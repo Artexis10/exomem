@@ -1635,6 +1635,7 @@ def read_generic_bytes(
     *,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -1655,12 +1656,14 @@ def read_generic_bytes(
 
     stored = _read_stored_generic(vault_root, value, physical=physical)
     if stored is not None:
+        if max_bytes is not None and len(stored.data) > max_bytes:
+            raise ReservedPathLeafError("INPUT_TOO_LARGE")
         return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
-            vault_root, value, identities=current, physical=physical
+            vault_root, value, identities=current, physical=physical, max_bytes=max_bytes,
         )
 
 
@@ -1689,6 +1692,7 @@ def _read_generic_bytes_held(
     *,
     identities: IdentityCatalogue,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
 
     parent_path, leaf = _leaf_spelling(value, physical=physical)
@@ -1711,7 +1715,7 @@ def _read_generic_bytes_held(
                 descriptor_id = identities.descriptor_for(file.identity) if identities else None
                 if descriptor_id is not None or file.identity.link_count != 1:
                     raise ReservedPathLeafError("RESERVED_PATH")
-                read_result = filesystem.read(file)
+                read_result = filesystem.read(file, max_bytes=max_bytes)
                 if not read_result.ok:
                     code = read_result.error.code if read_result.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)

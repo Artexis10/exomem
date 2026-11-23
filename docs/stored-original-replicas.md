@@ -68,6 +68,29 @@ The `decrypted` level is a sample, because it costs a download.
 It runs only where checks run (a store whose descriptor states `head_recomputes`), for a store with `retrieval_class` `immediate`, and for a key version whose identity this install can read.
 A store whose checks are not scheduled is never sampled and is never charged bytes.
 
+## Protect originals with a storage policy
+
+Add a `protection` object to the vault's media store configuration to request verified copies.
+Set `minimum_verified_copies`, `minimum_failure_domains`, and the eligible store names in `replica_stores`.
+Give each eligible store a `failure_domain` that identifies where its data can fail together.
+To count a verified local copy, set `local_failure_domain`.
+
+Set `copy_bytes_per_month` to the automatic upload allowance, in ciphertext bytes per UTC calendar month.
+The worker reserves the bytes before a transfer. An uncertain result keeps its reservation.
+An existing confirmed version can settle the original reservation when the worker retries.
+Owner-requested copies and repairs use their existing queues.
+
+Automatic policy transfers require a store that can confirm a preassigned version.
+The filesystem replica adapter supports this. The store serving eviction gets its copies through offload.
+
+Watch `replicas.protection` in media status for the latest sweep, pending copy reasons and the current month's transfer allowance.
+A sweep reports coverage during its observation window. Unreadable bindings and incomplete proof remain unknown.
+The worker requires a content proof, usable recovery key and no quarantine finding before it counts a replica.
+
+Set `eviction_authorized` only after you approve automated local eviction under this policy.
+The worker still requires verified coverage for every filing of the local original after removal.
+Omit the `protection` object to use the ordinary media worker.
+
 ## Set the cycle and the read rate
 
 Each replica is checked about once in 30 days, oldest check first.

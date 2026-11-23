@@ -163,6 +163,7 @@ class LocalRuntimeActivation:
         self.media_replicas: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
         self.vault_backup: threading.Thread | None = None
+        self.upload_session_sweeper: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -502,7 +503,9 @@ class LocalRuntimeActivation:
         """Finish owned native work after activation can no longer assign workers."""
         from . import working_set_runtime
 
-        for thread in (self.retrieval_warmup, self.matrix_warmup, self.recall_reembed):
+        for thread in (
+            self.retrieval_warmup, self.matrix_warmup, self.recall_reembed, self.upload_session_sweeper,
+        ):
             if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
                 thread.join()
         working_set_runtime.join_builds(self.vault_root)
@@ -548,11 +551,18 @@ class LocalRuntimeActivation:
         self.review_pass = review_pass.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
-        """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
+        """Resume interrupted uploads and own their expiry while serving HTTP."""
         if not self.serves_upload_sessions:
             return
         from .server_transfer import resume_upload_sessions
+        from .upload_sessions import run_expiry_sweep
 
+        sweeper = threading.Thread(
+            target=run_expiry_sweep, args=(vault_root, self._shutdown),
+            name="upload-session-expiry", daemon=True,
+        )
+        sweeper.start()
+        self.upload_session_sweeper = sweeper
         resume_upload_sessions(vault_root)
 
     def _start_write_intake(self, vault_root: Path) -> None:

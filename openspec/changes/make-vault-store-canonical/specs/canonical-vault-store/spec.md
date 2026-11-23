@@ -254,6 +254,11 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
 - **THEN** the replica holds the collection tables and no page, lexical or graph table
 
+#### Scenario: A store-mode service starts on a store that its writer has not yet migrated
+- **WHEN** a release whose collection-store schema is newer starts the service of a store-mode vault whose store is at an earlier schema that this release can still read pages from
+- **THEN** the service starts and serves page reads from the store before its writer migrates the store
+- **AND** a knowledge write runs only after the writer holds the lease and has migrated the store
+
 ### Requirement: A change to the schema overlay settles the registry state in the background
 In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says or the record of the last overlay change cannot be read, and SHALL count the overlay paths that wait for the projector or a hold. A tick with no batch to run SHALL NOT take the vault's mutation boundary. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread. The same job SHALL give a store that an older build set up the derived tables that this build adds: until it has created them and derived every page, status SHALL report `unknown` with `owner_schema` as `behind`, and a reader of rows that the store does not hold yet SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` and SHALL NOT answer as if no row matched. The job SHALL record the tables it creates, so a rollback drops them.
 

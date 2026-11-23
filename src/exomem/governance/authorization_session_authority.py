@@ -19,6 +19,7 @@ from typing import Final
 from .authorization_session_lifecycle import (
     AuthorizationSessionContext,
     AuthorizationSessionUnavailable,
+    AuthorizationSessionUnreadable,
 )
 
 _TOKEN_VERSION: Final = "wh1"
@@ -179,7 +180,7 @@ def _active_context(
             (context.session_id,),
         ).fetchone()
     except sqlite3.Error:
-        raise _unavailable() from None
+        raise AuthorizationSessionUnreadable from None
     expected = (
         context.principal_id,
         context.issuer_family,
@@ -1023,8 +1024,32 @@ def active_session_purpose(
             ),
         ).fetchone()
     except sqlite3.Error:
-        raise _unavailable() from None
+        raise AuthorizationSessionUnreadable from None
     return None if row is None else _text(row[0])
+
+
+def session_release_stamp(
+    connection: sqlite3.Connection,
+    *,
+    context: AuthorizationSessionContext,
+    audience: str,
+    now: int,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Name the current purpose and immutable active grants on a pinned read."""
+    purpose = active_session_purpose(connection, context=context, audience=audience, now=now)
+    try:
+        rows = connection.execute(
+            "SELECT grant_id FROM governance_session_grants WHERE authorization_session_id=? "
+            "AND principal_id=? AND issuer_family=? AND audience=? AND status='active' "
+            "AND expires_at>=? ORDER BY grant_id LIMIT ?",
+            (context.session_id, context.principal_id, context.issuer_family, audience, now, _MAX_ITEMS + 1),
+        ).fetchall()
+        # The authority payload bound keeps the stamp bounded. A prefix proves nothing.
+        if len(rows) > _MAX_ITEMS:
+            raise _unavailable()
+        return purpose, tuple(_digest(row[0]) for row in rows)
+    except sqlite3.Error:
+        raise _unavailable() from None
 
 
 def revoke_session_grants(

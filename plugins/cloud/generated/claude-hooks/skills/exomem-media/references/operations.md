@@ -30,9 +30,9 @@ reporting results.
 A stable preference, recurring routine, historical baseline, or durable affiliation
 is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, and trivial
+uniquely resolved Entity; otherwise preserve one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
 metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
 work could use it, save it as tentative, attributed, with its uncertainty. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
@@ -126,17 +126,24 @@ gap. Remote callers preview generic derived-index repair with
 `inspect_memory(operation="maintenance.reconcile", arguments={'dry_run': true})` and run it as a
 maintenance job with the preview's `plan_id` and a `why` (see vault care).
 
-Route durable observed events or current state here without waiting for a magic
-verb. When exactly one compatible existing collection accepts a sufficiently
-identified observation, the active engagement policy may append or update it and
-the agent reports the mutation. If collections compete or identity, date,
-provenance, or ownership is unclear, ask one focused question. If no collection
-fits, start with `describe`, then propose a concise collection and validate it;
-the agent must not silently create a long-lived schema. For a new collection use
-`describe -> validate -> create -> inspect -> append`; for maintenance use
-`validate -> revise` or `inspect -> rebaseline`.
+Route durable observed events, current state and recurring structured work here without
+waiting for a magic verb. When exactly one compatible existing collection accepts a
+sufficiently identified observation, the active engagement policy may append or update it
+and the agent reports the mutation. If collections compete or identity, date, provenance,
+or ownership is unclear, ask one focused question. If no collection fits and the work's
+identity, type and scope are clear, create a minimal collection under the served
+`proactive_capture` disposition: when it is `silent`, `add_record` with `new_collection`
+creates it from the first row in one call; when it is `advisory`, propose it and create it
+with `create` after one inline confirmation of your named proposal. When a bound of the
+minimal collection does not hold, the server refuses `AUTOMATIC_CREATION_REFUSED`, names the
+bound, creates nothing and returns the create call to make after the user confirms. A later
+fact that needs its own field is added with `new_fields` on `add_record` or `edit_record`
+under the same disposition, never put into another field.
+[Records and Planning](planning-records.md) has the whole procedure. For a collection you
+design yourself use `describe -> validate -> create -> inspect -> append`; for maintenance
+use `validate -> revise` or `inspect -> rebaseline`.
 
-Records are intentionally manual-first. Canonical data remains ordinary files:
+Records stay hand-editable. Canonical data remains ordinary files:
 an append-heavy chronological Markdown log, one Markdown file per item, or a
 CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
 is no hidden database, and indexes and generated views are rebuildable from the
@@ -703,8 +710,8 @@ schema. A verified remote identity additionally requires
 `algorithm: "sha256"`, the matching local receipt `digest`, and the platform
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
-collection or fields permits only `structural_suggestions`; collection changes
-need confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+collection or fields is created only under the bounded collection-creation rule; a
+change to an existing collection's fields needs confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.

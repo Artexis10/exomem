@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: 69ef54ed0fae86e1f39af784fac8a7d396514c021e34acd13023653a16187772
+  skill_contract: 59fdb824d9926e5a261e638c2329b886f2cd2e2898803e547b97aaedfe07198b
   version: "0.32.0"
 ---
 
@@ -300,10 +300,10 @@ Its **disposition** comes from prominence, a fixed rule, or the user's explicit 
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, and the owner's type, category or relation save |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, the owner's type, category or relation save, one minimal Records collection within the server's automatic-creation bounds, and fields added to a Records collection (an automatic one holds at most 12) |
 | `link_acceptance` | confirm | accepting a relation that the relation queue suggested |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
-| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert |
+| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert, a collection created outside the automatic-creation bounds or in Planning, and any collection schema change other than adding fields, merge or migration |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
 
 Registry promotion covers additive entries only. Changes to existing meanings,

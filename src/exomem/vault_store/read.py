@@ -22,7 +22,7 @@ from sqlite3 import Connection
 from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, vault
-from ..collection_store import connection, runtime
+from ..collection_store import connection, runtime, schema
 from ..kbdir import managed_root_rel
 from . import mode, ownership
 
@@ -226,6 +226,10 @@ class StoreSnapshot:
     def held_pages(self, rels: Iterable[str]) -> frozenset[str]:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""
         return frozenset(path for path, in self._each(rels, "path"))
+
+    def page_hashes(self, rels: Iterable[str]) -> dict[str, str]:
+        """The SHA-256 of each page in ``rels`` that the store holds, read from the metadata index."""
+        return dict(self._each(rels, "path, sha256", source=_META_FROM))
 
     def prefetch_pages(self, rels: Iterable[str]) -> None:
         """Hold a bounded caller-selected batch for repeated parent and target reads in this snapshot."""
@@ -654,7 +658,10 @@ def snapshot(vault_root: Path, *, join_request: bool = True) -> Iterator[StoreSn
         yield scope.view
         return
     path = connection.store_path(root)
-    with connection.store_reader(path, runtime.reader_pool(root, path)) as reader:
+    # A service reads its schema pages before its writer takes the lease and migrates the store, and a standby
+    # never takes the lease, so page reads also serve a store that its writer has not migrated yet.
+    oldest = schema.VAULT_STORE_READ_SCHEMA_VERSION
+    with connection.store_reader(path, runtime.reader_pool(root, path), oldest=oldest) as reader:
         reader.execute("BEGIN")
         try:
             row = reader.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
@@ -922,16 +929,21 @@ def prefetch_pages(vault_root: Path, rels: Iterable[str]) -> None:
             view.prefetch_pages(rel for rel in wanted if pages[rel])
 
 
-def owned_page(vault_root: Path, rel: str) -> StoredPage | None:
+def owned_page(vault_root: Path, rel: str, *, max_bytes: int | None = None) -> StoredPage | None:
     """The stored page at ``rel`` when the store serves that path, else None: read the file.
 
     A path that the store serves but holds no page for raises ``FileNotFoundError``, as a missing
-    file does.
+    file does. If a byte limit applies, the covering index measures the page before
+    the same snapshot reads its body.
     """
     root = _as_path(vault_root)
     if not serves(root, rel):
         return None
     with snapshot(root) as view:
+        if max_bytes is not None:
+            row = view.connection.execute(f"SELECT size FROM {_META_FROM} WHERE path = ?", (rel,)).fetchone()
+            if row is not None and row[0] > max_bytes:
+                raise vault._refuse_unbounded_leaf(rel, vault._over_limit_reason(row[0], max_bytes))
         page = view.page(rel)
     if page is None:
         raise FileNotFoundError(rel)

@@ -182,7 +182,7 @@ This family measures recall on short follow-up turns: a carried subject ("and th
 
 ## Method check
 
-This check shows which of the user's own methods the product serves when the user never names them. The cases are in `scenarios/method-activation/`: a user discusses a technology for a project, approves a trial, reports an outcome, or points out a memory failure, plus negative twins. A lane that never saw the implementation wrote the 18 cases, their seed vault (`seeds/m00/`) and the keys. Each key adds `methods` (the skill pages the trigger turn should be served), `destination` and `trigger_turn` to the session-close key fields.
+This check shows which of the user's own methods the product serves when the user never names them. The cases are in `scenarios/method-activation/`: a user discusses a technology for a project, approves a trial, reports an outcome, points out a memory failure, or asks to archive a relative's files under her own folder, plus negative twins. A lane that never saw the implementation wrote the 20 cases, their seed vault (`seeds/m00/`) and the keys. Each key adds `methods` (the skill pages the trigger turn should be served), `destination` and `trigger_turn` to the session-close key fields.
 
 The check is model-free except for the method-fit placement under test. It runs no actor.
 

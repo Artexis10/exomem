@@ -218,12 +218,12 @@ def _connect(vault: Path) -> sqlite3.Connection:
     return connection
 
 
-def _reader(vault: Path) -> sqlite3.Connection | None:
+def _reader(vault: Path, *, timeout: float = _SQLITE_TIMEOUT_SECONDS) -> sqlite3.Connection | None:
     """A read-only connection, or None when no table of this schema exists. It creates nothing."""
     path = table_path(vault)
     if not path.is_file():
         return None
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=_SQLITE_TIMEOUT_SECONDS)
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=timeout)
     try:
         found = connection.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
     except sqlite3.OperationalError:
@@ -232,6 +232,41 @@ def _reader(vault: Path) -> sqlite3.Connection | None:
         connection.close()
         return None
     return connection
+
+
+def verified_local_files(vault: Path, wanted: Iterable[tuple[str, str, str]], *, deadline: float) -> frozenset[str]:
+    """Reuse fixity evidence for exact unchanged files in a bounded caller-selected page."""
+    from . import vault as vault_files
+
+    keys = tuple(wanted)
+    remaining = deadline - time.monotonic()
+    if not keys or remaining <= 0 or not vault_files.STAT_GENERATION_TRUSTED:
+        return frozenset()
+    try:
+        reader = _reader(vault, timeout=min(remaining, 0.05))
+        if reader is None:
+            return frozenset()
+        with closing(reader):
+            rows = reader.execute(
+                f"SELECT {_ROW_COLUMNS} FROM originals WHERE (path, sha256, binding) IN "
+                "(SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') "
+                "FROM json_each(?)) AND kind = ? AND state = ? AND verified_at IS NOT NULL",
+                (json.dumps(keys), FILE, VERIFIED),
+            ).fetchall()
+    except (OSError, sqlite3.Error):
+        return frozenset()
+    found = set()
+    for record in rows:
+        if time.monotonic() >= deadline:
+            break
+        try:
+            row = Row.of(record)
+            with _held(vault, row) as source:
+                if row.identity == Identity.of(os.fstat(source.stream.fileno())):
+                    found.add(row.path)
+        except (_Absent, _Unreadable, OSError, TypeError, ValueError):
+            continue
+    return frozenset(found)
 
 
 def _meta(connection: sqlite3.Connection) -> dict[str, Any]:

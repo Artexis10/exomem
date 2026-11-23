@@ -40,24 +40,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (keep-handed-files-as-sources).
 # The door operation `maintenance.capture_metadata`, the owner's metadata-only capture backfill, added 62 B to the two
 # door enums on 2026-11-20 (index-capture-metadata).
+# The Records routes that agents act on at the moment they choose a tool added 118 B on 2026-11-22
+# (capture-structured-work-automatically): `create_note` names add_record for compared or tracked named items, and
+# `add_record` says one row per item with the user's words, the agent's proposals and outside claims in separate
+# fields. Real-model acceptance showed agents never loaded the skill that carried these rules.
+# The same day, add_record's row-key rule became 'key rows by item and date when an item recurs' (+16 B): the
+# vaguer 'per item and occasion' still produced item-only keys that overwrite a recurring item's earlier dated row.
+# `edit_record.options`, the knob that carries `new_fields` as `add_record.options` already does (the server's additive
+# field change under proactive_capture), added 68 B (compact JSON) on 2026-11-22. `add_record` grew none: `new_fields` rides
+# its existing `options`, and the refusal that names the call teaches it.
 # The per-file `diarize` speaker-label choice on the `save_source` and `save_evidence` file handles added 212 B on
 # 2026-11-22 (add-media-processing-policy).
 # The door operation `review.queued_write`, reading a save the service queued while it was busy, added 22 B to the
 # `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
-TOTAL_BUDGET = 29_650
+TOTAL_BUDGET = 29_890
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
     "add_observation": 1650,
     "add_plan_item": 500,
-    "add_record": 850,
+    "add_record": 940,
     "cancel_uploads": 600,
     "create_note": 1850,
     "decide_review_item": 1000,
     "download_files": 550,
     "edit_note": 2700,
     "edit_plan_item": 750,
-    "edit_record": 800,
+    "edit_record": 850,
     "inspect_memory": 2200,
     "list_review_items": 750,
     "manage_memory": 2550,

@@ -179,7 +179,7 @@ def readable_page(vault_root, rel: str) -> PagePayload | None:
     return None if withheld(vault_root, rel) else stored_payload(vault_root, rel)
 
 
-def binding_unproven(vault_root, rel: str, payload: PagePayload) -> bool:
+def binding_unproven(vault_root, rel: str, payload: PagePayload, *, page_snapshot: bytes | None = None) -> bool:
     """Whether the page at `rel` is raw-protected and lacks the raw-protection binding that proves its original.
 
     A release grant binds to the page's content hash, so a protected page whose binding is missing or names other
@@ -187,7 +187,7 @@ def binding_unproven(vault_root, rel: str, payload: PagePayload) -> bool:
     """
     if not payload.protected:
         return False
-    found = raw_protection.binding(vault_root, rel)
+    found = raw_protection.binding(vault_root, rel, page_snapshot=page_snapshot)
     if found is None:
         return True
     block, companion, _ = found

@@ -1494,8 +1494,11 @@ def op_bootstrap(
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
                 "events, and current state here without waiting for a magic save or log verb. "
-                "Resolve one compatible collection before append or update; if none fits, "
-                "describe and propose a concise collection before validate and explicit create. "
+                "Resolve one compatible collection before append or update; if none fits and the "
+                "identity, type and scope are clear, call add_record with new_collection under "
+                "silent capture to create the minimal collection from the row; under advisory "
+                "capture propose it, then records.create once confirmed. "
+                "A passing mention gets no collection. "
                 "A recorded outcome never closes Planning automatically; propose or perform "
                 "a guarded transition only with explicit user intent."
             ),
@@ -1967,10 +1970,10 @@ def op_bootstrap(
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
-                    f"{tools_text('record_memory', 'read')} describe and validate, ask one "
-                    "question in domain language, "
-                    "and create only after that inline confirmation. Backfill only exactly dated "
-                    "evidence units, citing each unit or artifact in sources"
+                    f"{tools_text('record_memory', 'read')} describe and validate. Under silent capture "
+                    "create it with automatic true; if a bound refuses, or under advisory capture, ask one "
+                    "question in domain language and create only after that inline confirmation. "
+                    "Backfill only exactly dated evidence units, citing each unit or artifact in sources"
                 ),
                 "accepted_links": "persist only through edit_note/create_note/supersede_note; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
@@ -9941,6 +9944,7 @@ def op_transfer_artifact(
     hold: bool = False, artifacts: list[str] | None = None,
     uploads: list[str] | None = None,
     import_identity: str | None = None,
+    size_bytes: int | None = None,
 ) -> dict:
     """Prepare a file transfer or cancel owned waiting uploads.
 
@@ -9955,6 +9959,7 @@ def op_transfer_artifact(
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
         import_identity: Durable external ID for a held Source upload.
+        size_bytes: Exact Source size in bytes to select resumable upload.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
         uploads: Cancellation only: held-upload references owned by this authenticated session.
@@ -9967,6 +9972,13 @@ def op_transfer_artifact(
         or artifact is not None or artifacts is not None or uploads is not None
     ):
         raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload with expected_sha256")
+
+    if size_bytes is not None and (
+        operation != "upload" or lane != "source" or expected_sha256 is None
+        or artifact is not None or artifacts is not None or uploads is not None
+    ):
+        raise ValueError("INVALID_MODE: size_bytes needs a Source upload with expected_sha256")
+    held_only = hold
 
     if operation == "cancel":
         from . import held_uploads
@@ -10052,6 +10064,7 @@ def op_transfer_artifact(
 
         return upload_handoff.prepare_upload(
             vault_root, lane=lane, expected_sha256=expected_sha256, import_identity=import_identity,
+            size_bytes=size_bytes, held_only=held_only,
         )
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:
@@ -14379,6 +14392,8 @@ def op_propose_reclassification(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Report what correcting one source would do, without writing anything.
 
@@ -14395,13 +14410,14 @@ def op_propose_reclassification(
     IS means reading it — a plausible guess presented for approval is how a
     fallback becomes permanent.
     """
-    from . import reclassify_source as reclassify_module
+    from . import reclassification_preview, reclassify_source
 
     try:
-        return reclassify_module.propose(
-            vault_root, path, source_kind=source_kind, domain=domain
-        ).as_dict()
-    except reclassify_module.ReclassifyError as error:
+        return reclassification_preview.report(
+            vault_root, path, source_kind=source_kind, domain=domain,
+            preview_run_id=preview_run_id, cursor=cursor,
+        )
+    except reclassify_source.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
 
 
@@ -14464,6 +14480,8 @@ def op_manage_memory_file(
     relation_review_reason: str | None = None,
     promotion_reason: str | None = None,
     preview_digest: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
@@ -14492,6 +14510,8 @@ def op_manage_memory_file(
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
         preview_digest: A move or reclassify that repoints Source or Evidence pages passes
             its preview's `preview_digest`.
+        preview_run_id: Follow a background reclassification preview for the same Source.
+        cursor: Read the next page of that preview's completed reference report.
     """
     creation_review_requested = any(
         value is not None
@@ -14589,7 +14609,8 @@ def op_manage_memory_file(
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
         if operation == "propose-reclassification":
             return op_propose_reclassification(
-                vault_root, path=target, source_kind=source_kind, domain=domain
+                vault_root, path=target, source_kind=source_kind, domain=domain,
+                preview_run_id=preview_run_id, cursor=cursor,
             )
         if operation == "revert-reclassification":
             return op_revert_reclassification(vault_root, path=target, reason=reason)
@@ -14677,11 +14698,14 @@ def op_record_memory(
     import_request: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     item_id: str | None = None,
+    automatic: bool | None = None,
+    new_collection: dict[str, Any] | None = None,
+    new_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
     Describe/validate/inspect/query/history and import preview/status read.
-    Propose before create. Others write or hold candidates.
+    Create a minimal collection with automatic only under silent capture; else propose it. Others write or hold candidates.
 
     Args:
         collection: Vault-relative manifest path, collection UUID or memory reference.
@@ -14700,10 +14724,13 @@ def op_record_memory(
         hold: False refuses; otherwise hold invalid candidates.
         rows: bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.
             Outcomes: inserted/updated/unchanged/rejected.
-        source: bulk_upsert default preserved Source/Evidence path.
+        source: bulk_upsert preserved Source/Evidence path; required once for the batch or on each row.
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
         item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
+        automatic: Create only: true for a minimal collection you start under silent proactive_capture; refused with the failed bound named.
+        new_collection: Append only, {"natural_key": [item fields]}: a title that names no collection is created from the row under the automatic bounds, then the row is appended.
+        new_fields: Append or update: names in item/changes the collection does not declare; under silent proactive_capture they are added, typed from the values, then the row is written.
     """
     result = record_memory_module.record_memory(
         vault_root,
@@ -14746,6 +14773,9 @@ def op_record_memory(
         import_request=import_request,
         query=query,
         item_id=item_id,
+        automatic=automatic,
+        new_collection=new_collection,
+        new_fields=new_fields,
     )
     # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
     # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
@@ -15276,7 +15306,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "record": {
         "intent": "Capture, inspect, query, or correct durable observed events and current state.",
         "route": {"tool": "record_memory", "args": {"action": "inspect"}},
-        "safety": "resolve one compatible collection before a mutation; propose rather than silently create a schema",
+        "safety": "resolve one compatible collection before a mutation; create a minimal one only under the served capture disposition",
         "advanced": ["record_memory"],
     },
     "plan": {

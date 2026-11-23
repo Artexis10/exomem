@@ -636,8 +636,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
     try:
-        with embeddings.query_turn(cancel_event=_CallerDeparture()), recall_space.encoding_for(index):
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        query_vector = embeddings.encode_query(index, query, cancel_event=_CallerDeparture())
     except runtime_resources.ModelBusyError:
         # The turn wait also ends when the caller leaves; that search stops before its encode.
         _stop_if_caller_left("encode")
@@ -645,12 +644,13 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     recall_space.require_same_space(index, identity, query_vector)
     _stop_if_caller_left("selection")
     fusing = request.get("mode") == "hybrid"
-    lexical = index.select_passage_terms(query, FUSION_DEPTH, allowed_paths=allowed) if fusing else None
+    # A fused search reads both rankings at one sidecar token, on one connection.
     selection = index.select_passage_chunks(
-        query_vector, limit if lexical is None else FUSION_DEPTH,
-        allowed_paths=allowed, encoded_for=identity,
+        query_vector, FUSION_DEPTH if fusing else limit,
+        allowed_paths=allowed, encoded_for=identity, lexical_query=query if fusing else None,
     )
-    selected = selection.hits if lexical is None else _fused(selection.hits, lexical, limit)
+    lexical = selection.lexical
+    selected = selection.hits[:limit] if lexical is None else _fused(selection.hits, lexical, limit)
     similarity = {(path, number): score for path, number, _ref, score in selection.hits}
     _stop_if_caller_left("verification")
     sources = _verified_sources(vault_root, walk_scope, snapshot, publication, selected)
@@ -708,7 +708,11 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
             else "failed" if index.passage_terms_failed()
             else "preparing"
         )
-        reply["diagnostics"] = {"lexical": lexical_state}
+        # The count tells a fused reply whose lexical ranking was empty from one it changed.
+        reply["diagnostics"] = {
+            "lexical": lexical_state,
+            "lexical_candidates": len(lexical) if lexical is not None else None,
+        }
     return reply
 
 

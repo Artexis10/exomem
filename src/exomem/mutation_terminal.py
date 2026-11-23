@@ -60,6 +60,12 @@ _RECORD_RECEIPT_FIELDS = (
     "gap_fingerprint",
     "checkpoint_snapshot_hash",
     "minimum_reader_version",
+    # Only a receipt of an automatic collection creation, or of the append that created its collection,
+    # carries these: the owner reviews what the agent created. `added_fields` is the same review for a write
+    # that added fields to its collection.
+    "automatic",
+    "created_collection",
+    "added_fields",
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1

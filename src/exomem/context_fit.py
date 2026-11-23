@@ -298,8 +298,8 @@ def select_methods(
     Each carrier is `{"name", "path", "kind", "description_of", "max_chars"}`: the name it is offered by, the page,
     and how to read the text its author wrote to say when it applies from the page's projection. Each description
     is read through `_released_for_model`, so an API placement sees only what its provider audience may see. Labels
-    are made unique among the admitted carriers only, so a withheld page changes no label. Carriers are offered in
-    order until the input allowance is reached; the rest are counted as `omitted`. The model may only return
+    are made unique among the admitted carriers only, so a withheld page changes no label. Each carrier is offered
+    when it fits the input allowance that is left, and counted as `omitted` when it does not. The model may only return
     supplied labels (a schema enum), so its answer is read through structure, never by matching words. Selection
     proposes; it grants no authority, and a failure, a timeout or a disabled placement selects nothing.
     """
@@ -337,21 +337,28 @@ def select_methods(
         omitted = 0
         # Each carrier is judged against the room left on its own, so one oversized description costs only itself;
         # the judgment deadline bounds how many are read.
+        def cost(entry: dict[str, str]) -> int:
+            return len(json.dumps(entry, ensure_ascii=False)) + 2
+
         for carrier in carriers:
+            # Labels depend only on carriers already admitted, so a withheld page changes none.
+            label = carrier["name"] if carrier["name"] not in by_label else f"{carrier['name']} ({carrier['path']})"
+            if cost({"label": label, "description": ""}) > room:
+                # Not even its label fits, so its page is not read. Counted before admission, a withheld carrier past
+                # the allowance is counted too; only the owner reads this count.
+                omitted += 1
+                continue
             judgment_timeout()
             released = _released_for_model(
                 root, carrier["path"], caller, provider, judgment_timeout, carrier["description_of"], sources,
             )
             if released is None:
                 continue
-            description = " ".join(egress.without_wikilinks(released[2]).split())[: carrier["max_chars"]]
-            label = carrier["name"] if carrier["name"] not in by_label else f"{carrier['name']} ({carrier['path']})"
-            entry = {"label": label, "description": description}
-            cost = len(json.dumps(entry, ensure_ascii=False)) + 2
-            if cost > room:
+            entry = {"label": label, "description": " ".join(egress.without_wikilinks(released[2]).split())[: carrier["max_chars"]]}
+            if cost(entry) > room:
                 omitted += 1
                 continue
-            room -= cost
+            room -= cost(entry)
             by_label[label] = {**carrier, "label": label}
             listed.append(entry)
         if not listed:

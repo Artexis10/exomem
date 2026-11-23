@@ -77,7 +77,8 @@ def _prepare_clip_query(vault_root: Path, query: str) -> PreparedQuery:
             return PreparedQuery(index, non_applicable_reason="no_image_vectors")
         if readiness.should_defer("clip"):
             return PreparedQuery(index, deferred=True)
-        return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
+        with embeddings.query_turn():
+            return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
     except Exception as error:  # noqa: BLE001 - the image lane reports the retained failure.
         return PreparedQuery(error=error)
 
@@ -86,15 +87,16 @@ def prepare_query_inputs(
     vault_root: Path, query: str, *, unit: bool, page: bool, timings: Any = None,
 ) -> PreparedQueryInputs:
     """Run encoders before retaining catalogue rows; replay failures in their lanes."""
-    from . import embeddings, readiness, recall_migration, recall_space, runtime_resources
+    from . import embeddings, readiness, recall_migration, runtime_resources
 
     prepared = PreparedQueryInputs()
 
     def encode(index: Any) -> PreparedQuery:
         identity = getattr(index, "identity", None)
         try:
-            with _span(timings, "vector.embed"), recall_space.encoding_for(index):
-                vector = embeddings.embed_texts([query], is_query=True)[0]
+            # The query's own turn: it never queues behind a bulk batch or a model load on the shared slot.
+            with _span(timings, "vector.embed"):
+                vector = embeddings.encode_query(index, query)
             return PreparedQuery(index, identity, vector)
         except Exception as error:  # noqa: BLE001 - the existing lane classifies this failure.
             return PreparedQuery(index, identity, error=error)
@@ -461,8 +463,7 @@ def collect_candidates(
                             encoded_for, query_vec = query_vector_provider()
                         else:
                             encoded_for = getattr(idx, "identity", None)
-                            with recall_space.encoding_for(idx):
-                                query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                            query_vec = embeddings.encode_query(idx, query)
                 recall_space.require_same_space(idx, encoded_for, query_vec)
                 sources = [idx]
                 if building is not None:

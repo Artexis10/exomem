@@ -2359,8 +2359,7 @@ def find(
             # another sidecar serving by then refuses it (`require_same_space`).
             index = embeddings.get_embedding_index(vault_root)
             encoded_for = getattr(index, "identity", None)
-            with recall_space.encoding_for(index):
-                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
+            query_vector = (encoded_for, embeddings.encode_query(index, query))
             query_vector_ready = True
         return query_vector
 
@@ -3913,8 +3912,7 @@ def _vector_unit_candidates(
                     encoded_for, query_vector = query_vector_provider()
                 else:
                     encoded_for = getattr(index, "identity", None)
-                    with recall_space.encoding_for(index):
-                        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+                    query_vector = embeddings.encode_query(index, query)
         recall_space.require_same_space(index, encoded_for, query_vector)
         incomplete: list[str] = []
         hits = index.search_semantic_units(
@@ -8668,6 +8666,7 @@ _RECALL_RESOLVER_REBUILDS: set[Path] = set()
 _QUERY_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with an inbound-index background build running; same lock as above.
 _INBOUND_INDEX_REBUILDS: set[Path] = set()
+_TOMBSTONE_PROOF_REBUILDS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -8737,7 +8736,7 @@ def _schedule_recall_resolver_rebuild(root: Path) -> None:
     )
 
 
-def _schedule_query_resolver_rebuild(root: Path) -> None:
+def _schedule_query_resolver_rebuild(root: Path, *, require_checkpoint: bool = False) -> None:
     """Start at most one background broad-resolver build per vault.
 
     The owner that restores the resolver a server's context pack borrowed and
@@ -8747,26 +8746,38 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     _schedule_resolver_warm(
         root,
         _QUERY_RESOLVER_REBUILDS,
-        _get_query_resolver,
+        lambda root: _get_query_resolver(root, require_checkpoint=require_checkpoint),
         "exomem-query-resolver-warm",
     )
 
 
-def schedule_inbound_rebuild(vault_root: Path) -> None:
-    """Start at most one background inbound-index build per vault.
-
-    The immediate owner for a server's context pack that borrowed the index and
-    found none: the pack must not build it, and the watcher's reconcile pass
-    (minutes away) stays the backstop. `prime_inbound_index` is single-flight per
-    vault, so this thread and that pass never build concurrently.
-    """
+def schedule_inbound_rebuild(vault_root: Path, *, stop: threading.Event | None = None) -> None:
+    """Schedule one background inbound build when the watcher cannot patch the miss."""
+    from . import readiness
     from . import vault as vault_module
 
+    if stop is not None:
+        observed = freshness.preview_reference_generation(vault_root)
+        if readiness.is_warming() or observed is None or observed[1] is None or observed[3] is not None:
+            return
+    # The worker checks patch history. Borrowing this proof in the request can
+    # wait behind a writer computing a new freshness digest.
     _schedule_resolver_warm(
         vault_root,
         _INBOUND_INDEX_REBUILDS,
-        vault_module.prime_inbound_index,
+        lambda root: vault_module.prime_inbound_index(root, defer_to_patch=stop is not None),
         "exomem-inbound-index-warm",
+        stop=stop,
+    )
+
+
+def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) -> None:
+    """Warm the shared exact proof after a managed preview reaches its deadline."""
+    from .governance import lifecycle
+
+    _schedule_resolver_warm(
+        vault_root, _TOMBSTONE_PROOF_REBUILDS, lifecycle.tombstone_snapshot,
+        "exomem-tombstone-proof-warm", stop=stop,
     )
 
 
@@ -8775,6 +8786,8 @@ def _schedule_resolver_warm(
     inflight: set[Path],
     build: Callable[[Path], object],
     thread_name: str,
+    *,
+    stop: threading.Event | None = None,
 ) -> None:
     """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
@@ -8787,8 +8800,10 @@ def _schedule_resolver_warm(
 
     def _run() -> None:
         try:
-            with foreground_priority.bulk():
+            with foreground_priority.bulk(stop=stop):
                 build(key)
+        except foreground_priority.BulkCancelled:
+            return
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
             log.warning("background rebuild skipped (%s)", error)
         finally:
@@ -8836,7 +8851,9 @@ def _evict_resolver(root: Path) -> None:
     _RESOLVER_CHECKPOINTS.pop(root, None)
 
 
-def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
+def _get_query_resolver(
+    vault_root: Path, freshness: tuple | None = None, *, require_checkpoint: bool = False,
+):
     """Per-process WikilinkResolver cache, invalidated when the vault changes.
 
     Freshness is the digest-strength `_walk_freshness_key` triple — the old
@@ -8867,12 +8884,17 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         if checkpoint.triple != freshness:
             checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
-        if cached and cached[0] == freshness:
+        if not require_checkpoint and cached and cached[0] == freshness:
             return cached[1]
         with _RESOLVER_LOCK:
             cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == freshness:
+            if require_checkpoint and checkpoint is None:
+                return None
+            if (cached and cached[0] == freshness
+                    and (not require_checkpoint or _RESOLVER_CHECKPOINTS.get(root) == checkpoint)):
                 return cached[1]
+            # A matching disk digest alone cannot certify when the resolver was built.
+            # Rebuild against the observed checkpoint instead of stamping old entries.
             resolver = WikilinkResolver(root)
             _RESOLVER_CACHE[root] = (freshness, resolver)
             if checkpoint is not None:
@@ -8925,6 +8947,29 @@ def borrow_query_resolver(
             return cached[1]
     if schedule_rebuild:
         _schedule_query_resolver_rebuild(root)
+    return None
+
+
+def borrow_preview_resolver(vault_root: Path):
+    """Borrow the current file-mode resolver without hashing or waiting for a build."""
+    root = Path(vault_root)
+    live = freshness.preview_reference_generation(root)
+    if live is None or live[1] is None or live[3] is not None:
+        return None
+    if not _RESOLVER_LOCK.acquire(blocking=False):
+        return None
+    try:
+        cached = _RESOLVER_CACHE.get(root)
+        checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+        if (
+            cached is not None and checkpoint is not None
+            and checkpoint.triple == cached[0]
+            and (checkpoint.instance_id, checkpoint.generation) == live[:2]
+        ):
+            return cached[1]
+    finally:
+        _RESOLVER_LOCK.release()
+    _schedule_query_resolver_rebuild(root, require_checkpoint=True)
     return None
 
 
@@ -9739,10 +9784,11 @@ def unload_ram_caches(
         # correctness eviction cannot make either stale; only a caller handing
         # memory back drops them.
         from . import lexstore
-        from .governance import page_admission
+        from .governance import admission_memo, page_admission
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        admission_memo.forget()
         # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
         from .vault_store import resident_catalogue
 
