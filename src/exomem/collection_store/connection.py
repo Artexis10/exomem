@@ -345,6 +345,10 @@ class WriterConnection:
         from sqlalchemy.exc import DBAPIError
 
         self.require_write_authority(allow_diverged=resolve_divergence)
+        from .. import write_intake
+
+        # The store's commit gate: a queued save's replay records that it reached its commit first.
+        write_intake.mark_replay_reached_commit()
         cache = self.release_cache
         cache.check()
         try:
