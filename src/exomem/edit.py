@@ -436,40 +436,14 @@ def edit(
 # ---------------- path resolution ----------------
 
 
-def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
-    """The vault-relative page the caller addressed, iff it exists on disk under
-    the vault root but outside ``Knowledge Base/`` — else ``None``.
-
-    Lets `_resolve` tell "you addressed a real page outside the governed root"
-    apart from "no such page". It leaks nothing the read side would not already
-    surface: it only confirms a vault-relative path `get_page` itself resolves,
-    and never a path that escapes the vault. Extension handling mirrors
-    `_resolve` so the two agree on what "the same page" means.
-    """
+# REWRITE-SLOT 1
     # The caller's own text, separators normalised but *not* re-rooted: this
     # question is precisely "did they name something outside the governed
     # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
     # whole job is to supply the prefix `_resolve` wants and this does not.
     given = given.strip().replace("\\", "/").lstrip("/")
     if managed_split(given) is not None:
-        return None  # caller explicitly addressed KB/ — a genuine miss stays one
-    rel = given if given.endswith(".md") else given + ".md"
-    candidate = vault_root / rel
-    try:
-        resolved = candidate.resolve()
-        resolved.relative_to(vault_root.resolve())  # must stay inside the vault
-    except (ValueError, OSError):
-        return None
-    try:
-        resolved.relative_to(kb_root(vault_root).resolve())
-        return None  # already under the governed root — not this case
-    except ValueError:
-        pass
-    # `resolved` has followed symlinks and been confirmed under vault_root
-    # above, so stat the real target rather than the lexical candidate.
-    return rel if resolved.is_file() else None
-
-
+        # REWRITE-SLOT 2
 def _write_target_withheld(vault_root: Path, rel: str) -> bool:
     from .governance import egress
 
@@ -538,15 +512,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).
     if not candidate.exists() or _write_target_withheld(vault_root, rel):
-        # The read side (`get_page`) accepts a vault-relative path and will read
-        # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
-        # re-root every bare path under Knowledge Base/, so a caller re-using
-        # such a path here gets a re-rooted candidate that does not exist. A
-        # plain NOT_FOUND would then name a path the caller never gave and
-        # assert the page is missing when it demonstrably exists — a typo and an
-        # outside-the-root refusal become indistinguishable (issue #599). Detect
-        # that case and refuse honestly; the governance model is intentional, so
-        # we still don't write outside the root.
+        # REWRITE-SLOT 3
         raise _missing_page_error(vault_root, path, rel)
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
