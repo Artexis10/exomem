@@ -1,11 +1,13 @@
-"""A curation plan's `repoint-links` step: one rewrite of every referrer of the plan's moves.
+"""A curation plan's `repoint-links` steps: the rewrite of the referrers of the plan's moves.
 
-The plan's `move` steps move bytes and lineage only. This step runs last. At proposal it seals each
-page that links to or cites an old path with its exact before hash, the hash of the bytes it
-rewrites the page to, and one outcome as a move preview gives it. At execution it re-derives each
-rewrite from the sealed bytes and commits every rewrite and every append-only pointer repoint in one
-batch, which carries the step's witness. Its compensation returns each page it rewrote to its
-sealed pre-step bytes, and each append-only page through the pointer write's revert.
+The plan's `move` steps move bytes and lineage only. The repoint steps run last. A step without
+`referrers` rewrites every referrer of the moves; a step with `referrers` rewrites only those pages,
+so a plan can split the rewrite by referring page, each page in one step (`referrers`). At proposal
+a step seals each page it rewrites with its exact before hash, the hash of the bytes it rewrites the
+page to, and one outcome as a move preview gives it. At execution it re-derives each rewrite from
+the sealed bytes and commits every rewrite and every append-only pointer repoint in one batch, which
+carries the step's witness. Its compensation returns each page it rewrote to its sealed pre-step
+bytes, and each append-only page through the pointer write's revert.
 """
 
 from __future__ import annotations
@@ -51,6 +53,41 @@ def _rewrite(
     return text, changes, mentions, 0
 
 
+def _needed(
+    texts: Mapping[str, str],
+    moves: Sequence[tuple[str, str]],
+    renames: Sequence[path_mentions.Rename],
+) -> tuple[list[tuple[str, str]], tuple[path_mentions.Rename, ...]]:
+    """The moves and renames that change or count in at least one of `texts`, in plan order.
+
+    A step that names its referrers seals only these, so a plan split by referring page does not
+    seal every move once per step. An entry that counts nothing leaves the text as it was, so the
+    narrowed lists rewrite each page to the same bytes; a page that they would not rewrite to the
+    same bytes keeps every entry.
+    """
+    used_moves: set[int] = set()
+    used_renames: set[int] = set()
+    for rel, text in texts.items():
+        immutable = _append_only(rel)
+        for index, (old_rel, new_rel) in enumerate(moves):
+            text, count = rewrite_wikilinks_for_move(text, old_rel, new_rel)
+            if count:
+                used_moves.add(index)
+        for index, rename in enumerate(renames):
+            text, count = path_mentions.rewrite(text, (rename,), apply=not immutable)
+            if count:
+                used_renames.add(index)
+    narrowed = [move for index, move in enumerate(moves) if index in used_moves]
+    narrowed_renames = tuple(rename for index, rename in enumerate(renames) if index in used_renames)
+    for rel, text in texts.items():
+        immutable = _append_only(rel)
+        if _rewrite(text, narrowed, narrowed_renames, body_immutable=immutable) != _rewrite(
+            text, moves, renames, body_immutable=immutable
+        ):
+            return list(moves), tuple(renames)
+    return narrowed, narrowed_renames
+
+
 def _append_only(rel: str) -> bool:
     """Whether the page is captured content, which changes only through the pointer write.
 
@@ -61,19 +98,11 @@ def _append_only(rel: str) -> bool:
     return vault.in_append_only_tree(rel) is not None and not generated_index
 
 
-def prepare(
-    vault_root: Path,
-    moves: Sequence[tuple[str, str]],
-    projected: Mapping[str, str],
-) -> dict[str, Any]:
-    """Seal every referrer of `moves`, in plan order, as the plan leaves it.
-
-    `projected` holds the exact bytes of each page that an earlier step of the plan leaves, at the
-    path where that step leaves it: a referrer among them is read and bound there. A referrer whose
-    change the pointer write refuses refuses the plan.
-    """
+def referrers(vault_root: Path, moves: Sequence[tuple[str, str]]) -> tuple[list[str], bool]:
+    """Every page the caller sees that links to or names an old path of `moves`, at the path the
+    moves leave it, sorted; and whether the catalogue answered the prose-mention lookup."""
     root = Path(vault_root)
-    visible, writable = _view(root)
+    visible, _writable = _view(root)
     location = dict(moves)
     # One index read and one catalogue proof serve every move: a lookup per move walks the vault.
     inbound = vault.find_inbound_wikilinks_many(root, list(location), visible=visible)
@@ -82,7 +111,50 @@ def prepare(
     found.update(mentions.pages)
     if visible is not None:
         found = {rel for rel in found if visible(rel)}
+    return sorted({location.get(rel, rel) for rel in found}), mentions.complete
+
+
+def prepare(
+    vault_root: Path,
+    moves: Sequence[tuple[str, str]],
+    projected: Mapping[str, str],
+    *,
+    only: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Seal the referrers of `moves`, in plan order, as the plan leaves them.
+
+    `projected` holds the exact bytes of each page that an earlier step of the plan leaves, at the
+    path where that step leaves it: a referrer among them is read and bound there. `only` names the
+    referrers this step rewrites, at the paths the moves leave them; without it the step finds and
+    rewrites every referrer. Each named page is bound, rewritten or not, so the step's witness
+    covers exactly its pages, and the step seals only the moves those pages use (`_needed`). A
+    referrer whose change the pointer write refuses refuses the plan.
+    """
+    root = Path(vault_root)
+    visible, writable = _view(root)
+    location = dict(moves)
+    complete = True
+    if only is None:
+        found, complete = referrers(root, moves)
+    else:
+        # A named page is judged by the unsplit step's rule: the caller sees it where it stood.
+        origin = {new: old for old, new in moves}
+        found = sorted(
+            rel for rel in set(only) if visible is None or visible(origin.get(rel, rel))
+        )
     renames = path_mentions.renames(root, list(moves))
+    texts: dict[str, str] = {}
+    for rel in found:
+        if rel in projected:
+            texts[rel] = projected[rel]
+            continue
+        try:
+            texts[rel], _guard = vault.read_guarded_text(root, root / rel)
+        except (OSError, UnicodeDecodeError, vault.PathGuardError):
+            continue
+    if only is not None:
+        moves, renames = _needed(texts, moves, renames)
+        location = dict(moves)
     pointers = page_fields.pointer_fields(root)
     matcher = pointer_write.page_matcher(root, location)
     # A page the step leaves unchanged resolves an old link through the moved page's lineage,
@@ -93,33 +165,29 @@ def prepare(
         else move_file.KEPT_DANGLING
     )
     pages: dict[str, dict[str, Any]] = {}
-    referrers: list[dict[str, str]] = []
+    outcomes: list[dict[str, str]] = []
     repoints: list[pointer_write.PointerWrite] = []
     refused: list[pointer_write.PointerWriteError] = []
     # Each live page the step rewrites in place, whose lifecycle record the step carries.
     carried: dict[str, str] = {}
-    for rel in sorted({location.get(rel, rel) for rel in found}):
-        if rel in projected:
-            text = projected[rel]
-        else:
-            try:
-                text, _guard = vault.read_guarded_text(root, root / rel)
-            except (OSError, UnicodeDecodeError, vault.PathGuardError):
-                continue
+    for rel, text in texts.items():
         append_only = _append_only(rel)
         after, changes, written, kept = _rewrite(text, moves, renames, body_immutable=append_only)
         if not (changes or written) or not writable(rel):
             if changes or written or kept:
-                referrers.append({"path": rel, "outcome": unchanged})
+                outcomes.append({"path": rel, "outcome": unchanged})
+            if only is not None:
+                held = vault.content_hash(text)
+                pages[rel] = {"path": rel, "before_hash": held, "after_hash": held, "append_only": append_only}
             continue
         if append_only:
             try:
                 repoints.append(_repoint(root, rel, text, after, pointers, location, matcher))
             except pointer_write.PointerWriteError as error:
-                referrers.append({"path": rel, "outcome": move_file.REFUSED, "code": error.code})
+                outcomes.append({"path": rel, "outcome": move_file.REFUSED, "code": error.code})
                 refused.append(error)
                 continue
-        referrers.append(
+        outcomes.append(
             {"path": rel, "outcome": move_file.REPOINTED if append_only else move_file.REWRITTEN}
         )
         row: dict[str, Any] = {
@@ -141,24 +209,27 @@ def prepare(
     except semantic_writes.SemanticWriteError as error:
         raise fold_leaf.refuse(error.code, error.reason) from error
     store_rows = move_file.store_rows_outcome(root, unchanged)
-    # Each moved page is bound as the plan leaves it, rewritten or not, so the witness always
-    # states where the plan's pages stand.
-    for _old_rel, new_rel in moves:
+    # Each moved page is bound as the plan leaves it, rewritten or not, so the witness of the one
+    # step that rewrites every referrer states where the plan's pages stand. A step that names its
+    # referrers binds only those: another step of the plan may rewrite a moved page.
+    for _old_rel, new_rel in moves if only is None else ():
         if new_rel not in pages and new_rel in projected:
             held = vault.content_hash(projected[new_rel])
             pages[new_rel] = {
                 "path": new_rel, "before_hash": held, "after_hash": held, "append_only": False,
             }
+    if only is not None and not pages:
+        raise fold_leaf.refuse("CURATION_BINDING_STALE", "no page the step names can be read")
     return {
         "moves": [list(move) for move in moves],
         # The mention rewrite reads the old folders once, here: at execution the moves have
         # emptied them, and the sealed bytes must be re-derived from the same names.
         "renames": [[rename.old, rename.new, list(rename.longer)] for rename in renames],
         "pages": [pages[rel] for rel in sorted(pages)],
-        "referrers": referrers,
+        "referrers": outcomes,
         **({"store_rows": store_rows} if store_rows is not None else {}),
         "preview_digest": pointer_write.preview_digest(location, repoints),
-        **({"mentions_unchecked": True} if not mentions.complete else {}),
+        **({"mentions_unchecked": True} if not complete else {}),
     }
 
 

@@ -34,6 +34,7 @@ from .vault import (
     PlannedWrite,
     UnparseableFilenameStyleError,
     batch_atomic_write,
+    corrected_title_name,
     kb_root,
     read_bytes_without_pinning,
     read_guarded_text,
@@ -308,6 +309,24 @@ def _title_case_slug(key: str, existing: Iterable[str] = ()) -> str:
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 
+class InvalidProjectFolderError(ValueError):
+    """A caller-named project folder that is not one portable folder name."""
+
+
+def require_portable_folder(folder: object) -> str:
+    """`folder` when it is the name the vault's own writer would give it, else refuse.
+
+    The rule is the note writer's (`vault.corrected_title_name`): one segment, NFC, no character
+    a platform or the wikilink grammar refuses, no leading dot, no trailing dot or space, and no
+    reserved device name.
+    """
+    if not isinstance(folder, str) or not folder or corrected_title_name(folder).name != folder:
+        raise InvalidProjectFolderError(
+            f"INVALID_PROJECT_FOLDER: project folder {folder!r} is not one portable folder name"
+        )
+    return folder
+
+
 class ProjectKeyTypoError(ValueError):
     """Raised when a new key looks like a typo of an existing registered key.
 
@@ -447,8 +466,9 @@ def plan_project_keys(
         close = _closest_existing_key(raw, list(proposed_folders))
         if close is not None:
             raise ProjectKeyTypoError(raw, close[0], close[1])
+        named = (folders or {}).get(raw) if replay is None else None
         folder_name = replay.folder if replay is not None else (
-            (folders or {}).get(raw) or _title_case_slug(raw, known_folders)
+            require_portable_folder(named) if named is not None else _title_case_slug(raw, known_folders)
         )
         variant = reuse_folder_spelling(folder_name, known_folders)
         if variant != folder_name:
@@ -473,10 +493,12 @@ def plan_project_keys(
     for item in introductions:
         if item.key in current.project_to_folder:
             continue
+        # A caller may name the folder, so it is written as a quoted scalar.
+        folder = yaml.safe_dump(item.folder, default_style='"', allow_unicode=True, width=1 << 16)
         text += (
             "\n  # auto-registered by exomem\n"
             f"  {item.key}:\n"
-            f"    folder: {item.folder}\n"
+            f"    folder: {folder.strip()}\n"
             f"    category: {item.category}\n"
         )
     project_directories = tuple(

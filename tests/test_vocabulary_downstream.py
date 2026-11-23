@@ -624,8 +624,10 @@ def test_a_registered_relation_the_candidate_does_not_offer_refuses_without_a_vo
 
 
 def test_curation_resume_keeps_a_vocabulary_application_open_until_all_steps_commit(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     target = _hydration(tmp_path, identity="cobalt workshop")
     report = commands.op_review_memory(
         tmp_path, categories=["entity_recurrence"], limit=3
@@ -787,6 +789,8 @@ def test_an_mcp_curation_resume_without_a_key_completes_its_vocabulary_applicati
         },
     )
     monkeypatch.setattr(writer_lease, "get_manager", lambda: _manager(tmp_path))
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     vocabulary = {
         "vocabulary_ref": current["ref"],
         "vocabulary_fingerprint": current["fingerprint"],

@@ -1894,6 +1894,7 @@ def planned_destination(
     domain: str | None = None,
     date_iso: str | None = None,
     name_number: int | None = None,
+    project_registry: project_keys_module.ProjectRegistry | None = None,
 ) -> str:
     """The vault-relative path `note` would create for these inputs; nothing is written.
 
@@ -1902,7 +1903,8 @@ def planned_destination(
     `date_iso` is the day a dated folder or name uses, today by default; a caller that
     creates the note later passes the same day to `note` as `_path_date`. `name_number` is the
     collision number that the plan gives a second page of one name, as `unique_path` would add it;
-    the caller passes the same number to `note` as `_name_number`.
+    the caller passes the same number to `note` as `_name_number`. `project_registry` is the
+    project registry as the caller's plan leaves it, so a key the plan registers places as it will.
     """
     root = Path(vault_root)
     date_iso = date_iso or temporal.render_date(temporal.now())
@@ -1920,6 +1922,7 @@ def planned_destination(
         medium=None,
         started=None,
         date_iso=date_iso,
+        project_registry=project_registry,
         create_parents=False,
         home_set=homes_module.load(root),
     )

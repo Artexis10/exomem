@@ -4729,7 +4729,34 @@ def _bounded_directory_entries(
     return tuple(sorted(entries, key=lambda item: item.relative_path.encode("utf-8")))
 
 
+class _CensusAllowance:
+    """A batch's fixed set of allowed census changes, with each directory's allowed names found once.
+
+    Staging fixes the set before the first flip, so a guarded directory's allowed names are the
+    same at every flip. Recomputing them for every census guard at every flip made a batch's hold
+    grow with its writes squared times its guards. The census itself is still re-read at each flip.
+    """
+
+    __slots__ = ("_changes", "_names")
+
+    def __init__(self, changes: Iterable[Path]) -> None:
+        self._changes = tuple(changes)
+        self._names: dict[str, frozenset[str]] = {}
+
+    def __iter__(self) -> Iterator[Path]:
+        return iter(self._changes)
+
+    def names(self, directory: Path) -> frozenset[str]:
+        key = os.path.abspath(directory)
+        found = self._names.get(key)
+        if found is None:
+            found = self._names[key] = _allowed_census_names(directory, self._changes)
+        return found
+
+
 def _allowed_census_names(directory: Path, allowed_changes: Iterable[Path]) -> frozenset[str]:
+    if isinstance(allowed_changes, _CensusAllowance):
+        return allowed_changes.names(directory)
     directory_path = Path(os.path.abspath(directory))
     names: set[str] = set()
     for change in allowed_changes:
@@ -6913,14 +6940,16 @@ def _batch_atomic_write_locked(
         _remove_empty_created_dirs(created_dirs)
         raise
 
-    allowed_census_changes = (
-        *(write.path for write in writes),
-        *(directory for write in writes for directory in write.ensure_directories),
-        *(
-            created.path if isinstance(created, _CreatedDirectory) else created
-            for created in created_dirs
-        ),
-        *(item.path for item in workspace_by_parent.values()),
+    allowed_census_changes = _CensusAllowance(
+        (
+            *(write.path for write in writes),
+            *(directory for write in writes for directory in write.ensure_directories),
+            *(
+                created.path if isinstance(created, _CreatedDirectory) else created
+                for created in created_dirs
+            ),
+            *(item.path for item in workspace_by_parent.values()),
+        )
     )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}

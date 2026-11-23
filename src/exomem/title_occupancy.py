@@ -78,15 +78,18 @@ class TitleCheck:
                 )
         return self._answerer
 
-    def held(self, stem: str) -> bool:
+    def held(self, stem: str, *, excluding: str | None = None) -> bool:
+        """Whether a live page's title is `stem`. `excluding` names a page being renamed, whose
+        own title its bare links already reach."""
         if not self._applies:
             return False
         resolver = self._resolver()
         if resolver is None:
             return False
         key = title_key(stem)
-        return bool(
-            wikilink_candidates(
+        return any(
+            candidate.path != excluding
+            for candidate in wikilink_candidates(
                 resolver.candidates_by_key, resolver.titles.get(key, ()), title_key=key, visible=self._visible
             )
         )

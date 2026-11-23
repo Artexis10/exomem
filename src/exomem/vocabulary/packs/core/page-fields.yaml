@@ -5,15 +5,18 @@ registry: page-fields
 # append-only tree. Every other field there keeps its captured bytes. A field with a
 # `writer` changes on such a page only through that operation: `reclassify` relocates the
 # source and records its classification history, `custody` checks the raw file's identity,
-# and `closure` writes the back-reference when a compiled page cites the source. This pack
-# is the only source of a role: a vault overlay may retire an entry and nothing else.
+# and `closure` writes the back-reference when a compiled page cites the source. A field
+# that `carries: project-key` holds project keys, so a value it gains registers that key and
+# a relocation rewrites it. A field with `shape: list` holds a list of values; any other
+# field holds one. This pack is the only source of a role: a vault overlay may retire an
+# entry and nothing else.
 entries:
   project:
     label: Project
-    attributes: {field: project, role: pointer}
+    attributes: {field: project, role: pointer, carries: project-key}
   projects:
     label: Projects
-    attributes: {field: projects, role: pointer}
+    attributes: {field: projects, role: pointer, carries: project-key, shape: list}
   domain:
     label: Domain
     attributes: {field: domain, role: pointer, writer: reclassify}

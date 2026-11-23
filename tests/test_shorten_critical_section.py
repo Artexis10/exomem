@@ -1107,7 +1107,11 @@ def test_a_note_save_commits_while_a_curation_step_prepares_its_leaf(
     assert _run_outcome(vault, proposed["run_id"], rel) == _run_outcome(twin, twin_proposed["run_id"], rel)
 
 
-def _two_step_run_with_its_first_step_committed(vault: Path, manager: writer_lease.LeaseManager) -> dict:
+def _two_step_run_with_its_first_step_committed(
+    vault: Path, manager: writer_lease.LeaseManager, monkeypatch: pytest.MonkeyPatch
+) -> dict:
+    # A budget too short for a second step, so apply commits the first step and leaves the second.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     rels = ("Knowledge Base/Notes/Insights/resume-edit-a.md", "Knowledge Base/Notes/Insights/resume-edit-b.md")
     for index, rel in enumerate(rels):
         _write_existing_page(vault, rel, page_id=f"00000000-0000-4000-8000-0000000000b{index}")
@@ -1128,7 +1132,7 @@ def test_a_second_resume_of_a_run_in_flight_is_refused_as_busy(
     """With no hold across a step, two resumes of one run would both execute it. The second
     must hear a retryable CURATION_RUN_BUSY that committed nothing, and the step lands once."""
     manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
-    proposed = _two_step_run_with_its_first_step_committed(vault, manager)
+    proposed = _two_step_run_with_its_first_step_committed(vault, manager, monkeypatch)
     parked, release = _park_the_next_leaf_preflight(monkeypatch)
 
     first, outcome = _in_thread("first-resume", lambda: _resume(manager, vault, proposed, call="first"))
@@ -1157,7 +1161,7 @@ def test_a_leaf_refused_by_a_busy_vault_commits_on_the_next_resume(
     Absorption is off, so the refusal reaches the caller as it does when the wait runs out."""
     monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
     manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
-    proposed = _two_step_run_with_its_first_step_committed(vault, manager)
+    proposed = _two_step_run_with_its_first_step_committed(vault, manager, monkeypatch)
     parked, release = _park_the_next_leaf_preflight(monkeypatch)
     holding, leaf_refused = threading.Event(), threading.Event()
     real_busy = mutation_lock._mutation_busy
@@ -1192,6 +1196,103 @@ def test_a_leaf_refused_by_a_busy_vault_commits_on_the_next_resume(
 
     assert _resume(manager, vault, proposed, call="next")["phase"] == "completed"
     assert _second_step_record(vault, proposed["run_id"]) == (["failed", "committed"], 2)
+
+
+def test_a_busy_vault_after_a_committed_step_stops_the_call_beside_its_progress(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One apply runs both steps. When the second leaf meets a busy vault, the first step is already
+    durable, so the call must answer with that step and the refusal instead of raising, say the
+    refused step did not commit, and leave it for the next resume to commit once."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    rels = ("Knowledge Base/Notes/Insights/resume-edit-a.md", "Knowledge Base/Notes/Insights/resume-edit-b.md")
+    for index, rel in enumerate(rels):
+        _write_existing_page(vault, rel, page_id=f"00000000-0000-4000-8000-0000000000b{index}")
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, *rels))
+    store = curation.CurationStore(vault)
+    parked, release = threading.Event(), threading.Event()
+    holding, leaf_refused = threading.Event(), threading.Event()
+    real_edit = commands_module.op_edit_memory
+    real_busy = mutation_lock._mutation_busy
+
+    def park_the_second_leaf(*args, **kwargs):
+        if (
+            kwargs.get("operation", {}).get("validate_only")
+            and not parked.is_set()
+            and store.reconstruct(proposed["run_id"])["committed_steps"]
+        ):
+            parked.set()
+            assert release.wait(30.0)
+        return real_edit(*args, **kwargs)
+
+    def note_the_leaf_refusal(*args, **kwargs):
+        if threading.current_thread().name == "curation-apply":
+            leaf_refused.set()
+        return real_busy(*args, **kwargs)
+
+    def other_writer() -> None:
+        assert parked.wait(30.0)
+        with manager.mutation_guard(vault, operation="other_writer"):
+            holding.set()
+            assert leaf_refused.wait(30.0)
+
+    monkeypatch.setattr(commands_module, "op_edit_memory", park_the_second_leaf)
+    monkeypatch.setattr(mutation_lock, "_mutation_busy", note_the_leaf_refusal)
+    holder, held = _in_thread("other-writer", other_writer)
+    applier, outcome = _in_thread(
+        "curation-apply", lambda: _curation(manager, vault, **_apply_arguments(proposed))
+    )
+    try:
+        assert holding.wait(10.0), held.get("error")
+    finally:
+        release.set()
+        applier.join(timeout=60.0)
+        leaf_refused.set()
+        holder.join(timeout=60.0)
+
+    assert "error" not in held, held.get("error")
+    assert "error" not in outcome, outcome.get("error")
+    stopped = outcome["result"]["stopped"]
+    assert (stopped["code"], stopped["step"], stopped["committed"]) == ("MUTATION_BUSY", "reword-1", False)
+    assert outcome["result"]["progress"] == {"steps": 2, "committed": 1, "this_call": 1}
+    # A busy vault is not a failed run: the caller resumes it rather than proposing an undo.
+    assert (outcome["result"]["phase"], outcome["result"]["next_action"]) == ("executing", "resume")
+    assert _second_step_record(vault, proposed["run_id"]) == (["failed"], 1)
+
+    assert _resume(manager, vault, proposed, call="next")["phase"] == "completed"
+    assert _second_step_record(vault, proposed["run_id"]) == (["failed", "committed"], 2)
+
+
+def test_another_refusal_after_a_committed_step_stops_the_call_instead_of_raising(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal other than a busy vault, raised after the call's first step committed, escaped as an
+    error: the caller lost the durable step's report and could not tell the run had moved."""
+    manager = _standalone_manager(vault.parent / "state")
+    rels = ("Knowledge Base/Notes/Insights/stop-edit-a.md", "Knowledge Base/Notes/Insights/stop-edit-b.md")
+    for index, rel in enumerate(rels):
+        _write_existing_page(vault, rel, page_id=f"00000000-0000-4000-8000-0000000000c{index}")
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, *rels))
+    real_next = curation._execute_next
+    calls: list[int] = []
+
+    def refuse_the_second_step(*args, **kwargs):
+        # A step decided again under its hold calls back in; only the call's own steps count.
+        if not manager.holds_mutation_boundary(vault):
+            calls.append(1)
+            if len(calls) == 2:
+                raise OpError("VAULT_UNREADABLE", "the vault could not be read")
+        return real_next(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_execute_next", refuse_the_second_step)
+    result = _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert result["stopped"]["code"] == "VAULT_UNREADABLE"
+    assert result["progress"] == {"steps": 2, "committed": 1, "this_call": 1}
+    assert (result["phase"], result["next_action"]) == ("partial", "resume")
+    monkeypatch.setattr(curation, "_execute_next", real_next)
+    assert _resume(manager, vault, proposed, call="next")["phase"] == "completed"
 
 
 def test_a_save_to_the_page_after_a_curation_leaf_commits_leaves_the_step_committed(

@@ -51,10 +51,6 @@ def _apply(vault: Path, proposed: dict[str, object]) -> dict[str, object]:
     )
 
 
-def _resume(vault: Path, proposed: dict[str, object]) -> dict[str, object]:
-    return curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
-
-
 def _seed_note(vault: Path, slug: str, body: str) -> str:
     arguments = {"title": f"Curation {slug}", "slug": slug, "content": body}
     validation = commands.op_remember(vault, validate_only=True, **arguments)
@@ -156,10 +152,10 @@ def test_a_split_whose_second_page_links_to_the_first_applies_end_to_end(
         ),
     )
 
-    assert _apply(vault, proposed)["step"]["path"] == HOME
-    finished = _resume(vault, proposed)
+    finished = _apply(vault, proposed)
 
     assert finished["phase"] == "completed"
+    assert finished["committed_steps"] == ["home", "branch"]
     branch = (vault / finished["step"]["path"]).read_text(encoding="utf-8")
     assert "[[Notes/Insights/curation-home" in branch
 

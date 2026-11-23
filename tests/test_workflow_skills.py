@@ -326,10 +326,13 @@ def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() ->
     assert "`restructure_execution`" in text
     assert "preview the immutable plan once" in text
     assert "one explicit confirmation for that exact plan fingerprint" in text
-    assert "resume automatically one step per request" in text
+    assert "resume automatically through" in text
+    assert 'manage_memory(operation="curation.relocate"' in text
     assert 'propose_compensation")` (CLI `curation_action="propose-compensation"`) is `structural_suggestions`' in text
     assert "does not need a fresh confirmation" in text
-    assert "stop on `partial` or `blocked`" in text
+    # A run that stops for another writer keeps `next_action: resume`; the skill follows the reply.
+    assert "Follow the reply's `next_action`" in text
+    assert "`next_action` is not `resume`, stop" in text
     assert "standing approval" in text
 
 

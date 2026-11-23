@@ -431,6 +431,38 @@ def note_released_fanout(reports: list[Any], *, completed: bool) -> None:
 
 
 @contextmanager
+def fanout_per_commit() -> Iterator[None]:
+    """Run the derived fan-out its body defers when the body ends, and keep its outcome for the mutation.
+
+    For one request that commits several times in turn, as a multi-step curation call does. The
+    corpus and freshness registries learn of a write only from its fan-out, so each commit's fan-out
+    must land before the next commit reads them. The mutation's terminal still reports what these
+    fan-outs reported: their reports reach the enclosing queue, and a failed drain still reads as one.
+    Outside a mutation the leaves run their fan-out inline, so the body runs unchanged.
+    """
+    outer = _ACTIVE_POST_TERMINAL_FANOUT.get()
+    if outer is None:
+        yield
+        return
+    queue: list[Any] = []
+    token = _ACTIVE_POST_TERMINAL_FANOUT.set(queue)
+    try:
+        yield
+    finally:
+        _ACTIVE_POST_TERMINAL_FANOUT.reset(token)
+        if queue:
+            reports, failed = _drain_post_terminal_fanout(queue)
+
+            def drained() -> list[Any]:
+                if failed:
+                    # The drain already logged the failure; the mutation's own drain reports it as pending.
+                    raise RuntimeError("a derived fan-out drained before the terminal failed")
+                return reports
+
+            outer.append(drained)
+
+
+@contextmanager
 def fanout_after_release(vault_root: os.PathLike[str] | str) -> Iterator[ReleasedFanout]:
     """Run the derived fan-out its body defers once the body has released the vault mutation boundary.
 
@@ -9409,10 +9441,10 @@ def invoke_command(
         and kwargs.get("mode") == "curation"
         and kwargs.get("curation_action") == "resume"
     ):
-        # Resume advances a run by one step and every call carries the same arguments, so the
-        # call's own request id joins the scope: a new call runs the next step instead of
-        # replaying the last reply for 600 s, while a retry of one call, the busy and warm-up
-        # waits and a vocabulary binding keep a canonical identity.
+        # Resume advances a run as far as one call's budget allows, and every call carries the
+        # same arguments, so the call's own request id joins the scope: a new call runs the next
+        # steps instead of replaying the last reply for 600 s, while a retry of one call, the busy
+        # and warm-up waits and a vocabulary binding keep a canonical identity.
         implicit_idempotency_scope = (
             f"{implicit_idempotency_scope}\0resume:{mutation_request_id or uuid.uuid4()}"
         )
