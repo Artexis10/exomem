@@ -333,7 +333,8 @@ class _CardCache(NamedTuple):
     checkpoint: object  # the recall checkpoint of that key, where the next delta starts
     paths: frozenset[str]  # every card path of the projection at that key
     cards: tuple[Card, ...]
-    unread: tuple[str, ...]  # card paths that gave no page, read again on the next search
+    unread: tuple[str, ...]  # card paths that gave no page during start-up, read again on the next search
+    missed: frozenset[str] = frozenset()  # card paths that gave no page after start-up, read again on a key move
 
 
 _CARDS: dict[tuple[str, str], _CardCache] = {}
@@ -381,28 +382,35 @@ def _cards_in_scope(
     # inventory existed may only have waited out its budget, so the next search reads it again;
     # remembering it as absent would hide its dataset for the life of the process. Once the
     # inventory existed before the read, no wait explains a missing page (a linked, refused or
-    # unparsable card), so it is not read again until the registry names it as changed.
+    # unparsable card), so it is not read again until the projection key moves.
     if known is None or known.version != version:
         # Reading every card on every search would cost more than the lane. The projection key
-        # moves on every write, so after one only the cards the registry names as changed are
-        # read again, and every card when the registry cannot name what changed. A card path new
-        # to the projection is read too: a page committed through pending custody joins the
-        # projection before the registry names it.
+        # moves on every write, so after one only the cards the registry names as changed, the
+        # card paths new to the projection and the cards that gave no page are read again, and
+        # every card when the registry cannot name what changed. The delta is trusted only for
+        # cards already read: a card path the cache has never seen is always read.
         checkpoint = snapshot.recall_checkpoint(walk_scope)
         paths = frozenset(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
         touched = None if known is None else _touched_since(vault_root, walk_scope, known, version, checkpoint)
         if touched is None:
             reread, kept = paths, ()
         else:
-            reread = (paths & touched) | (paths - known.paths) | (paths & set(known.unread))
+            reread = (paths & touched) | (paths - known.paths) | (paths & (set(known.unread) | known.missed))
             kept = tuple(card for card in known.cards if card.card_path in paths and card.card_path not in reread)
         found, unread = _qualify(vault_root, sorted(reread))
         cards = tuple(sorted(kept + tuple(found), key=lambda card: card.card_path))
-        _CARDS[key] = known = _CardCache(version, checkpoint, paths, cards, () if settled else tuple(unread))
+        _CARDS[key] = known = _CardCache(
+            version, checkpoint, paths, cards,
+            () if settled else tuple(unread), frozenset(unread) if settled else frozenset(),
+        )
     elif known.unread:
         found, unread = _qualify(vault_root, known.unread)
         merged = tuple(sorted(known.cards + tuple(found), key=lambda card: card.card_path))
-        _CARDS[key] = known = known._replace(cards=merged, unread=() if settled else tuple(unread))
+        _CARDS[key] = known = known._replace(
+            cards=merged,
+            unread=() if settled else tuple(unread),
+            missed=(known.missed | frozenset(unread)) if settled else known.missed,
+        )
     cards = {
         card.original: card
         for card in known.cards

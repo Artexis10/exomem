@@ -629,17 +629,17 @@ def test_history_and_restore_refuse_snapshot_authority_lost_after_preflight(
             return reader(*args, **kwargs)
         return consume
 
-    def change_during_read(filesystem, file):
+    def change_during_read(filesystem, file, **options):
         nonlocal changed
         if not consuming or file.name != retained.name or changed:
-            return read(filesystem, file)
+            return read(filesystem, file, **options)
         changed = True
         if change == "consumed-replacement":
             retained.write_bytes(raw.replace(b"Granted private state", b"Withheld changed state"))
-            result = read(filesystem, file)
+            result = read(filesystem, file, **options)
             retained.write_bytes(raw)
             return result
-        result = read(filesystem, file)
+        result = read(filesystem, file, **options)
         connection = store.open_authorization_session_connection(vault)
         try:
             authorization_session_lifecycle.close_verified_session(
@@ -1861,6 +1861,7 @@ def test_an_owner_only_page_without_units_leaves_the_owner_its_unit_counts(
         )
 
     assert [hit.parent_path for hit in hits] == [public]
+    # No public measure shows the counted corpus; the unit freshness tests read the same base.
     assert lexstore.get_store(vault)._unit_bases["kb"].counted is not None
 
 
