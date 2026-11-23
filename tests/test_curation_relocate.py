@@ -518,6 +518,82 @@ def test_a_relocation_with_many_referrers_rewrites_them_in_bounded_disjoint_step
     assert _snapshot(vault, list(before)) == before
 
 
+class _TwoStepBudget:
+    """A request budget that covers two prepared steps of a call: the second check runs short."""
+
+    def __init__(self) -> None:
+        self.checks = 0
+
+    def can_afford(self, _reserve: float) -> bool:
+        self.checks += 1
+        return self.checks < 2
+
+
+def test_a_proposal_that_runs_short_goes_on_from_its_prepared_steps_to_the_same_seal(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relocation whose preparation outlived the request budget, now prepared over several calls.
+
+    It catches a call that stops without keeping its steps, a later call that prepares them again,
+    a call that never stops, and a plan sealed in parts that differs from the one sealed at once.
+    """
+    monkeypatch.setattr(relocate, "REFERRERS_PER_STEP", 2)
+    built = _relocation_vault(vault)
+    pages: list[str] = built["pages"][:6]  # type: ignore[index]
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+
+    result = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    calls, prepared = 1, 0
+    while result.get("phase") == "preparing":
+        assert result["next_action"] == "relocate" and result["sealed"] is False
+        progress = result["progress"]
+        assert 1 <= progress["this_call"] <= 2
+        assert progress["prepared"] == prepared + progress["this_call"], "a kept step ran again"
+        prepared = progress["prepared"]
+        assert calls <= progress["steps"], "the proposal does not advance"
+        result = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+        calls += 1
+    assert result["sealed"] is True and result["next_action"] == "apply"
+    assert calls > 2
+
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+    at_once = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    assert at_once["plan_fingerprint"] == result["plan_fingerprint"]
+    assert at_once["run_id"] == result["run_id"]
+
+
+def test_a_page_that_changes_after_its_step_was_kept_refuses_the_seal(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step kept from an earlier call, sealed against bytes its page no longer holds.
+
+    It catches a kept step that reaches the seal after its page changed, and a refused proposal
+    whose stale steps the next call keeps.
+    """
+    monkeypatch.setattr(relocate, "REFERRERS_PER_STEP", 2)
+    built = _relocation_vault(vault)
+    pages: list[str] = built["pages"][:6]  # type: ignore[index]
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+    assert _maintain(vault, "relocate", pages=pages, to_project="meadow")["phase"] == "preparing"
+    first = vault / pages[0]
+    added = "A reading added between two calls."
+    first.write_text(first.read_text(encoding="utf-8") + f"\n{added}\n", encoding="utf-8")
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+
+    with pytest.raises(curation.CurationError) as refused:
+        _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    assert refused.value.code == "CURATION_BINDING_STALE"
+    resealed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+
+    assert resealed["sealed"] is True
+    assert _apply_to_the_end(vault, resealed)["phase"] == "completed"
+    moves = _all_moves(vault, resealed["run_id"])
+    landed = next(move["to"] for move in moves if move["from"] == pages[0])
+    assert added in (vault / landed).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("folder", ["Survey/2026", "Survey: field"])
 def test_a_relocation_refuses_a_folder_that_is_not_one_portable_name(vault: Path, folder: str) -> None:
     """A folder that a path separator splits, or that YAML reads as a mapping, written into the registry."""

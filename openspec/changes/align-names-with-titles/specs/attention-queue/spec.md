@@ -2,7 +2,7 @@
 
 ### Requirement: Name drift is one review item for the vault
 
-While a rename-only `curation.relocate` would rename any page, the review surface SHALL carry one `name_drift` item for the vault. Detection and relocation SHALL derive a page's planned path with one shared function. The item's fingerprint SHALL change with the drifted set or its planned names. Its text SHALL state the count and the spelled-out `curation.relocate` call, with the item's `review_ref`, that renames the next batch.
+While a rename-only `curation.relocate` would rename any page, the review surface SHALL carry one `name_drift` item for the vault. Detection and relocation SHALL derive a page's planned path with one shared function. The item's fingerprint SHALL change with the drifted set or its planned names. Its text SHALL state the counts, the time they were taken and the spelled-out `curation.relocate` call, with the item's `review_ref`, that renames the next batch.
 
 #### Scenario: A backlog of stale names is one item
 
@@ -19,15 +19,26 @@ While a rename-only `curation.relocate` would rename any page, the review surfac
 - **WHEN** no page drifts
 - **THEN** the review listing holds no `name_drift` item
 
+#### Scenario: Stored counts say when they were taken
+
+- **WHEN** the listing builds the item from the stored due-state row
+- **THEN** the item's text states the time of the scan that the row's counts come from
+
 ### Requirement: The name-drift item keeps its identity
 
-The `name_drift` item SHALL be anchored on the vault's top index, so that renaming drifted pages never changes its identity. A `review_ref` given before a batch SHALL resolve to the batch that is next when it is used.
+The `name_drift` item SHALL be anchored on the vault's top index, so that renaming drifted pages never changes its identity. A `review_ref` given before a batch SHALL resolve to the batch that is next when it is used. A vault without a top index SHALL have no item and no item reference.
 
 #### Scenario: The item keeps its identity through its own renames
 
 - **WHEN** a batch of drifted pages is renamed and pages still drift
 - **THEN** the item keeps its `review_ref`
 - **AND** a `review_ref` given before the batch names the batch that is next now
+
+#### Scenario: A vault without a top index has no item
+
+- **WHEN** pages drift and the vault has no top `index.md`
+- **THEN** no `name_drift` item and no rename call by `review_ref` is offered
+- **AND** `inspect_name_drift` still lists the drifted pages
 
 ### Requirement: The default listing serves the name-drift item from a stored row
 
@@ -52,6 +63,34 @@ A `curation.relocate` call whose `review_ref` names the `name_drift` item SHALL 
 - **WHEN** an agent proposes `curation.relocate` with the item's `review_ref` and the user approves the preview
 - **THEN** every page in the batch takes its planned name, and one compensation restores every page
 
+### Requirement: A refused page leaves the name-drift batch
+
+For a `curation.relocate` by the item's `review_ref`, a page whose move or referrer rewrite the move contract refuses SHALL be left out of the plan and listed with its code. The call SHALL NOT fail for it. Pages that a caller names SHALL keep the refusal.
+
+#### Scenario: A refused page does not fail the batch
+
+- **WHEN** the next batch holds a page that the move contract refuses, and other pages
+- **THEN** the relocation seals the other pages and lists the refused page with its code
+
+### Requirement: A refused page waits until it changes
+
+The runtime SHALL remember a refused page with its code, bound to its exact bytes and those of the pages that link to it, outside the stored due-state row. The batch resolver SHALL NOT propose it again until one of those pages changes. No scan SHALL prepare a move to learn a refusal.
+
+#### Scenario: An edit lets a refused page back in
+
+- **WHEN** a page was refused and the owner then edits it or a page that links to it
+- **THEN** the next batch can hold the page again
+
+### Requirement: Refused pages stay visible
+
+The item's text and `inspect_name_drift` SHALL report the refused pages' count with their codes. When every drifted page that remains is refused, the item SHALL close.
+
+#### Scenario: The item closes over refused pages
+
+- **WHEN** every remaining drifted page is refused
+- **THEN** the review listing holds no `name_drift` item
+- **AND** `inspect_name_drift` lists each refused page with its code
+
 ### Requirement: A renaming run refreshes the name-drift item
 
 When a curation run that renamed pages ends, the runtime SHALL refresh the `name_drift` item from a fresh scan, so the due-state block keeps the item while pages drift and drops it when none do.
@@ -63,16 +102,17 @@ When a curation run that renamed pages ends, the runtime SHALL refresh the `name
 
 ### Requirement: An oversized name-drift batch shrinks
 
-When the plan of the next batch is too large to seal, the relocation SHALL halve the batch, up to four times, and SHALL name the pages it left for the next batch in its summary.
+Before the relocation prepares the next batch, it SHALL size the batch, from its pages and their links, to what one sealed plan holds with room to spare. When a sized batch's plan is still too large to seal, the relocation SHALL halve the batch, up to four times. It SHALL name the pages it left for the next batch in its summary.
 
 #### Scenario: A batch too large to seal shrinks
 
 - **WHEN** the next batch's plan would exceed the sealed-size bound
 - **THEN** the relocation seals a smaller batch and lists the remaining pages under `deferred_to_next_batch`
+- **AND** it prepares no step for a plan that it does not seal
 
 ### Requirement: Name drift judges only pages named by their title
 
-A page that holds the collision-numbered name its title gets while another page holds the bare name SHALL NOT count as drift. A name that differs from the planned name only in case SHALL NOT count as drift, because a case-blind volume holds both as one file. Captured Sources, recaps and every type that the registry does not name by title SHALL be out of scope. An entity SHALL be renamed in its own folder.
+A page that holds the collision-numbered name its title gets while another page holds the bare name SHALL NOT count as drift. A name that differs from the planned name only in case SHALL NOT count as drift, because a case-blind volume holds both as one file. Captured Sources, recaps, navigation pages and every type that the registry does not name by title SHALL be out of scope, for detection and for every relocation. An entity SHALL be renamed in its own folder.
 
 #### Scenario: Dated captures and collision copies are not drift
 
@@ -81,7 +121,7 @@ A page that holds the collision-numbered name its title gets while another page 
 
 ### Requirement: Pages without a plannable name are counted apart
 
-A page with no usable title, and a page whose rename this caller cannot plan, SHALL be counted apart from the drifted pages and never proposed for a rename.
+A page with no usable title, a page whose rename this caller cannot plan, and a refused page SHALL be counted apart from the drifted pages and never proposed for a rename.
 
 #### Scenario: A page with no usable title is never proposed
 
@@ -90,7 +130,7 @@ A page with no usable title, and a page whose rename this caller cannot plan, SH
 
 ### Requirement: Drifted pages are listed in bounded pages
 
-The read operation `inspect_name_drift` SHALL return the total number of drifted pages and one bounded page of rows: the page's ref, title, current name and planned name, in path order, with a cursor for the next page. A row for a page with no usable title, or whose rename this caller cannot plan, SHALL say so and carry no planned name. A scan that did not finish SHALL say it is incomplete and SHALL NOT report a total.
+The read operation `inspect_name_drift` SHALL return the total number of drifted pages and one bounded page of rows: the page's ref, title, current name and planned name, in path order, with a cursor for the next page. A row for a page with no usable title SHALL say so and carry no planned name. A refused row SHALL carry its code. A scan that did not finish SHALL say so and SHALL NOT report a total.
 
 #### Scenario: A listing pages through the backlog
 

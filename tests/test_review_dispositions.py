@@ -576,7 +576,8 @@ def test_removing_the_carrier_filter_puts_the_quiet_family_back(
     monkeypatch.setattr(
         due_state_module, "_excluded_families", lambda *args, **kwargs: frozenset()
     )
-    assert due_state_module.served(vault)["categories"] == {FAMILY: 1}
+    # The fixture's switched-off name-drift item comes back with the filter too.
+    assert due_state_module.served(vault)["categories"][FAMILY] == 1
 
 
 def test_removing_the_advisory_filter_puts_the_quiet_kind_back(

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -877,6 +877,21 @@ def pages_of_item(vault_root: Path, reference: str) -> list[str] | None:
         if batch is not None:
             return batch
     return None
+
+
+def record_refused(vault_root: Path, reference: str, refused: Sequence[Mapping[str, str]]) -> None:
+    """Tell a vault-wide family which pages of its batch an action on its item refused.
+
+    Each row names a `page` and the refusal's `code`. The family that owns the reference keeps
+    them out of its next batches until they change, so its item can close while they wait for
+    repair. A reference no vault-wide family owns records nothing.
+    """
+    from . import name_drift
+
+    # The same families as `pages_of_item`; each one says whether the reference is its own.
+    for record in (name_drift.record_refused,):
+        if record(vault_root, reference, refused):
+            return
 
 
 def item_by_ref(

@@ -8,8 +8,9 @@ name no longer follows their title. This module finds them and proposes the rena
   `relocate.planned_path`, the rule that relocation derives its moves with, so a renamed page
   stops drifting and the backlog closes by construction. Scope, title, date prefix, case and
   collision numbers are all decided there;
-- a page with no usable title, and a page whose rename this caller cannot plan, are counted
-  apart and never proposed;
+- a page with no usable title, a page whose rename this caller cannot plan, and a page whose
+  rename the item's call was refused for, are counted apart and never proposed. A refusal is
+  remembered beside the due-state projection until the page or a page linking to it changes;
 - the one review item for the vault, anchored on the top index so that its own renames never
   move its identity, with the call that renames the next batch;
 - the bounded listing and the retitle suggestion.
@@ -19,9 +20,13 @@ It measures and proposes. It never renames: `curation.relocate` does, on the own
 
 from __future__ import annotations
 
+import collections
+import dataclasses
 import datetime as dt
 import hashlib
-from collections.abc import Iterable
+import json
+import threading
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -41,6 +46,13 @@ KIND = "rename"
 #: vocabulary. It is the operator's preview size; `curation.relocate` halves a batch it cannot seal.
 BATCH_PAGES = 200
 
+#: The file in the vault's state directory, beside the due-state projection, that remembers the
+#: pages a rename of the item's batch was refused for. A reconcile and a row refresh rewrite only
+#: the projection, so the memory outlives both. Losing the file costs one refused preparation per
+#: page, which records the refusal again.
+REFUSALS_FILENAME = "name-drift-refusals.json"
+_REFUSALS_LOCK = threading.Lock()
+
 #: Closed verdicts of `judge`.
 IN_STEP = "in_step"
 DRIFTED = "drifted"
@@ -57,8 +69,10 @@ class Page:
     title: str = ""
     current: str = ""
     planned: str = ""
-    #: Why the page's rename cannot be planned, for a `refused` page.
+    #: Why the page's rename cannot be planned or was refused, for a `refused` page.
     reason: str = ""
+    #: The refusal's code, for a `refused` page.
+    code: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +89,7 @@ def anchor_path() -> str:
 
     The item stands for the whole vault. An anchor on a drifted page would move with that page's
     own rename and take the item's identity with it. The top index is a page, so the item can be
-    inspected, and no rename moves it (`judge` leaves navigation pages out).
+    inspected, and no rename moves it (`relocate.renamed_by_title` leaves navigation pages out).
     """
     from .kbdir import managed_join
 
@@ -90,18 +104,11 @@ def judge(
     title: str | None,
     names: Names,
 ) -> Page | None:
-    """The page's verdict, or None when no relocation names it by its title.
-
-    A navigation page keeps its name whatever its type: links and this family's anchor find it by
-    that name.
-    """
+    """The page's verdict, or None when no relocation names it by its title."""
     from . import relocate
     from .cli_ops import OpError
-    from .find_corpus import NAVIGATION_BASENAMES
 
-    if note_type is None or not relocate.renamed_by_title(note_type):
-        return None
-    if PurePosixPath(rel_path).name.lower() in NAVIGATION_BASENAMES:
+    if not relocate.renamed_by_title(rel_path, note_type):
         return None
     current = PurePosixPath(rel_path).name
     shown = title or ""
@@ -110,7 +117,9 @@ def judge(
             return Page(rel_path, NO_USABLE_TITLE, shown, current)
         target = relocate.planned_path(vault_root, rel_path, note_type, title, names)
     except (OpError, ValueError) as error:
-        return Page(rel_path, REFUSED, shown, current, reason=str(error))
+        return Page(
+            rel_path, REFUSED, shown, current, reason=str(error), code=relocate.NO_DESTINATION
+        )
     if target is None:
         return Page(rel_path, IN_STEP, shown, current)
     return Page(rel_path, DRIFTED, shown, current, PurePosixPath(target).name)
@@ -119,19 +128,24 @@ def judge(
 def scan(vault_root: Path, pages: Iterable[Any]) -> Scan:
     """Judge every page of a corpus, in path order, as one relocation of them all would.
 
-    `pages` are parsed pages with `rel_path`, `frontmatter` and `body`. The loop checks the
-    request's read budget on every page, so a scan that cannot finish raises the budget refusal
-    instead of answering with a partial count.
+    `pages` are parsed pages with `rel_path`, `frontmatter`, `body` and `snapshot_hash`. The loop
+    checks the request's read budget on every page, so a scan that cannot finish raises the budget
+    refusal instead of answering with a partial count. A drifted page whose rename the item's call
+    was refused for, and which has not changed since, counts as refused (`record_refused`); the
+    scan reads that memory and prepares nothing.
     """
     from . import find, relocate, request_budget, vault
 
     root = Path(vault_root)
     basis = note_types.Basis(root)
     names = relocate.Names(root, resolver=lambda: find.writer_resolver_snapshot(root))
+    ordered = sorted(pages, key=lambda page: page.rel_path)
+    remembered = _refusals(root)
+    hashes = {page.rel_path: page.snapshot_hash for page in ordered} if remembered else {}
     drifted: list[Page] = []
     untitled: list[Page] = []
     refused: list[Page] = []
-    for page in sorted(pages, key=lambda page: page.rel_path):
+    for page in ordered:
         request_budget.checkpoint()
         verdict = judge(
             root,
@@ -143,12 +157,110 @@ def scan(vault_root: Path, pages: Iterable[Any]) -> Scan:
         if verdict is None or verdict.verdict == IN_STEP:
             continue
         if verdict.verdict == DRIFTED:
-            drifted.append(verdict)
+            held = _held(remembered.get(page.rel_path), page.rel_path, hashes)
+            if held is None:
+                drifted.append(verdict)
+            else:
+                held_code = str(held["code"])
+                refused.append(dataclasses.replace(verdict, verdict=REFUSED, code=held_code))
         elif verdict.verdict == NO_USABLE_TITLE:
             untitled.append(verdict)
         else:
             refused.append(verdict)
     return Scan(tuple(drifted), tuple(untitled), tuple(refused))
+
+
+def _refusals_path(vault_root: Path) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(vault_root) / REFUSALS_FILENAME
+
+
+def _refusals(vault_root: Path) -> dict[str, dict[str, Any]]:
+    """The remembered refusals by page path; none when the file is absent or cannot be read."""
+    try:
+        payload = json.loads(_refusals_path(vault_root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    pages = payload.get("pages") if isinstance(payload, dict) else None
+    if not isinstance(pages, dict):
+        return {}
+    return {str(path): entry for path, entry in pages.items() if isinstance(entry, dict)}
+
+
+def _held(
+    entry: dict[str, Any] | None, path: str, hashes: Mapping[str, str | None]
+) -> dict[str, Any] | None:
+    """The remembered refusal of `path` while it still applies, else None.
+
+    It applies while the page has the bytes it was refused with, and each page that linked to it
+    then and that this scan reads has its bytes then too. A referrer this scan does not read is
+    passed over, so a caller that sees fewer pages does not readmit the page on every scan.
+    """
+    if entry is None or not entry.get("hash") or entry.get("hash") != hashes.get(path):
+        return None
+    referrers = entry.get("referrers")
+    if not isinstance(referrers, dict):
+        return None
+    if any(rel in hashes and hashes[rel] != held for rel, held in referrers.items()):
+        return None
+    return entry
+
+
+def _hash_of(root: Path, rel: str) -> str | None:
+    """The SHA-256 of the page's exact bytes, as the corpus records it (`snapshot_hash`)."""
+    from . import vault
+
+    try:
+        data, _guard = vault.read_guarded_bytes(root, root / rel)
+    except (OSError, vault.PathGuardError):
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def record_refused(
+    vault_root: Path, review_ref: str, refused: Sequence[Mapping[str, str]]
+) -> bool:
+    """Remember the pages a rename of this item's batch was refused for; whether the ref is ours.
+
+    Each row names a `page` and its refusal `code`. The memory binds the page's exact bytes and
+    those of each page that links to it, so the scan proposes the page again once it or one of
+    those referrers changes. It keeps no reason text: a reason can name pages that another
+    audience may not see. The row is refreshed, so the item closes when every remaining drifted
+    page is refused.
+    """
+    from . import due_state, state_paths, vault
+    from .governance import egress
+
+    if not _owns(vault_root, review_ref):
+        return False
+    root = Path(vault_root)
+    paths = sorted({str(row["page"]) for row in refused})
+    inbound = vault.find_inbound_wikilinks_many(
+        root, paths, visible=egress.visible_page_filter(root)
+    )
+    entries: dict[str, dict[str, Any]] = {}
+    for row in refused:
+        path = str(row["page"])
+        own = _hash_of(root, path)
+        if own is None:
+            continue
+        referrers: dict[str, str] = {}
+        for link in inbound.get(path, ()):
+            if link.path != path and link.path not in referrers:
+                held = _hash_of(root, link.path)
+                if held is not None:
+                    referrers[link.path] = held
+        entries[path] = {"code": str(row["code"]), "hash": own, "referrers": referrers}
+    if not entries:
+        return True
+    with _REFUSALS_LOCK:
+        pages = {**_refusals(root), **entries}
+        state_paths.ensure_vault_state_dir(root)
+        # The projection's own atomic replace: a reader never sees half a file.
+        due_state._replace_json(_refusals_path(root), {"version": 1, "pages": pages})  # noqa: SLF001
+    due_state.schedule_name_drift_refresh(root)
+    return True
 
 
 def _corpus_scan(vault_root: Path) -> Scan:
@@ -189,18 +301,24 @@ def _reading(meta: dict[str, Any]) -> AuditFinding:
 
 
 def item_ref(vault_root: Path) -> str | None:
-    """This vault's one name-drift review ref, composed as the projection composes every item's."""
+    """This vault's one name-drift review ref, composed as the projection composes every item's.
+
+    None while the vault has no top index: the due-state block serves no row whose page is
+    missing (`due_state._page_exists`), so an item there would carry a ref that no listing shows.
+    """
     from . import due_state
 
+    if not due_state._page_exists(Path(vault_root), anchor_path()):  # noqa: SLF001 -- its drop rule
+        return None
     entry = due_state.entry_for(vault_root, _reading({}))
     return str(entry["ref"]) if entry is not None else None
 
 
-def pages_for_ref(vault_root: Path, review_ref: str) -> list[str] | None:
-    """The next batch when `review_ref` is this vault's name-drift item, else None.
+def _owns(vault_root: Path, review_ref: str) -> bool:
+    """Whether `review_ref` names this vault's name-drift item for this caller.
 
-    One scan: the item's identity is its anchor and family, so the ref is recognised without the
-    whole-vault review passes. A caller that may not see the anchor gets None, as for a ref
+    The item's identity is its anchor and family, so the ref is recognised without the
+    whole-vault review passes. A caller that may not see the anchor is answered no, as for a ref
     that names no item.
     """
     from . import review_state
@@ -210,13 +328,16 @@ def pages_for_ref(vault_root: Path, review_ref: str) -> list[str] | None:
         wanted = review_state.parse_review_ref(review_ref)
         own = item_ref(vault_root)
     except ValueError:
-        return None
+        return False
     if own is None or review_state.parse_review_ref(own) != wanted:
-        return None
+        return False
     visible = egress.visible_page_filter(Path(vault_root))
-    if visible is not None and not visible(anchor_path()):
-        return None
-    return pages_for_review(vault_root)
+    return visible is None or visible(anchor_path())
+
+
+def pages_for_ref(vault_root: Path, review_ref: str) -> list[str] | None:
+    """The next batch when `review_ref` is this vault's name-drift item, else None."""
+    return pages_for_review(vault_root) if _owns(vault_root, review_ref) else None
 
 
 def drift_signal(drift: Scan) -> str:
@@ -236,44 +357,62 @@ def relocate_call(**arguments: Any) -> str:
     )
 
 
-def _summary(drifted: int, untitled: int, refused: int) -> str:
+def _refused_codes(drift: Scan) -> dict[str, int]:
+    """How many refused pages each refusal code holds, by code."""
+    return dict(sorted(collections.Counter(page.code for page in drift.refused).items()))
+
+
+def _summary(drifted: int, untitled: int, refused: int, codes: Mapping[str, int]) -> str:
     noun = "page has a file name" if drifted == 1 else "pages have file names"
     sentence = f"{drifted} {noun} that no longer follow their titles."
     if untitled:
         sentence += f" {untitled} more have no usable title and are left as they are."
     if refused:
-        sentence += f" {refused} more cannot be renamed by this caller and are left as they are."
+        by_code = ", ".join(f"{code} {count}" for code, count in codes.items())
+        sentence += f" {refused} more cannot be renamed now and are left as they are ({by_code})."
     return sentence
 
 
-#: The counts a finding is built from, which the due-state row stores (`stored_finding`).
+#: The meta fields a finding is built from, which the due-state row stores (`stored_finding`).
 # nosemgrep: ep-word-set -- the meta fields that `finding` writes, not a vocabulary.
-_COUNTS = ("signal_version", "drifted", "untitled", "refused")
+_STORED = ("signal_version", "drifted", "untitled", "refused", "refused_codes", "as_of")
 
 
-def _finding_from(vault_root: Path, counts: dict[str, Any]) -> AuditFinding:
-    """The review finding for these counts, with the item's reference and its call spelled now."""
-    reading = _reading({**counts, "batch_pages": BATCH_PAGES})
-    ref = item_ref(vault_root)
-    call = relocate_call(review_ref=ref) if ref else relocate_call()
+def _finding_from(vault_root: Path, fields: dict[str, Any], ref: str) -> AuditFinding:
+    """The review finding for these stored fields, with the item's call spelled now.
+
+    The counts are those of the scan made at `as_of`, which the text states: a finding rebuilt
+    from the stored row is as old as that row.
+    """
+    reading = _reading({**fields, "batch_pages": BATCH_PAGES})
+    call = relocate_call(review_ref=ref)
     assert reading.meta is not None
     reading.meta["review_ref"], reading.meta["call"] = ref, call
-    drifted = int(counts["drifted"])
+    drifted = int(fields["drifted"])
+    summary = _summary(
+        drifted,
+        int(fields.get("untitled") or 0),
+        int(fields.get("refused") or 0),
+        fields.get("refused_codes") or {},
+    )
+    as_of = f"As of {fields['as_of']}, " if fields.get("as_of") else ""
     reading.detail = (
-        f"{_summary(drifted, int(counts.get('untitled') or 0), int(counts.get('refused') or 0))} "
-        f"Propose the next batch of {min(BATCH_PAGES, drifted)} to the user as one preview, then "
-        f"apply it on their yes: {call}"
+        f"{as_of}{summary} Propose the next batch of up to {min(BATCH_PAGES, drifted)} to the "
+        f"user as one preview, then apply it on their yes: {call}"
     )
     return reading
 
 
 def finding(vault_root: Path, drift: Scan) -> AuditFinding | None:
-    """The one review finding for the vault, or None while no page drifts.
+    """The one review finding for the vault, or None while no page drifts or no top index exists.
 
     Its `signal_version` changes with the drifted set, so a decision binds to the set that was
     shown. Its text carries the call that renames the next batch, with the item's own reference.
+    The pages left as they are count apart, so the item closes when every remaining drifted page
+    is refused.
     """
-    if not drift.drifted:
+    ref = item_ref(vault_root) if drift.drifted else None
+    if ref is None:
         return None
     return _finding_from(
         vault_root,
@@ -282,15 +421,19 @@ def finding(vault_root: Path, drift: Scan) -> AuditFinding | None:
             "drifted": len(drift.drifted),
             "untitled": len(drift.untitled),
             "refused": len(drift.refused),
+            "refused_codes": _refused_codes(drift),
+            "as_of": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M UTC"),
         },
+        ref,
     )
 
 
 def stored_finding(vault_root: Path, meta: dict[str, Any]) -> AuditFinding | None:
     """The finding rebuilt from a stored row's meta, with no scan; None when it holds no drift."""
-    if not meta.get("drifted"):
+    ref = item_ref(vault_root) if meta.get("drifted") else None
+    if ref is None:
         return None
-    return _finding_from(vault_root, {key: meta.get(key) for key in _COUNTS})
+    return _finding_from(vault_root, {key: meta.get(key) for key in _STORED}, ref)
 
 
 def suggestion_after_write(
@@ -366,6 +509,7 @@ def listing(
             "total_drifted": None,
             "no_usable_title": None,
             "refused": None,
+            "refused_codes": None,
             "pages": [],
         }
     rows = sorted([*drift.drifted, *drift.untitled, *drift.refused], key=lambda page: page.path)
@@ -374,14 +518,16 @@ def listing(
     shown = rows[:limit]
     refs = review_state.refs_for_paths(vault_root, [page.path for page in shown]) if shown else {}
     found = finding(vault_root, drift)
+    codes = _refused_codes(drift)
     result: dict[str, Any] = {
-        "outcome": _summary(len(drift.drifted), len(drift.untitled), len(drift.refused))
+        "outcome": _summary(len(drift.drifted), len(drift.untitled), len(drift.refused), codes)
         if drift.drifted or drift.untitled or drift.refused
         else "Every page's file name follows its title.",
         "complete": True,
         "total_drifted": len(drift.drifted),
         "no_usable_title": len(drift.untitled),
         "refused": len(drift.refused),
+        "refused_codes": codes,
         "pages": [
             {
                 "ref": refs[page.path],
@@ -389,6 +535,7 @@ def listing(
                 "title": page.title,
                 "current_name": page.current,
                 **({"planned_name": page.planned} if page.verdict == DRIFTED else {}),
+                **({"code": page.code} if page.code else {}),
                 **({"reason": page.reason} if page.reason else {}),
             }
             for page in shown

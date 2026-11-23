@@ -10,8 +10,10 @@ only, and seals it through the curation lane:
 - the `repoint-links` steps come last and rewrite every link to a moved page. A plan with more
   referrers than one step rewrites in a short hold splits them by referring page.
 
-The plan is sealed with `derived_by="relocate"`. The person approves one fingerprint, apply runs
-the steps under the request budget, and one compensation plan undoes them. The page-field
+The plan is sealed with `derived_by="relocate"`. Preparing it runs under the request budget: a
+call that runs short keeps the steps it prepared and answers `preparing`, and the same call made
+again goes on from them. The person approves one fingerprint, apply runs the steps under the
+request budget, and one compensation plan undoes them. The page-field
 registry's `carries` attribute says which fields hold project keys. The note writer's own
 placement says where a page lands and what it is named (`note.planned_destination`,
 `vault.resolve_filename_slug`). Nothing here branches on a vocabulary entry.
@@ -21,6 +23,8 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import hashlib
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -43,6 +47,25 @@ REFERRERS_PER_STEP: Final[int] = 25
 MAX_HALVINGS: Final[int] = 4
 
 _CARRIES = page_fields.CARRIES_PROJECT_KEY
+#: The refusal code of a page whose planned path cannot be derived, which name drift reports too.
+NO_DESTINATION: Final[str] = "RELOCATE_NO_DESTINATION"
+#: How long a paused preparation waits for the same call to go on from it. The calls of one
+#: proposal follow each other at once (`next_action`), so an older one was abandoned.
+PREPARATION_TTL_SECONDS: Final[float] = 900.0
+#: Where paused preparations wait, in the vault's state directory: they are a cache of work that
+#: the same call can redo, not vault content.
+PREPARATIONS_DIRNAME: Final[str] = "relocate-preparations"
+#: The estimate of what a sealed plan holds for each moved page, each page that links to one and
+#: each link between them, besides the link lines that a rewrite seals twice (`_fitting`).
+#: Measured 2026-11-23 on rename batches of a generated 3,000-page vault: a move seals about 1.7
+#: to 2.0 KB with its summary row, a referring page about 600 bytes and a link about 300. The
+#: page figure leaves room for paths longer than the measured ones.
+SEALED_BYTES_PER_PAGE: Final[int] = 2200
+SEALED_BYTES_PER_REFERRER: Final[int] = 650
+SEALED_BYTES_PER_LINK: Final[int] = 300
+#: The share of the sealed-plan limit that a review item's batch is sized to fill, so that a
+#: batch the estimate under-counts still seals and halving stays the exception.
+SEALED_HEADROOM: Final[float] = 0.75
 
 
 def _error(code: str, reason: str) -> curation.CurationError:
@@ -90,7 +113,11 @@ def propose(
     folder: str | None = None,
     from_project: str | None = None,
 ) -> dict[str, Any]:
-    """Derive and seal the plan that relocates these pages, and answer with its grouped summary."""
+    """Derive and seal the plan that relocates these pages, and answer with its grouped summary.
+
+    A call that runs short of time before the plan seals answers `preparing` with its progress,
+    and keeps the steps it prepared for the same call made again (`_keep_paused`).
+    """
     root = Path(vault_root)
     raw = _requested(root, pages, review_ref)
     if to_project is None and (folder is not None or from_project is not None):
@@ -103,6 +130,74 @@ def propose(
     held_sources: set[str] = set()
     deferred: list[str] = []
     exclusions = halvings = 0
+    budget = curation._call_budget()  # noqa: SLF001 -- the lane's one request deadline
+    preparation_key = _preparation_key(
+        {
+            "pages": list(pages) if pages is not None else None,
+            "review_ref": review_ref,
+            "to_project": to_project,
+            "folder": folder,
+            "from_project": from_project,
+        }
+    )
+    preparation = curation.Preparation()
+    paused = _paused(root, preparation_key)
+    resumed = paused is not None and set(paused["selected"]) <= {item.path for item in selected}
+    if paused is not None and resumed:
+        # The same call goes on from the preparation it paused, with the batch it chose then.
+        chosen = set(paused["selected"])
+        selected = [item for item in selected if item.path in chosen]
+        refused = list(paused["refused"])
+        deferred = list(paused["deferred"])
+        held_sources = set(paused["held_sources"])
+        exclusions, halvings = int(paused["exclusions"]), int(paused["halvings"])
+        preparation = curation.Preparation(
+            steps=list(paused["steps"]), registry_ids=dict(paused["registry_ids"])
+        )
+    elif review_ref is not None:
+        # The server chose this batch, so it sizes the batch to what one sealed plan holds.
+        fits = _fitting(root, selected)
+        deferred.extend(item.path for item in selected[fits:])
+        selected = selected[:fits]
+
+    def remember(rows: Sequence[dict[str, str]]) -> None:
+        """Tell the review item that its rename batch could not take these pages.
+
+        Only a rename-only relocation by `review_ref` reports: that is the call the item offers,
+        and its family skips the pages until they change (`attention.record_refused`).
+        """
+        if review_ref is not None and to_project is None and rows:
+            from . import attention
+
+            attention.record_refused(root, review_ref, rows)
+
+    def leave_out(error: curation.CurationError, derived: _Derived) -> bool:
+        """Leave out of a review item's batch the pages whose move or referrer rewrite was refused.
+
+        The server chose that batch, so it shrinks, as a batch too large to seal is halved. The
+        refusal spends no exclusion: each pass drops at least one page, so the loop ends. Pages
+        the caller named refuse instead, and a refused Source correction keeps its own rule.
+        """
+        nonlocal selected
+        if review_ref is None or error.step_id in derived.source_steps:
+            return False
+        named = set(error.pages)
+        if not named and error.step_id in derived.step_pages:
+            named = {derived.step_pages[error.step_id]}
+        rows = [
+            _refusal(item.path, error.code, error.reason)
+            for item in selected
+            if item.path in named
+        ]
+        if not rows:
+            return False
+        refused.extend(rows)
+        selected = [item for item in selected if item.path not in named]
+        remember(rows)
+        return True
+
+    if not resumed:
+        remember(refused)
 
     def shrink(error: curation.CurationError) -> bool:
         """Halve a review item's batch that is too large to seal.
@@ -124,73 +219,214 @@ def propose(
         halvings += 1
         return True
 
-    # Each pass either returns, raises, or spends one bounded exclusion or halving.
-    while True:
-        derived = _derive(
+    def out_of_time(slowest: float) -> bool:
+        """Whether this call stops before another step or the seal, by apply's rule (`_advance`)."""
+        from . import request_budget
+
+        return not budget.can_afford(slowest + request_budget.DELIVERY_RESERVE_SECONDS)
+
+    def pause(derived: _Derived) -> dict[str, Any]:
+        """Keep what this call prepared for the same call to go on from, and say how far it got."""
+        _keep_paused(
             root,
-            selected,
-            to_project=to_project,
-            from_project=from_project,
-            folder=folder,
-            registry=registry,
-            registers=registers,
-            held_sources=held_sources,
+            preparation_key,
+            {
+                "selected": [item.path for item in selected],
+                "refused": refused,
+                "deferred": deferred,
+                "held_sources": sorted(held_sources),
+                "exclusions": exclusions,
+                "halvings": halvings,
+                "registry_ids": preparation.registry_ids,
+                "steps": preparation.steps,
+            },
         )
-        derived.refused[:0] = refused
-        derived.deferred = list(deferred)
-        if not derived.steps:
-            summary = _summary(derived, to_project=to_project, registers=False)
-            return {"action": "relocate", "mutated": False, "sealed": False, "summary": summary}
-        writes_key = registers and any(
-            step["kind"] == "edit" or "fields" in step["args"] for step in derived.steps
-        )
-        if writes_key and folder and not any("project_folders" in step["args"] for step in derived.steps):
-            raise _error(
-                "RELOCATE_FOLDER_NEEDS_MOVE",
-                f"no page moves into project {to_project!r}, so no step can register its folder; "
-                "omit folder to register the default one",
-            )
-        plan = {"version": 1, "title": _title(derived, to_project), "steps": derived.steps}
-        try:
-            prepared = curation.prepare_proposal(root, plan, derived_by="relocate")
-        except curation.CurationError as error:
-            if shrink(error):
-                continue
-            page = derived.step_pages.get(error.step_id or "")
-            if page is None or exclusions == MAX_EXCLUSIONS:
-                raise
-            exclusions += 1
-            refused.append({"page": page, "code": error.code, "reason": error.reason})
-            if error.step_id in derived.source_steps:
-                held_sources.add(page)
-            else:
-                selected = [item for item in selected if item.path != page]
-            continue
-        summary = _summary(
-            derived,
-            to_project=to_project,
-            registers=writes_key,
-            referrers=sum(
-                curation.rewritten_referrers(step, binding)
-                for step, binding in zip(prepared.plan["steps"], prepared.binding_manifest, strict=True)
-            ),
-        )
-        # The plan seals the summary it is approved by, so a later preview shows the same groups.
-        try:
-            sealed = curation.seal_proposal(root, dataclasses.replace(prepared, summary=summary))
-        except curation.CurationError as error:
-            if shrink(error):
-                continue
-            raise
-        response = {key: value for key, value in sealed.items() if key != "plan"}
         return {
-            **response,
             "action": "relocate",
-            "sealed": True,
-            "steps": len(derived.steps),
-            "summary": summary,
-            "next_action": "apply",
+            "mutated": False,
+            "sealed": False,
+            "phase": "preparing",
+            "progress": {
+                "steps": len(derived.steps),
+                "prepared": len(preparation.steps),
+                "this_call": preparation.this_call,
+            },
+            "next_action": "relocate",
         }
+
+    # Each pass either returns, raises, pauses, spends one bounded exclusion or halving, or leaves
+    # at least one page of a review item's batch out. A pass keeps the steps an earlier pass
+    # prepared while they open its plan unchanged (`curation.Preparation`).
+    try:
+        while True:
+            derived = _derive(
+                root,
+                selected,
+                to_project=to_project,
+                from_project=from_project,
+                folder=folder,
+                registry=registry,
+                registers=registers,
+                held_sources=held_sources,
+            )
+            derived.refused[:0] = refused
+            derived.deferred = list(deferred)
+            if not derived.steps:
+                _drop_paused(root, preparation_key)
+                summary = _summary(derived, to_project=to_project, registers=False)
+                return {"action": "relocate", "mutated": False, "sealed": False, "summary": summary}
+            writes_key = registers and any(
+                step["kind"] == "edit" or "fields" in step["args"] for step in derived.steps
+            )
+            if writes_key and folder and not any(
+                "project_folders" in step["args"] for step in derived.steps
+            ):
+                raise _error(
+                    "RELOCATE_FOLDER_NEEDS_MOVE",
+                    f"no page moves into project {to_project!r}, so no step can register its "
+                    "folder; omit folder to register the default one",
+                )
+            plan = {"version": 1, "title": _title(derived, to_project), "steps": derived.steps}
+            try:
+                prepared = curation.prepare_proposal(
+                    root, plan, derived_by="relocate", preparation=preparation, stop=out_of_time
+                )
+            except curation.PreparationPaused:
+                return pause(derived)
+            except curation.CurationError as error:
+                if shrink(error) or leave_out(error, derived):
+                    continue
+                page = derived.step_pages.get(error.step_id or "")
+                if page is None or exclusions == MAX_EXCLUSIONS:
+                    raise
+                exclusions += 1
+                refused.append({"page": page, "code": error.code, "reason": error.reason})
+                if error.step_id in derived.source_steps:
+                    held_sources.add(page)
+                else:
+                    selected = [item for item in selected if item.path != page]
+                continue
+            if preparation.this_call and out_of_time(preparation.slowest):
+                # Every step is prepared; the same call made again seals at once.
+                return pause(derived)
+            summary = _summary(
+                derived,
+                to_project=to_project,
+                registers=writes_key,
+                referrers=sum(
+                    curation.rewritten_referrers(step, binding)
+                    for step, binding in zip(
+                        prepared.plan["steps"], prepared.binding_manifest, strict=True
+                    )
+                ),
+            )
+            # The plan seals the summary it is approved by, so a later preview shows the same groups.
+            try:
+                sealed = curation.seal_proposal(root, dataclasses.replace(prepared, summary=summary))
+            except curation.CurationError as error:
+                if shrink(error):
+                    continue
+                raise
+            _drop_paused(root, preparation_key)
+            response = {key: value for key, value in sealed.items() if key != "plan"}
+            return {
+                **response,
+                "action": "relocate",
+                "sealed": True,
+                "steps": len(derived.steps),
+                "summary": summary,
+                "next_action": "apply",
+            }
+    except Exception:
+        # A refusal ends the proposal: the same call made again derives it afresh.
+        _drop_paused(root, preparation_key)
+        raise
+
+
+def _preparation_key(request: Mapping[str, Any]) -> str:
+    """The paused preparation's name: the call's arguments and who asks, since the audience
+    decides which pages and referrers a plan holds."""
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    identity = {"request": dict(request), "audience": who.audience_id, "purpose": who.purpose}
+    return hashlib.sha256(curation.canonical_json_bytes(identity)).hexdigest()[:32]
+
+
+def _paused_path(root: Path, key: str) -> Path:
+    from . import state_paths
+
+    return state_paths.vault_state_dir(root) / PREPARATIONS_DIRNAME / f"{key}.json"
+
+
+def _paused(root: Path, key: str) -> dict[str, Any] | None:
+    """The preparation that this call paused, else None; an unreadable or old one is not kept."""
+    import json
+
+    path = _paused_path(root, key)
+    try:
+        if time.time() - path.stat().st_mtime > PREPARATION_TTL_SECONDS:
+            return None
+        held = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return held if isinstance(held, dict) and held.get("version") == 1 else None
+
+
+def _keep_paused(root: Path, key: str, state: Mapping[str, Any]) -> None:
+    """Keep a paused preparation, and drop the ones older than `PREPARATION_TTL_SECONDS`."""
+    from . import due_state, state_paths
+
+    state_paths.ensure_vault_state_dir(root)
+    path = _paused_path(root, key)
+    path.parent.mkdir(exist_ok=True)
+    for other in path.parent.glob("*.json"):
+        try:
+            if time.time() - other.stat().st_mtime > PREPARATION_TTL_SECONDS:
+                other.unlink()
+        except OSError:
+            continue
+    due_state._replace_json(path, {"version": 1, **state})  # noqa: SLF001 -- its atomic writer
+
+
+def _drop_paused(root: Path, key: str) -> None:
+    try:
+        _paused_path(root, key).unlink(missing_ok=True)
+    except OSError:
+        return
+
+
+def _fitting(root: Path, selected: Sequence[_Page]) -> int:
+    """How many pages, from the head of a review item's batch, one sealed plan holds.
+
+    The estimate reads one link index: a sealed plan grows with each moved page, each page that
+    links to one, each link between them and each link line that a rewrite seals with its undo.
+    At least one page is kept, so a page above the limit alone still refuses as before.
+    """
+    from .governance import egress
+
+    paths = [item.path for item in selected]
+    inbound = vault.find_inbound_wikilinks_many(
+        root, paths, visible=egress.visible_page_filter(root)
+    )
+    room = curation.MAX_SEALED_BYTES * SEALED_HEADROOM
+    used = 0
+    referrers: set[str] = set()
+    lines: set[tuple[str, int]] = set()
+    for count, path in enumerate(paths):
+        cost = SEALED_BYTES_PER_PAGE
+        for hit in inbound.get(path, ()):
+            cost += SEALED_BYTES_PER_LINK
+            if hit.path not in referrers:
+                referrers.add(hit.path)
+                cost += SEALED_BYTES_PER_REFERRER
+            if (hit.path, hit.line_number) not in lines:
+                lines.add((hit.path, hit.line_number))
+                cost += 2 * len(hit.context.encode("utf-8"))
+        if count and used + cost > room:
+            return count
+        used += cost
+    return len(paths)
 
 
 def _requested(root: Path, pages: Sequence[str] | None, review_ref: str | None) -> list[str]:
@@ -361,7 +597,7 @@ def _derive(
                 registry=registry,
             )
         except (OpError, ValueError) as error:
-            derived.refused.append(_refusal(page.path, "RELOCATE_NO_DESTINATION", str(error)))
+            derived.refused.append(_refusal(page.path, NO_DESTINATION, str(error)))
             continue
         if target is None and len(changes) > 1:
             derived.refused.append(_refusal(
@@ -513,11 +749,21 @@ class Names:
         self.folders: dict[Path, Callable[[str], bool]] = {}
 
 
-def renamed_by_title(note_type: note_types.NoteType) -> bool:
-    """Whether a relocation names a page of this type by its title: the types whose file name the
-    writer builds from the title (`titled_name`), less the captured Sources, which keep their
-    dated capture names."""
-    return note_types.titled_name(note_type) and not note_types.captured_source(note_type)
+def renamed_by_title(path: str, note_type: note_types.NoteType | None) -> bool:
+    """Whether a relocation names this page by its title.
+
+    The types whose file name the writer builds from the title (`titled_name`) are in scope, less
+    the captured Sources, which keep their dated capture names. A navigation page keeps its name
+    whatever its type: links, and the name-drift item's anchor, find it by that name.
+    """
+    from . import fold_leaf
+
+    return (
+        note_type is not None
+        and note_types.titled_name(note_type)
+        and not note_types.captured_source(note_type)
+        and not fold_leaf.is_navigation(path)
+    )
 
 
 def title_stem(
@@ -558,7 +804,7 @@ def planned_path(
     The one rule for a page's planned path: a relocation derives its moves with it, and the
     name-drift review asks it whether a rename-only relocation would move a page.
 
-    In scope are the types that `renamed_by_title` names. The name is the one the
+    In scope are the pages that `renamed_by_title` names. The name is the one the
     vault's writer gives the page's title, after the date prefix that a dated type keeps. The
     folder changes only for a compiled type that a project partitions, and only when the page
     belongs to `project` alone afterwards; an entity is renamed where it is. A name that a file,
@@ -569,7 +815,7 @@ def planned_path(
     """
     from . import note
 
-    if note_type is None or not renamed_by_title(note_type):
+    if note_type is None or not renamed_by_title(path, note_type):
         return None
     current = PurePosixPath(path)
     stem = title_stem(root, path, note_type, title) or current.stem

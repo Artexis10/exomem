@@ -600,6 +600,7 @@ def test_a_vault_that_owes_nothing_never_builds_the_release_filter(
 
     Pinned on the CALL rather than on a duration, so it is not a timing test.
     """
+    from exomem import name_drift as name_drift_module
     from exomem.governance import egress as egress_module
 
     calls: list[object] = []
@@ -610,6 +611,9 @@ def test_a_vault_that_owes_nothing_never_builds_the_release_filter(
         lambda *a, **k: (calls.append(1), real(*a, **k))[1],
     )
 
+    # The fixture's slug-named pages drift, and their one name-drift item hangs on the top index:
+    # without the index, the vault owes nothing.
+    (vault / name_drift_module.anchor_path()).unlink()
     due_state_module.reconcile(vault, today=TODAY)
     assert _served(vault) is None
     assert calls == [], "an empty projection consulted the release plane anyway"

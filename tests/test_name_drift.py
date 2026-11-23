@@ -2,14 +2,14 @@
 
 Each test drives the real audit, due-state block, curation call or edit command on a copy of the
 fixture vault, and names the failure that only it catches. Pages are invented. The fixture vault
-holds slug-named pages of its own, and the backlog test renames them with the invented ones.
+holds slug-named pages of its own. Most of them lack the semantic unit that the move contract
+requires, so the backlog test renames the invented pages and reports those as refused.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-import shutil
 from pathlib import Path
 
 import pytest
@@ -131,51 +131,54 @@ def _invent(root: Path) -> None:
     )
 
 
-@pytest.fixture
-def harbour(vault: Path) -> Path:
-    """The fixture vault with the invented pages in place of its own compiled notes.
-
-    Most of those notes lack the semantic unit that the move contract requires of a page it
-    writes, so a rename batch would refuse them; the backlog here is the invented pages alone.
-    """
-    shutil.rmtree(vault / "Knowledge Base" / "Notes")
-    _invent(vault)
-    return vault
-
-
 def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes(
-    harbour: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Failure caught: the item's call renames a page the rule did not plan, or a page that must
     keep its name; the item's identity moves with its own renames, so the ref the agent holds stops
-    working mid-backlog; a finished batch leaves the row counting renamed pages; the backlog never
-    closes; or one batch cannot be undone exactly."""
+    working mid-backlog; a page the move contract refuses fails the whole call, or heads every
+    batch so the backlog never closes, or drops out of the counts; a finished batch leaves the row
+    counting renamed pages; or one batch cannot be undone exactly."""
     # The preview size is the operator's cadence parameter. A small one makes this vault's
     # backlog take several batches, which is the loop under test.
     monkeypatch.setattr(name_drift, "BATCH_PAGES", 3)
-    vault = harbour
+    _invent(vault)
     kept = {rel: (vault / rel).read_bytes() for rel in KEPT}
     due_state.reconcile(vault)
     batches: list[tuple[dict, dict[str, bytes]]] = []
+    refused: dict[str, str] = {}
+    #: Pages left out since the last applied batch: nothing has changed them since.
+    unchanged_refusals: set[str] = set()
 
     with request_scope(owner_principal(surface="mcp")):
         first = _name_drift_row(vault)
         assert first is not None
         (found,) = _findings(vault)
         assert f"review_ref='{first['ref']}'" in found.meta["call"]
-        for _ in range(12):
+        for _ in range(30):
             row = _name_drift_row(vault)
             if row is None:
                 break
             # The ref the agent was first given still names the item, and resolves to the batch
-            # that is next now, not to the pages an earlier batch renamed.
+            # that is next now: never a page an earlier batch renamed, nor one refused since. A
+            # refused page whose bytes a later batch's link rewrite changes is judged again.
             assert row["ref"] == first["ref"]
             batch = name_drift.pages_for_ref(vault, first["ref"])
             assert batch and len(batch) <= 3
             assert not set(batch) & {rel for _, done in batches for rel in done}
+            assert not set(batch) & unchanged_refusals
             snapshot = {rel: (vault / rel).read_bytes() for rel in batch}
             proposed = _maintain(vault, "relocate", review_ref=first["ref"])
-            assert proposed["summary"]["moves"]["count"] == len(batch)
+            left_out = {row["page"]: row["code"] for row in proposed["summary"]["refused"]["shown"]}
+            moved = [move["from"] for move in proposed["summary"]["moves"]["shown"]]
+            assert sorted([*moved, *left_out]) == sorted(batch)
+            refused.update(left_out)
+            unchanged_refusals.update(left_out)
+            if not moved:
+                assert proposed["sealed"] is False
+                continue
+            unchanged_refusals.clear()
+            snapshot = {rel: snapshot[rel] for rel in moved}
             applied = _maintain(
                 vault,
                 "apply",
@@ -188,13 +191,27 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
                 vault, applied, run_id=proposed["run_id"], plan_id=proposed["plan_id"],
                 done="completed",
             )
-            assert not any((vault / rel).exists() for rel in batch)
+            assert not any((vault / rel).exists() for rel in moved)
             batches.append((proposed, snapshot))
         else:
             pytest.fail("the name-drift backlog did not close")
 
+        assert _findings(vault) == []
+        # The refusals outlive a full rebuild of the projection.
+        due_state.reconcile(vault)
+        assert _name_drift_row(vault) is None
+        listing = name_drift.listing(vault, limit=200)
+
     assert len(batches) >= 3
-    assert name_drift._corpus_scan(vault).drifted == ()
+    # The fixture vault's own legacy notes lack a semantic unit, so the move contract refuses them.
+    legacy = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
+    assert refused[legacy] == "SEMANTIC_CONTRACT_BLOCKED"
+    assert listing["total_drifted"] == 0
+    assert listing["refused"] == len(refused)
+    assert sum(listing["refused_codes"].values()) == len(refused)
+    rows = {row["current_name"]: row for row in listing["pages"] if row["state"] == "refused"}
+    assert rows["retry-with-fixed-interval.md"]["code"] == "SEMANTIC_CONTRACT_BLOCKED"
+    assert "rename_next_batch" not in listing
     for before, after in RENAMED.items():
         assert not (vault / before).exists()
         assert (vault / after).is_file(), after
@@ -215,6 +232,90 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
     )
     assert {rel: (vault / rel).read_bytes() for rel in snapshot} == snapshot
 
+    # Repairing a refused page lets it back into the batches.
+    page = vault / legacy
+    page.write_text(
+        page.read_text(encoding="utf-8")
+        + "\n## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n",
+        encoding="utf-8",
+    )
+    assert legacy in {drifted.path for drifted in name_drift._corpus_scan(vault).drifted}
+
+
+def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
+    vault: Path,
+) -> None:
+    """Failure caught: a link rewrite that the contract refuses fails the whole batch, because its
+    step names no page; the page it would rename heads every later batch; or the page stays out
+    after its referrer is repaired."""
+    from exomem import edit as edit_module
+    from exomem import note as note_module
+
+    day = dt.date(2026, 8, 16)
+    unit = "## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n"
+    target = note_module.note(
+        vault, content=f"# Tide limits\n\nRetries stay bounded.\n\n{unit}", note_type="insight",
+        title="Tide limits", today=day, relation_disposition="reviewed_none",
+        relation_review_reason="Nothing in the vault fits",
+    ).path
+    link = f"[[{target.removesuffix('.md')}]]"
+    referrer = note_module.note(
+        vault, content=f"# Tide limits in use\n\nBuilds on {link}.\n\n{unit}",
+        note_type="insight", title="Tide limits in use", today=day,
+        relation_disposition="reviewed_none", relation_review_reason="Its link is enough",
+    ).path
+    writer_lease.invoke_command(
+        _command("edit_memory"), vault, path=target,
+        operation={"kind": "patch_frontmatter", "field": "title", "value": "Tide limits revised"},
+        why="retitle",
+    )
+    edit_module.edit(
+        vault, path=referrer, why="reword", old_string="Keep retries", new_string="Hold retries",
+        today=day,
+    )
+    # A change outside a governed write leaves the referrer's lifecycle record behind its bytes,
+    # so the link rewrite refuses it.
+    page = vault / referrer
+    page.write_text(page.read_text(encoding="utf-8").replace("Hold", "Cap"), encoding="utf-8")
+
+    with request_scope(owner_principal(surface="mcp")):
+        proposed = _maintain(vault, "relocate", review_ref=name_drift.item_ref(vault))
+        left_out = {row["page"]: row["code"] for row in proposed["summary"]["refused"]["shown"]}
+        refused_batch = name_drift.pages_for_review(vault)
+        page.write_text(page.read_text(encoding="utf-8").replace("Cap", "Hold"), encoding="utf-8")
+        repaired_batch = name_drift.pages_for_review(vault)
+
+    assert proposed["sealed"] is True
+    assert left_out[target] == "LIFECYCLE_TRANSITION_STALE"
+    assert target not in refused_batch
+    assert target in repaired_batch
+
+
+def test_a_relocation_that_names_a_navigation_page_keeps_its_name(vault: Path) -> None:
+    """Failure caught: a relocation that names a typed index page renames it to its title, and the
+    links and the review item that find it by its name lose it."""
+    rel = f"{AREA}/index.md"
+    _put(vault, rel, _page("Harbour research index", number=40))
+
+    proposed = _maintain(vault, "relocate", pages=[rel])
+
+    assert proposed["summary"]["moves"]["count"] == 0
+    assert proposed["summary"]["unchanged"]["shown"] == [rel]
+    assert (vault / rel).is_file()
+
+
+def test_a_vault_without_a_top_index_offers_no_item_and_still_lists_the_drift(vault: Path) -> None:
+    """Failure caught: with no top index the item carries a ref that the review listing never
+    shows, so the agent holds a call for an item that nobody can triage."""
+    _invent(vault)
+    (vault / name_drift.anchor_path()).unlink()
+
+    listing = name_drift.listing(vault)
+
+    assert listing["total_drifted"] > 0
+    assert "rename_next_batch" not in listing
+    assert _findings(vault) == []
+
 
 def test_the_review_listing_serves_the_item_from_its_stored_row_without_a_scan(
     vault: Path, monkeypatch: pytest.MonkeyPatch
@@ -231,7 +332,10 @@ def test_the_review_listing_serves_the_item_from_its_stored_row_without_a_scan(
         items = op_attention(vault, limit=0)["items"]
 
     (item,) = [item for item in items if "name_drift" in item["categories"]]
-    assert "curation_action='relocate'" in item["reasons"][0]["detail"]
+    detail = item["reasons"][0]["detail"]
+    assert "curation_action='relocate'" in detail
+    # Failure caught too: the stored counts read as current; the text says when they were taken.
+    assert detail.startswith(f"As of {due_state.name_drift_reading(vault)['as_of']}, ")
 
 
 def test_the_one_item_changes_its_signal_with_the_drifted_set(vault: Path) -> None:
@@ -353,18 +457,30 @@ def test_a_scan_the_budget_stops_reports_no_total(
 
 
 def test_a_batch_too_large_to_seal_shrinks_and_names_the_pages_left_for_the_next(
-    harbour: Path, monkeypatch: pytest.MonkeyPatch
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Failure caught: the server-chosen batch exceeds the sealed-size bound and the whole backlog
-    refuses, with no way for the agent to make the batch smaller."""
+    refuses, with no way for the agent to make the batch smaller; or the batch is prepared, found
+    too large and prepared again, when one read of its links sizes it before any step is prepared.
+    Preparing is the cost here: on a large vault each step runs a semantic preflight."""
     from exomem import curation
 
-    vault = harbour
+    _invent(vault)
     ref = name_drift.item_ref(vault)
-    batch = name_drift.pages_for_review(vault)
     whole = _maintain(vault, "relocate", review_ref=ref)
+    # The first call left out the pages the move contract refuses; the batch is now the rest.
+    batch = name_drift.pages_for_review(vault)
+    assert whole["summary"]["moves"]["count"] == len(batch)
     sealed = len(json.dumps(curation.CurationStore(vault).load_plan(whole["run_id"])).encode())
     monkeypatch.setattr(curation, "MAX_SEALED_BYTES", int(sealed * 0.75))
+    prepared: list[str] = []
+    prepare_step = curation._prepare_step
+
+    def counted(vault_root, step, *args, **kwargs):
+        prepared.append(step["step_id"])
+        return prepare_step(vault_root, step, *args, **kwargs)
+
+    monkeypatch.setattr(curation, "_prepare_step", counted)
 
     proposed = _maintain(vault, "relocate", review_ref=ref)
 
@@ -372,3 +488,4 @@ def test_a_batch_too_large_to_seal_shrinks_and_names_the_pages_left_for_the_next
     assert proposed["sealed"] is True
     assert 0 < moved < len(batch)
     assert proposed["summary"]["deferred_to_next_batch"]["count"] == len(batch) - moved
+    assert len(prepared) == proposed["steps"], "a step was prepared for a plan that did not seal"

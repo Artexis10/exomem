@@ -414,6 +414,9 @@ class CurationError(ValueError):
     reason: str
     #: The plan step that preparation refused, when preparation names one (`_prepare_manifest`).
     step_id: str | None = None
+    #: The plan's pages a refusal names when it is narrower than its step: a repoint step's
+    #: refusal names the moved pages, by their old paths, whose referrer it refused.
+    pages: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         return f"{self.code}: {self.reason}"
@@ -2622,7 +2625,65 @@ def _prepare_step(
 _CREATED_TITLE_ARGUMENT = {"create-note": "title", "supersede": "title", "create-entity": "name"}
 
 
-def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+#: The step kinds whose preparation leaves state outside their binding item: a duplicate fold's
+#: projection and an inverse move's projected contract. A `Preparation` keeps no such step.
+_UNKEPT_STEP_KINDS: Final[frozenset[str]] = _DUPLICATE_FOLD_KINDS | _RELOCATION_INVERSE_KINDS
+
+
+def _step_digest(step: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json_bytes(step)).hexdigest()
+
+
+@dataclass
+class Preparation:
+    """The steps of a derived plan prepared so far, so that preparing can stop between steps and
+    a later call can go on from them (`prepare_proposal`).
+
+    `steps` holds, for each prepared step in plan order, the step's digest, its binding item and
+    the exact bytes it leaves, which later steps of the plan read. `steps` and `registry_ids`
+    are plain JSON, so a caller can keep them between calls. `this_call` and `slowest` count only
+    the steps this object prepared itself.
+    """
+
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    #: The registry identities the kept steps were prepared under.
+    registry_ids: dict[str, str] = field(default_factory=dict)
+    this_call: int = 0
+    slowest: float = 0.0
+
+    def keep_opening(
+        self, steps: Sequence[Mapping[str, Any]], registry_ids: Mapping[str, str]
+    ) -> None:
+        """Keep only the prepared steps that open `steps` unchanged, under the same registries.
+
+        A step's binding item depends only on the vault, the registries and the steps before
+        it, so a kept step is the one a fresh preparation would make. The seal still checks
+        every binding against the vault.
+        """
+        if any(self.registry_ids.get(name, value) != value for name, value in registry_ids.items()):
+            self.steps.clear()
+        kept = 0
+        # The kept steps may outnumber the new plan's, or fall short of it.
+        for step, done in zip(steps, self.steps, strict=False):
+            if done["digest"] != _step_digest(step) or step["kind"] in _UNKEPT_STEP_KINDS:
+                break
+            kept += 1
+        del self.steps[kept:]
+        self.registry_ids = dict(registry_ids)
+
+
+class PreparationPaused(Exception):
+    """Preparing stopped between steps because its caller's time ran short. The `Preparation`
+    holds every step prepared so far."""
+
+
+def _prepare_manifest(
+    vault_root: Path,
+    steps: Sequence[Mapping[str, Any]],
+    *,
+    preparation: Preparation | None = None,
+    stop: Callable[[float], bool] | None = None,
+) -> list[dict[str, Any]]:
     """Prepare each step with links to the pages the plan's earlier steps create.
 
     A later step may link to a page an earlier step creates, so its links are
@@ -2642,7 +2703,14 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     page) at that step's sealed after hash. The item's `chained` map names that
     earlier step for each such path, and `_binding_blockers` checks the path only
     once that step has committed.
+
+    With a `preparation`, the steps it holds count as prepared, and each step
+    prepared here is added to it. Before each later step, `stop` is asked with the
+    slowest step this call prepared; when it answers true, `PreparationPaused`
+    ends the call. The first step of a call always runs, so every call advances.
     """
+    import time
+
     from . import duplicate_fold
     from . import find as find_module
 
@@ -2655,7 +2723,55 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     chained: set[str] = set()
     projection = duplicate_fold.Projection()
     chain = _Chain()
+
+    def record(step: Mapping[str, Any], item: dict[str, Any], exact: Mapping[str, str]) -> None:
+        """Add a prepared step to the manifest and to what the later steps read."""
+        manifest.append(item)
+        after = {str(entry["path"]) for entry in item["effect_after"]}
+        if step["kind"] == "move":
+            chain.moves.append((str(item["path"]), str(item["postcondition"]["path"])))
+        for path in after:
+            chain.pages.pop(path, None)
+        chain.vacated = (chain.vacated - after) | {
+            str(entry["path"]) for entry in item["effect_after"] if entry.get("absent")
+        }
+        for path, text in exact.items():
+            chain.pages[path] = (str(step["step_id"]), text_content_hash(text), text)
+        if step["kind"] in _DUPLICATE_FOLD_KINDS:
+            # Only the rows a step changes count as written: the canonical original a fold reads stays as sealed.
+            chained.update(duplicate_fold.changed_paths(item))
+            written.update(duplicate_fold.changed_paths(item))
+        else:
+            written.update(after)
+        title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
+        title = step["args"].get(title_argument) if title_argument else None
+        created.extend(
+            (str(entry["path"]), title if isinstance(title, str) else None)
+            for entry in item["effect_before"]
+            if entry.get("absent") is True and entry["path"] in after
+        )
+        if step["kind"] == "supersede":
+            from .vault import parse_frontmatter, resolve_display_title
+
+            # The resolver indexes a page by the title read surfaces show, not only `title:`.
+            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
+            superseded.append(
+                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
+            )
+
+    done = list(preparation.steps) if preparation is not None else []
+    for step, kept in zip(steps, done, strict=False):  # `done` holds a prefix of `steps`
+        record(step, kept["item"], kept["exact"])
     for ordinal, step in enumerate(steps):
+        if ordinal < len(done):
+            continue
+        if (
+            preparation is not None
+            and stop is not None
+            and preparation.this_call
+            and stop(preparation.slowest)
+        ):
+            raise PreparationPaused
         args = step["args"]
         retired = _planned_link_targets(vault_root, args, superseded)
         if retired:
@@ -2675,6 +2791,7 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 f"step {step['step_id']!r} links to {related[0]!r}, which an earlier step "
                 "creates; that link is its relation, so it takes no relation disposition",
             )
+        started = time.monotonic()
         try:
             with find_module.planned_pages(vault_root, created):
                 item = _prepare_step(
@@ -2710,38 +2827,11 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 f"step {step['step_id']!r} is bound to {conflicts[0]!r}, "
                 "which an earlier step of the plan changes",
             )
-        manifest.append(item)
-        after = {str(entry["path"]) for entry in item["effect_after"]}
-        if step["kind"] == "move":
-            chain.moves.append((str(item["path"]), str(item["postcondition"]["path"])))
-        for path in after:
-            chain.pages.pop(path, None)
-        chain.vacated = (chain.vacated - after) | {
-            str(entry["path"]) for entry in item["effect_after"] if entry.get("absent")
-        }
-        for path, text in exact.items():
-            chain.pages[path] = (str(step["step_id"]), text_content_hash(text), text)
-        if duplicate:
-            # Only the rows a step changes count as written: the canonical original a fold reads stays as sealed.
-            chained |= duplicate_fold.changed_paths(item)
-            written |= duplicate_fold.changed_paths(item)
-        else:
-            written |= after
-        title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
-        title = args.get(title_argument) if title_argument else None
-        created.extend(
-            (str(entry["path"]), title if isinstance(title, str) else None)
-            for entry in item["effect_before"]
-            if entry.get("absent") is True and entry["path"] in after
-        )
-        if step["kind"] == "supersede":
-            from .vault import parse_frontmatter, resolve_display_title
-
-            # The resolver indexes a page by the title read surfaces show, not only `title:`.
-            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
-            superseded.append(
-                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
-            )
+        record(step, item, exact)
+        if preparation is not None:
+            preparation.steps.append({"digest": _step_digest(step), "item": item, "exact": exact})
+            preparation.this_call += 1
+            preparation.slowest = max(preparation.slowest, time.monotonic() - started)
     duplicate_fold.seal_chains(manifest, projection)
     if duplicate_fold.sealed_size(manifest) > duplicate_fold.MANIFEST_BUDGET:
         raise _error(
@@ -2960,13 +3050,22 @@ def prepare_proposal(
     *,
     allow_records: bool = False,
     derived_by: str | None = None,
+    preparation: Preparation | None = None,
+    stop: Callable[[float], bool] | None = None,
 ) -> PreparedProposal:
     """Every check `propose` makes, without sealing anything. Read-only, so a
     caller preparing several plans can refuse them all before sealing one.
-    `derived_by` names the server action that derived the plan (`DERIVED_BY`)."""
+    `derived_by` names the server action that derived the plan (`DERIVED_BY`).
+
+    A derived plan may prepare in parts: `preparation` keeps the steps that open
+    this plan unchanged and gains each step prepared here, and `stop` may end the
+    call between steps with `PreparationPaused` (`_prepare_manifest`)."""
     root = Path(vault_root)
     if derived_by is not None and derived_by not in DERIVED_BY:
         raise _error("INVALID_CURATION_PLAN", "plan derivation is invalid")
+    if preparation is not None and derived_by is None:
+        # Only the derived steps are known to keep all their preparation state in their items.
+        raise _error("INVALID_CURATION_PLAN", "only a derived plan prepares in parts")
     validated = validate_forward_plan(
         plan, allow_records=allow_records, derived=derived_by is not None
     )
@@ -2979,8 +3078,10 @@ def prepare_proposal(
     _validate_entity_candidate_plan(root, validated)
     from . import vocabulary_gate
 
+    if preparation is not None:
+        preparation.keep_opening(validated["steps"], registry_ids)
     with vocabulary_gate.preparation_context(root):
-        manifest = _prepare_manifest(root, validated["steps"])
+        manifest = _prepare_manifest(root, validated["steps"], preparation=preparation, stop=stop)
     binding = validated.get("entity_candidate")
     if isinstance(binding, Mapping) and binding.get("candidate_state") == "hydration":
         allowed_paths = {
