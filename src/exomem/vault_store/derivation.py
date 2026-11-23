@@ -478,6 +478,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             delta = derive.derive_paths(
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
+                metered=frozenset(metered),
             )
             settle()
             tx.executemany(

@@ -442,3 +442,44 @@ def test_an_original_needs_room_for_the_pages_that_link_to_it(
         south = file_survey("south-survey")
         assert read.page_exists(served, south)
         assert queued(writer, south) == [(derivation.NO_ROOM,)]
+
+
+
+def test_an_original_draws_no_room_for_the_other_pages_its_commit_writes(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a drain that charges a commit's unrelated notes to its original's room.
+
+    The charge fails the commit's batch, and its 300 notes then derive one transaction at a time.
+    """
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # Room for the original's own commit and derived rows, not for the graph rows of the notes.
+    free = [floor + 6 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    notes = tuple(
+        write.PagePut(
+            f"Knowledge Base/Notes/Gauges/gauge-{note:03}.md",
+            (f"# Gauge {note}\n\n" + "".join(
+                f"- [rule] Check gauge {note} against [[station-{note:03}-{index:02}-{'calibration-' * 20}]].\n"
+                for index in range(30)
+            )).encode(),
+        )
+        for note in range(300)
+    )
+    original = "Knowledge Base/Evidence/Tests/Gauges/calibration.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file calibration with notes", puts=(
+            write.PagePut(original, b"# Calibration\n\nRaw readings.\n", media_allocation=True), *notes,
+        )))
+
+    drained = derivation.drain(served.resolve(), writer)
+
+    assert (drained.batches, drained.failed) == (1, 0)
+    assert queued(writer, original) == []
+    assert writer.connection.execute(
+        "SELECT COUNT(*) FROM graph_edges WHERE source_path LIKE 'Knowledge Base/Notes/Gauges/%'"
+    ).fetchone() == (300 * 30,)
