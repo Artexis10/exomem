@@ -55,7 +55,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
 # The door operation `curation.relocate`, which derives and seals the plan that moves or renames a set of pages,
 # added 20 B to the write door's enum on 2026-11-22 (relocate-pages-in-one-curation-call).
-# The read operation `inspect_name_drift`, which lists pages whose file name no longer follows their title,
+# The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
+# their title,
 # added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
 TOTAL_BUDGET = 29_935
 

@@ -1266,10 +1266,13 @@ _MAX_RENAME_TEXT_CHARS = 800
 
 
 def _rename_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The rename a retitling write suggests: the outcome sentence, the names and the spelled call."""
+    """The rename a retitling write suggests: the outcome, the names and the spelled call."""
     from .name_drift import KIND
 
-    fields = {name: value.get(name) for name in ("outcome", "ref", "current_name", "planned_name", "call")}
+    fields = {
+        name: value.get(name)
+        for name in ("outcome", "ref", "current_name", "planned_name", "call")
+    }
     limits = {
         "outcome": _MAX_RENAME_TEXT_CHARS,
         "call": _MAX_RENAME_TEXT_CHARS,
@@ -1277,7 +1280,10 @@ def _rename_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "current_name": _MAX_RENAME_NAME_CHARS,
         "planned_name": _MAX_RENAME_NAME_CHARS,
     }
-    if any(not isinstance(fields[name], str) or not 0 < len(fields[name]) <= limits[name] for name in fields):
+    if any(
+        not isinstance(fields[name], str) or not 0 < len(fields[name]) <= limits[name]
+        for name in fields
+    ):
         return None
     return {"kind": KIND, **fields}
 

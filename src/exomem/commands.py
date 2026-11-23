@@ -1926,7 +1926,9 @@ def op_bootstrap(
                 "stable_named_entity": call_text("connect_memory", {"operation": "create-entity"}),
             },
             "preflight": {
-                tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
+                tools_text("connect_memory", "read"): (
+                    "read-only link and relation check before a compiled note write"
+                ),
                 "near_duplicate_warnings": (
                     "if they fire, prefer edit or replace over a parallel page; a write advisory "
                     "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
@@ -1942,7 +1944,7 @@ def op_bootstrap(
                 "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
                 "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
-                    "A committed response may carry one advisory. rename: the user retitled the page and its file name no longer follows the title; the outcome, the current and planned names and the spelled-out relocate call. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
+                    "A committed response may carry one advisory. rename: a retitle left the file name behind the title; the outcome, current and planned names and the relocate call. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
                     else "advisory in the default committed response. kind='rename': a write changed the page's title so that its file name no longer follows it; it carries the outcome, the current and planned names and the spelled-out relocate call for that page, and the user's edit is the approval. kind='ownership': the written page is asked whether it belongs in its current project and home folder while its review item is open; it carries the item's ref and fingerprint and one question, and the runtime never says the page is misfiled. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
@@ -14910,14 +14912,17 @@ def op_inspect_captured_sources(
 def op_inspect_name_drift(
     vault_root: Path,
     cursor: str | None = None,
-    limit: Annotated[int, Field(ge=1, le=name_drift_module.MAX_PAGE_SIZE)] = name_drift_module.DEFAULT_PAGE_SIZE,
+    limit: Annotated[
+        int, Field(ge=1, le=name_drift_module.MAX_PAGE_SIZE)
+    ] = name_drift_module.DEFAULT_PAGE_SIZE,
 ) -> dict:
     """List pages whose file name no longer follows their title, with the name each would get today.
 
-    Returns the total count (unknown when the scan did not finish), then per page its ref,
-    title, current name and planned name. Pages with no usable title are marked and never
-    proposed. A name that differs only by a collision number is not stale. Rename a batch
-    with the call in `rename_next_batch`, after the user approves one preview.
+    A page is listed when a rename-only relocation would rename it now. Returns the total count
+    (unknown when the scan did not finish), then per page its ref, title, current name and
+    planned name. Pages with no usable title, or that this caller cannot rename, are marked and
+    never proposed. Rename a batch with the call in `rename_next_batch`, after the user approves
+    one preview.
     """
     return name_drift_module.listing(vault_root, cursor=cursor, limit=limit)
 
@@ -15593,8 +15598,14 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure",)}},
     ),
     (
-        "inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC, ("inspect_name_drift",),
-        {"public_title": "Inspect stale file names", "surface": "advanced", "actions": ("review",), "first_run_safe": True},
+        "inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC,
+        ("inspect_name_drift",),
+        {
+            "public_title": "Inspect stale file names",
+            "surface": "advanced",
+            "actions": ("review",),
+            "first_run_safe": True,
+        },
     ),
     (
         "coordination_status",

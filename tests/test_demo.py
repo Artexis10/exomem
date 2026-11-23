@@ -45,7 +45,7 @@ def test_packaged_sample_vault_present() -> None:
 def test_sample_vault_shows_proof_without_treating_sources_as_evidence() -> None:
     evidence_rel = "Knowledge Base/Evidence/Warranty/Receipts/2026-06-30-laptop-receipt.md"
     source_rel = "Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md"
-    note = demo.SAMPLE_VAULT / "Knowledge Base" / "Notes" / "Research" / "Sample" / "sample-architecture.md"
+    note = demo.SAMPLE_VAULT / "Knowledge Base" / "Notes" / "Research" / "Sample" / "Sample architecture.md"
 
     assert (demo.SAMPLE_VAULT / evidence_rel).is_file()
     assert (demo.SAMPLE_VAULT / source_rel).is_file()

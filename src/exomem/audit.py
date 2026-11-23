@@ -63,11 +63,12 @@ Checks (all read-only; no writes ever):
   the connected agent, never as a claim that the page is misfiled, and listed
   with the other backlog items after dated obligations. One item per page; a dismissal holds until the page's project key,
   home folder or title changes.
-- `name_drift`: compiled and entity pages whose file name differs from the name that the creation
-  path gives their title today (`name_drift`). Reported at `info`, as one item for the vault
-  that carries the call that renames the next batch, and listed with the backlog items after dated
-  obligations. Its fingerprint changes with the drifted set. A page with no usable title is
-  counted, never proposed.
+- `name_drift`: pages that a rename-only `curation.relocate` would rename today, because their
+  file name no longer follows their title (`name_drift`). Reported at `info`, as one item for the
+  vault anchored on the top index, that carries the call that renames the next batch, and
+  listed with the backlog items after dated obligations. Its fingerprint changes with the drifted
+  set. A page with no usable title, or whose rename this caller cannot plan, is counted, never
+  proposed.
 - `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
   resolve, and a supersession component with more than one current head. Both
   are `warn` DEFECTS in authored state with no threshold anywhere, which is why
@@ -6815,8 +6816,8 @@ def _check_name_drift(
 ) -> list[AuditFinding]:
     """One finding for the vault while any page's file name differs from its title's name.
 
-    The rule, the batch and the call live in `name_drift`, which the read operation and the
-    write path use as well. It claims nothing about a page's title; it measures names.
+    The batch and the call live in `name_drift`, which the read operation and the write path use
+    as well; the rule is the one relocation plans with. It claims nothing about a page's title.
     """
     from . import name_drift
 

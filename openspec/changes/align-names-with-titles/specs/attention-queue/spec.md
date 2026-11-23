@@ -2,7 +2,7 @@
 
 ### Requirement: Name drift is one review item for the vault
 
-While any compiled or entity page has a file name that differs from the name the creation path gives its title, the review surface SHALL carry one `name_drift` item for the vault. Its fingerprint SHALL change with the drifted set or its planned names. Its text SHALL state the count and the spelled-out `curation.relocate` call, with the item's `review_ref`, that renames the next batch. It SHALL join the default review listing after the other backlog queues.
+While a rename-only `curation.relocate` would rename any page, the review surface SHALL carry one `name_drift` item for the vault. Detection and relocation SHALL derive a page's planned path with one shared function. The item's fingerprint SHALL change with the drifted set or its planned names. Its text SHALL state the count and the spelled-out `curation.relocate` call, with the item's `review_ref`, that renames the next batch.
 
 #### Scenario: A backlog of stale names is one item
 
@@ -11,7 +11,7 @@ While any compiled or entity page has a file name that differs from the name the
 
 #### Scenario: The fingerprint follows the set
 
-- **WHEN** one drifted page is renamed to its planned name
+- **WHEN** one drifted page is renamed to its planned name and the item is computed again
 - **THEN** the item's fingerprint differs from before and its count is one lower
 
 #### Scenario: A vault whose names follow their titles has no item
@@ -19,14 +19,51 @@ While any compiled or entity page has a file name that differs from the name the
 - **WHEN** no page drifts
 - **THEN** the review listing holds no `name_drift` item
 
+### Requirement: The name-drift item keeps its identity
+
+The `name_drift` item SHALL be anchored on the vault's top index, so that renaming drifted pages never changes its identity. A `review_ref` given before a batch SHALL resolve to the batch that is next when it is used.
+
+#### Scenario: The item keeps its identity through its own renames
+
+- **WHEN** a batch of drifted pages is renamed and pages still drift
+- **THEN** the item keeps its `review_ref`
+- **AND** a `review_ref` given before the batch names the batch that is next now
+
+### Requirement: The default listing serves the name-drift item from a stored row
+
+The `name_drift` item SHALL join the default review listing after the other backlog queues. For a caller who may read every page, the default review listing SHALL build the item from the stored due-state row without a scan of the vault. A reconcile and the end of a renaming curation run SHALL rewrite that row.
+
+#### Scenario: A dated obligation ranks first
+
+- **WHEN** the vault owes a dated obligation and pages drift
+- **THEN** the default review listing serves the dated obligation before the `name_drift` item
+
+#### Scenario: The listing reads no page for the item
+
+- **WHEN** the owner reads the default review listing and the due-state row holds the item
+- **THEN** the listing carries the item and its call without a scan of the vault
+
 ### Requirement: The item's call renames the next batch
 
-A `curation.relocate` call whose `review_ref` names the `name_drift` item SHALL rename the next batch of drifted pages, read afresh when the call runs, and not only the page the item is anchored on. When that batch's plan is too large to seal, the relocation SHALL halve the batch, up to four times, and SHALL name the pages it left for the next batch in its summary.
+A `curation.relocate` call whose `review_ref` names the `name_drift` item SHALL rename the next batch of drifted pages, read afresh when the call runs, and not only the page the item is anchored on. Each page SHALL take the path that the shared function plans for it.
 
 #### Scenario: One call renames the batch
 
 - **WHEN** an agent proposes `curation.relocate` with the item's `review_ref` and the user approves the preview
 - **THEN** every page in the batch takes its planned name, and one compensation restores every page
+
+### Requirement: A renaming run refreshes the name-drift item
+
+When a curation run that renamed pages ends, the runtime SHALL refresh the `name_drift` item from a fresh scan, so the due-state block keeps the item while pages drift and drops it when none do.
+
+#### Scenario: The backlog closes batch by batch
+
+- **WHEN** an agent repeats the item's call, with the user's yes for each preview, until no page drifts
+- **THEN** each finished run refreshes the item, and the item closes after the last batch
+
+### Requirement: An oversized name-drift batch shrinks
+
+When the plan of the next batch is too large to seal, the relocation SHALL halve the batch, up to four times, and SHALL name the pages it left for the next batch in its summary.
 
 #### Scenario: A batch too large to seal shrinks
 
@@ -35,12 +72,16 @@ A `curation.relocate` call whose `review_ref` names the `name_drift` item SHALL 
 
 ### Requirement: Name drift judges only pages named by their title
 
-A collision number on an otherwise matching name SHALL NOT count as drift. Captured Sources and every type that the registry does not name by title SHALL be out of scope. A page with no usable title SHALL be counted apart and never proposed for a rename.
+A page that holds the collision-numbered name its title gets while another page holds the bare name SHALL NOT count as drift. A name that differs from the planned name only in case SHALL NOT count as drift, because a case-blind volume holds both as one file. Captured Sources, recaps and every type that the registry does not name by title SHALL be out of scope. An entity SHALL be renamed in its own folder.
 
 #### Scenario: Dated captures and collision copies are not drift
 
-- **WHEN** a Source with a dated name and a page named `Title-2` for the title `Title` exist
-- **THEN** neither is counted as drift
+- **WHEN** a Source with a dated name exists, and a page named `Title-2` with the title `Title` exists beside a page named `Title`
+- **THEN** neither the Source nor `Title-2` is counted as drift
+
+### Requirement: Pages without a plannable name are counted apart
+
+A page with no usable title, and a page whose rename this caller cannot plan, SHALL be counted apart from the drifted pages and never proposed for a rename.
 
 #### Scenario: A page with no usable title is never proposed
 
@@ -49,7 +90,7 @@ A collision number on an otherwise matching name SHALL NOT count as drift. Captu
 
 ### Requirement: Drifted pages are listed in bounded pages
 
-The read operation `inspect_name_drift` SHALL return the total number of drifted pages and one bounded page of rows: the page's ref, title, current name and planned name, in path order, with a cursor for the next page. A row for a page with no usable title SHALL say so and carry no planned name. A scan that did not finish SHALL say it is incomplete and SHALL NOT report a total.
+The read operation `inspect_name_drift` SHALL return the total number of drifted pages and one bounded page of rows: the page's ref, title, current name and planned name, in path order, with a cursor for the next page. A row for a page with no usable title, or whose rename this caller cannot plan, SHALL say so and carry no planned name. A scan that did not finish SHALL say it is incomplete and SHALL NOT report a total.
 
 #### Scenario: A listing pages through the backlog
 

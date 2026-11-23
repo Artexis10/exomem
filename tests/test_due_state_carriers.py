@@ -638,7 +638,8 @@ def test_a_writes_governance_receipt_gains_nothing_from_the_due_state_count(
     )
 
     with request_scope(owner_principal(surface="cli")):
-        # Both vaults hold slug-named pages, so both also owe the vault-wide name-drift row; only the predictions differ.
+        # Both vaults hold slug-named pages, so both also owe the vault-wide name-drift row; only
+        # the predictions differ.
         def predictions(block: dict | None) -> int:
             return 0 if block is None else block["total"] - block["categories"].get("name_drift", 0)
 

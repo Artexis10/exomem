@@ -38,7 +38,8 @@ MAX_EXCLUSIONS: Final[int] = 3
 #: Measured 2026-11-23 on a laptop disk under WSL, corpus cache on: 100 pages relocated in a
 #: 3,000-page vault split 451 referring pages into 19 steps, and no step held the vault past 3.0 s.
 REFERRERS_PER_STEP: Final[int] = 25
-#: How often a review item's batch is halved when its plan is too large to seal (200 pages reach 12).
+#: How often a review item's batch is halved when its plan is too large to seal (200 pages
+#: reach 12).
 MAX_HALVINGS: Final[int] = 4
 
 _CARRIES = page_fields.CARRIES_PROJECT_KEY
@@ -75,7 +76,8 @@ class _Derived:
     source_steps: set[str] = field(default_factory=set)
     #: Whether the catalogue could not answer which pages name a moved page's path in prose.
     mentions_unchecked: bool = False
-    #: Pages of a review item's batch left for its next batch, because the whole batch was too large to seal.
+    #: Pages of a review item's batch left for its next batch, because the whole batch was too
+    #: large to seal.
     deferred: list[str] = field(default_factory=list)
 
 
@@ -103,8 +105,11 @@ def propose(
     exclusions = halvings = 0
 
     def shrink(error: curation.CurationError) -> bool:
-        """Halve a review item's batch that is too large to seal. The server chose that batch, so it
-        shrinks; pages the caller named refuse instead, because dropping them would change the request."""
+        """Halve a review item's batch that is too large to seal.
+
+        The server chose that batch, so it shrinks; pages the caller named refuse instead, because
+        dropping them would change the request.
+        """
         nonlocal selected, halvings
         if (
             error.code != "CURATION_PLAN_TOO_LARGE"
@@ -198,7 +203,9 @@ def _requested(root: Path, pages: Sequence[str] | None, review_ref: str | None) 
                 "RELOCATE_REVIEW_ITEM_UNKNOWN", "review_ref names no current review item on a page"
             )
         if not covered:
-            raise _error("RELOCATE_REVIEW_ITEM_EMPTY", "the review item names no page to relocate now")
+            raise _error(
+                "RELOCATE_REVIEW_ITEM_EMPTY", "the review item names no page to relocate now"
+            )
         return covered
     if (
         not isinstance(pages, list)
@@ -297,25 +304,18 @@ def _derive(
     held_sources: set[str],
 ) -> _Derived:
     """The plan's steps for these pages, with what each group of the summary lists."""
-    from . import find, title_occupancy
+    from . import find
 
     derived = _Derived()
     carrying = page_fields.fields_carrying(root, _CARRIES)
     lists = page_fields.list_fields(root)
     # The one writer snapshot that the title check and the Source rule read.
     snapshot = functools.cache(lambda: find.writer_resolver_snapshot(root))
-    try:
-        titles: title_occupancy.TitleCheck | None = title_occupancy.TitleCheck(
-            root, None, resolver=snapshot
-        )
-    except ValueError:
-        # The vault's naming style cannot be read; each page's own naming then refuses it.
-        titles = None
+    names = Names(root, resolver=snapshot)
     moves: list[dict[str, Any]] = []
     corrections: list[dict[str, Any]] = []
     #: Each relocated page and the keys it gives up, for the Source rule.
     relocated: dict[str, tuple[_Page, frozenset[str]]] = {}
-    claimed: set[str] = set()
     why = f"Relocate to project {to_project}." if to_project else "Rename to the page title."
     for page in selected:
         values = page_fields.carried(root, page.frontmatter, _CARRIES)
@@ -351,8 +351,14 @@ def _derive(
         after = {**values, **changes}
         alone = {key for value in after.values() for key in page_fields.carried_keys(value)}
         try:
-            target = _destination(
-                root, page, to_project if alone == {to_project} else None, registry, claimed, titles
+            target = planned_path(
+                root,
+                page.path,
+                page.note_type,
+                page.title,
+                names,
+                project=to_project if alone == {to_project} else None,
+                registry=registry,
             )
         except (OpError, ValueError) as error:
             derived.refused.append(_refusal(page.path, "RELOCATE_NO_DESTINATION", str(error)))
@@ -364,7 +370,6 @@ def _derive(
             ))
             continue
         if target is not None:
-            claimed.add(vault.vault_name_key(target))
             args: dict[str, Any] = {"old_path": page.path, "new_path": target}
             if changes:
                 args["fields"] = changes
@@ -488,66 +493,118 @@ def _rewritten(
     return changes
 
 
-def _destination(
-    root: Path,
-    page: _Page,
-    project: str | None,
-    registry: project_keys.ProjectRegistry | None,
-    claimed: set[str],
-    titles: Any,
-) -> str | None:
-    """Where the note writer would put this compiled page now, or None when it stays.
+class Names:
+    """What a rename may not take, for one derivation or one scan over an unchanged vault.
 
-    The name is the one the vault's writer gives the page's title, after the date prefix that a
-    dated type keeps. The folder changes only for a type that a project partitions, and only when
-    the page belongs to `project` alone afterwards. Entities and Sources never move. A name that
-    a file, a moved page's lineage, an earlier move of this plan or another live page's title
-    holds gets the writer's number, so the page never takes over another page's bare links.
+    A live file or a prior claim in the target folder (each folder listed once), another live
+    page's title, and a name this derivation already gave to an earlier page.
     """
-    from . import layout, note
 
-    definition = page.note_type
-    if definition is None or not note_types.compiled(definition):
+    def __init__(self, root: Path, *, resolver: Callable[[], Any] | None = None) -> None:
+        from . import title_occupancy
+
+        self.root = Path(root)
+        try:
+            self.titles: Any = title_occupancy.TitleCheck(self.root, None, resolver=resolver)
+        except ValueError:
+            # The vault's naming style cannot be read; each page's own naming then refuses it.
+            self.titles = None
+        self.claimed: set[str] = set()
+        self.folders: dict[Path, Callable[[str], bool]] = {}
+
+
+def renamed_by_title(note_type: note_types.NoteType) -> bool:
+    """Whether a relocation names a page of this type by its title: the types whose file name the
+    writer builds from the title (`titled_name`), less the captured Sources, which keep their
+    dated capture names."""
+    return note_types.titled_name(note_type) and not note_types.captured_source(note_type)
+
+
+def title_stem(
+    root: Path, path: str, note_type: note_types.NoteType, title: str | None
+) -> str | None:
+    """The file stem the vault's writer gives this page's title now, date prefix included.
+
+    None when the title can name no file: no title, or one with no character a file name can
+    hold. Such a page keeps its name, because any other name would be made up.
+    """
+    from . import layout
+
+    usable = vault.corrected_title_name(title).name if title else ""
+    if not usable:
         return None
-    current = PurePosixPath(page.path)
-    title = page.title
-    stem = current.stem
-    if title:
-        # `slug` is the closed stem kind that builds a name from the slug alone, with no date.
-        prefix = layout.date_prefix(current.stem) if definition.stem != "slug" else ""
-        name, _warnings = vault.resolve_filename_slug(
-            title, None, vault_root=root, date_prefix=prefix
-        )
-        if name:
-            stem = prefix + name
+    # `slug` is the closed stem kind that builds a name from the slug alone, with no date.
+    prefix = layout.date_prefix(PurePosixPath(path).stem) if note_type.stem != "slug" else ""
+    if vault.fit_filename(usable, date_prefix=prefix) is None:
+        return None
+    name, _warnings = vault.resolve_filename_slug(
+        title or "", None, vault_root=root, date_prefix=prefix
+    )
+    return prefix + name if name else None
+
+
+def planned_path(
+    root: Path,
+    path: str,
+    note_type: note_types.NoteType | None,
+    title: str | None,
+    names: Names,
+    *,
+    project: str | None = None,
+    registry: project_keys.ProjectRegistry | None = None,
+) -> str | None:
+    """Where a relocation puts this page now, or None when it stays where it is.
+
+    The one rule for a page's planned path: a relocation derives its moves with it, and the
+    name-drift review asks it whether a rename-only relocation would move a page.
+
+    In scope are the types that `renamed_by_title` names. The name is the one the
+    vault's writer gives the page's title, after the date prefix that a dated type keeps. The
+    folder changes only for a compiled type that a project partitions, and only when the page
+    belongs to `project` alone afterwards; an entity is renamed where it is. A name that a file,
+    a prior claim, a name given earlier in this derivation or another live page's title holds
+    gets the writer's number, and the page's own name stays free for it, so a page that holds
+    its numbered name keeps it. A name that differs only in case is the same file on a case-blind
+    volume, so it stays too.
+    """
+    from . import note
+
+    if note_type is None or not renamed_by_title(note_type):
+        return None
+    current = PurePosixPath(path)
+    stem = title_stem(root, path, note_type, title) or current.stem
     parent = current.parent.as_posix()
     # `project` is the closed partition value of a type whose folder its project splits.
-    if project is not None and definition.partition == "project":
+    if project is not None and note_types.compiled(note_type) and note_type.partition == "project":
         planned = note.planned_destination(
             root,
-            note_type=definition.key,
+            note_type=note_type.key,
             title=title or stem,
             project=project,
             project_registry=registry,
         )
         parent = PurePosixPath(planned).parent.as_posix()
     target = f"{parent}/{stem}{current.suffix}"
-    # A name that differs only in case is the same file on a case-blind volume: it stays.
-    if vault.vault_name_key(target) == vault.vault_name_key(page.path):
+    if vault.vault_name_key(target) == vault.vault_name_key(path):
         return None
     free = vault.unique_path(
         root / parent,
         stem,
         current.suffix,
         vault_root=root,
-        # A stem that an earlier move of this plan takes counts as held, as a live title does. The
-        # page's own title does not: its bare links already reach it.
+        # A stem that an earlier page of this derivation takes counts as held, as a live title
+        # does. The page's own title does not: its bare links already reach it.
         title_held=lambda candidate: vault.vault_name_key(f"{parent}/{candidate}{current.suffix}")
-        in claimed
-        or (titles is not None and titles.held(candidate, excluding=page.path)),
+        in names.claimed
+        or (names.titles is not None and names.titles.held(candidate, excluding=path)),
+        excluding=path,
+        folders=names.folders,
     )
     target = free.relative_to(root).as_posix()
-    return None if vault.vault_name_key(target) == vault.vault_name_key(page.path) else target
+    if vault.vault_name_key(target) == vault.vault_name_key(path):
+        return None
+    names.claimed.add(vault.vault_name_key(target))
+    return target
 
 
 def _source_corrections(

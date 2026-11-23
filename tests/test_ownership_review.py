@@ -454,12 +454,7 @@ def _rows(vault: Path, *categories: str, state: str = "open") -> list[dict]:
     listing = commands.op_attention(
         vault, categories=list(categories) or None, state=state, limit=0
     )
-    # PAGE has a slug name, so the vault-wide name-drift item may anchor on it; that family has its own tests.
-    return [
-        item
-        for item in listing["items"]
-        if item["path"] == PAGE and item["categories"] != ["name_drift"]
-    ]
+    return [item for item in listing["items"] if item["path"] == PAGE]
 
 
 def test_a_page_with_ownership_and_relation_debt_lists_two_rows_whose_refs_resolve(

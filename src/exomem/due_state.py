@@ -143,10 +143,12 @@ SOURCE_BACKLOG = "unprocessed_source"
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
 EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
-#: The vault-wide name-drift family: one row while any page's file name differs from its title's name.
+#: The vault-wide name-drift family: one row while any page's file name differs from its title's
+#: name.
 #: It is recompute-only. A page write does not settle it: the whole drifted set is the row, so the
-#: write path would need a vault scan. `reconcile` and `refresh_name_drift` rebuild it. After the
-#: ownership and cohesion questions, because a stale name is housekeeping and a page's home is not.
+#: write path would need a vault scan. `reconcile` rebuilds it, and so does a curation run that
+#: renamed pages, when it ends (`schedule_name_drift_refresh`). After the ownership and cohesion
+#: questions, because a stale name is housekeeping and a page's home is not.
 NAME_DRIFT = "name_drift"
 
 #: The four due-state categories, in the tiebreak preference the attention surface
@@ -290,8 +292,9 @@ _UNPERSISTED_CAP = 8
 #: itself becomes the durable readiness signal. Entries exist only for the life
 #: of one worker, so the registry cannot grow with the number of vaults served.
 _WARMING: set[str] = set()
-#: Vaults whose ownership rotation is running in a background worker.
-_ROTATING: set[str] = set()
+#: The (vault, job) pairs running in a background worker (`_in_background`): the ownership
+#: rotation and the name-drift refresh. One worker per job and vault at a time.
+_BACKGROUND: set[tuple[str, str]] = set()
 
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
@@ -744,9 +747,11 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
         # WRITER's count, and an audience that may not see a joined record still
         # reads it in the total.
         **({"component": finding.component} if finding.component else {}),
+        # The candidate serve order reads the stored meta, and the review listing rebuilds the
+        # name-drift item from it (`name_drift_reading`) instead of scanning the vault per request.
         **(
             {"meta": dict(finding.meta or {})}
-            if finding.category == "collection_candidate"
+            if finding.category in ("collection_candidate", NAME_DRIFT)
             else {}
         ),
     }
@@ -1817,15 +1822,24 @@ def _schedule_ownership_rotation(vault_root: Path, *, today: dt.date) -> None:
     root = Path(vault_root)
     if not ownership_rotation.is_due(root, today):
         return
+    _in_background(root, "ownership-rotation", lambda: _rotate_ownership(root, today=today))
+
+
+def _in_background(root: Path, job: str, work: Callable[[], None]) -> None:
+    """Run owner-local advisory `work` without delaying the caller, one worker per job and vault.
+
+    A job already running for this vault is not started twice: the running one reads the state
+    that the caller's change left. `work` reports its own faults.
+    """
     if _sync_due_state_warm():
         # The suite asks for background work inline (see `_schedule_reconcile`).
-        _rotate_ownership(root, today=today)
+        work()
         return
-    key = str(root)
+    key = (str(root), job)
     with _LOCK:
-        if key in _ROTATING:
+        if key in _BACKGROUND:
             return
-        _ROTATING.add(key)
+        _BACKGROUND.add(key)
 
     def _run() -> None:
         try:
@@ -1834,17 +1848,17 @@ def _schedule_ownership_rotation(vault_root: Path, *, today: dt.date) -> None:
 
             # An owner-local worker: a request's principal does not cross into this thread.
             with background_scope(root), library_scope():
-                _rotate_ownership(root, today=today)
+                work()
         finally:
             with _LOCK:
-                _ROTATING.discard(key)
+                _BACKGROUND.discard(key)
 
     try:
-        threading.Thread(target=_run, name="exomem-ownership-rotation", daemon=True).start()
+        threading.Thread(target=_run, name=f"exomem-{job}", daemon=True).start()
     except RuntimeError:
         with _LOCK:
-            _ROTATING.discard(key)
-        log.warning("could not start the ownership rotation for %s", root, exc_info=True)
+            _BACKGROUND.discard(key)
+        log.warning("could not start %s for %s", job, root, exc_info=True)
 
 
 def apply_ownership_delta(
@@ -1880,11 +1894,44 @@ def apply_ownership_delta(
         _persist_delta(root, current, categories, today, count_write=False)
 
 
+def schedule_name_drift_refresh(vault_root: Path) -> None:
+    """Rebuild the `name_drift` row off the caller's path, after a run renamed pages.
+
+    A rename changes the drifted set that the row counts, and a page write cannot settle a
+    vault-wide row, so the curation run that renamed pages asks for this when it ends.
+    """
+    root = Path(vault_root)
+    _in_background(root, "name-drift-refresh", lambda: _refresh_name_drift(root))
+
+
+def _refresh_name_drift(root: Path) -> None:
+    try:
+        refresh_name_drift(root)
+    except Exception:  # noqa: BLE001 - advisory work; the next reconcile rebuilds the row
+        log.warning("name-drift refresh failed for %s", root, exc_info=True)
+
+
+def name_drift_reading(vault_root: Path) -> dict[str, Any] | None:
+    """The stored name-drift row's meta: `{}` when the row holds no drift, None when none is stored.
+
+    No audit. A projection written before the row kept its meta also answers None, so the caller
+    scans as before until the next rebuild.
+    """
+    payload = _load_shared(Path(vault_root))
+    rows = ((payload or {}).get("categories") or {}).get(NAME_DRIFT)
+    if not isinstance(rows, dict):
+        return None
+    for bucket in rows.values():
+        for entry in _unbucket(bucket):
+            meta = entry.get("meta")
+            return dict(meta) if isinstance(meta, Mapping) else None
+    return {}
+
+
 def refresh_name_drift(vault_root: Path, *, today: dt.date | None = None) -> None:
     """Replace the `name_drift` row from one pass over the corpus, and nothing else.
 
-    Off the write path, for a caller that has just renamed pages (`curation.relocate`) or
-    wants today's count. It bumps no emission counter, because no governed write happened.
+    It bumps no emission counter, because no governed write happened.
     """
     from . import audit as audit_module
     from .vault import kb_root
@@ -1893,14 +1940,17 @@ def refresh_name_drift(vault_root: Path, *, today: dt.date | None = None) -> Non
     root = Path(vault_root)
     if _load_shared(root) is None:
         return
-    pages = audit_module._parse_all(kb_root(root), root)
-    rows = _entries_from_findings(root, audit_module._check_name_drift(root, pages)).get(NAME_DRIFT) or {}
+    pages = audit_module._parse_all(kb_root(root), root)  # noqa: SLF001 -- the audit's own corpus read
+    findings = audit_module._check_name_drift(root, pages)
+    rows = _entries_from_findings(root, findings).get(NAME_DRIFT) or {}
     with _LOCK:
         current = _load_shared(root)
         if current is None:
             return
         categories = dict(current.get("categories") or {})
-        categories[NAME_DRIFT] = {path: _bucket(entries, today) for path, entries in sorted(rows.items())}
+        categories[NAME_DRIFT] = {
+            path: _bucket(entries, today) for path, entries in sorted(rows.items())
+        }
         _persist_delta(root, current, categories, today, count_write=False)
 
 
@@ -3704,7 +3754,10 @@ def _served_rows(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )
         return rows
-    who = principal if principal is not None else principal_module.effective_principal()
+    # The bound principal, or None for a call no surface bound, exactly as the uncached build
+    # above receives it. Resolving an unbound call to the floor principal here made an owner-only
+    # family (`owner_only_aggregate`) appear in a first, uncached answer and vanish from the next.
+    who = principal if principal is not None else principal_module.current_principal()
     key = (
         str(vault_root),
         getattr(who, "audience_id", None),

@@ -1562,38 +1562,26 @@ def _candidate_step_kinds(state: str) -> list[str]:
     }[state]
 
 
-def _page_of_review_item(vault_root: Path, review_ref: str) -> str | None:
-    """The page a current review item that is not an entity candidate anchors on, else None.
-
-    The audience filter of the review surface applies, so a page the caller may not see
-    resolves to None exactly as a ref that names no item does.
-    """
-    item = _page_review_item(vault_root, review_ref)
-    return None if item is None else item.path
-
-
 def _pages_of_review_item(vault_root: Path, review_ref: str) -> list[str] | None:
     """The pages a current review item that is not an entity candidate stands for now, else None.
 
     A page-level item stands for its page; a vault-wide family's one item stands for the batch
-    its family names (`attention.pages_of_item`). The audience filter applies as above.
+    its family names (`attention.pages_of_item`). The audience filter of the review surface
+    applies, so a page the caller may not see resolves to None exactly as a ref that names no
+    item does.
     """
     from . import attention as attention_module
 
-    item = _page_review_item(vault_root, review_ref)
-    return None if item is None else attention_module.pages_of_item(vault_root, item)
-
-
-def _page_review_item(vault_root: Path, review_ref: str) -> Any:
-    from . import attention as attention_module
-
+    batch = attention_module.pages_of_item(vault_root, review_ref)
+    if batch is not None:
+        return batch
     try:
         item = attention_module.item_by_ref(vault_root, review_ref)
     except ValueError:
         return None
     if any(reason.get("category") == ENTITY_CANDIDATE_FAMILY for reason in item.reasons):
         return None
-    return item
+    return [item.path]
 
 
 def _page_work_item(
@@ -1676,11 +1664,17 @@ def work_item(
                 raise
             if hydration_recheck is None:
                 # Not an entity candidate: a page-level item opens its page, as a ref to
-                # that page does. A ref that names no current item keeps the refusal.
-                anchor = _page_of_review_item(Path(vault_root), str(review_ref))
-                if anchor is None:
+                # that page does, and a vault-wide item opens the first pages of its batch.
+                # A ref that names no current item keeps the refusal.
+                covered = _pages_of_review_item(Path(vault_root), str(review_ref))
+                if not covered:
                     raise
-                return _page_work_item(Path(vault_root), [anchor], max_chars_per_page)
+                opened = _page_work_item(
+                    Path(vault_root), covered[:MAX_WORK_ITEM_PAGES], max_chars_per_page
+                )
+                if len(covered) > MAX_WORK_ITEM_PAGES:
+                    opened["unopened_pages"] = len(covered) - MAX_WORK_ITEM_PAGES
+                return opened
             # A continuation is read-only and identity-bound.  When the exact
             # row disappears after the terminal batch receipt, the useful
             # result is bounded closure rather than a misleading stale error.
@@ -1911,6 +1905,9 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
 #: The steps that rename a page: a `move`, and the inverse move that compensates one.
 # nosemgrep: ep-word-set -- the two step kinds this module defines that rename a page.
 _RENAME_STEP_KINDS: Final[frozenset[str]] = frozenset({"move", UNMOVE_STEP_KIND})
+#: The two run phases that leave a step to run; every other phase ends the run.
+# nosemgrep: ep-word-set -- the two run phases this module defines that leave a step to run.
+_OPEN_RUN_PHASES: Final[frozenset[str]] = frozenset({"executing", "compensating"})
 #: The steps that rewrite pages in place to sealed bytes, append-only pages among them.
 # nosemgrep: ep-word-set -- the three step kinds this module defines that rewrite sealed pages.
 _REWRITE_STEP_KINDS: Final[frozenset[str]] = frozenset(
@@ -5562,8 +5559,7 @@ def _advance(
         if not result.get("mutated"):
             break
         ran += 1
-        # The two run phases that leave a step to run; every other phase ends the run.
-        if result.get("phase") not in {"executing", "compensating"}:
+        if result.get("phase") not in _OPEN_RUN_PHASES:
             break
         reserve = slowest + request_budget.DELIVERY_RESERVE_SECONDS
         if not budget.can_afford(reserve):
@@ -5574,6 +5570,14 @@ def _advance(
         if not budget.can_afford(reserve):
             break
     plan = store.load_plan(run_identity)
+    if ran and result.get("phase") not in _OPEN_RUN_PHASES and any(
+        step.get("kind") in _RENAME_STEP_KINDS for step in plan["steps"]
+    ):
+        # The run renamed pages and ended, so the vault-wide name-drift row counts a set that
+        # changed.
+        from . import due_state
+
+        due_state.schedule_name_drift_refresh(vault_root)
     if stop is not None:
         # The stopped step's receipt, if any, changed the run's phase; the steps before it stay committed.
         run = store.reconstruct(run_identity)

@@ -1,7 +1,7 @@
 ## 1. Detection
 
-- [x] 1.1 Add the `name_drift` module: the rule over `resolve_filename_slug`, the registry scope, the collision forms, the batch resolver and the review finding. Test: the audit lists exactly the pages whose planned name differs from their name, with names taken from the creation path, and lists no Source, dated capture, matching page or collision copy.
-- [x] 1.2 Add the `name_drift` audit check and the default attention category. Test: one item for the vault, carrying the relocate call and its own ref; its fingerprint changes with the drifted set; none at zero drift.
+- [x] 1.1 Move the planned-path function into `relocate`, called by relocation and detection, and add the `name_drift` module: the registry scope, the batch resolver and the review finding. Test: the backlog loop renames every drifted page to the path written in the test, and leaves Sources, recaps, an untitled page, a case-only name and a numbered copy as they are.
+- [x] 1.2 Add the `name_drift` audit check and the default attention category, anchored on the top index. Test: one item for the vault, carrying the relocate call and its own ref; its fingerprint changes with the drifted set; its ref holds through its own renames; none at zero drift.
 
 ## 2. Surfaces
 
@@ -11,5 +11,7 @@
 
 ## 3. Wiring after `curation.relocate`
 
-- [x] 3.1 Resolve `review_ref` of this item to `next_batch` inside `curation.relocate`, and halve a batch too large to seal. Test: one batch renames to its planned names and one compensation restores it; an oversized batch seals smaller and names the deferred pages.
-- [ ] 3.2 After release, rename one live batch through the item's call with the operator's yes, and record the counts.
+- [x] 3.1 Resolve `review_ref` of this item to the next batch inside `curation.relocate`, and halve a batch too large to seal. Test: the backlog loop renames batch by batch until the item closes, and one compensation restores the last batch byte for byte; an oversized batch seals smaller and names the deferred pages.
+- [x] 3.2 Refresh the item when a curation run that renamed pages ends. Test: the backlog loop closes the item with no manual refresh.
+- [x] 3.3 Serve the item in the default review listing from its stored due-state row. Test: the listing returns the item and its call with the scan disabled.
+- [ ] 3.4 After release, rename one live batch through the item's call with the operator's yes, and record the counts.

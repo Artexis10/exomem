@@ -28,7 +28,7 @@ from pathlib import Path
 from .vault_store import cli_fence
 
 SAMPLE_VAULT = Path(__file__).resolve().parent / "_sample_vault"
-TARGET_PATH = "Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md"
+TARGET_PATH = "Knowledge Base/Notes/Insights/Retrieval needs owned files.md"
 
 # Correctly-spelled lean pins (the retired repo scripts carried rename-corrupted
 # variants of these names, which made them silent no-ops).
