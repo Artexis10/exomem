@@ -5358,10 +5358,21 @@ def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, Path
 
 #: Reads of one file that a concurrent commit may replace between its measurement and its open.
 #: A bound, not a tuning value: a file that keeps moving is refused rather than chased.
-_GROWN_READ_ATTEMPTS = 3
-#: Guard codes that the read's own fresh snapshot and self-recheck raise when the file moved
+MOVED_READ_ATTEMPTS = 3
+#: Guard codes that a read's own fresh snapshot and self-recheck raise when the file moved
 #: under them; closed protocol codes of this module.
-_FRESH_READ_RACE_CODES = frozenset({"PATH_GUARD_CHANGED", "PATH_GUARD_CONTENT"})
+_FRESH_READ_RACE_CODES = frozenset({PATH_GUARD_CHANGED, PATH_GUARD_CONTENT})
+
+
+def moved_during_read(error: BaseException) -> bool:
+    """Whether a fresh guarded read failed because a concurrent commit replaced its file.
+
+    A reader that measured the file itself may measure again and retry, up to
+    `MOVED_READ_ATTEMPTS`; each attempt rechecks the root, the folders and the file.
+    """
+    return isinstance(error, GuardedLeafMoved) or (
+        isinstance(error, PathGuardError) and error.code in _FRESH_READ_RACE_CODES
+    )
 
 
 def _read_guarded_path(
@@ -5391,7 +5402,7 @@ def _read_guarded_path(
         _require_read_limit(stored.meta.size)
         guard = _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
         return stored.body, guard, None
-    for attempt in range(_GROWN_READ_ATTEMPTS):
+    for attempt in range(MOVED_READ_ATTEMPTS):
         try:
             limit = absolute.lstat().st_size
         except FileNotFoundError:
@@ -5409,8 +5420,10 @@ def _read_guarded_path(
             # A commit replaced the file during this fresh read (a pre-boundary plan reading an
             # index or log beside another write's commit): measure it again. Each attempt
             # rechecks the root, the folders and the file from scratch, so unsafe files stay refused.
-            moved = isinstance(error, GuardedLeafMoved) or error.code in _FRESH_READ_RACE_CODES
-            if not moved or attempt + 1 == _GROWN_READ_ATTEMPTS:
+            if not moved_during_read(error):
+                raise
+            if attempt + 1 == MOVED_READ_ATTEMPTS:
+                log.warning("guarded read refused a file still moving after %d reads: %s", MOVED_READ_ATTEMPTS, target)
                 raise
     raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
