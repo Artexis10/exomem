@@ -73,6 +73,9 @@ RETRY_REFUSALS = ACCEPTED_REFUSALS | {  # nosemgrep: ep-word-set -- closed publi
     # Committed, terminal not persisted: its own remediation is a same-identity retry.
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
 }
+#: Retry outcomes whose work may still commit after the replay ends; their requeue marks the
+#: identity as reaching its commit, so a reclaim reuses it instead of replaying under a fresh one.
+UNCERTAIN_REFUSALS = frozenset(RETRY_REFUSALS - ACCEPTED_REFUSALS)
 #: The login behind a save no longer vouches for it: the save fails, with its arguments.
 LOGIN_REVOKED = "INTAKE_LOGIN_REVOKED"
 #: The session store could not say whether the login still holds: the save waits and is retried.
@@ -386,17 +389,10 @@ def mark_replay_reached_commit() -> None:
     if replay is None:
         return
     with replay.lock:
-        if replay.commit_reached:
+        # Work that outlived its replay commits as designed: the requeue of an uncertain
+        # outcome already marked its identity, so no reclaim replays it under a fresh one.
+        if replay.commit_reached or replay.closed:
             return
-        if replay.closed:
-            # Work that outlived its replay (the drainer requeued it while a store call still ran)
-            # must not commit unmarked: a later reclaim could replay it under a fresh identity.
-            raise OpError(
-                "MUTATION_BUSY",
-                "the queued save's replay already ended, so this late attempt wrote nothing",
-                "Nothing to do: the service applies the queued save again.",
-                details={"status": "retryable", "committed": False},
-            )
         try:
             _mark_commit_reached(replay)
         except Exception as error:
@@ -939,9 +935,10 @@ def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
     now = time.time()
     with _write(vault_root) as conn:
         conn.execute(
-            "UPDATE intake SET state = ?, owner = NULL, updated_at = ?, next_attempt_at = ?, error_code = ? "
+            "UPDATE intake SET state = ?, owner = NULL, updated_at = ?, next_attempt_at = ?, error_code = ?, "
+            "commit_reached = CASE WHEN ? THEN 1 ELSE commit_reached END "
             "WHERE id = ? AND state = ? AND generation = ?",
-            (QUEUED, now, now + delay, code, claim.id, APPLYING, claim.generation),
+            (QUEUED, now, now + delay, code, code in UNCERTAIN_REFUSALS, claim.id, APPLYING, claim.generation),
         )
 
 
