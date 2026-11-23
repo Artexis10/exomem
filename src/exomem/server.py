@@ -984,7 +984,7 @@ def build_server(
     mcp = ExomemFastMCP(
         "exomem",
         instructions=SERVER_INSTRUCTIONS,
-        # AGPL section 13: a client sees the running release and the source repository in the
+        # The source offer: a client sees the running release and the source repository in the
         # initialize handshake. The instructions carry a hard 900-character limit, so the offer
         # does not live there; without `version`, serverInfo would report the framework's own.
         version=__version__,

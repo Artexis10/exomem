@@ -23,7 +23,7 @@ Versions made available after the licence change SHALL license the server, the c
 
 - **WHEN** someone inspects a tag or image made available before the licence change
 - **THEN** it still carries AGPL-3.0-or-later for the server
-- **AND** the repository names the last AGPL-3.0-or-later commit and keeps that licence text available
+- **AND** the repository names the last AGPL-3.0-or-later release by its tag, identifies the last AGPL-3.0-or-later commit as the parent of the commit that replaced `LICENSE`, and keeps that licence text available
 
 ### Requirement: Each FSL version converts to Apache-2.0 on its second anniversary
 
@@ -40,6 +40,7 @@ The licence of each version made available after the cut SHALL grant Apache-2.0,
 - **WHEN** a reader opens the hosted service's source offer after the cut
 - **THEN** it names the licence of the release the reader's cell runs, or both licences when that release is unknown
 - **AND** for a release that may be under FSL, it states the terms above or links to the public licence statement by a link named as the licence terms
+- **AND** it does not call versions after the cut "open source"
 
 ### Requirement: The contributor promise matches the licence
 

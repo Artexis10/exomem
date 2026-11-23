@@ -3,8 +3,8 @@
 "Evermatter" and "Substrate Systems" are names that identify this project and its maker.
 The project was formerly named "Exomem"; the rename grants no rights to either
 name and changes none of the permissions below.
-The licence for the code does not grant rights to the names. FSL-1.1-ALv2 grants no rights
-to our trademarks, the earlier AGPL-3.0 releases grant none either (section 7(e)), and the
+The licence for the code does not grant rights to the names. FSL-1.1-ALv2 grants no trademark
+rights beyond identifying us as the origin of the code, the earlier AGPL-3.0 releases grant none either (section 7(e)), and the
 plugins and starter skill under Apache-2.0 do not (Apache-2.0 section 6).
 
 ## You may

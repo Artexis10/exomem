@@ -571,12 +571,13 @@ operations.
 
 ## License
 
-The server, CLI and everything not listed below are source-available under the
+The server, CLI and everything not listed below, except third-party files that carry their own
+licence, are source-available under the
 [Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2).
-Self-hosting is free, and so is every other use except offering a competing commercial
-product or service. Each release becomes Apache-2.0 two years after it is published.
-Releases before v0.202.0 stay AGPL-3.0-or-later; [the licence change](docs/licensing/licence-change.md)
-says what changed and from when.
+Self-hosting is free, and so is every other use except a commercial product or service that
+competes with it or with a service we offer using it. Each version becomes Apache-2.0 two
+years after it is published. Earlier versions stay AGPL-3.0-or-later;
+[the licence change](docs/licensing/licence-change.md) says what changed and from which release.
 
 | Path | Licence |
 |---|---|
