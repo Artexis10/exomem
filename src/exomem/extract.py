@@ -68,6 +68,7 @@ from .media_types import (
 )
 from .media_types import (
     PDF_READERS,
+    damaged_pdf_page_texts,
     has_text_layer,
     pdf_page_text,
 )
@@ -1566,7 +1567,15 @@ def _extract_pdf(path: Path) -> ExtractResult:
     # reads from the child's exit (`MediaWorker._record_allocation_abort`). The allocation that fails
     # in Python's buffers, a page raster too large for the child's limit, raises `MemoryError`, which
     # propagates to the worker as a memory stop.
-    with pdfium.PdfDocument(path) as doc:
+    try:
+        doc = pdfium.PdfDocument(path)
+    except pdfium.PdfiumError as refusal:
+        # A password or an unsupported security handler is encryption, which pypdf cannot lift; every other
+        # refusal to open the file is damage, which pypdf may still repair.
+        if refusal.err_code in (pdfium.raw.FPDF_ERR_PASSWORD, pdfium.raw.FPDF_ERR_SECURITY):
+            raise
+        return _extract_damaged_pdf(path, refusal)
+    with doc:
         for number in range(1, len(doc) + 1):
             page = doc[number - 1]
             try:
@@ -1597,6 +1606,31 @@ def _extract_pdf(path: Path) -> ExtractResult:
         warnings.append(f"OCR refused scanned page(s) {', '.join(map(str, refused_pages))}; they are not in the text")
     engine = "pdfium+tesseract" if ocr_pages else "pdfium"
     return ExtractResult(text="\n\n".join(parts).strip(), media_type="pdf", engine=engine, warnings=warnings)
+
+
+def _extract_damaged_pdf(path: Path, refusal: Exception) -> ExtractResult:
+    """The text layer of a PDF that PDFium refused to open, as far as pypdf can repair the file.
+
+    Pages lost to the damage and scanned pages are missing, and the warnings say so. A file pypdf cannot
+    read either, or one that yields no text, fails with PDFium's refusal, as it did before this repair.
+    """
+    try:
+        texts = list(damaged_pdf_page_texts(path))
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - pypdf fails on a file it cannot repair in many ways; PDFium's refusal is the one reported
+        raise refusal from None
+    parts = [f"{page_marker(number)}\n{text}" for number, text in enumerate(texts, 1) if text]
+    if not parts:
+        # Completing now would store "no text" for good, for a file whose pages were never read.
+        raise refusal
+    warnings = [
+        f"damaged PDF repaired by pypdf: text read from {len(parts)} page(s); pages lost to the damage are "
+        "missing, and page numbers count only the pages that could be read"
+    ]
+    if len(parts) < len(texts):
+        warnings.append(f"{len(texts) - len(parts)} page(s) have no text layer and are not OCR'd in a damaged PDF")
+    return ExtractResult(text="\n\n".join(parts).strip(), media_type="pdf", engine="pypdf", warnings=warnings)
 
 
 def _extract_document(path: Path, media_type: str) -> ExtractResult:

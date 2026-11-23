@@ -17,6 +17,7 @@ from __future__ import annotations
 import atexit
 import datetime as dt
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -476,8 +477,12 @@ def read_pdf(path: Path) -> PdfEvidence:
             packet = ""
     except Exception as error:  # noqa: BLE001 - a damaged PDF fails in many ways; each means unreadable
         # PDFium reports a file that needs a password as its own load error code, not as a message.
-        if isinstance(error, pdfium.PdfiumError) and error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
-            return PdfEvidence(unavailable=ENCRYPTED)
+        if isinstance(error, pdfium.PdfiumError):
+            if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
+                return PdfEvidence(unavailable=ENCRYPTED)
+            if error.err_code != pdfium.raw.FPDF_ERR_SECURITY:
+                # PDFium could not read the file, and encryption is not why: pypdf may still repair it.
+                return _read_damaged_pdf(path)
         return PdfEvidence(unavailable=TOO_LARGE if isinstance(error, MemoryError) else UNREADABLE)
     # A title is untrusted text that the Source page stores in frontmatter: keep printable characters only.
     title = "".join(ch for ch in " ".join((information.get("Title") or "").split()) if ch.isprintable())
@@ -487,6 +492,25 @@ def read_pdf(path: Path) -> PdfEvidence:
         metadata_values=(*information.values(), *xmp_values(packet)),
         title=title,
     )
+
+
+def _read_damaged_pdf(path: Path) -> PdfEvidence:
+    """The first pages of a PDF that PDFium refused to open, as far as pypdf can repair the file.
+
+    A file cut short keeps no trailer, so it has no document information or XMP packet to read: the
+    printed text alone is the evidence. A file that pypdf cannot read either stays `unreadable`.
+    """
+    try:
+        pages = tuple(
+            text[:MAX_PAGE_CHARS] for text in itertools.islice(media_types.damaged_pdf_page_texts(path), PAGES_READ)
+        )
+    except MemoryError:
+        return PdfEvidence(unavailable=TOO_LARGE)
+    except Exception:  # noqa: BLE001 - pypdf fails on a file it cannot repair in many ways; each means unreadable
+        return PdfEvidence(unavailable=UNREADABLE)
+    if not any(media_types.has_text_layer(text) for text in pages):
+        return PdfEvidence(unavailable=UNREADABLE)
+    return PdfEvidence(pages=pages)
 
 
 def _information(doc: Any) -> dict[str, str]:

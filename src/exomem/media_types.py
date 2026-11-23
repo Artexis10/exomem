@@ -6,6 +6,7 @@ it stays free of heavy imports.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +69,8 @@ _PDF_OCR_MIN_CHARS = 16
 
 
 #: The libraries that read a PDF, by import name. PDFium (`pypdfium2`) reads the text layer, renders
-#: pages for OCR and reads the information dictionary; `pypdf` reads only the XMP packet, which PDFium
-#: has no call for.
+#: pages for OCR and reads the information dictionary. `pypdf` reads the XMP packet, which PDFium has no
+#: call for, and repairs a damaged file that PDFium cannot open (`damaged_pdf_page_texts`).
 PDF_READERS = ("pypdfium2", "pypdf")
 
 
@@ -86,3 +87,62 @@ def pdf_page_text(page: Any) -> str:
 def has_text_layer(page_text: str) -> bool:
     """Whether a page's embedded text is long enough to be read, not rasterized and OCR'd."""
     return len(page_text) >= _PDF_OCR_MIN_CHARS
+
+
+#: pypdf rebuilds the cross-reference table of a file only after it reads a `startxref`, and a file cut
+#: short has none. An empty one appended in memory makes pypdf rebuild it from the objects it finds.
+_EMPTY_STARTXREF = b"\nstartxref\n0\n%%EOF\n"
+
+
+def damaged_pdf_page_texts(path: Path) -> Iterator[str]:
+    """The text layer of each page that pypdf can still find in a PDF that PDFium refused to open.
+
+    A page whose content pypdf cannot read gives "", and so does a scanned page, because nothing here
+    renders it. Raises when pypdf cannot read the file at all. The pages come in page-tree order, or in
+    file order when the tree is unusable, so the count of pages read is not the file's page count.
+    """
+    import io
+    import shutil
+
+    from pypdf import PdfReader
+
+    stream = io.BytesIO()
+    with open(path, "rb") as source:
+        shutil.copyfileobj(source, stream)
+    stream.write(_EMPTY_STARTXREF)
+    reader = PdfReader(stream, strict=False)
+    try:
+        pages = list(reader.pages)
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - pypdf fails on a broken page tree in many ways; the objects are listed instead
+        pages = []
+    for page in pages or _page_objects(reader):
+        try:
+            yield (page.extract_text() or "").strip()
+        except MemoryError:
+            raise
+        except Exception:  # noqa: BLE001 - a page whose content stream is damaged is skipped; the rest are read
+            yield ""
+
+
+def _page_objects(reader: Any) -> list[Any]:
+    """Every `/Page` object a rebuilt reader holds, in file order, for a file whose page tree is lost."""
+    from pypdf import PageObject
+    from pypdf.generic import DictionaryObject, IndirectObject
+
+    offsets = {number: offset for table in reader.xref.values() for number, offset in table.items()}
+    # An object inside an object stream sorts by where its stream starts, then by its place inside it.
+    places = {number: (offset, 0) for number, offset in offsets.items()}
+    places.update({number: (offsets.get(stream, 0), inner) for number, (stream, inner) in reader.xref_objStm.items()})
+    pages = []
+    for number, _place in sorted(places.items(), key=lambda entry: entry[1]):
+        try:
+            candidate = reader.get_object(number)
+        except MemoryError:
+            raise
+        except Exception:  # noqa: BLE001 - an object that cannot be parsed is not a page
+            continue
+        if isinstance(candidate, DictionaryObject) and candidate.get("/Type") == "/Page":
+            pages.append(PageObject(reader, IndirectObject(number, 0, reader)))
+    return pages

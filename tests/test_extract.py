@@ -1272,6 +1272,21 @@ def test_a_corrupt_pdf_is_a_failure_and_not_a_memory_stop(tmp_path) -> None:
     assert not isinstance(raised.value, MemoryError)
 
 
+def test_a_pdf_cut_short_keeps_the_text_that_can_be_repaired_and_warns(tmp_path: Path) -> None:
+    # PDFium cannot open a file with no trailer; pypdf rebuilds it, so the pages that survive are not lost.
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pypdf")
+    whole = make_pdf(tmp_path / "whole.pdf", ["The first page holds enough text.", "The second page holds enough text."])
+    cut = tmp_path / "cut.pdf"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size * 6 // 10])
+
+    result = extract.extract_text(cut)
+
+    assert result.text.startswith("[page 1]\nThe first page holds enough text.")
+    assert result.engine == "pypdf"
+    assert result.warnings
+
+
 def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
     # Tesseract runs under its own data limit beside the media child. A rendered A0 page
     # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.

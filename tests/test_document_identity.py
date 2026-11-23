@@ -260,6 +260,14 @@ def test_a_malformed_pdf_is_unavailable_and_raises_nothing(pdfs: Path) -> None:
     assert (result.state, result.reason) == (identity.UNAVAILABLE, identity.UNREADABLE)
 
 
+def test_a_pdf_cut_short_still_shows_the_doi_its_first_page_printed(pdfs: Path) -> None:
+    whole = make_pdf(pdfs / "whole.pdf", ["A study of harbour lanterns. 10.5555/aaa", "Second page of the study."])
+    cut = pdfs / "cut.pdf"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size * 6 // 10])
+
+    assert identity.inspect(cut, CLAIM).state == identity.PRINTED
+
+
 def test_a_pdf_with_no_text_layer_is_unavailable_for_that_reason(pdfs: Path) -> None:
     path = make_pdf(pdfs / "scan.pdf", ["", ""])
 
