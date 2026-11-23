@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+from packaging.requirements import Requirement
 from packaging.utils import (
     InvalidSdistFilename,
     InvalidWheelFilename,
@@ -164,6 +165,30 @@ def release_pypi_files(packages: tuple[str, ...], version: str) -> list[dict]:
     return [row for package in packages for row in pypi_files(package, version)]
 
 
+def compat_pyproject(original: str, name: str) -> str:
+    """The release's pyproject.toml under the compatibility distribution name."""
+    primary = tomllib.loads(original)["project"]["name"]
+    # tomllib cannot write, so the rewrite is textual and the parse below checks it.
+    # Self-referencing extras ("evermatter[image-codecs]") must name this distribution
+    # too: otherwise installing an exomem extra pulls in evermatter, and the two
+    # distributions then own the same module files.
+    rewritten, count = re.subn(r'(?m)^name = "[^"]+"', f'name = "{name}"', original, count=1)
+    rewritten = rewritten.replace(f'"{primary}[', f'"{name}[')
+    project = tomllib.loads(rewritten)["project"]
+    requirements = list(project.get("dependencies", [])) + [
+        requirement
+        for extra in project.get("optional-dependencies", {}).values()
+        for requirement in extra
+    ]
+    if (
+        count != 1
+        or project["name"] != name
+        or any(Requirement(r).name == primary for r in requirements)
+    ):
+        raise ValueError("compatibility build could not rewrite the project name")
+    return rewritten
+
+
 def _compat_build(name: str, kind: str, tag: str, directory: Path) -> None:
     # The compatibility distribution is the same source tree with only its
     # distribution name rewritten, so both wheels carry identical module files.
@@ -174,12 +199,7 @@ def _compat_build(name: str, kind: str, tag: str, directory: Path) -> None:
         source.mkdir()
         shutil.unpack_archive(archive, source)
         pyproject = source / "pyproject.toml"
-        rewritten, count = re.subn(
-            r'(?m)^name = "[^"]+"', f'name = "{name}"', pyproject.read_text(), count=1
-        )
-        if count != 1:
-            raise ValueError("compatibility build could not rewrite the project name")
-        pyproject.write_text(rewritten)
+        pyproject.write_text(compat_pyproject(pyproject.read_text(), name))
         run("uv", "build", f"--{kind}", "--out-dir", str(directory), str(source))
 
 
