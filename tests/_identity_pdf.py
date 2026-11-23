@@ -33,6 +33,7 @@ def make_pdf(
     password: str | None = None,
 ) -> Path:
     """Write a PDF whose page `n` prints `pages[n]`; an empty string leaves that page with no text layer.
+    A newline inside a page text starts a new printed line.
 
     `info` names the document information entries in lower case (`title`, `subject`). A `password`
     encrypts the file with AES-256 under that user and owner password.
@@ -46,7 +47,9 @@ def make_pdf(
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>"
             % content
         )
-        shown = b"BT /F1 10 Tf 72 720 Td (" + _escape(text) + b") Tj ET" if text else b""
+        # A newline in the text starts the next printed line, the way a wrapped paragraph breaks.
+        lines = b" T* ".join(b"(" + _escape(line) + b") Tj" for line in text.split("\n"))
+        shown = b"BT /F1 10 Tf 12 TL 72 720 Td " + lines + b" ET" if text else b""
         objects[content] = _stream(b"", shown)
     objects[2] = b"<< /Type /Pages /Kids [" + b" ".join(kids) + b"] /Count %d >>" % len(pages)
     next_number = 4 + 2 * len(pages)

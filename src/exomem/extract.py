@@ -1563,6 +1563,8 @@ def _extract_pdf(path: Path) -> ExtractResult:
     ocr_pages = 0
     scanned_pages = 0
     refused_pages: list[int] = []
+    unread_pages: list[int] = []
+    no_engine: ExtractionUnavailable | None = None
     # PDFium answers a failed allocation of its own by aborting the process, which the media worker
     # reads from the child's exit (`MediaWorker._record_allocation_abort`). The allocation that fails
     # in Python's buffers, a page raster too large for the child's limit, raises `MemoryError`, which
@@ -1590,6 +1592,12 @@ def _extract_pdf(path: Path) -> ExtractResult:
                         # is damaged, so it stays unread and the rest of the document completes.
                         refused_pages.append(number)
                         ocr_text = ""
+                    except ExtractionUnavailable as missing:
+                        # No OCR engine can read the page (no Tesseract binary, say): it stays unread, as it
+                        # does when OCR is switched off, and the pages with a text layer are still stored.
+                        unread_pages.append(number)
+                        no_engine = no_engine or missing
+                        ocr_text = ""
                     if ocr_text:
                         page_text = ocr_text
                         ocr_pages += 1
@@ -1600,8 +1608,13 @@ def _extract_pdf(path: Path) -> ExtractResult:
     if not parts and scanned_pages and not media_engines.stage_enabled("image"):
         # Completing now would store "no text" for good; waiting lets enabling OCR read it.
         raise EngineDisabled(media_engines.OCR, "the PDF has no text layer and OCR is switched off")
+    if not parts and no_engine is not None:
+        # The same wait as for a switched-off engine: no page was read, and installing OCR reads them.
+        raise no_engine
     if ocr_pages:
         warnings.append(f"{ocr_pages} scanned page(s) recovered via OCR")
+    if unread_pages:
+        warnings.append(f"OCR is unavailable for scanned page(s) {', '.join(map(str, unread_pages))}; they are not in the text")
     if refused_pages:
         warnings.append(f"OCR refused scanned page(s) {', '.join(map(str, refused_pages))}; they are not in the text")
     engine = "pdfium+tesseract" if ocr_pages else "pdfium"

@@ -3814,7 +3814,7 @@ def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
     def launch():
         launches.append(now[0])
         worker._store.claim_next()  # the child had taken the job when it died
-        return _AbortedChild(2_147_483_000 + len(launches))
+        return _AbortedChild(2_147_483_000)  # every child reuses one pid, as a busy host does
 
     monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
     monkeypatch.setattr(worker, "_launch_child", launch)

@@ -2361,6 +2361,8 @@ class MediaWorker:
                         if owns_runtime:
                             self._store.clear_worker(child_pid)
                         self._child = None
+                        # The exit is handled whole and cannot replay; a later child that reuses the pid is another exit.
+                        self._allocation_abort_of = None
                         idle_signature = None
                         gpu_hold = False
                         crashed = returncode is not None and returncode < 0 and not self._child_stopped and not aborted

@@ -78,8 +78,9 @@ def pdf_page_text(page: Any) -> str:
     """The text a PDF page's own text layer holds, stripped. A short one means a scan."""
     text_page = page.get_textpage()
     try:
-        # PDFium ends each line with CR LF; the stored text keeps a bare newline.
-        return text_page.get_text_bounded().replace("\r\n", "\n").strip()
+        # PDFium ends each line with CR LF; the stored text keeps a bare newline. It also writes a hyphen
+        # that ends a line as U+0002 and joins the lines; the stored text keeps the printed `-` and break.
+        return text_page.get_text_bounded().replace("\r\n", "\n").replace("\x02", "-\n").strip()
     finally:
         text_page.close()
 
@@ -131,18 +132,25 @@ def _page_objects(reader: Any) -> list[Any]:
     from pypdf import PageObject
     from pypdf.generic import DictionaryObject, IndirectObject
 
-    offsets = {number: offset for table in reader.xref.values() for number, offset in table.items()}
-    # An object inside an object stream sorts by where its stream starts, then by its place inside it.
-    places = {number: (offset, 0) for number, offset in offsets.items()}
-    places.update({number: (offsets.get(stream, 0), inner) for number, (stream, inner) in reader.xref_objStm.items()})
+    # The generation 65535 entries are free objects, which hold nothing.
+    places = {
+        (number, generation): (offset, 0)
+        for generation, table in reader.xref.items()
+        if generation != 65535
+        for number, offset in table.items()
+    }
+    offsets = {number: place[0] for (number, _generation), place in places.items()}
+    # An object inside an object stream has generation 0 and sorts by where its stream starts, then by its place inside it.
+    places.update({(number, 0): (offsets.get(stream, 0), inner) for number, (stream, inner) in reader.xref_objStm.items()})
     pages = []
-    for number, _place in sorted(places.items(), key=lambda entry: entry[1]):
+    for (number, generation), _place in sorted(places.items(), key=lambda entry: entry[1]):
+        reference = IndirectObject(number, generation, reader)
         try:
-            candidate = reader.get_object(number)
+            candidate = reader.get_object(reference)
         except MemoryError:
             raise
         except Exception:  # noqa: BLE001 - an object that cannot be parsed is not a page
             continue
         if isinstance(candidate, DictionaryObject) and candidate.get("/Type") == "/Page":
-            pages.append(PageObject(reader, IndirectObject(number, 0, reader)))
+            pages.append(PageObject(reader, reference))
     return pages

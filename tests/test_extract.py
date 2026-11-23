@@ -1261,6 +1261,52 @@ def test_a_scanned_page_that_tesseract_refuses_is_named_and_the_other_pages_are_
     assert result.warnings == ["OCR refused scanned page(s) 2; they are not in the text"]
 
 
+def test_a_repaired_pdf_reads_a_page_object_whose_generation_is_not_zero(tmp_path: Path) -> None:
+    # A file saved by incremental updates can hold page objects of a later generation.
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pypdf")
+    whole = make_pdf(tmp_path / "whole.pdf", ["The first page holds enough text."]).read_bytes()
+    regenerated = whole.replace(b"\n4 0 obj", b"\n4 1 obj")
+    cut = tmp_path / "cut.pdf"
+    cut.write_bytes(regenerated[: regenerated.index(b"\nxref\n")])
+
+    result = extract.extract_text(cut)
+
+    assert result.text == "[page 1]\nThe first page holds enough text."
+
+
+def test_a_missing_ocr_engine_loses_only_the_scanned_pages_and_never_blocks_the_text_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "case.pdf", ["A page with a text layer.", "", "Another page with text."])
+
+    def no_tesseract(_page) -> str:
+        raise extract.ExtractionUnavailable("Tesseract binary not found")
+
+    monkeypatch.setattr(extract, "_ocr_pdf_page", no_tesseract)
+
+    result = extract.extract_text(pdf)
+
+    assert result.text == "[page 1]\nA page with a text layer.\n\n[page 3]\nAnother page with text."
+    assert result.warnings == ["OCR is unavailable for scanned page(s) 2; they are not in the text"]
+
+
+def test_a_pdf_with_no_text_layer_waits_when_no_ocr_engine_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "scan.pdf", ["", ""])
+
+    def no_tesseract(_page) -> str:
+        raise extract.ExtractionUnavailable("Tesseract binary not found")
+
+    monkeypatch.setattr(extract, "_ocr_pdf_page", no_tesseract)
+
+    with pytest.raises(extract.ExtractionUnavailable):
+        extract.extract_text(pdf)
+
+
 def test_a_corrupt_pdf_is_a_failure_and_not_a_memory_stop(tmp_path) -> None:
     # A memory stop marks the file over budget; a damaged file must stay a failure of its own.
     pytest.importorskip("pypdfium2")

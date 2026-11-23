@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -240,6 +243,28 @@ def test_only_the_first_two_pages_are_read(pdfs: Path) -> None:
     )
 
     assert identity.inspect(path, CLAIM).state == identity.NOT_SHOWN
+
+
+def test_a_doi_wrapped_after_a_letter_and_a_hyphen_is_printed_not_a_conflict(pdfs: Path) -> None:
+    # PDFium writes a hyphen that ends a line as a control character and joins the lines.
+    path = make_pdf(pdfs / "a.pdf", ["The article is cited as 10.5555/aaa-\n123 in the journal of lanterns."])
+
+    assert identity.inspect(path, "https://doi.org/10.5555/aaa-123").state == identity.PRINTED
+
+
+def test_the_reader_child_dumps_no_core_when_pdfium_aborts_under_its_cap() -> None:
+    # PDFium aborts when an allocation fails under the cap; a core dump would write the document's bytes to disk.
+    pytest.importorskip("resource")
+    code = (
+        "import resource\n"
+        "from exomem import document_identity as d\n"
+        "d.read_pdf = lambda path: d.PdfEvidence(unavailable=str(resource.getrlimit(resource.RLIMIT_CORE)))\n"
+        "d._child([str(1 << 30)])\n"
+    )
+
+    reply = subprocess.run([sys.executable, "-c", code], input=b"x.pdf", capture_output=True, check=True)
+
+    assert json.loads(reply.stdout)["unavailable"] == "(0, 0)"
 
 
 def test_an_encrypted_pdf_is_unavailable_and_names_the_reason(pdfs: Path) -> None:
