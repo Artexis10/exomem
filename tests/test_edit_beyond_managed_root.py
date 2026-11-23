@@ -25,7 +25,7 @@ PAGE = (
 )
 
 
-def _try_edit(vault: Path, path: str) -> edit.EditError:
+def _try_edit(vault: Path, path: str, *, validate_only: bool = True) -> edit.EditError:
     with pytest.raises(edit.EditError) as raised:
         edit.edit(
             vault,
@@ -33,7 +33,7 @@ def _try_edit(vault: Path, path: str) -> edit.EditError:
             why="tighten the wording",
             old_string="flat rate",
             new_string="flat monthly rate",
-            validate_only=True,
+            validate_only=validate_only,
             today=TODAY,
         )
     return raised.value
@@ -72,10 +72,12 @@ def test_the_refusal_names_the_page_the_way_the_caller_typed_it_once_normalised(
 
 def test_a_page_beyond_the_managed_root_is_never_written(vault: Path) -> None:
     page = _write(vault, "projects/pricing.md")
+    before = page.read_bytes()
 
-    _try_edit(vault, "projects/pricing.md")
+    error = _try_edit(vault, "projects/pricing.md", validate_only=False)
 
-    assert page.read_text(encoding="utf-8") == PAGE
+    assert error.code == "OUTSIDE_GOVERNED_ROOT"
+    assert page.read_bytes() == before
 
 
 def test_a_path_that_exists_nowhere_in_the_vault_is_not_found(vault: Path) -> None:
