@@ -27,7 +27,7 @@ ANSWERS = json.loads((ROOT / "tests/fixtures/cloud-deploy/answers.json").read_te
 DEPLOY_TOKEN = "deploy-token-value-that-must-never-be-printed"  # noqa: S105 - a test value
 ALERT_URL = "https://app.example.test/api/exomem/alerts/alert-capability-that-must-never-be-printed"
 DIGEST = "sha256:" + "2" * 64
-IMAGE = f"ghcr.io/artexis10/exomem@{DIGEST}"
+IMAGE = f"ghcr.io/substrate-systems/evermatter@{DIGEST}"
 ENV = {
     "GITHUB_REPOSITORY": "example-owner/example-repo",
     "GITHUB_API_URL": "https://api.github.test",
@@ -84,8 +84,8 @@ def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str
     clock = iter(range(0, 10_000, 15))
     tools = cloud_deploy.Tools(
         transport=recorded,
-        digest=lambda tag: DIGEST,
-        attest=lambda repository, image, tag: attested,
+        image=lambda tag: IMAGE,
+        attest=lambda image, tag: attested,
         changed_paths=lambda base, head: TESTS_AND_DOCS if changed is None else changed,
         sleep=slept.append,
         monotonic=lambda: next(clock),
@@ -134,6 +134,35 @@ def test_an_unattested_digest_sets_nothing(capsys) -> None:
 
     assert (code, recorded.puts()) == (1, [])
     assert "ATTESTATION_UNVERIFIED" in log
+
+
+def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(monkeypatch) -> None:
+    # Catches a rollback to a release cut before the repository moved that no builder
+    # vouches for, a new release checked against the old repository, and an image from
+    # outside the two repositories that ever built these images.
+    commands: list[list[str]] = []
+
+    def run(command, **_):
+        commands.append(command)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cloud_deploy.subprocess, "run", run)
+
+    assert cloud_deploy.verify_attestation(f"ghcr.io/artexis10/exomem@{DIGEST}", "v0.200.0")
+    assert cloud_deploy.verify_attestation(IMAGE, "v0.201.0")
+    builders = [(command[command.index("--repo") + 1], command[command.index("--signer-workflow") + 1])
+                for command in commands]
+    assert builders == [
+        ("Artexis10/exomem", "Artexis10/exomem/.github/workflows/release-please.yml"),
+        ("substrate-systems/evermatter", "substrate-systems/evermatter/.github/workflows/release-please.yml"),
+    ]
+
+    commands.clear()
+    for foreign in (f"ghcr.io/example-owner/evermatter@{DIGEST}", f"ghcr.io/artexis10/exomem-cellctl@{DIGEST}"):
+        with pytest.raises(cloud_deploy.Stop) as refused:
+            cloud_deploy.verify_attestation(foreign, "v0.201.0")
+        assert refused.value.code == "CELL_IMAGE_REPOSITORY_UNKNOWN"
+    assert commands == []
 
 
 @pytest.mark.parametrize("answer", ["substrate_error_image_seen", "substrate_error_release_older"])

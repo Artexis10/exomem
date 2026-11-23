@@ -254,17 +254,19 @@ Lock of 30 days by default.
 
 ## Image provenance and admission
 
-**Claim.** Each released image carries a build attestation from this repository's release workflow.
+**Claim.** Each released image carries a build attestation from the release workflow of the repository that built it.
 
 **Enforced.** [release-please.yml](../.github/workflows/release-please.yml) attests each image and
 publishes the bundles as `exomem-image-*.sigstore.json` release assets. `verify_attestation` in
 [cloud_deploy.py](../infra/scripts/cloud_deploy.py) checks the attestation before it sets the cell
-image. The admission policy `exomem-cellctl-scope` in
+image. It derives the builder from the image name: `ghcr.io/substrate-systems/evermatter` from
+`substrate-systems/evermatter`, and `ghcr.io/artexis10/exomem` (every release cut before the repository
+moved) from `Artexis10/exomem`. It refuses any other image. The admission policy `exomem-cellctl-scope` in
 [cellctl.yaml](../infra/helm/platform/templates/cellctl.yaml) admits only digest-pinned images from the
 configured repository.
 
-**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/evermatter:<version>-cloud --repo
-Artexis10/evermatter --signer-workflow Artexis10/evermatter/.github/workflows/release-please.yml --source-ref
+**Check.** Run `gh attestation verify oci://ghcr.io/substrate-systems/evermatter:<version>-cloud --repo
+substrate-systems/evermatter --signer-workflow substrate-systems/evermatter/.github/workflows/release-please.yml --source-ref
 refs/tags/v<version>`.
 
 **Limits.** Admission checks no signatures, because the signature policy in

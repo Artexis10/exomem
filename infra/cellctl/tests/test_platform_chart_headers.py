@@ -1096,7 +1096,7 @@ def test_the_edge_api_server_address_is_required_and_a_single_host() -> None:
 
 ARTIFACT_BROKER_ARGS = (
     "--set", "artifactBroker.enabled=true",
-    "--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "artifactBroker.image=ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
     "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
     "--set-json", 'artifactBroker.cellIds=["aaaaaaaaaaaaaaaa"]',
 )
@@ -1601,7 +1601,19 @@ def test_cellctl_reads_the_export_settings_the_chart_sets(monkeypatch: pytest.Mo
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_the_platform_jobs_image_is_required_and_digest_pinned() -> None:
-    result = _helm_render("--set-string", "platformJobs.image=ghcr.io/artexis10/exomem:latest")
+    result = _helm_render("--set-string", "platformJobs.image=ghcr.io/substrate-systems/evermatter:latest")
+    assert result.returncode != 0
+    assert "/platformJobs/image" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_platform_jobs_image_accepts_the_digest_of_either_builder_and_no_other_repository() -> None:
+    # Catches a schema that strands a rollback to a release cut before the repository
+    # moved, or that admits an image from outside the two repositories that built it.
+    digest = "@sha256:" + "a" * 64
+    for repository in ("ghcr.io/substrate-systems/evermatter", "ghcr.io/artexis10/exomem"):
+        assert _helm_render("--set-string", f"platformJobs.image={repository}{digest}").returncode == 0, repository
+    result = _helm_render("--set-string", f"platformJobs.image=ghcr.io/example-owner/evermatter{digest}")
     assert result.returncode != 0
     assert "/platformJobs/image" in result.stderr
 
@@ -1839,7 +1851,7 @@ def test_attachable_only_fleet_receives_the_shared_cap(monkeypatch: pytest.Monke
 
 MEDIA_SLOT_ARGS = (
     "--set", "mediaSlotLease.enabled=true",
-    "--set-string", "mediaSlotLease.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "mediaSlotLease.image=ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
     "--set-string", "mediaSlotLease.endpoint=http://10.43.0.26:8768",
     "--set-json", 'mediaSlotLease.cellIds=["aaaaaaaaaaaaaaaa"]',
 )

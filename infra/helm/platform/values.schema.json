@@ -17,7 +17,7 @@
       "additionalProperties": false,
       "required": ["image"],
       "properties": {
-        "image": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"}
+        "image": {"type": "string", "pattern": "^ghcr\\.io/(substrate-systems/evermatter|artexis10/exomem)@sha256:[0-9a-f]{64}$"}
       }
     },
     "scheduler": {
