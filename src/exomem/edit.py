@@ -437,13 +437,9 @@ def edit(
 
 
 # REWRITE-SLOT 1
-    # The caller's own text, separators normalised but *not* re-rooted: this
-    # question is precisely "did they name something outside the governed
-    # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
-    # whole job is to supply the prefix `_resolve` wants and this does not.
-    given = given.strip().replace("\\", "/").lstrip("/")
-    if managed_split(given) is not None:
-        # REWRITE-SLOT 2
+    # REWRITE-SLOT 2
+    # REWRITE-SLOT 3
+        # REWRITE-SLOT 4
 def _write_target_withheld(vault_root: Path, rel: str) -> bool:
     from .governance import egress
 
@@ -452,16 +448,7 @@ def _write_target_withheld(vault_root: Path, rel: str) -> bool:
 
 def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
     """Distinguish a missing governed page from a real page outside the governed root."""
-    outside = _existing_page_outside_kb(vault_root, path)
-    if outside is not None:
-        return EditError(
-            code="OUTSIDE_GOVERNED_ROOT", missing=["path"],
-            reason=(
-                f"page exists at {outside} but is outside {managed_join('')}"
-                f" — exomem only edits governed content under {managed_join('')};"
-                " move it under the governed root or address it there"
-            ),
-        )
+    # REWRITE-SLOT 5
     return EditError(code="NOT_FOUND", missing=["path"], reason=f"file does not exist: {rel}")
 
 
@@ -512,7 +499,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).
     if not candidate.exists() or _write_target_withheld(vault_root, rel):
-        # REWRITE-SLOT 3
+        # REWRITE-SLOT 6
         raise _missing_page_error(vault_root, path, rel)
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
