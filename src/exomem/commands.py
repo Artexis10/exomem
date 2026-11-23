@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, NamedTuple, NotRequired, TypeVar, cast, get_args
@@ -100,6 +100,7 @@ from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
 from . import import_windows as import_windows_module
+from . import install_info as install_info_module
 from . import knowledge_packs as knowledge_packs_module
 from . import lifecycle_statuses as lifecycle_statuses_module
 from . import link as link_module
@@ -919,13 +920,9 @@ def op_bootstrap(
             session_unavailable = "skill_contract_mismatch"
         profile = "compact"
 
-    for _dist_name in ("evermatter", "exomem"):
-        try:
-            package_version = version(_dist_name)
-            break
-        except PackageNotFoundError:
-            continue
-    else:
+    try:
+        package_version = install_info_module.installed_version()
+    except PackageNotFoundError:
         package_version = "0+unknown"
 
     from . import envelope as envelope_module

@@ -12,45 +12,70 @@ import json
 import os
 import stat
 import sys
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import Distribution, PackageNotFoundError, distribution
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import unquote, urlsplit
 from urllib.request import url2pathname
 
 _MANIFEST_ENV = "EXOMEM_MANAGED_INSTALL_MANIFEST"
 _VALID_PROFILES = frozenset({"lean", "hybrid", "standard", "media"})
 _VALID_ROUTES = frozenset({"direct", "service"})
-#: The distribution was renamed to `evermatter`; installs under the former
-#: `exomem` name resolve through the same lookup during the compatibility window.
-_DISTRIBUTION_NAMES = ("evermatter", "exomem")
+#: The distribution names this package installs under, primary first. One build
+#: is published under both names during the rename's compatibility window
+#: (openspec rename-to-evermatter D3). Every lookup by distribution name reads
+#: this tuple, in-process and in the probes that run in another interpreter.
+DISTRIBUTION_NAMES = ("evermatter", "exomem")
 
 
-def _distribution():
-    for name in _DISTRIBUTION_NAMES:
+def installed_distribution() -> Distribution:
+    """The installed distribution of this package, under whichever name installed it.
+
+    Raises ``PackageNotFoundError`` when no name in ``DISTRIBUTION_NAMES`` is installed.
+    """
+    for name in DISTRIBUTION_NAMES:
         try:
             return distribution(name)
         except PackageNotFoundError:
             continue
-    return None
+    raise PackageNotFoundError(DISTRIBUTION_NAMES[0])
+
+
+def installed_version() -> str:
+    """The installed release; raises ``PackageNotFoundError`` when none is installed."""
+    return installed_distribution().version
+
+
+def distribution_probe(variable: str, lookup: Literal["version", "distribution"] = "version") -> str:
+    """Python source that binds ``variable`` in another interpreter, or binds None.
+
+    The target interpreter may run another release, so the probe reads only
+    ``importlib.metadata`` and imports nothing from this package.
+    """
+    return (
+        "import importlib.metadata as _metadata\n"
+        f"{variable} = None\n"
+        f"for _name in {DISTRIBUTION_NAMES!r}:\n"
+        "    try:\n"
+        f"        {variable} = _metadata.{lookup}(_name)\n"
+        "        break\n"
+        "    except _metadata.PackageNotFoundError:\n"
+        "        continue\n"
+    )
 
 
 def _package_version() -> str:
-    for name in _DISTRIBUTION_NAMES:
-        try:
-            return version(name)
-        except Exception:  # noqa: BLE001 - version reporting must not crash
-            continue
-    return "unknown"
+    try:
+        return installed_version()
+    except Exception:  # noqa: BLE001 - version reporting must not crash
+        return "unknown"
 
 
 def _install_source() -> str:
     """Classify the distribution without resolving git or importing extras."""
     try:
-        dist = _distribution()
+        dist = installed_distribution()
     except Exception:  # noqa: BLE001 - metadata may be partially installed
-        return "unknown"
-    if dist is None:
         return "unknown"
     try:
         raw = dist.read_text("direct_url.json")
@@ -64,8 +89,7 @@ def _install_source() -> str:
 def editable_project_root_status() -> tuple[Path | None, str | None]:
     """Return a validated editable root or the reason editable metadata is unusable."""
     try:
-        dist = _distribution()
-        raw = dist.read_text("direct_url.json") if dist is not None else None
+        raw = installed_distribution().read_text("direct_url.json")
     except Exception:  # noqa: BLE001 - missing metadata cannot establish an editable root
         return None, "installation metadata is unavailable"
     if not raw:
@@ -238,9 +262,17 @@ def package_identity(package_mode: str, *, role: str) -> dict:
     import exomem
 
     origin = Path(exomem.__file__).resolve()
-    dist = _distribution()
-    if dist is None:
-        raise ValueError("installed distribution metadata is unavailable")
+    dist = installed_distribution()
+    # An environment can hold metadata under both names; the identity is the one
+    # that owns the imported package.
+    for name in DISTRIBUTION_NAMES:
+        try:
+            candidate = distribution(name)
+        except PackageNotFoundError:
+            continue
+        if Path(candidate.locate_file("exomem/__init__.py")).resolve() == origin:
+            dist = candidate
+            break
     installed_origin = Path(dist.locate_file("exomem/__init__.py")).resolve()
     direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
     installed = origin == installed_origin and not direct_url.get("dir_info", {}).get("editable")

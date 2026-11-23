@@ -17,10 +17,10 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from importlib import metadata
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from .. import state_paths, vault, writer_lease
+from .. import install_info, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import admission, authority, connection, inventory, legacy, legacy_import
@@ -37,12 +37,10 @@ UPGRADE_REQUIRED = "COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED"
 
 
 def _running_release() -> str:
-    for name in ("evermatter", "exomem"):
-        try:
-            return metadata.version(name)
-        except metadata.PackageNotFoundError:
-            continue
-    return "the release running here (its installed version is unrecorded)"
+    try:
+        return install_info.installed_version()
+    except PackageNotFoundError:
+        return "the release running here (its installed version is unrecorded)"
 
 
 def coordinator_capability(fence_client=None) -> dict:

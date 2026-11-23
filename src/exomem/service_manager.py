@@ -1242,17 +1242,6 @@ def required_lifecycle_state_compatibility_ids() -> tuple[str, ...]:
     return tuple(sorted(set(recorded) & set(LIFECYCLE_IDS)))
 
 
-def _installed_release_version() -> str:
-    from importlib.metadata import PackageNotFoundError, version
-
-    for name in ("evermatter", "exomem"):
-        try:
-            return version(name)
-        except PackageNotFoundError:
-            continue
-    return "0+unknown"
-
-
 def upgrade_blocker() -> str | None:
     """Why this supervisor cannot run an upgrade on the vault's state, with the fix, or None.
 
@@ -1266,19 +1255,18 @@ def upgrade_blocker() -> str | None:
     vault = os.environ.get("EXOMEM_VAULT_PATH", "")
     if not vault or not Path(vault).is_absolute():
         return None
-    from importlib.metadata import PackageNotFoundError, version
+    from importlib.metadata import PackageNotFoundError
 
     from . import state_migration
+    from .install_info import installed_version
 
     unrecognized = state_migration.unrecognized_compatibility_ids(Path(vault))
     if not unrecognized:
         return None
-    installed_version = _installed_release_version()
-    release = (
-        f"Evermatter {installed_version}"
-        if installed_version != "0+unknown"
-        else "a release whose installed version is unrecorded"
-    )
+    try:
+        release = f"Evermatter {installed_version()}"
+    except PackageNotFoundError:
+        release = "a release whose installed version is unrecorded"
     return (f"the supervisor runs {release}, older than the vault's state, which records "
             f"{', '.join(unrecognized)}; upgrade the launcher venv offline, as \"A supervisor older than the "
             "vault's state\" in docs/managed-service-upgrades.md describes, then upgrade again; current admission "
@@ -1519,6 +1507,7 @@ class WorkerRuntime:
 
     async def inspect(self, target: dict[str, Any]) -> dict[str, Any]:
         self._verified_state_compatibility = None
+        from .install_info import distribution_probe
         from .service_upgrade import _STATE_DECLARATIONS_PROBE
 
         if not isinstance(target, dict) or not {"python", "version"} <= set(target):
@@ -1539,7 +1528,7 @@ class WorkerRuntime:
         # descriptors are, so the supervisor never has to run the migrator to
         # learn whether the target declares a migration.
         code = (
-            "import json; from importlib.metadata import version; "
+            "import json\n"
             "from exomem.service_manager import WORKER_PROTOCOL\n"
             "try:\n"
             "    from exomem.service_standby import STANDBY_ENV as _s\n"
@@ -1569,13 +1558,7 @@ class WorkerRuntime:
             + "    state_verdict = _verdict(_vault) if _vault else None\n"
             + "except Exception:\n"
             + "    state_verdict = None\n"
-            + "    _installed = None\n"
-            + "    for _n in ('evermatter', 'exomem'):\n"
-            + "        try:\n"
-            + "            _installed = version(_n)\n"
-            + "            break\n"
-            + "        except Exception:\n"
-            + "            continue\n"
+            + distribution_probe("_installed")
             + 'print(json.dumps({"version":_installed,"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
             '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
@@ -2437,7 +2420,8 @@ async def serve(
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
-    from importlib.metadata import version
+
+    from .install_info import installed_version
 
     parser = argparse.ArgumentParser(prog="python -m exomem.service_manager")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2534,10 +2518,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             supervisor = Supervisor(
                 directory,
-                initial_target={
-                    "python": args.worker_python,
-                    "version": _installed_release_version(),
-                },
+                initial_target={"python": args.worker_python, "version": installed_version()},
                 ingress=ServiceIngress(ingress_key=ingress_key),
                 runtime=runtime,
                 identity=identity,

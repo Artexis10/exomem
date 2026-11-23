@@ -17,6 +17,8 @@ import pytest
 from test_collection_store_s1_gate import ab as ab
 from test_collection_store_s1_gate import abc as abc
 
+from exomem.install_info import distribution_probe
+
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Managed lifecycle is Linux-only")
 
 
@@ -493,10 +495,10 @@ def test_target_inspection_is_read_only_and_checks_worker_protocol(tmp_path, mon
     monkeypatch.setenv("EXOMEM_STATE_ROOT", str(state))
 
     async def scenario():
-        from importlib.metadata import version
+        from exomem.install_info import installed_version
 
         runtime = module.WorkerRuntime(tmp_path / "worker.sock", host="127.0.0.1", port=8765)
-        target = {"python": sys.executable, "version": version("exomem")}
+        target = {"python": sys.executable, "version": installed_version()}
         inspected = await runtime.inspect(target)
         assert {key: inspected[key] for key in target} == target
         # The probe reports the target's own standby capability and the state
@@ -554,7 +556,7 @@ def test_real_older_reader_refused_for_copied_raw_orphan_before_worker_stop(tmp_
         python = sys.executable if compatible else interpreter
         # The probe compares against the staged interpreter's own release, so ask it.
         version = subprocess.run(
-            [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+            [python, "-I", "-c", distribution_probe("release") + "print(release)"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         target = await runtime.inspect({"python": python, "version": version})
@@ -603,7 +605,7 @@ def _store_reader(tmp_path, ceiling):
 
 def _release_of(python):
     return subprocess.run(
-        [python, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+        [python, "-I", "-c", distribution_probe("release") + "print(release)"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
 

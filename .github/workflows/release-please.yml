@@ -400,8 +400,12 @@ jobs:
           python - <<'PY'
           import glob
           import sys
+          import tomllib
 
-          [wheel] = glob.glob("dist/*.whl")
+          # dist/ holds one wheel per published distribution name; smoke the primary one.
+          with open("pyproject.toml", "rb") as fh:
+              primary = tomllib.load(fh)["project"]["name"]
+          [wheel] = glob.glob(f"dist/{primary}-*.whl")
           sys.path.insert(0, wheel)
           from exomem.tool_surface import contract, sha256
 

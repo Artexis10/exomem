@@ -21,9 +21,11 @@ import importlib.util
 import json
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+
+from . import install_info
 
 # Import-name -> extra it belongs to. `find_spec` does not execute module code,
 # so probing these stays cheap even for the heavy ML packages.
@@ -39,12 +41,10 @@ _ACCEL_TAGS = ("+cu", "+rocm", "+xpu")
 
 
 def _package_version() -> str:
-    for name in ("evermatter", "exomem"):
-        try:
-            return version(name)
-        except Exception:  # noqa: BLE001 — try the compatibility name
-            continue
-    return "unknown"
+    try:
+        return install_info.installed_version()
+    except Exception:  # noqa: BLE001 — provenance must never raise
+        return "unknown"
 
 
 def _install_source_and_root() -> tuple[str, Path | None]:
@@ -55,15 +55,10 @@ def _install_source_and_root() -> tuple[str, Path | None]:
     rather than guessing, since a wrong answer here is what caused the original
     confusion.
     """
-    dist = None
-    for name in ("evermatter", "exomem"):
-        try:
-            dist = distribution(name)
-            break
-        except PackageNotFoundError:
-            continue
-        except Exception:  # noqa: BLE001
-            return "unknown", None
+    try:
+        dist = install_info.installed_distribution()
+    except Exception:  # noqa: BLE001
+        return "unknown", None
 
     try:
         raw = dist.read_text("direct_url.json")

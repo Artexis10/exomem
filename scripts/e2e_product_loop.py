@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import traceback
 import urllib.error
 import urllib.request
@@ -3405,7 +3406,9 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=REPO_ROOT,
             timeout=min(args.budget_seconds, 120),
         )
-        wheels = sorted(dist.glob("exomem-*.whl"))
+        # `uv build` names the wheel after the checkout's project.
+        project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+        wheels = sorted(dist.glob(f"{project}-*.whl"))
         if not wheels:
             raise RuntimeError("uv build produced no wheel")
         venv = tmp / "venv"

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem.install_info import DISTRIBUTION_NAMES
+
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="managed service operator is Linux-only")
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,8 +35,8 @@ def _wheel(
     signature: bool = False,
     compatibility: bool = False,
 ) -> Path:
-    """Build the smallest installable local Evermatter wheel for staging tests."""
-    dist_info = f"exomem-{version}.dist-info"
+    """Build the smallest installable local wheel of this package for staging tests."""
+    dist_info = f"{name.replace('-', '_')}-{version}.dist-info"
     path.parent.mkdir(parents=True, exist_ok=True)
     members = {
         "exomem/__init__.py": b"",
@@ -770,7 +772,7 @@ def test_wheel_package_mismatch_refuses_staging(tmp_path: Path) -> None:
     from exomem import service_upgrade
 
     wheel = _wheel(tmp_path / "exomem-9.9.9-py3-none-any.whl", name="not-exomem")
-    with pytest.raises(RuntimeError, match="not an Evermatter wheel"):
+    with pytest.raises(RuntimeError, match="not an evermatter or exomem wheel"):
         service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "", wheel, "a" * 40)
     assert list((tmp_path / "releases").iterdir()) == []
 
@@ -799,12 +801,14 @@ def test_wheel_source_mutation_refuses_snapshot(tmp_path: Path, monkeypatch: pyt
         service_upgrade._snapshot_wheel(wheel, release)
 
 
+# The release builds one wheel under each distribution name; a candidate of either stages.
+@pytest.mark.parametrize("name", DISTRIBUTION_NAMES)
 def test_wheel_staging_snapshots_provenance_before_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     from exomem import service_upgrade
 
-    wheel = _wheel(tmp_path / "wheel source" / "exomem-9.9.9-py3-none-any.whl", compatibility=True)
+    wheel = _wheel(tmp_path / "wheel source" / f"{name}-9.9.9-py3-none-any.whl", name=name, compatibility=True)
     original_mode = wheel.stat().st_mode
     revision = "a" * 40
     monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "uv-cache"))
@@ -830,7 +834,7 @@ def test_wheel_staging_snapshots_provenance_before_handoff(
         "artifact_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
         "source_revision": revision,
         "original_artifact_name": wheel.name,
-        "installed_name": "exomem",
+        "installed_name": name,
         "installed_version": "9.9.9",
         "installed_python": target["python"],
     }

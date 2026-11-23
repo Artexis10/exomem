@@ -20,10 +20,10 @@ import shutil
 import subprocess
 import tomllib
 import zipfile
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import workflow_skills
+from . import install_info, workflow_skills
 from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
@@ -53,15 +53,12 @@ def release_version() -> str:
         project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
     except (OSError, tomllib.TOMLDecodeError):
         project = {}
-    if project.get("name") in ("evermatter", "exomem") and project.get("version"):
+    if project.get("name") in install_info.DISTRIBUTION_NAMES and project.get("version"):
         return str(project["version"])
     try:
-        return version("evermatter")
+        return install_info.installed_version()
     except PackageNotFoundError:
-        try:
-            return version("exomem")
-        except PackageNotFoundError:
-            return RELEASE_PLACEHOLDER
+        return RELEASE_PLACEHOLDER
 
 
 def render_shipped_markdown(text: str) -> str:
@@ -256,12 +253,10 @@ def _write_generated(path: Path, payload: dict) -> None:
 
 
 def _package_version() -> str:
-    for distribution in ("evermatter", "exomem"):
-        try:
-            return version(distribution)
-        except PackageNotFoundError:
-            continue
-    return "0+unknown"
+    try:
+        return install_info.installed_version()
+    except PackageNotFoundError:
+        return "0+unknown"
 
 
 def _plugin_manifest() -> dict:
