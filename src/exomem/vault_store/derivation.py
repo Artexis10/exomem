@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -26,7 +26,7 @@ from pathlib import Path
 from sqlite3 import Connection, OperationalError
 from typing import TYPE_CHECKING
 
-from .. import find, media_capacity, writer_lease
+from .. import find, foreground_priority, media_capacity, writer_lease
 from ..cli_ops import OpError
 from ..collection_store import connection
 from . import derive, mode, read, resident_catalogue
@@ -51,12 +51,27 @@ BATCH_PAGES = 32
 RETRY_SECONDS = 1.0
 MAX_RETRY_SECONDS = 300.0
 
-#: The seconds that a writing request derives its own intents for before it acknowledges with its
-#: derived state pending; the store thread derives the rest before its next request.
+#: The seconds that a writing request that derives its own intents (``committed``) spends on them
+#: before it acknowledges with its derived state pending; the store thread derives the rest before
+#: its next request.
 OWN_DERIVATION_SECONDS = 30.0
+#: The longest that a read waits for the derivation of the writes acknowledged before it began
+#: (``caught_up``); its request budget may cut the wait shorter.
+READ_WAIT_SECONDS = 1.0
+#: The first and the longest pause between two looks at the queue by a waiting reader. A drain in
+#: this process wakes the reader at once; one in another process is seen only at a look.
+_LOOK_FIRST_SECONDS, _LOOK_MOST_SECONDS = 0.01, 0.1
 
 #: The vault whose derived rows this context writes without the vault mutation boundary.
 _SCOPE: ContextVar[Path | None] = ContextVar("vault_store_derivation_scope", default=None)
+#: Whether the commits of this context derive their rows before their request acknowledges
+#: (``own_rows``).
+_OWN_ROWS: ContextVar[bool] = ContextVar("vault_store_derivation_own_rows", default=False)
+#: Signalled after each drain batch commits and after each failure is recorded, so a reader waiting
+#: in this process (``caught_up``) looks again at once. ``_TURNS`` counts the signals, so a reader
+#: that looked just before one does not sleep through it.
+_DERIVED = threading.Condition()
+_TURNS = 0
 
 #: Per vault, the commits whose resident caches still stand where the commit found them, in order:
 #: ``(before, after, paths)``. The next drain moves the caches across them (``_advance``).
@@ -116,13 +131,30 @@ def enqueue(
     )
 
 
+@contextmanager
+def own_rows() -> Iterator[None]:
+    """Derive the rows of the commits in this block before their request acknowledges.
+
+    For a governed trash or recovery, which settles its receipt from those rows after the release
+    (``governed.settle``): its reply then reports the rows that its receipt was settled from.
+    """
+    token = _OWN_ROWS.set(True)
+    try:
+        yield
+    finally:
+        _OWN_ROWS.reset(token)
+
+
 def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tuple[str, ...]) -> None:
     """Follow a canonical commit: keep its caches current and derive its intents after the boundary.
 
     The resident catalogue moves to the commit's triple at once, since the commit wrote no catalogue
-    row. The resolver and corpus contexts move, and the intents are derived, once the writing request
-    has released the vault mutation boundary and before it acknowledges. A caller with no boundary
-    and no request (a test, an offline route) derives them here.
+    row. A request on the store thread acknowledges at the commit: the thread derives the intents,
+    and moves the resolver and corpus contexts, before it takes other work, and a reader waits for
+    them (``caught_up``). Any other request derives them once it has released the vault mutation
+    boundary and before it acknowledges, as do a governed transition (``own_rows``) and an upload,
+    whose rows draw on the room that its session reserved. A caller with no boundary and no request
+    (a test, an offline route) derives them here.
     """
     root = Path(writer.root)
     # First, so that nothing below can strand the intents: should the request end before its follow
@@ -133,6 +165,11 @@ def committed(writer: CollectionWriter, before: tuple, after: tuple, paths: tupl
         _UNADVANCED.setdefault(root, []).append((before, after, tuple(paths)))
     # An upload's derived rows draw on the room that its session reserved, as its page did.
     credit = media_capacity.held_commit_credit()
+    if credit is None and not _OWN_ROWS.get() and writer_lease.terminal_follows():
+        from ..collection_store import runtime
+
+        if runtime.on_store_thread(root):
+            return
 
     def follow() -> list[object]:
         try:
@@ -284,15 +321,69 @@ def _queue_rows(conn: Connection, sql: str, parameters: tuple = ()) -> list[tupl
         return None
 
 
-def lag(conn: Connection) -> tuple[int, int]:
-    """The pending and the failed intents at ``conn``'s snapshot, for a reader's notice."""
+#: The whole seconds since the oldest intent was queued, as SQLite's own clock reads them.
+_OLDEST_AGE = (
+    "CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', MIN(queued_at)) AS INTEGER)"
+)
+
+
+def lag(conn: Connection) -> tuple[int, int, int | str | None]:
+    """The pending and the failed intents at ``conn``'s snapshot, and the age in seconds of the
+    oldest one (None when none waits), for a reader's notice."""
     rows = _queue_rows(
         conn,
-        "SELECT COUNT(*) FILTER (WHERE attempts < ?), COUNT(*) FILTER (WHERE attempts >= ?) "
-        "FROM store_derivation_queue",
+        "SELECT COUNT(*) FILTER (WHERE attempts < ?), COUNT(*) FILTER (WHERE attempts >= ?), "
+        f"{_OLDEST_AGE} FROM store_derivation_queue",
         (ATTEMPTS, ATTEMPTS),
     )
-    return (0, 0) if rows is None else rows[0]
+    if rows is None:
+        return 0, 0, None
+    pending, failed, oldest = rows[0]
+    return pending, failed, _age(oldest)
+
+
+def _age(oldest: int | None) -> int | str | None:
+    # A negative age is a clock that went backwards: it is not known, and it is never a zero.
+    return mode.UNKNOWN if oldest is not None and oldest < 0 else oldest
+
+
+def holds_back(conn: Connection, revision: int) -> bool:
+    """Whether an intent at or below ``revision`` is still pending at ``conn``'s snapshot.
+
+    One indexed read. An intent with a recorded failure holds no reader back: its retry is a second
+    or more away, and status and the notice report it.
+    """
+    rows = _queue_rows(
+        conn,
+        "SELECT 1 FROM store_derivation_queue WHERE revision <= ? AND failed_code IS NULL LIMIT 1",
+        (revision,),
+    )
+    return bool(rows)
+
+
+def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
+    """Wait until ``still_held_back()`` is False, for at most ``seconds``; whether it became False.
+
+    The caller holds no store connection while it waits, and ``still_held_back`` opens one only for
+    its look. A drain in this process wakes the wait at once; a drain in another process is seen at
+    the next look, after a pause that doubles up to ``_LOOK_MOST_SECONDS``. The waiting request lets
+    the store thread run meanwhile, which a foreground request otherwise parks.
+    """
+    deadline = time.monotonic() + seconds
+    pause = _LOOK_FIRST_SECONDS
+    with foreground_priority.awaiting_bulk():
+        while True:
+            with _DERIVED:
+                turn = _TURNS
+            if not still_held_back():
+                return True
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            with _DERIVED:
+                if _TURNS == turn:
+                    _DERIVED.wait(min(pause, left))
+            pause = min(pause * 2, _LOOK_MOST_SECONDS)
 
 
 def underived(conn: Connection) -> dict[str, bytes | None]:
@@ -323,8 +414,7 @@ def figures(conn: Connection) -> dict:
     """The derived state for status: counts and the oldest age, never a path."""
     pending, failed, oldest = conn.execute(
         "SELECT COUNT(*) FILTER (WHERE attempts < ?), COUNT(*) FILTER (WHERE attempts >= ?), "
-        "CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', MIN(queued_at)) AS INTEGER) "
-        "FROM store_derivation_queue",
+        f"{_OLDEST_AGE} FROM store_derivation_queue",
         (ATTEMPTS, ATTEMPTS),
     ).fetchone()
     by_code = dict(conn.execute(
@@ -337,8 +427,7 @@ def figures(conn: Connection) -> dict:
         "derived_pending": pending,
         "derived_failed": failed,
         "derived_failed_by_code": by_code,
-        # A negative age is a clock that went backwards: it is not known, and it is never a zero.
-        "oldest_derivation_age_seconds": mode.UNKNOWN if oldest is not None and oldest < 0 else oldest,
+        "oldest_derivation_age_seconds": _age(oldest),
     }
 
 
@@ -495,7 +584,15 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
     # After the transaction: a reader that meets the advanced catalogue must see this revision.
     resident_catalogue.remember(root, after, delta.catalogue)
     find.on_store_commit(root, before, after, delta.entries, delta.deleted, ())
+    _signal()
     return True
+
+
+def _signal() -> None:
+    global _TURNS
+    with _DERIVED:
+        _TURNS += 1
+        _DERIVED.notify_all()
 
 
 def _stored(tx: Connection, paths: list[str]) -> set[str]:
@@ -532,5 +629,7 @@ def _record_failure(writer: CollectionWriter, batch: list[_Intent], error: Excep
         # Still due, it would be taken again at once: this drain ends, and the next one retries it.
         result.stopped = True
         return
+    # A recorded failure no longer holds a reader back.
+    _signal()
     if attempts == ATTEMPTS:
         result.failed += 1

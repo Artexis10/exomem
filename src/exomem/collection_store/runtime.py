@@ -1306,6 +1306,13 @@ def _server(root):
         return server
 
 
+def on_store_thread(vault_root) -> bool:
+    """Whether this thread is the store thread of ``vault_root``, which drains its derivation queue
+    before it takes any other work (``StoreServer._derive_owed``). A plain dict read."""
+    server = _SERVERS.get(Path(vault_root).resolve())
+    return server is not None and server.thread is threading.current_thread()
+
+
 def notify_view_change(root, path, *, destination=None, directory=False):
     """Wake an existing store thread with a filesystem hint, without opening or calling it."""
     watched_root = Path(root)
