@@ -1335,7 +1335,7 @@ def test_a_pdf_cut_short_keeps_the_text_that_can_be_repaired_and_warns(tmp_path:
 
 def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
     # Tesseract runs under its own data limit beside the media child. A rendered A0 page
-    # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.
+    # at 200 dpi is about 59 MB as gray; a child that keeps it during OCR holds two budgets.
     pdfium = pytest.importorskip("pypdfium2")
     import gc
     import weakref
@@ -1348,7 +1348,9 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
 
     def render_page(page, *args, **kwargs):
         bitmap = render(page, *args, **kwargs)
-        rendered.append(weakref.ref(bitmap))
+        # The pixels live in the buffer, which a Pillow image of the page may still share
+        # after the bitmap wrapper is gone, so the buffer is what must be released.
+        rendered.append(weakref.ref(bitmap.buffer))
         return bitmap
 
     alive_when_tesseract_starts: list[int] = []

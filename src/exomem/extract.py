@@ -47,7 +47,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -1367,7 +1367,8 @@ def _ocr_image(path: Path) -> ExtractResult:
             image = image_codecs.open_image(path)
         except ImportError as error:
             raise ExtractionUnavailable(str(error)) from error
-        with image as img:
+        # Pillow's `with image` closes the file, not the decoded pixels, so `closing` does.
+        with closing(image) as img:
             _save_png_for_ocr(img, source)
         # The decoded image is closed before Tesseract starts: each process has its own
         # VmData limit, so holding both would let one job take two budgets of the cell.
@@ -1905,8 +1906,12 @@ def _render_pdf_page(page):
     PDFium draws on an opaque white page, so no alpha flattening is needed. A gray bitmap is one byte a
     pixel and Pillow shares its buffer. An RGB bitmap is three bytes a pixel, and Pillow stores RGB at
     four, so its copy raised the peak to seven. Choosing the format, not PDFium's grayscale flag, also
-    spares the converted copy of an embedded scan that the flag makes PDFium hold. The bitmap is freed
-    when the block ends, after the image.
+    spares the converted copy of an embedded scan that the flag makes PDFium hold.
+
+    The block releases the raster. pypdfium2 allocates the buffer in Python, so it lives until the
+    image and the bitmap wrapper are both gone, and `bitmap.close()` frees only PDFium's handle. Pillow's
+    `with image` does not release a raster, so `closing` does. The image closes before the bitmap, which
+    is also the safe order for a bitmap whose buffer PDFium owns.
     """
     import pypdfium2 as pdfium
 
@@ -1914,7 +1919,7 @@ def _render_pdf_page(page):
         scale=_PDF_OCR_DPI / _PDF_POINTS_PER_INCH, force_bitmap_format=pdfium.raw.FPDFBitmap_Gray
     )
     try:
-        with bitmap.to_pil() as image:
+        with closing(bitmap.to_pil()) as image:
             yield image
     finally:
         bitmap.close()
