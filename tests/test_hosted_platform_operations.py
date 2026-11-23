@@ -142,10 +142,12 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'GO_VERSION: "1.26.5"' in workflow
     assert "go-version: ${{ env.GO_VERSION }}" in workflow
     assert "GO_VERSION=1.26.5" in tool_versions
+    trivy_install = (ROOT / "scripts/ci-install-trivy.sh").read_text(encoding="utf-8")
     assert "go install github.com/aquasecurity/trivy" not in workflow
-    assert "https://github.com/aquasecurity/trivy/releases/download/" in workflow
+    assert "scripts/ci-install-trivy.sh" in workflow
+    assert "https://github.com/aquasecurity/trivy/releases/download/" in trivy_install
+    assert "TRIVY_LINUX_AMD64_SHA256" in trivy_install
     assert 'install -d -m 0755 "$HOME/.local/bin"' in workflow
-    assert "${TRIVY_LINUX_AMD64_SHA256}" in workflow
     assert (
         "TRIVY_LINUX_AMD64_SHA256=bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
     ) in tool_versions
