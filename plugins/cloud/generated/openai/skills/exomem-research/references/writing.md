@@ -58,7 +58,7 @@ or generic connection as authority to create an entity, type, or edge.
 
 ## Agent write loop
 
-Use this loop whenever a durable conclusion should enter Exomem:
+Use this loop whenever a durable conclusion should enter Evermatter:
 
 1. Partition durable candidates by retrieval question, subject/domain, episode,
    and epistemic role before choosing destinations. Reuse current relevant
@@ -330,7 +330,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    artifact **is** (`article`, `session`, `research-report`, `invoice-receipt`,
    `field-notebook`, …) and `domain` is what it is **about** (`travel`, `health`,
    `software`, …). Both are **open vocabularies** — name the label you actually
-   mean even when Exomem has not seen it, and it registers itself. Add `projects`
+   mean even when Evermatter has not seen it, and it registers itself. Add `projects`
    for the work the source serves; a source may serve several, and projects never
    change where it is filed.
    The path is a projection of that metadata, `Sources/<Kind>/[<Domain>/]` —
@@ -447,7 +447,7 @@ Registered relations become traversable edges while clean aliases remain authori
 labels. A registry-marked generic relation that an older page already holds establishes connectivity,
 not typed specificity; an all-generic advisory asks for meaning review without forcing an edge.
 
-**The writer normalizes on your behalf.** Exomem's writers run every wikilink
+**The writer normalizes on your behalf.** Evermatter's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.

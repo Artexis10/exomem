@@ -1,4 +1,4 @@
-<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
+<!-- exomem-semantic-authoring:v12 sha256:c7b7cd67fb4b4c8d67ed13f82cebb1956c54533f527ec025eeef45f5422154d0 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.

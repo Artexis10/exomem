@@ -2,7 +2,7 @@
 name: exomem-defrag
 description: Reconcile duplicate, stale, or conflicting Evermatter memory while preserving history through review, merge, or supersession.
 metadata:
-  skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
+  skill_contract: 5ee94d5e0e4e1919f24f352d3ad9f2788ec1ded8727a6e6ef8cf52904b52672d
   version: "0.1.0"
 ---
 
@@ -97,7 +97,7 @@ Only mutate when the correct action is clear. Use supersession for meaningful ch
 ## Mistakes to avoid
 Do not auto-delete memory. Do not treat semantic proximity as contradiction by itself. Do not merge notes that answer different questions.
 
-<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
+<!-- exomem-semantic-authoring:v12 sha256:c7b7cd67fb4b4c8d67ed13f82cebb1956c54533f527ec025eeef45f5422154d0 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
