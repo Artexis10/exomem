@@ -4,6 +4,11 @@
 
 The fastest way to try exomem with Claude Code: no `uv`, no Python, no clone.
 
+> **Images moved.** Releases publish to `ghcr.io/substrate-systems/evermatter`.
+> The old `ghcr.io/artexis10/exomem` tags stop at the last release before the
+> rename and receive no updates. Change the image name in your `docker run`
+> lines and compose files to keep upgrading.
+
 ```bash
 claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```

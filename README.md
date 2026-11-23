@@ -111,14 +111,16 @@ hook system, so capture there is skill-driven rather than automatic.
 ## Set it up in 5 minutes
 
 ```bash
-uv tool install evermatter   # or: pip install evermatter
+uv tool install evermatter==<version>
 exomem setup --vault "/path/to/your/Obsidian"
 ```
 
-Re-running the one-line installer upgrades an existing uv-tool install instead
-of leaving an older `exomem` command on PATH. `exomem --version --json` is a
-model-free provenance check, so it also works in the intentional lean CLI paired
-with a fuller managed service.
+Replace `<version>` with the newest release on
+[PyPI](https://pypi.org/project/evermatter/). An existing install named `exomem`
+keeps upgrading under that name: rerun the one-line installer or
+`uv tool upgrade exomem`, and do not install `evermatter` beside it.
+`exomem --version --json` is a model-free provenance check, so it also works in
+the intentional lean CLI paired with a fuller managed service.
 
 One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
@@ -278,6 +280,11 @@ standing instruction.
 
 <details>
 <summary>Docker (no Python on the host)</summary>
+
+> **Images moved.** Releases publish to `ghcr.io/substrate-systems/evermatter`.
+> The old `ghcr.io/artexis10/exomem` tags stop at the last release before the
+> rename and receive no updates. Change the image name in your `docker run`
+> lines and compose files to keep upgrading.
 
 ```bash
 claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
