@@ -37,10 +37,12 @@ UPGRADE_REQUIRED = "COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED"
 
 
 def _running_release() -> str:
-    try:
-        return metadata.version("exomem")
-    except metadata.PackageNotFoundError:
-        return "the release running here (its installed version is unrecorded)"
+    for name in ("evermatter", "exomem"):
+        try:
+            return metadata.version(name)
+        except metadata.PackageNotFoundError:
+            continue
+    return "the release running here (its installed version is unrecorded)"
 
 
 def coordinator_capability(fence_client=None) -> dict:

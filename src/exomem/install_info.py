@@ -12,7 +12,7 @@ import json
 import os
 import stat
 import sys
-from importlib.metadata import distribution, version
+from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -21,20 +21,36 @@ from urllib.request import url2pathname
 _MANIFEST_ENV = "EXOMEM_MANAGED_INSTALL_MANIFEST"
 _VALID_PROFILES = frozenset({"lean", "hybrid", "standard", "media"})
 _VALID_ROUTES = frozenset({"direct", "service"})
+#: The distribution was renamed to `evermatter`; installs under the former
+#: `exomem` name resolve through the same lookup during the compatibility window.
+_DISTRIBUTION_NAMES = ("evermatter", "exomem")
+
+
+def _distribution():
+    for name in _DISTRIBUTION_NAMES:
+        try:
+            return distribution(name)
+        except PackageNotFoundError:
+            continue
+    return None
 
 
 def _package_version() -> str:
-    try:
-        return version("exomem")
-    except Exception:  # noqa: BLE001 - version reporting must not crash
-        return "unknown"
+    for name in _DISTRIBUTION_NAMES:
+        try:
+            return version(name)
+        except Exception:  # noqa: BLE001 - version reporting must not crash
+            continue
+    return "unknown"
 
 
 def _install_source() -> str:
     """Classify the distribution without resolving git or importing extras."""
     try:
-        dist = distribution("exomem")
+        dist = _distribution()
     except Exception:  # noqa: BLE001 - metadata may be partially installed
+        return "unknown"
+    if dist is None:
         return "unknown"
     try:
         raw = dist.read_text("direct_url.json")
@@ -48,7 +64,8 @@ def _install_source() -> str:
 def editable_project_root_status() -> tuple[Path | None, str | None]:
     """Return a validated editable root or the reason editable metadata is unusable."""
     try:
-        raw = distribution("exomem").read_text("direct_url.json")
+        dist = _distribution()
+        raw = dist.read_text("direct_url.json") if dist is not None else None
     except Exception:  # noqa: BLE001 - missing metadata cannot establish an editable root
         return None, "installation metadata is unavailable"
     if not raw:
@@ -221,7 +238,9 @@ def package_identity(package_mode: str, *, role: str) -> dict:
     import exomem
 
     origin = Path(exomem.__file__).resolve()
-    dist = distribution("exomem")
+    dist = _distribution()
+    if dist is None:
+        raise ValueError("installed distribution metadata is unavailable")
     installed_origin = Path(dist.locate_file("exomem/__init__.py")).resolve()
     direct_url = json.loads(dist.read_text("direct_url.json") or "{}")
     installed = origin == installed_origin and not direct_url.get("dir_info", {}).get("editable")

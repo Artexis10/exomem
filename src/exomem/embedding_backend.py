@@ -77,7 +77,7 @@ _ARTIFACT_MANIFEST = "artifact.json"
 #: asset name (`artifact_asset_name`) is appended to. Empty or ``off`` disables
 #: the download, and so does `HF_HUB_OFFLINE`; the host then builds locally.
 ARTIFACT_URL_ENV = "EXOMEM_MODEL_ARTIFACT_URL"
-DEFAULT_ARTIFACT_URL = "https://github.com/Artexis10/evermatter/releases/download/served-models"
+DEFAULT_ARTIFACT_URL = "https://github.com/Artexis10/exomem/releases/download/served-models"
 _URL_OFF = {"", "0", "off", "none", "false", "no"}
 #: A published asset is bounded; a response past this is not an artefact.
 _MAX_ASSET_BYTES = 2 << 30

@@ -1242,6 +1242,17 @@ def required_lifecycle_state_compatibility_ids() -> tuple[str, ...]:
     return tuple(sorted(set(recorded) & set(LIFECYCLE_IDS)))
 
 
+def _installed_release_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    for name in ("evermatter", "exomem"):
+        try:
+            return version(name)
+        except PackageNotFoundError:
+            continue
+    return "0+unknown"
+
+
 def upgrade_blocker() -> str | None:
     """Why this supervisor cannot run an upgrade on the vault's state, with the fix, or None.
 
@@ -1262,10 +1273,12 @@ def upgrade_blocker() -> str | None:
     unrecognized = state_migration.unrecognized_compatibility_ids(Path(vault))
     if not unrecognized:
         return None
-    try:
-        release = f"Evermatter {version('exomem')}"
-    except PackageNotFoundError:
-        release = "a release whose installed version is unrecorded"
+    installed_version = _installed_release_version()
+    release = (
+        f"Evermatter {installed_version}"
+        if installed_version != "0+unknown"
+        else "a release whose installed version is unrecorded"
+    )
     return (f"the supervisor runs {release}, older than the vault's state, which records "
             f"{', '.join(unrecognized)}; upgrade the launcher venv offline, as \"A supervisor older than the "
             "vault's state\" in docs/managed-service-upgrades.md describes, then upgrade again; current admission "
@@ -1556,7 +1569,14 @@ class WorkerRuntime:
             + "    state_verdict = _verdict(_vault) if _vault else None\n"
             + "except Exception:\n"
             + "    state_verdict = None\n"
-            + 'print(json.dumps({"version":version("exomem"),"protocol":WORKER_PROTOCOL,'
+            + "    _installed = None\n"
+            + "    for _n in ('evermatter', 'exomem'):\n"
+            + "        try:\n"
+            + "            _installed = version(_n)\n"
+            + "            break\n"
+            + "        except Exception:\n"
+            + "            continue\n"
+            + 'print(json.dumps({"version":_installed,"protocol":WORKER_PROTOCOL,'
             '"standby":standby,"state_descriptors":descriptors,'
             '"supported_state_compatibility":compatibility,"store_schema":store_schema,'
             '"offline_migrations":migrations,"state_verdict":state_verdict,'
@@ -2514,7 +2534,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             supervisor = Supervisor(
                 directory,
-                initial_target={"python": args.worker_python, "version": version("exomem")},
+                initial_target={
+                    "python": args.worker_python,
+                    "version": _installed_release_version(),
+                },
                 ingress=ServiceIngress(ingress_key=ingress_key),
                 runtime=runtime,
                 identity=identity,

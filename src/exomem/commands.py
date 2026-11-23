@@ -919,9 +919,13 @@ def op_bootstrap(
             session_unavailable = "skill_contract_mismatch"
         profile = "compact"
 
-    try:
-        package_version = version("exomem")
-    except PackageNotFoundError:
+    for _dist_name in ("evermatter", "exomem"):
+        try:
+            package_version = version(_dist_name)
+            break
+        except PackageNotFoundError:
+            continue
+    else:
         package_version = "0+unknown"
 
     from . import envelope as envelope_module

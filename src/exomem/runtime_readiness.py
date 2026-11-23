@@ -364,7 +364,14 @@ def package_release() -> str:
     global _package_release
     if _package_release is None:
         try:
-            _package_release = version("exomem")
+            for name in ("evermatter", "exomem"):
+                try:
+                    _package_release = version(name)
+                    break
+                except Exception:  # noqa: BLE001 - try the compatibility name
+                    continue
+            else:
+                return "0+unknown"
         except Exception:  # noqa: BLE001 - metadata failure must become diagnostic state
             return "0+unknown"
     return _package_release

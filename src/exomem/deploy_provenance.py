@@ -39,10 +39,12 @@ _ACCEL_TAGS = ("+cu", "+rocm", "+xpu")
 
 
 def _package_version() -> str:
-    try:
-        return version("exomem")
-    except Exception:  # noqa: BLE001 — provenance must never raise
-        return "unknown"
+    for name in ("evermatter", "exomem"):
+        try:
+            return version(name)
+        except Exception:  # noqa: BLE001 — try the compatibility name
+            continue
+    return "unknown"
 
 
 def _install_source_and_root() -> tuple[str, Path | None]:
@@ -53,12 +55,15 @@ def _install_source_and_root() -> tuple[str, Path | None]:
     rather than guessing, since a wrong answer here is what caused the original
     confusion.
     """
-    try:
-        dist = distribution("exomem")
-    except PackageNotFoundError:
-        return "unknown", None
-    except Exception:  # noqa: BLE001
-        return "unknown", None
+    dist = None
+    for name in ("evermatter", "exomem"):
+        try:
+            dist = distribution(name)
+            break
+        except PackageNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001
+            return "unknown", None
 
     try:
         raw = dist.read_text("direct_url.json")

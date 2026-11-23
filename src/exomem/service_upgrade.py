@@ -138,18 +138,36 @@ _STATE_DECLARATIONS_PROBE = (
     "        migrations = None\n"
 )
 
+_INSTALLED_VERSION_PROBE = (
+    "_installed_version = None\n"
+    "for _n in ('evermatter', 'exomem'):\n"
+    "    try:\n"
+    "        _installed_version = m.version(_n)\n"
+    "        break\n"
+    "    except Exception:\n"
+    "        continue\n"
+)
+
 _TARGET_PROBE = (
     "import json; import importlib.metadata as m\n"
     + _STATE_DECLARATIONS_PROBE
-    + 'print(json.dumps({"version": m.version("exomem"), "state_descriptors": descriptors, '
+    + _INSTALLED_VERSION_PROBE
+    + 'print(json.dumps({"version": _installed_version, "state_descriptors": descriptors, '
     '"supported_state_compatibility": compatibility}))'
 )
 
 _WHEEL_TARGET_PROBE = (
     "import base64; import csv; import hashlib; import importlib.metadata as m; import json\n"
     + _STATE_DECLARATIONS_PROBE
+    + _INSTALLED_VERSION_PROBE
     + "try:\n"
-    '    distribution = m.distribution("exomem")\n'
+    "    distribution = None\n"
+    "    for _n in ('evermatter', 'exomem'):\n"
+    "        try:\n"
+    "            distribution = m.distribution(_n)\n"
+    "            break\n"
+    "        except Exception:\n"
+    "            continue\n"
     '    name = distribution.metadata["Name"]\n'
     '    raw_direct_url = distribution.read_text("direct_url.json")\n'
     "    direct_url = json.loads(raw_direct_url) if raw_direct_url else None\n"
@@ -168,7 +186,7 @@ _WHEEL_TARGET_PROBE = (
     "    name = None\n"
     "    direct_url = None\n"
     "    record_hashes = None\n"
-    'print(json.dumps({"version": m.version("exomem"), "name": name, '
+    'print(json.dumps({"version": _installed_version, "name": name, '
     '"direct_url": direct_url, "record_hashes": record_hashes, "state_descriptors": descriptors, '
     '"supported_state_compatibility": compatibility}))'
 )
