@@ -1335,7 +1335,7 @@ def test_a_pdf_cut_short_keeps_the_text_that_can_be_repaired_and_warns(tmp_path:
 
 def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
     # Tesseract runs under its own data limit beside the media child. A rendered A0 page
-    # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.
+    # at 200 dpi is about 59 MB as gray; a child that keeps it during OCR holds two budgets.
     pdfium = pytest.importorskip("pypdfium2")
     import gc
     import weakref
@@ -1348,7 +1348,9 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
 
     def render_page(page, *args, **kwargs):
         bitmap = render(page, *args, **kwargs)
-        rendered.append(weakref.ref(bitmap))
+        # The pixels live in the buffer, which a Pillow image of the page may still share
+        # after the bitmap wrapper is gone, so the buffer is what must be released.
+        rendered.append(weakref.ref(bitmap.buffer))
         return bitmap
 
     alive_when_tesseract_starts: list[int] = []
@@ -1366,6 +1368,40 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
 
     assert result.text == "[page 1]\nharbour lantern was repaired"
     assert alive_when_tesseract_starts == [0]
+
+
+def test_a_scanned_pdf_page_reaches_tesseract_as_dark_text_on_white_at_the_ocr_resolution(
+    tmp_path, monkeypatch
+) -> None:
+    # The neighbouring tests stub Tesseract and never open the image, so a blank or inverted raster would
+    # read as an empty page, and that empty text would be stored as the page's extraction.
+    pdfium = pytest.importorskip("pypdfium2")
+    from PIL import Image
+
+    from exomem import ocr_models
+
+    pdf = make_pdf(tmp_path / "page.pdf", ["A study of harbour lanterns."])
+    seen: dict[str, object] = {}
+
+    def read_image(_cmd: str, image: Path) -> ocr_models.OcrReading:
+        with Image.open(image) as page:
+            gray = page.convert("L")
+            seen["size"] = gray.size
+            seen["corner"] = gray.getpixel((2, 2))
+            seen["darkest"] = gray.getextrema()[0]
+        return ocr_models.OcrReading("harbour lantern", ())
+
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    document = pdfium.PdfDocument(pdf)
+    try:
+        assert extract._ocr_pdf_page(document[0]) == "harbour lantern"
+    finally:
+        document.close()
+
+    assert seen["size"] == (1700, 2200)  # a 612 x 792 pt page at 200 dpi
+    assert seen["corner"] == 255 and seen["darkest"] < 64
 
 
 def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_path, monkeypatch) -> None:
