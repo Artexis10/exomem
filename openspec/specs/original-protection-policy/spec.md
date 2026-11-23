@@ -7,13 +7,17 @@ Let an owner set the verified replica coverage needed to protect original files,
 
 ### Requirement: Set minimum verified protection and a transfer allowance
 
-An owner MAY opt into a storage protection policy with minimum recoverable copy and distinct failure-domain counts, eligible declared stores, and a monthly byte allowance for policy copies. Each store's verified copies SHALL use exact version and binding evidence, verified content, current key custody, and known absence of quarantine. A distinct domain SHALL count once regardless of store or filing count. Unavailable or incomplete evidence SHALL remain unknown. The system SHALL retain the existing behavior when no policy is present.
+An owner MAY opt into a storage protection policy with minimum recoverable copy and distinct failure-domain counts, eligible declared stores, and a monthly byte allowance for policy copies. The system SHALL retain the existing behavior when no policy is present.
 
 #### Scenario: Two stores share a failure domain
 
 - **WHEN** two exact, verified versions use the same configured failure domain
 - **THEN** they count as two copies in one domain
 - **AND** a presence check on an additional version does not meet a verified copy requirement
+
+### Requirement: Count only verified copies toward protection
+
+Each store's verified copies SHALL use exact version and binding evidence, verified content, current key custody, and known absence of quarantine. A distinct domain SHALL count once regardless of store or filing count. Unavailable or incomplete evidence SHALL remain unknown.
 
 #### Scenario: A store or exact proof is unavailable
 
