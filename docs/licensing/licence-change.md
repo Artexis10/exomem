@@ -1,6 +1,6 @@
 # Licence change at the Evermatter release
 
-From release LAST_AGPL_RELEASE_NEXT onward, Evermatter's server, CLI and images are licensed under the [Functional Source License, Version 1.1, ALv2 Future License](../../LICENSE) (`FSL-1.1-ALv2`). Earlier releases keep the GNU Affero General Public License, version 3 or later.
+From release v0.202.0 onward, Evermatter's server, CLI and images are licensed under the [Functional Source License, Version 1.1, ALv2 Future License](../../LICENSE) (`FSL-1.1-ALv2`). Earlier releases keep the GNU Affero General Public License, version 3 or later.
 
 ## What stays the same
 
@@ -15,7 +15,7 @@ From release LAST_AGPL_RELEASE_NEXT onward, Evermatter's server, CLI and images 
 
 ## Releases before the change
 
-The last release under AGPL-3.0-or-later is LAST_AGPL_RELEASE, from commit LAST_AGPL_COMMIT. Anyone who holds that release, or any earlier one, keeps every AGPL right to it. The AGPL text is kept in [prior-licence-AGPL-3.0.txt](prior-licence-AGPL-3.0.txt).
+The last release under AGPL-3.0-or-later is v0.201.0. Every commit before the one that replaced `LICENSE` with FSL-1.1-ALv2 is also AGPL-3.0-or-later. Anyone who holds such a release or commit keeps every AGPL right to it. The AGPL text is kept in [prior-licence-AGPL-3.0.txt](prior-licence-AGPL-3.0.txt).
 
 ## Contributors
 

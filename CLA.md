@@ -1,6 +1,7 @@
 # Contributor License Agreement
 
-This agreement covers contributions to the Exomem repository at
+This agreement covers contributions to the Evermatter repository at
+https://github.com/substrate-systems/evermatter, formerly the Exomem repository at
 https://github.com/Artexis10/exomem. "Maintainer" means the owner of that repository
 and its successors and assigns. "You" means the person who signs, and your employer
 if it holds rights in your contribution. A "Contribution" is any code, documentation

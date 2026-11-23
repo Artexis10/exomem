@@ -4,7 +4,7 @@ version = "0.201.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "AGPL-3.0-or-later AND Apache-2.0"
+license = "FSL-1.1-ALv2 AND Apache-2.0"
 # The wheel ships the starter skill (`_scaffold`) under Apache-2.0 beside the AGPL server.
 license-files = ["LICENSE", "src/exomem/_licenses/Apache-2.0.txt"]
 authors = [{ name = "Hugo Ander", email = "founder@substratesystems.io" }]
