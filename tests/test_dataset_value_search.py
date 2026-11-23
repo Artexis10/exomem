@@ -616,3 +616,43 @@ def test_a_stale_value_terms_index_is_dropped_on_rebuild(vault, tmp_path):
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     conn.close()
     assert not any(name.startswith("value_terms") for name in tables)
+
+
+def test_a_write_to_another_page_makes_the_next_search_read_no_dataset_card(vault, monkeypatch):
+    # Every write moves the projection key. Reading all of a vault's cards again after each one
+    # cost the first search after a write more than a second on an installed service.
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    first = _preserve(vault, "supplier-profile.json", PROFILE)
+    second = _preserve(vault, "carrier-profile.json", PROFILE.replace(b"Brightwater", b"Northgate"))
+    for scope, paths in (
+        ("vault", vault_module.walk_vault_md(vault)),
+        ("kb", find._walk_md(vault / "Knowledge Base")),
+    ):
+        freshness.seed(vault, scope, ((str(path), freshness.stat_signature(path)) for path in paths))
+    assert first.path in _paths(_find(vault, ACCOUNT))
+    original_resolve = find._resolve_page
+    card_reads = []
+
+    def counted_resolve(vault_root, rel, *args, **options):
+        if rel in (first.sidecar_path, second.sidecar_path):
+            card_reads.append(rel)
+        return original_resolve(vault_root, rel, *args, **options)
+
+    monkeypatch.setattr(find, "_resolve_page", counted_resolve)
+    _note(vault, "Notes/Insights/unrelated.md", "An unrelated insight.", updated="2026-11-23", number=7)
+    freshness.on_files_changed(vault, changed=[vault / "Knowledge Base" / "Notes/Insights/unrelated.md"])
+
+    assert first.path in _paths(_find(vault, ACCOUNT))
+    assert card_reads == [], "a write that touched no card read the cards again"
+
+    # A changed card is read again and drops the value it no longer vouches for.
+    card = vault / first.sidecar_path
+    card.write_text(
+        card.read_text(encoding="utf-8").replace("inspection_status: ready", "inspection_status: invalid_data"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[card])
+    assert first.path not in _paths(_find(vault, ACCOUNT))
+    assert card_reads == [first.sidecar_path]

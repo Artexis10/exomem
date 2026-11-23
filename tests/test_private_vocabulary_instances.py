@@ -1819,6 +1819,51 @@ def test_unit_ranking_keeps_only_public_instance_parents_across_requests(
     assert ranked(full, both)[0] is None
 
 
+def test_an_owner_only_page_without_units_leaves_the_owner_its_unit_counts(
+    configured_boundary, private_instances, vault
+):
+    """An owner-only page whose reading yields no unit puts nothing private in the unit corpus.
+
+    The owner's build therefore keeps its counted unit corpus, so its next build after a write
+    counts only the changed parents. This catches a build that treats every owner-only parent as
+    private and leaves the owner recounting its whole unit corpus on every rebuild.
+    """
+    from exomem import epistemic_graph, freshness, lexstore
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    def write(name: str, extra: str, number: int, content: str) -> str:
+        path = f"Knowledge Base/Notes/Insights/{name}.md"
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}8888888-8888-4888-8888-888888888888\n---\n"
+            f"# {name}\n\n{content}\n"
+        )
+        return path
+
+    public = write("counted-public", "", 1, "- [fact] harbor gauges read depth ^gauges")
+    # A heading section gives the page stored candidate rows but no unit under the owner's reading.
+    private = write(
+        "counted-private", "project: private-project\n", 2, "## Harbor notes\n\nHarbor tides rise in the evening."
+    )
+    full = private_instances("full")
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+        both = {public, private}
+        hits = lexstore.search_semantic_units(
+            vault, "harbor depth", 5, scope="kb", admitted_parent_paths=both,
+            released_parent_paths=both, _validate_current=False, repair=False,
+        )
+
+    assert [hit.parent_path for hit in hits] == [public]
+    assert lexstore.get_store(vault)._unit_bases["kb"].counted is not None
+
+
 def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_private_one(
     configured_boundary, private_instances, vault, monkeypatch
 ):

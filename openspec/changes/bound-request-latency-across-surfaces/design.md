@@ -456,7 +456,7 @@ A base now also keeps the introducer of each word: the first document, in key or
 - A word whose introducer left or dropped it moves to the next document that holds it. One forward pass from the earliest such introducer finds all of them.
 - A word that no document holds any more leaves the counts.
 
-The helper then reads the per-document lists in key order, which is the order `CorpusStatistics.from_counts` sums in. A rebuild costs the changed documents plus one pass over the vocabulary. The unit corpus keeps each ref's winning tokens, so only the refs whose winner changed are counted again. `CorpusStatistics.of` stays the single definition, and seeded edit sequences compare every field with it bit for bit.
+The helper then reads the per-document lists in key order, which is the order `CorpusStatistics.from_counts` sums in. A rebuild usually costs the changed documents plus one pass over the vocabulary. A word whose introducer left or dropped it sends one forward pass over the documents after that introducer, which can walk most of the corpus; the worst case measured 188 ms against 406 ms for a full count. The unit corpus keeps each ref's winning tokens, so only the refs whose winner changed are counted again. `CorpusStatistics.of` stays the single definition, and seeded edit sequences compare every field with it bit for bit.
 
 The bounds stay as they were. With no base, or past `_ADMITTED_BASE_TERMS_MAX` or `_UNIT_BASE_BYTES_MAX`, a build counts every document in order, as before. A corpus that holds an owner-only parent's units never enters the shared unit base.
 
