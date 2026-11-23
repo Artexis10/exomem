@@ -280,7 +280,7 @@ def _plugin_manifest() -> dict:
         # these are deliberately the same values so the two listings agree.
         "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
         "homepage": "https://evermatter.ai",
-        "repository": "https://github.com/Artexis10/evermatter",
+        "repository": "https://github.com/substrate-systems/evermatter",
         "license": "Apache-2.0",
         "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,

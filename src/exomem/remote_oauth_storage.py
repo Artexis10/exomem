@@ -14,7 +14,7 @@ from typing import Any, SupportsFloat
 import httpx
 
 _COORDINATOR_USER_AGENT = (
-    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/evermatter)"
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/substrate-systems/evermatter)"
 )
 
 

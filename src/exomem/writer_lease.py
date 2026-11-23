@@ -80,7 +80,7 @@ from .mutation_terminal import (
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
-    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/evermatter)"
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/substrate-systems/evermatter)"
 )
 # The implicit replay window is the acknowledgement-loss recovery budget: when
 # the edge abandons a slow write that the origin then commits, retrying the

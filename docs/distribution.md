@@ -10,7 +10,7 @@ definition, hooks and fixtures are maintained by their own channel contracts.
 
 | Surface | Canonical channel | What users install or connect |
 |---|---|---|
-| Claude Code plugin | This Git repository's Claude Code plugin marketplace | `Artexis10/evermatter` plugin (skills and hooks), plus a configured remote or stdio MCP route |
+| Claude Code plugin | This Git repository's Claude Code plugin marketplace | `substrate-systems/evermatter` plugin (skills and hooks), plus a configured remote or stdio MCP route |
 | Claude.ai, Desktop, Mobile, Code, and Cowork | Claude Connector Directory plus the independent public Claude plugin channel | The hosted connector; the plugin bundle adds skills where the client supports them |
 | Hosted ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
 | Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
@@ -26,7 +26,7 @@ queue. `.claude-plugin/marketplace.json` is the listing, so merging the plugin
 metadata to the default branch publishes that Git-repo channel:
 
 ```text
-/plugin marketplace add Artexis10/evermatter
+/plugin marketplace add substrate-systems/evermatter
 /plugin install exomem@exomem
 ```
 

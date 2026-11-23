@@ -43,7 +43,7 @@ def _download(url: str, target: Path) -> None:
 
 def main(version: str, venv: str, sha: str, env_name: str) -> None:
     github_env = os.environ["GITHUB_ENV"]
-    repository = os.environ.get("GITHUB_REPOSITORY", "Artexis10/exomem")
+    repository = os.environ.get("GITHUB_REPOSITORY", "substrate-systems/evermatter")
     # The journey re-reads the wheel that the provenance record names, so the wheel stays in place.
     base = os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()
     work = Path(tempfile.mkdtemp(prefix="exomem-release.", dir=base))

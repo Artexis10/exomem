@@ -1,10 +1,10 @@
 # Evermatter (formerly Exomem)
 
-<!-- mcp-name: io.github.Artexis10/exomem -->
+<!-- mcp-name: io.github.substrate-systems/evermatter -->
 
 [![PyPI](https://img.shields.io/pypi/v/evermatter.svg)](https://pypi.org/project/evermatter/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/evermatter/)
-[![CI](https://github.com/Artexis10/evermatter/actions/workflows/ci.yml/badge.svg)](https://github.com/Artexis10/evermatter/actions/workflows/ci.yml)
+[![CI](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml/badge.svg)](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
 Durable memory with sources, proof, history, and review for MCP-capable agents.
@@ -52,13 +52,13 @@ Add `--keep` to leave that copy on disk afterward and open it in Obsidian.
 **Mac / Linux** — paste into Terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Artexis10/evermatter/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.sh | sh
 ```
 
 **Windows** — paste into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Artexis10/evermatter/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 ```
 
 Either one installs `uv`, installs Evermatter, and walks you through `exomem setup`,
@@ -69,7 +69,7 @@ Safe to run again later — it skips whatever's already done. If it can't prompt
 you interactively (e.g. run from another script), it prints the exact command to
 run next instead of guessing. Prefer to run each step yourself? See below or the
 full manual walkthrough in
-[QUICKSTART.md](https://github.com/Artexis10/evermatter/blob/main/QUICKSTART.md).
+[QUICKSTART.md](https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md).
 
 ### Claude Code: install as a plugin
 
@@ -78,7 +78,7 @@ HTTP URL; it deliberately does **not** auto-start a full stdio server in every
 Claude Code session:
 
 ```
-/plugin marketplace add Artexis10/evermatter
+/plugin marketplace add substrate-systems/evermatter
 /plugin install exomem@exomem
 ```
 
@@ -211,7 +211,7 @@ For development, or to run the sample vault from a checkout instead of a
 package install:
 
 ```bash
-git clone https://github.com/Artexis10/evermatter.git
+git clone https://github.com/substrate-systems/evermatter.git
 cd evermatter
 uv sync
 uv run exomem demo
@@ -280,7 +280,7 @@ standing instruction.
 <summary>Docker (no Python on the host)</summary>
 
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/evermatter:latest --transport stdio
+claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or

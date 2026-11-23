@@ -73,10 +73,10 @@ dependencies = [
 # Key order is preserved by PyPI, and "Homepage" gets special treatment.
 [project.urls]
 Homepage = "https://evermatter.ai"
-Documentation = "https://github.com/Artexis10/evermatter/blob/main/QUICKSTART.md"
-Source = "https://github.com/Artexis10/evermatter"
-Changelog = "https://github.com/Artexis10/evermatter/blob/main/CHANGELOG.md"
-Issues = "https://github.com/Artexis10/evermatter/issues"
+Documentation = "https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md"
+Source = "https://github.com/substrate-systems/evermatter"
+Changelog = "https://github.com/substrate-systems/evermatter/blob/main/CHANGELOG.md"
+Issues = "https://github.com/substrate-systems/evermatter/issues"
 
 # Hybrid semantic search (local vector embeddings). Optional so a lean install
 # — `uv sync` — works in keyword/BM25 mode (KB_MCP_DISABLE_EMBEDDINGS=1) without

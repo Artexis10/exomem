@@ -1325,5 +1325,5 @@ def test_cloud_cell_handshake_names_its_release_and_source_repository(
 
     cloud, _ = _build_cloud_server(monkeypatch)
     assert cloud.version == __version__
-    assert cloud.website_url == "https://github.com/Artexis10/evermatter"
+    assert cloud.website_url == "https://github.com/substrate-systems/evermatter"
     assert cloud.instructions == server.SERVER_INSTRUCTIONS

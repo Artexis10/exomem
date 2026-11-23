@@ -1,6 +1,6 @@
 # One-command exomem install for Windows. The macOS/Linux twin is scripts/install.sh.
 #
-#   irm https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 #
 # Installs uv if missing, installs the exomem package from PyPI, then runs the
 # setup wizard (vault, MCP registration, skills, hooks).

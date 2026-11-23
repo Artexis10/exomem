@@ -293,7 +293,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     HF_HOME=/data/hf \
     EXOMEM_CONTAINER_VARIANT=ml
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
+LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (ml: hybrid embeddings + CLIP search, CPU-only torch, no GPU)"
 
@@ -325,7 +325,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
+LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
 
@@ -534,7 +534,7 @@ assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 print('image load verified', MODEL_NAME, v.shape)" \
  && find /tmp -mindepth 1 -delete
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
+LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="Evermatter — Evermatter Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
 
@@ -562,7 +562,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_DISABLE_EMBEDDINGS=1 \
     EXOMEM_CONTAINER_VARIANT=lean
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
+LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (lean: keyword/BM25 search, no torch, no model download)"
 

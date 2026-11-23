@@ -2,7 +2,7 @@
 # One-line bootstrap for exomem — macOS-first, also works on Linux.
 #
 # Usage (paste into Terminal):
-#   curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.sh | sh
 #
 # What this does, in order:
 #   1. Installs uv (the Python tool manager exomem is published through) if

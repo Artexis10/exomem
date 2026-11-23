@@ -2418,7 +2418,7 @@ def op_bootstrap(
         ]
     if profile == "full":
         payload["references"] = {
-            name: "https://github.com/Artexis10/evermatter/blob/main/src/exomem/_scaffold/_Schema/" + name
+            name: "https://github.com/substrate-systems/evermatter/blob/main/src/exomem/_scaffold/_Schema/" + name
             for name, _path in workflow_skills_module.contract_sources()
             if name.startswith("references/")
         }

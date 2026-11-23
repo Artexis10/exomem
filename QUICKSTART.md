@@ -22,13 +22,13 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > hooks):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Artexis10/evermatter/main/scripts/install.sh | sh
+> curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.sh | sh
 > ```
 > ```powershell
-> irm https://raw.githubusercontent.com/Artexis10/evermatter/main/scripts/install.ps1 | iex
+> irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 > ```
 >
-> Claude Code alone? `/plugin marketplace add Artexis10/evermatter` then
+> Claude Code alone? `/plugin marketplace add substrate-systems/evermatter` then
 > `/plugin install exomem@exomem` installs the skills and hooks. Finish the MCP
 > route with `exomem setup --stdio`, or point setup at your existing service.
 >

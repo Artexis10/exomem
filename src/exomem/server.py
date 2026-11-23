@@ -885,7 +885,7 @@ def _find_call_summary(message) -> str:
 
 
 #: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
-SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/evermatter"
+SOURCE_REPOSITORY_URL = "https://github.com/substrate-systems/evermatter"
 
 #: What every MCP client is told at `initialize`. A host with lifecycle hooks
 #: injects the working set before a turn; a chat app or a generic client has no
