@@ -13,6 +13,8 @@ each save decided every page again. This memo keeps a page's verdict while every
 - A page whose decision reads anything else is never kept: a page that the store does not hold, a
   container claim, a bridge, a collection-relevant path, a parent with parents of its own, and a RAW
   release that reads its companion's or its original's bytes. Each request decides those again.
+- A verdict whose decision met an input it could not read is never kept, so a transient withhold
+  lasts one request.
 
 It stores verdicts and hashes, never page bytes.
 """
@@ -50,18 +52,19 @@ def forget(vault_root: Path | None = None) -> None:
 
 
 def decide(
-    root: Path, key: Hashable, paths: list[str], decide_many: Callable[[list[str]], dict[str, bool]],
-    who: RequestPrincipal,
+    root: Path, key: Hashable, paths: list[str],
+    decide_many: Callable[[list[str]], tuple[dict[str, bool], frozenset[str]]], who: RequestPrincipal,
 ) -> dict[str, bool]:
     """Whether each of `paths` is admitted: a kept verdict where its hashes are current, else `decide_many`'s.
 
+    `decide_many` returns its verdicts and the paths whose decision met an input it could not read.
     Call it inside a pinned store request (`egress.release_decision_context`), so the hashes read here
     are those of the bytes that `decide_many` decides. Outside one it decides every path.
     """
     from ..vault_store import read
 
     if read.request_memo(root) is None:
-        return decide_many(paths)
+        return decide_many(paths)[0]
     slot = (str(root), key)
     with _LOCK:
         kept = _KEPT.get(slot)
@@ -77,8 +80,9 @@ def decide(
             answers[path] = entry[0]
         else:
             missed.append(path)
-    fresh = decide_many(missed) if missed else {}
-    found = _dependencies(root, [path for path in missed if path in current], who) if missed else {}
+    fresh, unavailable = decide_many(missed) if missed else ({}, frozenset())
+    keepable = [path for path in missed if path in current and path not in unavailable]
+    found = _dependencies(root, keepable, who) if keepable else {}
     with _LOCK:
         kept = _KEPT.get(slot)
         if kept is None:
@@ -134,9 +138,9 @@ def _dependencies(root: Path, paths: list[str], who: RequestPrincipal) -> dict[s
 
 def _scope_parents(root: Path, paths: list[str]) -> dict[str, tuple[str, ...]]:
     """`page_admission.scope_parents` of each Markdown page of `paths` that has them, from its stored bytes."""
-    from ..vault_store import read
+    from ..vault_store import ownership, read
 
-    pages = [path for path in paths if path.lower().endswith(".md")]
+    pages = [path for path in paths if ownership.is_markdown(path)]
     if not pages:
         return {}
     with read.snapshot(root) as view:

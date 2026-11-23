@@ -63,7 +63,7 @@ def scope_parents(path: str, raw: bytes, page: ParsedPage | None) -> tuple[str, 
         return None
     if not (
         ownership.classify(path) is ownership.Ownership.PAGE
-        and path.lower().endswith(".md")
+        and ownership.is_markdown(path)
         # A container claim names its parent through a stored binding, which no path names.
         and "container_member" not in frontmatter
         # Only the parsed bridge grammar proves absence; the byte probe is a positive cache guard.

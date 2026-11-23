@@ -8233,13 +8233,30 @@ def release_walk_filter(
     vault_root = Path(vault_root)
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
-    content_ok = content_permits_filter(vault_root, who, on_unavailable=on_unavailable)
+    # The paths whose decision met an input it could not read; their withhold is not kept (`judge_kept`).
+    unavailable: set[str] = set()
+    # Only grows, so a path whose decision added one sees a longer list even if another thread adds too.
+    failures: list[None] = []
+
+    def note_unavailable() -> None:
+        failures.append(None)
+        if on_unavailable is not None:
+            on_unavailable()
+
+    content_ok = content_permits_filter(vault_root, who, on_unavailable=note_unavailable)
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     verdicts: dict[tuple, tuple[bool, bool]] = {}
 
     def verdict(rel_path: str) -> tuple[bool, bool]:
         """`(allowed, decided from the page, the policy and the caller alone)`."""
+        before = len(failures)
+        decided = _verdict(rel_path)
+        if len(failures) != before:
+            unavailable.add(rel_path)
+        return decided
+
+    def _verdict(rel_path: str) -> tuple[bool, bool]:
         # The set read above, like `policy`: the plane does not move while one
         # walk runs, and re-proving it per path stats every tombstone and event file.
         if lifecycle.is_tombstoned_in(tombstones, rel_path):
@@ -8265,10 +8282,10 @@ def release_walk_filter(
             authorization_context=who.verified_authorization_session,
             tombstones=tombstones,
             page_snapshot=raw,
-            on_unavailable=on_unavailable,
+            on_unavailable=note_unavailable,
         )
-        if decision is None and on_unavailable is not None:
-            on_unavailable()
+        if decision is None:
+            note_unavailable()
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         _outcome_for_decision(
             vault_root,
@@ -8317,9 +8334,14 @@ def release_walk_filter(
         def decide_paths(wanted: list[str]) -> dict[str, bool]:
             return {path: verdict[0] for path, verdict in judge_many(wanted, False).items()}
 
+        def decide_for_memo(wanted: list[str]) -> tuple[dict[str, bool], frozenset[str]]:
+            decided = decide_paths(wanted)
+            return decided, frozenset(unavailable.intersection(wanted))
+
         # Only the bound writer's request pins the snapshot whose hashes prove a kept verdict current.
-        # Staged container pages are read in place of stored ones, which no kept hash names.
-        if not paths or bound_writer(vault_root) is None or document_containers._OVERLAY.get():
+        # Staged container pages and supplied bytes are read in place of stored ones, which no kept hash names.
+        if (not paths or bound_writer(vault_root) is None or document_containers._OVERLAY.get()
+                or read_page is not None):
             return decide_paths(paths)
         with release_decision_context(vault_root):
             named = request_identity()
@@ -8328,7 +8350,7 @@ def release_walk_filter(
             if named is None or (collector is not None and not collector.sink):
                 return decide_paths(paths)
             key = (named, who, policy.conflicted, membership_module.subject_inputs(vault_root, policy))
-            return admission_memo.decide(vault_root, key, paths, decide_paths, who)
+            return admission_memo.decide(vault_root, key, paths, decide_for_memo, who)
 
     keep = AdmittedPredicate(Admission(identity, judge, judge_many, judge_kept))
 

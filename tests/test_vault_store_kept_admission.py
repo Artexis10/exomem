@@ -158,6 +158,52 @@ def test_a_kept_verdict_is_the_fresh_verdict_after_each_change(vault, monkeypatc
             assert not asked & set(kept), (event, "an unchanged page keeps its verdict", asked)
 
 
+@pytest.mark.timeout(300)
+def test_a_page_whose_parent_media_names_no_file_is_stored_and_decided_each_save(vault, monkeypatch):  # noqa: F811
+    """Defect: a page whose ``parent_media`` has no file name, such as "/", made the migration and every store
+    commit raise ValueError, because its facts asked for the frames folder of a path with no name. The page
+    migrates and commits, and its admission is decided on every save, never kept: it claims a parent it lacks."""
+    corpus = exception_corpus(vault)
+    odd = "Knowledge Base/Notes/Odd frame.md"
+    (vault / odd).write_bytes(page('title: Odd frame\nparent_media: "/"\n'))
+    apply_case(corpus, corpus.selectors[0], False)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    calls = decided_paths(monkeypatch)
+    restricted = RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", issuer_family="mcp-local")
+    with bound(vault) as held:
+        write.commit(held, put(odd, page('title: Odd frame, edited\nparent_media: "/"\n')))
+        for who in (owner_principal(surface="mcp"), restricted, restricted):
+            calls[:] = []
+            assert admit(vault, who, [odd], kept=True) == admit(vault, who, [odd], kept=False)
+            assert odd in set().union(*calls), "a page that claims a parent it lacks is decided again"
+
+
+@pytest.mark.timeout(300)
+def test_a_withhold_from_an_unreadable_input_lasts_one_save(vault, monkeypatch):  # noqa: F811
+    """Defect: a decision that cannot read one of its inputs withholds the page, and a kept withhold would hide
+    the page from that caller's corpus until the page changed. The next save decides it again and admits it."""
+    corpus = exception_corpus(vault)
+    apply_case(corpus, corpus.selectors[0], False)
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+    who = owner_principal(surface="mcp")
+    decide = egress._decide_path
+    failing = {FRAME}
+
+    def flaky(root, rel_path, **options):
+        # A stat or read that fails once, as a page being replaced on disk does.
+        if rel_path in failing:
+            failing.discard(rel_path)
+            return None
+        return decide(root, rel_path, **options)
+
+    with bound(vault):
+        monkeypatch.setattr(egress, "_decide_path", flaky)
+        assert FRAME not in admit(vault, who, [FRAME, VIDEO], kept=True)
+        assert FRAME in admit(vault, who, [FRAME, VIDEO], kept=True)
+
+
 def grow_dependents(held, start, count, *, on_disk):
     """Commit ``count`` scene frames, each with its video, and ``count`` RAW notes: pages whose release reads
     another page or the caller's RAW authority, which the scope class route never decides."""
