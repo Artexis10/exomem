@@ -2,7 +2,7 @@
 
 ### Requirement: Codex and Claude infer Records without prompt naming
 
-The disposable live acceptance SHALL run fixed natural-language cases through Codex and Claude Code. Existing-collection cases SHALL state durable observed events without the words “save”, “log”, “record”, or “Records”; each client SHALL select the compatible Records collection and produce the expected guarded mutation. No-collection cases under `advisory` capture SHALL produce a Records collection proposal and SHALL NOT create a schema. Under `silent` capture they SHALL create one minimal collection within the server's automatic-creation bounds and report it. In neither case SHALL the client write the observation into another knowledge layer instead.
+The disposable live acceptance SHALL run fixed natural-language cases through Codex and Claude Code. Existing-collection cases SHALL state durable observed events without the words “save”, “log”, “record” or “Records”, and each client SHALL select the compatible collection and produce the expected guarded mutation. No-collection cases SHALL end in a proposal under `advisory` capture or a bounded creation under `silent` capture, and never in a write to another knowledge layer.
 
 #### Scenario: Existing collection is selected proactively
 - **WHEN** a fixed prompt states an attributable observed measurement with no explicit persistence verb and exactly one compatible collection exists

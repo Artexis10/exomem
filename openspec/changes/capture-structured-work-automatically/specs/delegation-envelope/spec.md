@@ -7,7 +7,20 @@
 ## ADDED Requirements
 
 ### Requirement: Collection creation is bounded capture or confirmed restructuring
-Creating one Records collection within the automatic-creation bounds that the `records` capability defines SHALL be an action of the `proactive_capture` class and SHALL follow its served disposition: `silent` creates the collection and reports it in the same reply, `advisory` proposes it and creates it after one inline confirmation of the named proposal, and `off` initiates no creation while a creation the user asks for is still served. Creating a collection outside those bounds, creating a Planning collection, and any schema change other than adding fields, merge, deletion or migration of a collection SHALL remain actions of the `restructure_execution` class: confirm-required at every prominence level, satisfiable by one inline confirmation of the named proposal in the conversation, never by a standing delegation. Appending to an existing collection SHALL remain `proactive_capture`. The `records_routing` advisory and the `collection_candidate` finding SHALL be advisory material under `structural_suggestions` and SHALL never create, append, move or delete anything. A `disposition` on the advisory SHALL be derived from the effective capture level and SHALL direct only the agent's own `proactive_capture` append through `record_memory`; at no prominence SHALL the runtime append or create. A grouped backfill item SHALL be asked about once at every prominence, `maximal` included, and SHALL NOT be filed from a standing prominence. Bootstrap SHALL serve this classification with the envelope.
+
+Creating one Records collection within the automatic-creation bounds of the `records` capability SHALL be a `proactive_capture` action and follow its served disposition: `silent` creates it and reports it in the same reply, `advisory` proposes it and creates it after one inline confirmation, and `off` initiates nothing while a creation the user asks for is still served. Every other collection creation and schema change SHALL remain `restructure_execution`, and bootstrap SHALL serve this split.
+
+#### Scenario: The refusal words its way forward by disposition
+- **WHEN** an automatic creation is refused under `advisory` or under `off`
+- **THEN** the refusal under `advisory` says to propose and create after the confirmation, and the refusal under `off` says to create only if the user asked for it
+
+#### Scenario: The remaining actions keep their class
+- **WHEN** an agent creates a collection outside the bounds, creates a Planning collection, or makes a schema change other than adding fields, a merge, a deletion or a migration
+- **THEN** the action is `restructure_execution`: confirm-required at every prominence level, satisfiable by one inline confirmation of the named proposal, never by a standing delegation, while appending to an existing collection remains `proactive_capture`
+
+#### Scenario: The routing advisory and the candidate finding stay advisory
+- **WHEN** the runtime reports a `records_routing` advisory or a `collection_candidate` finding
+- **THEN** both are advisory material under `structural_suggestions` and never create, append, move or delete anything at any prominence, and a `disposition` on the advisory derives from the effective capture level and directs only the agent's own `proactive_capture` append through `record_memory`
 
 #### Scenario: A candidate never creates a collection on its own
 - **WHEN** a strong `collection_candidate` is served at prominence `maximal`
@@ -42,7 +55,20 @@ Creating one Records collection within the automatic-creation bounds that the `r
 - **THEN** no record exists until the agent performs the returned payload, which is governed like any other append
 
 ### Requirement: An additive field change is bounded capture
-Adding one or more fields to an existing Records collection, within the bounds that the `records` capability defines for `new_fields`, which count fields only in a collection that was itself created automatically, SHALL be an action of the `proactive_capture` class and SHALL follow its served disposition: `silent` adds the fields and reports them in the same reply, `advisory` proposes them and adds them after one inline confirmation of the named proposal, and `off` initiates no change while a change the user asks for is still served. Renaming, retyping or removing a field, re-keying, merging, deleting and migrating a collection, and any schema change to a Planning collection SHALL remain actions of the `restructure_execution` class, with its confirmation and its refusal of a standing delegation.
+
+Adding one or more fields to an existing Records collection, within the bounds that the `records` capability defines for `new_fields`, SHALL be an action of the `proactive_capture` class and follow its served disposition: `silent` adds the fields and reports them in the same reply, `advisory` proposes them and adds them after one inline confirmation, and `off` initiates no change while a change the user asks for is still served.
+
+#### Scenario: The refusal under off words its way forward by request
+- **WHEN** an addition is refused under `off`
+- **THEN** the refusal says to make the change only if the user asked for it
+
+#### Scenario: The field-count bound counts only an automatic collection
+- **WHEN** an agent adds fields under silent capture
+- **THEN** the field count is bounded only in a collection that was itself created automatically
+
+#### Scenario: The restructuring actions keep their class
+- **WHEN** an agent renames, retypes or removes a field, re-keys, merges, deletes or migrates a collection, or changes the schema of a Planning collection
+- **THEN** the action is `restructure_execution`, with its confirmation and its refusal of a standing delegation
 
 #### Scenario: Silent capture adds a field and reports it
 - **WHEN** `proactive_capture` is `silent` and the agent adds a field to a Records collection within the bounds
@@ -63,9 +89,16 @@ Adding one or more fields to an existing Records collection, within the bounds t
 ## MODIFIED Requirements
 
 ### Requirement: Handing over an artifact does not bypass write authority
-Handing a generated file to the user, or a definite report that an offered artifact was sent or published, SHALL be the adoption trigger but SHALL NOT count as explicit confirmation to write Exomem. Agent-initiated exact-byte Source or Evidence adoption and any later compatible delivery Record SHALL be `proactive_capture` and SHALL obey its active off, advisory, or silent disposition. A user's explicit request to save or preserve the artifact SHALL remain an ordinary requested action and SHALL not create standing authority for later artifacts.
 
-When no compatible Records collection exists, a collection SHALL be created only under the bounded collection-creation rule, and any schema mutation other than the bounded addition of fields SHALL be separate confirmed `restructure_execution`. Adoption success SHALL never depend on that structural work.
+Handing a generated file to the user, or a definite report that an offered artifact was sent or published, SHALL be the adoption trigger but SHALL NOT count as explicit confirmation to write Exomem. Agent-initiated exact-byte Source or Evidence adoption and any later compatible delivery Record SHALL be `proactive_capture` and SHALL obey its active off, advisory or silent disposition.
+
+#### Scenario: A requested save creates no standing authority
+- **WHEN** the user explicitly asks to save or preserve an artifact
+- **THEN** that is an ordinary requested action and creates no standing authority for later artifacts
+
+#### Scenario: Structural work never blocks adoption
+- **WHEN** no compatible Records collection exists for a delivery Record
+- **THEN** a collection is created only under the bounded collection-creation rule, any schema mutation other than the bounded addition of fields is separate confirmed `restructure_execution`, and adoption success never depends on that structural work
 
 #### Scenario: Hand-over under silent capture preserves exact bytes
 - **WHEN** the agent hands the user one generated file and `proactive_capture` is `silent`

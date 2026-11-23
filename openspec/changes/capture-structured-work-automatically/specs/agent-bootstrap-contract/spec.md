@@ -2,7 +2,23 @@
 
 ### Requirement: Bootstrap teaches Records routing and boundaries
 
-Bootstrap SHALL expose `record` as a beginner-facing and product-front-door action and SHALL describe Records as governed observed state distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging, and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context rather than wait for the user to name Records or issue a magic save verb. It SHALL teach natural capture/query/update intents, proactive existing-collection behavior, the recognition of recurring structured work, bounded creation of a minimal collection under the served capture disposition, template independence, derived-view provenance, and the rule that conclusions belong in compiled Notes. It SHALL teach that Planning can operate standalone or coordinate with any companion under a resolved user-authored workflow contract; no named companion SHALL be a product-wide default. It SHALL teach the `records_routing` advisory: when a committed note or Evidence write names a collection, route the observation into it through `record_memory` under the served capture disposition, resuming a held candidate when one exists, and never append from the advisory alone without the observation; that a collection may declare `claims.match`; that a disposition on the advisory carries its own instruction; and that a grouped backfill item is asked about once at every prominence and never filed without a yes. This teaching SHALL stay command-free so reduced surfaces keep it. It SHALL name the `collection_candidate` category and teach that a strong candidate is proposed in domain language with a schema drafted through `describe` and `validate`, that creating the collection follows the served capture disposition within the automatic-creation bounds, and that backfill uses only exactly dated units cited in `sources`.
+Bootstrap SHALL expose `record` as a beginner-facing front-door action and describe Records as governed observed state, distinct from Sources, Evidence, compiled Notes, Entities, Planning intent, Review, Imported staging and built-in assistant memory. It SHALL teach agents to infer Records participation from durable observed context without waiting for the user to name Records or issue a save verb. This teaching SHALL stay command-free so reduced surfaces keep it.
+
+#### Scenario: Bootstrap teaches the Records intents and their boundaries
+- **WHEN** an agent reads the bootstrap Records teaching
+- **THEN** it teaches natural capture, query and update intents, proactive existing-collection behavior, the recognition of recurring structured work, bounded creation of a minimal collection under the served capture disposition, template independence, derived-view provenance, and that conclusions belong in compiled Notes
+
+#### Scenario: Planning has no default companion
+- **WHEN** an agent reads how Planning relates to other tools
+- **THEN** it learns that Planning operates standalone or coordinates with any companion under a resolved user-authored workflow contract, and that no named companion is a product-wide default
+
+#### Scenario: Bootstrap teaches the routing advisory
+- **WHEN** a committed note or Evidence write names a collection
+- **THEN** bootstrap teaches the agent to route the observation into it through `record_memory` under the served capture disposition, resuming a held candidate when one exists and never appending from the advisory alone without the observation; that a collection may declare `claims.match`; that a disposition on the advisory carries its own instruction; and that a grouped backfill item is asked about once at every prominence and never filed without a yes
+
+#### Scenario: Bootstrap names the collection candidate category
+- **WHEN** an agent reads the bootstrap structural-suggestion teaching
+- **THEN** it names the `collection_candidate` category and teaches that a strong candidate is proposed in domain language with a schema drafted through `describe` and `validate`, that creating the collection follows the served capture disposition within the automatic-creation bounds, and that backfill uses only exactly dated units cited in `sources`
 
 #### Scenario: Implicit observation routes to Records
 - **WHEN** a client asks bootstrap how to handle a new durable measurement, session, transaction, or maintenance event without explicit save/log/Records wording
@@ -58,7 +74,27 @@ Bootstrap SHALL expose `record` as a beginner-facing and product-front-door acti
 
 ### Requirement: The capture predicate covers stated intent and observed outcomes
 
-The capture axis of the engagement contract at `balanced` and `maximal` SHALL name two lifecycle classes beside a durable conclusion, a recurring entity and a carried-out method: a *stated intent or commitment* — the user says what they will do, commits to a batch or workstream, sequences work, or re-prioritises — routes to Planning through `plan_memory`; an *observed outcome or event* — the conversation reports that something happened, was produced, measured, delivered, approved, published or failed — routes to Records through `record_memory`. The contract SHALL state the pairing rule: an observed outcome that lands on an open committed Planning item is one landing with two consequences, the Records append and then the Planning transition, performed together and reported once. It SHALL state that a tentative claim is never written as an event and that elapsed time is never an outcome. The existing Records engagement policy (exactly one compatible collection and a sufficiently identified observation → write and report; competing collections → one focused question; no collection → under `advisory` `proactive_capture` propose, and under `silent` create one minimal collection within the server's automatic-creation bounds and report it in the same reply) SHALL be the write gate for both classes. `light` SHALL keep capture-only-when-asked and `off` SHALL be unchanged. Both `SKILL.md` copies, `prominence.py` and the bootstrap `intent_boundary` and `capture_examples` SHALL carry the same rule, and the compact payload SHALL stay within its measured ceiling.
+The capture axis of the engagement contract at `balanced` and `maximal` SHALL name two lifecycle classes beside a durable conclusion, a recurring entity and a carried-out method: a *stated intent or commitment* routes to Planning through `plan_memory`, and an *observed outcome or event* routes to Records through `record_memory`. `light` SHALL keep capture-only-when-asked and `off` SHALL be unchanged.
+
+#### Scenario: Intent and outcome are defined
+- **WHEN** an agent reads the capture axis
+- **THEN** a stated intent or commitment is the user saying what they will do, committing to a batch or workstream, sequencing work, or re-prioritising, and an observed outcome or event is the conversation reporting that something happened, was produced, measured, delivered, approved, published or failed
+
+#### Scenario: One landing has two consequences
+- **WHEN** an observed outcome lands on an open committed Planning item
+- **THEN** the contract says it is one landing with two consequences, the Records append and then the Planning transition, performed together and reported once
+
+#### Scenario: Elapsed time is not an outcome
+- **WHEN** a conversation only shows that time has passed
+- **THEN** the contract says elapsed time is never an outcome and a tentative claim is never written as an event
+
+#### Scenario: The Records engagement policy gates both classes
+- **WHEN** an agent writes an intent or an outcome
+- **THEN** exactly one compatible collection and a sufficiently identified observation mean write and report, competing collections mean one focused question, and no collection means a proposal under `advisory` `proactive_capture` or one minimal collection within the server's automatic-creation bounds, reported in the same reply, under `silent`
+
+#### Scenario: One rule is carried everywhere
+- **WHEN** the capture rule is served
+- **THEN** both `SKILL.md` copies, `prominence.py` and the bootstrap `intent_boundary` and `capture_examples` carry the same rule, and the compact payload stays within its measured ceiling
 
 #### Scenario: A stated outcome closes a queued deliverable without a magic word
 

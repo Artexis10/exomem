@@ -2,7 +2,15 @@
 
 ### Requirement: A user's correction of stored advice is durable, and advice turns recall
 
-The `balanced` and `maximal` capture contracts and the activation `capture_policy` block SHALL serve one sentence that makes stored advice the user says failed, a claim the user corrects, and a decision or standing rule agreed in the conversation durable, to be saved under `proactive_capture`. Under `advisory` the agent offers the correction or the save; under `silent` it makes it. The server instructions and the native MCP activation nudge SHALL count advice on the user's own case as clear relevance for recall. At `balanced` and `maximal` the nudge SHALL also ask the agent to call `recall_context` for a task in the user's own repository or project before it inspects that repository or project; at `light` it SHALL NOT. The agent decides what counts as a correction, an agreed decision or an advice turn; no word list or detector SHALL decide it.
+The `balanced` and `maximal` capture contracts and the activation `capture_policy` block SHALL serve one sentence that makes stored advice the user says failed, a claim the user corrects, and a decision or standing rule agreed in the conversation durable, to be saved under `proactive_capture`; under `advisory` the agent offers the save and under `silent` it makes it. The agent decides what counts as one of these or as an advice turn; no word list or detector SHALL decide it.
+
+#### Scenario: Advice on the user's own case counts as relevance for recall
+- **WHEN** the server instructions and the native MCP activation nudge are read
+- **THEN** both count advice on the user's own case as clear relevance for recall
+
+#### Scenario: The nudge asks for recall before a repository task
+- **WHEN** the nudge runs at `balanced` or `maximal` for a task in the user's own repository or project
+- **THEN** it asks the agent to call `recall_context` before it inspects that repository or project, and at `light` it does not
 
 #### Scenario: A bootstrap-only client learns the correction rule
 - **WHEN** a client reads the `balanced` or `maximal` contract from bootstrap and never calls `recall_context`
@@ -27,7 +35,16 @@ The `balanced` and `maximal` capture contracts and the activation `capture_polic
 ## ADDED Requirements
 
 ### Requirement: Recurring structured work carries a recognition cue on every turn
-The activation `capture_policy` block SHALL carry, in its `rules` key, a short cue that routes recurring structured work to Records: named items that recur, are compared or change go to a matching collection by natural key, else to a minimal collection under the served `proactive_capture`, and narrative stays in Notes. The cue SHALL be defined once in `prominence.py` and SHALL fit the hook's render budget for `rules`. Under `off` the block SHALL carry no `rules` key and so no cue. Recognising the work SHALL be the agent's judgement of meaning; no part of the product SHALL decide it from a word list.
+
+The activation `capture_policy` block SHALL carry, in its `rules` key, a short cue that routes recurring structured work to Records: named items that recur, are compared or change go to a matching collection by natural key, else to a minimal collection under the served `proactive_capture`, and narrative stays in Notes. The cue SHALL be defined once in `prominence.py` and SHALL fit the hook's render budget for `rules`.
+
+#### Scenario: Recognition is the agent's judgement
+- **WHEN** recurring structured work appears in a conversation
+- **THEN** the agent decides from meaning that it is recurring, and no part of the product decides it from a word list
+
+#### Scenario: Off carries no cue
+- **WHEN** `proactive_capture` is `off`
+- **THEN** the block carries no `rules` key and so no cue
 
 #### Scenario: A hookless client learns the cue on every turn
 - **WHEN** a hookless client calls `recall_context` at `balanced`

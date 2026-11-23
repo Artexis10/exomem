@@ -2,9 +2,31 @@
 
 ### Requirement: Agents infer Records participation from observed state
 
-The agent-facing Records contract SHALL route durable observed events and state to `record_memory` from semantic fit rather than requiring the user to say “save”, “log”, “record”, or “Records”. Covered observations SHALL include measurements, sessions, symptoms, transactions, maintenance events, inventory changes, status history, and other attributable facts. Recurring structured work SHALL also be covered: stable identities that recur, repeated observations or evaluations of the same items, comparisons, changing state, or a need to query exactly. Recognising it SHALL be the agent's judgement of meaning, never a fixed repetition count or a word list. The routing contract SHALL preserve the existing boundary: future intent belongs to Planning, received raw material to Sources, proof-bearing artifacts to Evidence, and conclusions to Notes.
+The agent-facing Records contract SHALL route durable observed events and state, and recurring structured work, to `record_memory` from semantic fit, without requiring the user to say “save”, “log”, “record” or “Records”. Recognising the work SHALL be the agent's judgement of meaning, never a fixed repetition count or a word list. The contract SHALL keep the boundary: future intent is Planning, raw material is Sources, proof-bearing artifacts are Evidence, and conclusions are Notes.
 
-When exactly one existing collection is compatible and the observation is sufficiently identified for that schema, an agent operating under a proactive engagement policy MAY append or update it and SHALL report the mutation. Ambiguous collections, missing required identity/date/provenance, or uncertain ownership SHALL produce one focused clarification. Compatibility SHALL be judged by meaning and schema, and a repeated item SHALL update the row its natural key names. When no compatible collection exists and the work's identity, type and scope are clear, the agent SHALL create a minimal collection under the served `proactive_capture` disposition and the automatic-creation bounds, SHALL backfill the items already established in the conversation with their dates and attribution, and SHALL report the creation and the rows in its reply. It SHALL NOT create an unreported schema. A passing mention SHALL get no collection. An identity, type or scope that is unclear in a way that changes the action SHALL produce one focused question. Narrative and synthesis SHALL stay in Notes. Feedback from the user, proposals from the assistant and findings from outside sources SHALL be kept as separately attributed values, and an identity the user has not resolved SHALL stay its own row with its ambiguity recorded, never merged.
+#### Scenario: Covered observations are routed
+- **WHEN** a conversation carries a measurement, session, symptom, transaction, maintenance event, inventory change, status history or other attributable fact
+- **THEN** the contract routes it to `record_memory`
+
+#### Scenario: Recurring structured work is covered
+- **WHEN** a conversation shows stable identities that recur, repeated observations or evaluations of the same items, comparisons, changing state, or a need to query exactly
+- **THEN** the contract treats it as Records work
+
+#### Scenario: One compatible collection is written and reported
+- **WHEN** exactly one existing collection is compatible, judged by meaning and schema, and the observation is sufficiently identified for it
+- **THEN** an agent under a proactive engagement policy may append or update it, a repeated item updates the row its natural key names, and the agent reports the mutation
+
+#### Scenario: Missing identity or unclear scope gets one question
+- **WHEN** required identity, date or provenance is missing, ownership is uncertain, or the work's identity, type or scope is unclear in a way that changes the action
+- **THEN** the agent asks one focused question
+
+#### Scenario: A clear identity with no collection gets a minimal one
+- **WHEN** no compatible collection exists and the work's identity, type and scope are clear
+- **THEN** the agent creates a minimal collection under the served `proactive_capture` disposition and the automatic-creation bounds, backfills the items already established in the conversation with their dates and attribution, reports the creation and the rows in its reply, and creates no unreported schema
+
+#### Scenario: Narrative stays in Notes and attribution stays separate
+- **WHEN** recurring structured work carries narrative, the user's feedback, the assistant's proposals or outside findings
+- **THEN** the narrative and synthesis stay in Notes, and feedback from the user, proposals from the assistant and findings from outside sources are kept as separately attributed values
 
 #### Scenario: Measurement is inferred without a magic verb
 - **WHEN** a user states a new dated measurement in context without asking to save, log, record, or use Records and exactly one existing collection accepts it
@@ -38,15 +60,24 @@ When exactly one existing collection is compatible and the observation is suffic
 ## ADDED Requirements
 
 ### Requirement: An automatic collection creation is bounded by the server
-`records.create` SHALL accept `automatic: true` for an agent-initiated creation; without it a creation SHALL behave as before. With it, the server SHALL refuse with `AUTOMATIC_CREATION_REFUSED`, naming the failed bound in the details and creating nothing, unless every bound holds:
 
-- the effective `proactive_capture` disposition is `silent`;
-- the manifest uses the Records profile and declares a natural key;
-- the item schema has at most 12 fields;
-- the manifest declares no saved view, reference, rollup or derived rows;
-- the vault created fewer than 3 collections automatically in the last 24 hours.
+`records.create` SHALL accept `automatic: true` for an agent-initiated creation, and without it SHALL behave as before. With it, the server SHALL refuse `AUTOMATIC_CREATION_REFUSED`, naming the failed bound in the details and creating nothing, unless every bound in the scenarios holds. The bounds SHALL be defined once, beside the check, and SHALL hold on a vault with a collection store and on a vault with none.
 
-The refusal SHALL say to propose the collection and create it without the flag after the user confirms. The create's receipt SHALL record `automatic: true`, and the collection inventory SHALL report for each collection whether it was created automatically. The bounds SHALL be defined once, beside the check, and SHALL hold on a vault that has a collection store and on a vault that has none. The 24-hour count SHALL read each storage mode's own create record and never scan all history: a store vault reads the collections' create transactions, a file-only vault reads the marker that an automatic create adds to its activity-log entry, and a vault with both counts both.
+#### Scenario: Every bound is checked
+- **WHEN** an agent creates a collection with `automatic: true`
+- **THEN** the server creates it only if the effective `proactive_capture` is `silent`, the manifest uses the Records profile and declares a natural key, the item schema has at most 12 fields counting the properties of an object field and of an array's items, the manifest has no key beyond those of the minimal manifest (`type`, `exomem_id`, `title`, `semantic_profile`, `collection_version`, `schema_version`, `lifecycle`, `storage` and `item_schema`, whose own keys are `natural_key` and `fields`) and declares no reference, and the vault created fewer than 3 collections automatically in the last 24 hours
+
+#### Scenario: A refusal leaves the confirmed create available
+- **WHEN** an automatic creation is refused
+- **THEN** the refusal says to propose the collection and create it without the flag after the user confirms, except under `off`, where it says to create it without the flag only if the user asked for it, and in every case the confirmed create stays available
+
+#### Scenario: The receipt and the inventory report the flag
+- **WHEN** an automatic creation commits
+- **THEN** its receipt records `automatic: true` and the collection inventory reports for each collection whether it was created automatically
+
+#### Scenario: The 24-hour count reads each storage mode's own record
+- **WHEN** the server counts the automatic creations in the last 24 hours
+- **THEN** a store vault reads the collections' create transactions, a file-only vault reads the marker that an automatic create adds to its activity-log entry, a vault with both counts both, and no count scans all history
 
 #### Scenario: A minimal automatic creation commits under silent capture
 - **WHEN** `proactive_capture` is `silent` and an agent creates a Records collection with a natural key and 6 fields with `automatic: true`
@@ -60,16 +91,49 @@ The refusal SHALL say to propose the collection and create it without the flag a
 - **WHEN** `proactive_capture` is `advisory` and an agent creates a collection with `automatic: true`
 - **THEN** the server refuses `AUTOMATIC_CREATION_REFUSED` naming the disposition, and no collection exists
 
+#### Scenario: Advisory and off capture word the way forward differently
+- **WHEN** an agent creates a collection with `automatic: true` under `advisory`, and again under `off`
+- **THEN** the first refusal says to propose the collection and create it after the user confirms, and the second says to create it only if the user asked for it
+
 #### Scenario: A schema over the bound is refused
 - **WHEN** an agent creates a collection with 13 fields, or with no natural key, with `automatic: true`
 - **THEN** the server refuses `AUTOMATIC_CREATION_REFUSED` naming that bound, and the same manifest without the flag still creates normally
+
+#### Scenario: Nested properties count toward the field bound
+- **WHEN** an agent creates a collection with 3 fields, one of them an object that declares 11 properties, with `automatic: true`
+- **THEN** the server refuses `AUTOMATIC_CREATION_REFUSED` naming the field bound with 14 fields, and a manifest that totals 12 commits
+
+#### Scenario: A key beyond the minimal manifest is refused
+- **WHEN** an agent creates a collection with `automatic: true` whose manifest declares `governance`, `templates`, saved views or a key of `item_schema` beyond `natural_key` and `fields`
+- **THEN** the server refuses `AUTOMATIC_CREATION_REFUSED` naming the authored features, and the same manifest without the flag still creates
 
 #### Scenario: The daily bound holds
 - **WHEN** the vault created 3 collections automatically in the last 24 hours and an agent creates a fourth with `automatic: true`
 - **THEN** the server refuses `AUTOMATIC_CREATION_REFUSED` naming the daily bound
 
 ### Requirement: `add_record` creates a minimal collection for its first row
-`add_record` SHALL accept `new_collection`, an object with `natural_key`, a non-empty list of field names that the row's `item` carries. When `collection` is a title that names no collection and `new_collection` is given, the server SHALL draft a minimal Records manifest from the row: the title is `collection`, the declared natural key is required, and each key of `item` is a field typed from its value's JSON shape (string, integer, number, boolean, or date for an ISO calendar-date string), with no saved views, references, rollups or derived rows and the vault's default storage. It SHALL create that collection through the automatic create, so every bound of `records.create` with `automatic: true` holds unchanged, and SHALL append the row, as one governed call with one receipt that names the created collection, records `automatic: true` and names the row. A row that the drafted collection would refuse, including one that lacks a natural-key field or holds a null key, SHALL be refused with the append's own validation code before anything is created. A refused bound SHALL create nothing and SHALL return the confirmed create call, carrying the manifest the server would have created, so that the agent can propose exactly that collection. When `collection` names an existing collection, `new_collection` SHALL be ignored and the call SHALL be a plain append. A repeated call SHALL return the recorded result and SHALL NOT create a second collection.
+
+`add_record` SHALL accept `new_collection`, an object with `natural_key`, a non-empty list of field names that the row's `item` carries. When `collection` is a title that names no collection, the server SHALL draft a minimal Records manifest from the row, create it through the automatic create so that every bound of `records.create` with `automatic: true` holds, and append the row, as one governed call with one receipt.
+
+#### Scenario: The manifest is drafted from the row
+- **WHEN** the server drafts the collection from the row
+- **THEN** the title is `collection`, the declared natural key is required, each key of `item` is a field typed from its value's JSON shape (string, number for every JSON number, boolean, or date for an ISO calendar-date string), the manifest declares no saved views, references, rollups or derived rows, and storage is the vault's default
+
+#### Scenario: The receipt names the creation and the row
+- **WHEN** the call commits
+- **THEN** the receipt names the created collection and the row and records `automatic: true`
+
+#### Scenario: A title with a control character is refused
+- **WHEN** `collection` holds a control character, a line break included
+- **THEN** the call is refused with `INVALID_COLLECTION_REFERENCE` and creates nothing
+
+#### Scenario: A row that the drafted collection would refuse creates nothing
+- **WHEN** the row lacks a natural-key field or holds a null key, or fails the drafted schema
+- **THEN** the call is refused with the append's own validation code before anything is created
+
+#### Scenario: A refused bound returns the confirmed create
+- **WHEN** a bound refuses the automatic creation
+- **THEN** nothing is created and the refusal carries the confirmed create call with the manifest the server would have created, so the agent can propose exactly that collection
 
 #### Scenario: One call creates the collection and adds the row on a file-only vault
 - **WHEN** the vault has no collection store, `proactive_capture` is `silent`, and an agent calls `add_record` with a title that names no collection, a row and `new_collection`
@@ -96,7 +160,28 @@ The refusal SHALL say to propose the collection and create it without the flag a
 - **THEN** the call returns the recorded result or a replay of the row, and the vault holds one collection
 
 ### Requirement: `new_fields` adds the fields of a row to its collection
-`add_record` and `edit_record` SHALL accept `new_fields`, a list of distinct field names that the call's `item` (append) or `changes` (update) carries and that the collection may not declare yet. For a Records collection under silent `proactive_capture`, the server SHALL add each undeclared field to the collection's manifest through the manifest revision and its audit event, typed from the value's JSON shape as `new_collection` types it, and SHALL then write the row, as one call whose reply records `automatic: true` and names the added fields in `added_fields`. Existing fields and rows SHALL stay untouched, and an existing row SHALL hold no value for a new field. A collection that the owner made, or that a confirmed create made, SHALL take added fields with no field-count bound; the server SHALL decide that from the collection's own create record, a store collection's create transaction or a file collection's create line in the activity log, and SHALL treat a collection whose create record it cannot read in full as not created automatically. A name that the collection already declares with the type its value gives SHALL add nothing, so a repeated call writes only the row and adds no field twice. The server SHALL refuse with `AUTOMATIC_FIELDS_REFUSED`, naming the failed bound in the details and changing nothing, when the effective `proactive_capture` is not `silent` or when a collection that was itself created automatically would then declare more than 12 item fields; the refusal SHALL carry the proposal and the confirmed `revise` that makes the change. It SHALL refuse a name that the collection declares with another type and a value that is null, a list or an object, and SHALL refuse a Planning collection. A write that names an undeclared field without `new_fields` SHALL keep refusing `SCHEMA_UNKNOWN_FIELD`; when every issue is an undeclared field, the refusal SHALL carry the call that adds them under silent capture and otherwise the proposal and the confirmed `revise`. Renaming, retyping or removing a field SHALL stay the confirmed `revise`.
+
+`add_record` and `edit_record` SHALL accept `new_fields`, a list of distinct field names that the call's `item` (append) or `changes` (update) carries and that the collection may not declare yet. Under silent `proactive_capture` the server SHALL add each undeclared field to a Records collection's manifest through the manifest revision and its audit event, typed from the value's JSON shape (every JSON number is `number`), then write the row in one call that names them in `added_fields`.
+
+#### Scenario: The reply records the addition and leaves earlier data untouched
+- **WHEN** fields are added
+- **THEN** the reply records `automatic: true`, existing fields and rows stay untouched, and an existing row holds no value for a new field
+
+#### Scenario: The create record decides the field-count bound
+- **WHEN** an addition would pass 12 fields
+- **THEN** a collection that the owner made, or that a confirmed create made, takes the fields with no field-count bound; the server decides that from the collection's own create record, a store collection's create transaction or a file collection's create line in the activity log, and treats a collection whose create record it cannot read in full as not created automatically
+
+#### Scenario: A refusal changes nothing and carries the proposal
+- **WHEN** the effective `proactive_capture` is not `silent`, or a collection created automatically would declare more than 12 item fields
+- **THEN** the server refuses `AUTOMATIC_FIELDS_REFUSED` naming the failed bound and changes nothing; the refusal carries the proposal and the confirmed `revise`, keeps the proposal and names why in `retry_unavailable` when that revise cannot be drafted, and under `off` says to make the change only if the user asked for it
+
+#### Scenario: The revise edits only the fields
+- **WHEN** the confirmed `revise` is drafted
+- **THEN** it adds each field at the end of the fields mapping, leaves every other byte, and refuses, writing nothing, an edit that would change anything but the fields
+
+#### Scenario: An undeclared field without new_fields keeps its refusal
+- **WHEN** a write names an undeclared field without `new_fields`
+- **THEN** it keeps refusing `SCHEMA_UNKNOWN_FIELD`; when every issue is an undeclared field, the refusal carries the call that adds them under silent capture and otherwise the proposal and the confirmed `revise`, and renaming, retyping or removing a field stays the confirmed `revise`
 
 #### Scenario: Silent capture adds the fields and writes the row on a file-only vault
 - **WHEN** the vault has no collection store, `proactive_capture` is `silent`, and an agent calls `add_record` with a row that carries two fields the collection does not declare, named in `new_fields`
@@ -146,9 +231,25 @@ The refusal SHALL say to propose the collection and create it without the flag a
 - **WHEN** the activity log cannot be read in full and a collection with 12 fields has no create line that the read found
 - **THEN** the server treats the collection as not created automatically, adds the field and writes the row
 
-#### Scenario: A field declared with another type is refused and the same type adds nothing
-- **WHEN** `new_fields` names a field that the collection declares as a string while its value is a number, or a field that it declares with the type the value gives
-- **THEN** the first call is refused naming the field type, and the second writes only the row and reports no added field
+#### Scenario: A declared field adds nothing and its value is judged by the row
+- **WHEN** `new_fields` names a field that the collection declares as a string, with a value that is a date-shaped string or a number
+- **THEN** the first call writes only the row and reports no added field, and the second is refused by the row's own type validation
+
+#### Scenario: A whole number then a fraction
+- **WHEN** a first row adds a field with `new_fields` and the value `4`, and a later row carries `4.5` for it
+- **THEN** the field is declared as a number and both rows commit
+
+#### Scenario: A field that cannot be typed from one row is refused
+- **WHEN** `new_fields` names an undeclared field whose value is null, a list or an object
+- **THEN** the call is refused naming the field type and the collection is unchanged
+
+#### Scenario: A field is added after a last field written as a block
+- **WHEN** a collection's last field declares a block-style enum or a block scalar and a key follows its fields, and an agent adds a field
+- **THEN** the field lands at the end of the fields mapping, the manifest stays valid and every other key and value is unchanged
+
+#### Scenario: A refused field keeps its proposal when the revise cannot be drafted
+- **WHEN** a collection's fields are written in flow style and an agent writes an undeclared field under `advisory`
+- **THEN** the refusal carries the proposal and names why no revise is ready in `retry_unavailable`
 
 #### Scenario: A Planning collection is refused
 - **WHEN** `new_fields` names a field for a Planning collection
