@@ -25,10 +25,12 @@ infringes a patent, the patent licences you granted end on the date you start it
 
 ## 3. Open-source promise
 
-Every released version that includes your Contribution becomes available to the
-public under an OSI-approved open-source licence no later than the second anniversary
-of its release. A licence change under section 1 never delays or removes that
-availability.
+This section covers each version that includes your Contribution and that the
+Maintainer makes available to the public. The Maintainer will make each such version
+available under an OSI-approved open-source licence no later than the second
+anniversary of the date it first made that version available, and will keep it
+available under that licence after that date. A licence change under section 1 never
+delays or removes that availability.
 
 ## 4. What you confirm
 

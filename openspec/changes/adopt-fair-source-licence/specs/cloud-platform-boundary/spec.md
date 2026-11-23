@@ -46,10 +46,10 @@ The product and the trust set SHALL build, test and release without reading, imp
 - **WHEN** the product CI runs on a fork or without private-repository credentials
 - **THEN** every product job and trust-set job completes without reaching a private repository
 
-#### Scenario: A product release cannot silently break the fleet
+#### Scenario: The conformance suite ships with each release
 
-- **WHEN** a product release candidate is tagged
-- **THEN** the private fleet runs the public cell-runtime conformance suite against it before it deploys that release
+- **WHEN** a product version is made available
+- **THEN** the cell-runtime conformance suite for that version is public in this repository at the same tag
 
 ### Requirement: Published platform code stays reachable
 

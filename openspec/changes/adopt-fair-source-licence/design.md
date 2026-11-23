@@ -37,15 +37,17 @@ The cut goes with the rename because the repository identity changes then anyway
 
 ### D2. Contributor promise: OSI within two years
 
-§3 becomes "available under an OSI-approved licence no later than the second anniversary of its release". That matches FSL's own conversion date exactly, so every FSL release keeps the promise. Dropping the promise entirely would cost contributor trust and gain nothing.
+§3 now covers each version that includes the contribution and that the maintainer makes available to the public. Each such version becomes available under an OSI-approved licence no later than the second anniversary of the date it was first made available, and stays available under that licence. FSL grants Apache-2.0 "on the second anniversary of the date we make the Software available", so both clocks start on the same date. A version that is never made available, such as a private fleet build, is outside both. Dropping the promise entirely would cost contributor trust and gain nothing.
 
 ### D3. PDF: pypdfium2 for text and rendering, pypdf for the XMP packet
 
 - **pypdfium2** binds PDFium, the PDF engine Chrome uses; it is BSD-3-Clause and Apache-2.0, and so are its bundled binaries. It covers page text, page rendering at a given scale, the information dictionary and password detection.
 - **PDFium has no public call for the XMP packet.** pypdf (BSD-3-Clause, pure Python) reads it, and the packet still goes to the existing `defusedxml` parser.
 - **Rejected options:** pdfminer.six (slower, weaker on complex layouts), markitdown's PDF path (already judged weaker), and buying an Artifex licence (a recurring cost, and it binds the Cloud only).
-- **Allocator failures.** MuPDF's allocator message has no PDFium equivalent. The new code maps PDFium's memory errors and Python's `MemoryError` to the same `MediaMemoryExhausted` outcome, and the process memory cap stays the backstop.
-- **Proof.** Run the existing PDF tests. Also compare extraction on public PDFs of each kind: a text layer, a scanned page, a mixed document, an encrypted file and a damaged file. The comparison counts characters, the page markers and the OCR page count, side by side with the old output.
+- **Allocator failures.** MuPDF raises on a failed allocation; PDFium usually aborts the process. The PDF work already runs in child processes under a memory cap. The memory-exhausted outcome therefore comes from how the parent classifies a child that dies under the cap, not from matching library messages. Where the parent cannot tell a memory death from a crash, the implementation says so.
+- **Other users of the old library:** the doctor's profile detection and dependency check, and deployment provenance. Without updating them, the automatic profile would silently drop from media to hybrid.
+- **Tests.** Several test files skip themselves when PyMuPDF is missing, and one fixture builder uses it. They move to the new libraries, so the suite does not turn green by skipping. A rise in skipped tests counts as a failure.
+- **Proof.** Run the existing PDF tests with no new skips. Also compare extraction, old against new, on public PDFs: a text layer, a scanned page, a mixed document, a user password, an owner-only password, a damaged file and an XMP packet. Record characters, page markers, OCR page count, the refusal reason and the time per file, because pypdf adds a second parse inside a child with a deadline.
 
 ### D4. HEIF: pi-heif
 
@@ -59,31 +61,32 @@ pi-heif is the decode-only variant of pillow-heif, from the same maintainer. Its
 | Replace PyAV with `ffmpeg` and `ffprobe` subprocesses | A separate program avoids the combination question, but means rewriting seven modules, changing performance and error mapping | Rejected: large rewrite, user-visible risk |
 | Keep the PyPI wheel and delete the bundled encoders | Breaks dynamic linking, and is fragile | Rejected |
 
-The choice of build is pinned in the Dockerfile and checked by the image scan (D7). If PyAV's next release offers an official LGPL-only wheel, the build stage goes away.
+The PyPI wheel also bundles dav1d (AV1), libvpx, libopus and opencore-amr. FFmpeg has no software AV1 decoder of its own, so the build links dav1d (BSD-2-Clause). FFmpeg's native decoders cover VP8, VP9, Opus and AMR. Parity is proved by comparing the decoders PyAV reports in the old wheel and in the new build. The build enables assembly, so decode speed does not drop. The image notices record the FFmpeg source tarball, its checksum and the configure flags, which is the LGPL source obligation.
+
+The build is pinned in the Dockerfile and checked by the scan in D7. If PyAV later offers an official wheel without GPL encoders, the build stage goes away.
 
 ### D6. The AGPL-only contribution: a two-lane rewrite
 
 1. One lane reads the contributed lines and their test. It writes a behaviour description with no code: inputs, outputs, error codes and message intent.
 2. A second lane, which never sees the original lines, deletes them and implements and tests the behaviour from that description.
 
-Short identifiers and error codes are functional, so they may stay identical.
+The rewrite covers lines that blame attributes to the contributor, and also maintainer-edited lines that still carry the contribution's expression: its messages, its normalisation and its comment. Short identifiers and error codes are functional, so they may stay identical. A rewrite avoids depending on a third party's signature. Asking the contributor to sign the agreement can still happen in parallel.
 
-### D7. No new licence gate; a scan at the cut
+### D7. A per-release licence check, plus a bundled-library scan
 
-**The scan.** Before the licence cut, list every shared library and Python distribution in each published image (lean, ml, cuda, cloud, the custodian and the controller) with its licence. Record the result as release evidence.
+**Per release.** Each published image's Python distributions are checked by an off-the-shelf licence tool against the declared SPDX licence identifiers. SPDX identifiers are a closed set fixed by a specification, so checking them is not the kind of word list the repository's C6 rule forbids. The release fails when a GPL or AGPL distribution appears in the product's imported code.
 
-**Why no gate.**
-- The two bundling risks are gone by construction: the codec layer is built from source in our Dockerfile, and pi-heif has no encoder.
-- A custom CI gate would need its own list of library names to match against. That is a maintained list deciding what a file means, which the repository's rules forbid without a real need.
-- The residual risk is a later change back to binary wheels. The `product-licensing` requirement and review cover it.
+**Bundled libraries.** No off-the-shelf tool sees libraries bundled inside wheels; trivy, already pinned for the hosted infrastructure, sees operating-system packages only. So the shared libraries inside each published image are listed with their licences at the cut, and again whenever a wheel that bundles native libraries changes or the base image changes. The images are lean, ml, cuda, cloud and cellctl, plus the custodian once task 4.1 creates it. The two known bundling risks are gone by construction: the codec layer is built from source in the Dockerfile, and pi-heif has no encoder.
+
+**Operating-system layer.** The base image's programs (shell, core utilities, package manager) are separate programs, aggregated in the image rather than combined with the product. The GCC runtime libraries carry a linking exception. Both are recorded in the scan record, as the requirement says.
 
 ### D8. Trust set and custodian split
 
 - **The problem.** The security model document links the controller's core today: `reconcile.py`, `manifests.py`, `decide.py` and others, about 56% of the controller source. Keeping those public would keep the orchestration public.
 - **The trust set** is the set of enforcement points that bind a private controller: the admission, deletion and operator-access policies, the deletion-grant contract and verifier, and the key custodian.
-- **The custodian** runs today as the controller image with another command. It becomes its own package and image, built and attested by public CI. `custodian.py` depends only on a few helpers from `manifests.py` and on small modules (`deletion_grant`, `errors`, storage), so the split is bounded.
+- **The custodian** runs today as the controller image with another command; `contain-cloud-controller-compromise` decision D9 chose that. This change reverses it: the custodian becomes its own package and image, built and attested by public CI. `custodian.py` depends only on a few helpers from `manifests.py` and on small modules (`deletion_grant`, `errors`, storage), so the split is bounded.
 - **The security document** is rewritten so that each claim links trust-set code. A claim about controller behaviour is labelled as the operator's statement and names the policy that bounds it.
-- **Signing.** Private repositories on the free plan cannot create GitHub artifact attestations. The private controller image is signed with our own key, and the admission policy trusts that key. That policy is off today; `make-cloud-cells-operator-resistant` turns it on.
+- **Signing.** GitHub creates artifact attestations for private repositories only on Enterprise Cloud. So the private controller image is signed with our own key, and the admission policy trusts that key. This conflicts with a requirement that `make-cloud-cells-operator-resistant` adds to `cloud-operator-access`: admission accepts an image only when it carries a GitHub artifact attestation from this repository's release workflow on a release ref. Once that change ships, this change adds a MODIFIED delta to `cloud-operator-access`. The delta accepts either that attestation or a signature by the platform's release key, for the controller image only. The trade-off: whoever holds the release key can sign any controller image. The key therefore lives in a hardware-backed or cloud key store, signs only in the private release workflow, and the trust-set images keep public attestations.
 - **Dependency direction.** Private code may read public code and releases, never the reverse.
 
 ## Risks / Trade-offs
@@ -92,7 +95,6 @@ Short identifiers and error codes are functional, so they may stay identical.
 - **The custom FFmpeg build becomes our security surface.** It is pinned and rebuilt on each FFmpeg security release, and the same Dockerfile owns it.
 - **Published code stays AGPL forever.** Anyone can fork the last AGPL release and the 2026-11 platform snapshot. The change limits only future work. That is the accepted trade.
 - **Losing the "open source" label** excludes OSI-only programmes and some contributors. The maintainer accepted this cost.
-- **Legal questions stay open.** No counsel is engaged, by the maintainer's choice. The open questions are listed in the maintainer's private decision record, for later review.
 
 ## Migration Plan
 
