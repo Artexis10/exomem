@@ -1,8 +1,8 @@
 {
   "name": "exomem",
   "owner": {
-    "name": "Artexis10",
-    "url": "https://github.com/Artexis10"
+    "name": "Substrate Systems",
+    "url": "https://github.com/substrate-systems"
   },
   "metadata": {
     "description": "Governed long-term memory for AI agents, over a markdown vault you own.",
