@@ -240,6 +240,9 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
                'verify it before relying on it.',
  'search_miss': 'Empty recall means not found in that query/scope. Try related terms or '
                 "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
+ 'skill_check': "The owner's own skills and collections are listed in `skills`. If one covers this "
+                'turn, use `read_page` on it and follow it within existing authority before '
+                'answering.',
  'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
                 'Sources; an empty slice is not proof of absence.',
  'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read its '

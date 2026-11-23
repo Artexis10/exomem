@@ -101,6 +101,15 @@ Delivery SHALL grant no authority: the agent decides whether an item applies.
 - **WHEN** a tool-only client receives a catalogue that lists items
 - **THEN** the block's `advice` tells it to open a covering item with the read tool before acting
 
+### Requirement: The catalogue's turn points the agent at it
+
+On the turn that receives listed items, `next_action` SHALL be `skill_check`, pointing the agent at the catalogue, unless a reset, a review-due stance or a selected item takes precedence.
+
+#### Scenario: The catalogue's turn points at the catalogue
+
+- **WHEN** a response lists catalogue items and no item was selected for the turn
+- **THEN** `next_action.state` is `skill_check`, and a later turn that holds the catalogue is not pointed at it again
+
 ### Requirement: A caller can omit the skills it loads natively
 
 A request MAY name skills the client already loads natively in `native_skills`, a list of skill names.

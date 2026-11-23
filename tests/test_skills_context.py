@@ -148,7 +148,11 @@ def test_the_skills_block_takes_nothing_from_the_turn_allowance(skills_vault, mo
     without = _activate(skills_vault)
 
     assert with_skills["skills"]["state"] == "ready"
-    assert with_skills["budget"]["used_chars"] == without["budget"]["used_chars"]
+    # The pointer at the catalogue is turn protocol prose, charged like any `next_action`; the block itself is not.
+    def turn_chars(packet):
+        return packet["budget"]["used_chars"] - len((packet.get("next_action") or {}).get("say", ""))
+
+    assert turn_chars(with_skills) == turn_chars(without)
     assert with_skills["map"] == without["map"]
 
 
@@ -377,6 +381,17 @@ def test_advice_tells_the_agent_to_open_a_covering_item_and_is_sent_only_with_it
     assert "skills and collections" in advice and "read_memory" in advice and "existing authority" in advice
     assert "advice" not in later["skills"] and later["skills"]["state"] == "unchanged"
     assert emptied["skills"]["state"] == "empty" and "advice" not in emptied["skills"]
+
+
+def test_the_turn_that_receives_the_catalogue_is_pointed_at_it_first(skills_vault):
+    """A tool-only client follows `next_action`: on the catalogue's turn it checks the catalogue, not retrieval leads."""
+    first = _activate(skills_vault)
+    later = _activate(skills_vault, continuity=first["continuity"])
+
+    assert first["skills"]["state"] == "ready"
+    assert first["next_action"]["state"] == "skill_check" and first["next_action"]["tool"] == "read_memory"
+    assert later["skills"]["state"] == "unchanged"
+    assert (later.get("next_action") or {}).get("state") != "skill_check"
 
 
 # --------------------------------------------------------------------------- #

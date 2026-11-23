@@ -19,6 +19,7 @@ def templates(activate: str, read: str, search: str) -> dict[str, str]:
         "ambiguous": f"These candidates need a choice. Call {activate} again with the original turn and `anchor` set to the ref you mean.",
         "method_reset": "Discard the skills, collections and approaches you hold before reuse. Read the current page for its scope and exclusions before applying it within existing authority.",
         "method_selected": f"A saved skill or collection fits this turn: follow the contract in task_context.methods where it fits, within existing authority. Use {read} on its read_ref first when the contract is cut.",
+        "skill_check": f"The owner's own skills and collections are listed in `skills`. If one covers this turn, use {read} on it and follow it within existing authority before answering.",
         "task_read": f"Use {read} to open a task_context read_ref before relying on it. Read its scope and exclusions before applying it within existing authority.",
         "review_due": "Apply the served stance with its review caveat; its check date has passed, so verify it before relying on it.",
         "slice_empty": f"Map and slice cover compiled material only. Use {search} for captured Sources; an empty slice is not proof of absence.",
@@ -51,6 +52,10 @@ def state(packet: Mapping[str, Any], *, search: bool = False) -> str | None:
 
     if any(item.get("selection") == METHOD_FIT for item in (task.get("methods") or {}).get("items", ())):
         return "method_selected"
+    catalogue = packet.get("skills") or {}
+    if catalogue.get("state") == "ready" and catalogue.get("items"):
+        # The catalogue is served once per conversation; on that turn the agent checks it before reading leads.
+        return "skill_check"
     if task.get("candidates") or (task.get("methods") or {}).get("items"):
         return "task_read"
     if (packet.get("turn_slice") or {}).get("state") == "empty":
@@ -64,7 +69,7 @@ def move(packet: Mapping[str, Any], *, search: bool = False) -> dict[str, Any] |
     selected = state(packet, search=search)
     if selected is None:
         return None
-    command = {activation_result.INDEX_WARMING: "search_memory", "ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory"}.get(selected)
+    command = {activation_result.INDEX_WARMING: "search_memory", "ambiguous": "activate_context", "slice_empty": "search_memory", "related": "read_memory", "task_read": "read_memory", "skill_check": "read_memory"}.get(selected)
     if command is not None:
         tools = capabilities.active_tools(command)
         active = capabilities.current_active_surface()

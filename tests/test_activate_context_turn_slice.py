@@ -83,7 +83,11 @@ def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path) ->
         assert packet["turn_slice"]["items"] == []
         assert packet["turn_slice"]["description"]
         # Independent catalogue leads can remain available when anchor-derived slice evidence is empty.
-        if packet["task_context"]["candidates"]:
+        if (packet.get("skills") or {}).get("items"):
+            # The turn that receives the catalogue is pointed at it before any lead.
+            assert packet["next_action"]["state"] == "skill_check"
+            assert packet["next_action"]["tool"] == "read_memory"
+        elif packet["task_context"]["candidates"]:
             assert packet["next_action"]["state"] == "task_read"
             assert packet["next_action"]["tool"] == "read_memory"
         else:
