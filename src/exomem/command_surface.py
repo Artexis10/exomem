@@ -1368,12 +1368,29 @@ def gateway_client_context() -> str | None:
     return value if value in prominence.CONTEXTS else None
 
 
+_service_notice_ignored_logged = False
+
+
+def _note_ignored_service_notice() -> None:
+    """Say without quoting it that a header was ignored: a warning the first time, debug after.
+
+    A gateway and a cell that disagree on the header's shape would otherwise lose every notice
+    unseen; one warning per process makes that visible at the default level without flooding it.
+    A cataloged event, not free text: a cloud cell's log redacts any other message.
+    """
+    global _service_notice_ignored_logged
+    from .log_events import log_event
+
+    level = logging.DEBUG if _service_notice_ignored_logged else logging.WARNING
+    _service_notice_ignored_logged = True
+    log_event(_log, level, "cloud_service_notice_ignored")
+
+
 def gateway_service_notice() -> dict[str, typing.Any] | None:
     """The service notice the Cloud gateway forwarded with this request, or None.
 
     Cloud mode only, for the reason `cloud_cell.GATEWAY_SERVICE_NOTICE_HEADER` gives. A header
-    that is not a valid notice is ignored and never fails the call; one debug line says so
-    without quoting it.
+    that is not a valid notice is ignored and never fails the call.
     """
     from . import cloud_cell
 
@@ -1390,21 +1407,25 @@ def gateway_service_notice() -> dict[str, typing.Any] | None:
         return None
     notice = cloud_cell.parse_service_notice(value)
     if notice is None:
-        _log.debug("service notice header ignored: not a valid notice")
+        _note_ignored_service_notice()
     return notice
 
 
 def with_service_notice(result: typing.Any) -> typing.Any:
-    """`result` with this request's service notice added as `service_notice`, when it is a JSON object.
+    """`result` with this request's service notice added as its first field, when it is a JSON object.
 
-    The connected assistant reads the result and tells the person; a result that is not an object
-    has no place for the field and is returned as it is. The result is copied, never changed in
-    place: a replayed write may hand back an object that the dispatcher keeps.
+    The connected assistant reads the result and tells the person, and a block late in a result is
+    passed over (see the `positions` block in `governance.egress`), so the notice leads. A result
+    that is not an object has no place for the field and is returned as it is. The result is
+    copied, never changed in place: a replayed write may hand back an object that the dispatcher
+    keeps. The size reports that a leaf computed do not count the notice.
     """
     if not isinstance(result, dict):
         return result
     notice = gateway_service_notice()
-    return result if notice is None else {**result, "service_notice": notice}
+    if notice is None:
+        return result
+    return {"service_notice": notice} | {key: item for key, item in result.items() if key != "service_notice"}
 
 
 def peek_request_id() -> str | None:

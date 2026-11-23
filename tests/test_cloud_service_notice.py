@@ -10,13 +10,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 
 import httpx
 import pytest
 from _public_call import public_call
-from test_cloud_cell import LEGACY_VERSION, TOKEN, _build_cloud_server, _teardown_activation
+from test_cloud_cell import (
+    LEGACY_VERSION,
+    TOKEN,
+    _build_cloud_server,
+    _rendered_logs,
+    _teardown_activation,
+)
 
-from exomem import call_ledger, cloud_cell, server
+from exomem import call_ledger, cloud_cell, command_surface, server
 
 MAINTENANCE = {
     "v": 1,
@@ -126,13 +133,16 @@ def test_a_cloud_cell_relays_a_valid_notice_in_every_object_result(run_cell):
 
     assert results["save"]["structuredContent"]["user_summary"].startswith("Saved")
     assert results["refusal"]["structuredContent"]["error"]["code"] == "CLOUD_GATEWAY_REQUIRED"
-    for name in ("recall", "save", "refusal"):
-        assert results[name]["structuredContent"]["service_notice"] == relayed(MAINTENANCE), name
     # `search_memory` publishes its object under `result`; the notice rides inside it, with the hits.
-    for name in ("search", "padded"):
-        assert results[name]["structuredContent"]["result"]["service_notice"] == relayed(MAINTENANCE), name
+    objects = {name: results[name]["structuredContent"] for name in ("recall", "save", "refusal")}
+    objects |= {name: results[name]["structuredContent"]["result"] for name in ("search", "padded")}
+    for name, body in objects.items():
+        assert body["service_notice"] == relayed(MAINTENANCE), name
+        # A block late in a result is passed over, so the notice leads the result.
+        assert next(iter(body)) == "service_notice", name
     # A host that reads only the text content must see the notice too.
     text = json.loads(results["save"]["content"][0]["text"])
+    assert next(iter(text)) == "service_notice"
     assert text["service_notice"] == relayed(MAINTENANCE)
     assert "service_notice" not in json.dumps(results["none"])
 
@@ -163,19 +173,27 @@ def test_a_call_refused_before_its_command_runs_carries_the_notice(run_cell):
     assert result["service_notice"] == relayed(MAINTENANCE)
 
 
-@pytest.mark.parametrize("header", [
-    "not base64 at all!",
-    encode("not an object"),
-    encode({**MAINTENANCE, "v": 2}),
-    "A" * (cloud_cell.SERVICE_NOTICE_MAX_HEADER_BYTES + 1),
-])
-def test_a_cloud_cell_serves_the_call_when_the_notice_is_unusable(run_cell, header):
+def test_a_cloud_cell_serves_the_call_and_warns_once_when_the_notice_is_unusable(
+    run_cell, caplog, monkeypatch
+):
+    """A gateway and a cell that disagree on the header's version would lose every notice
+    unseen, so the first ignored header warns at the default level, without quoting it."""
+    monkeypatch.setattr(command_surface, "_service_notice_ignored_logged", False)
+    header = encode({**MAINTENANCE, "v": 2})
+
     async def scenario(client):
-        return await call(client, *SEARCH, notice=header)
+        return [await call(client, *SEARCH, notice=header), await call(client, *SEARCH, notice=header)]
 
-    result = run_cell(scenario)
+    with caplog.at_level(logging.DEBUG, logger=command_surface.__name__):
+        results = run_cell(scenario)
 
-    assert "service_notice" not in json.dumps(result)
+    assert all("service_notice" not in json.dumps(result) for result in results)
+    ignored = [r for r in caplog.records if getattr(r, "event", None) == "cloud_service_notice_ignored"]
+    assert [r.levelno for r in ignored] == [logging.WARNING, logging.DEBUG]
+    # A cloud cell redacts free text, so the warning must survive as a cataloged event, without the header.
+    rendered = _rendered_logs(caplog)
+    assert "cloud_service_notice_ignored" in rendered
+    assert header not in rendered
 
 
 def test_a_personal_service_ignores_the_notice_header(run_cell):
