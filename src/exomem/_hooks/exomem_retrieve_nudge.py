@@ -216,8 +216,9 @@ _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last che
 _CAPTURE_POLICY_MAX_CHARS = 1600
 # The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
 # text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
-# no room from the working set or from `say`: the whole injection is at most the working-set ceiling plus 1
-# (the separator) plus the rules allowance.
+# no room from the working set or from `say`: the charged working set plus `rules` is at most the working-set
+# ceiling plus 1 (the separator) plus the rules allowance. The positions, stance, skills and profile blocks render
+# beside them under their own bounds.
 # A longer text is omitted whole, never cut.
 _CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
@@ -229,6 +230,9 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
                   'relevant stored material.',
  'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
                  'and exclusions before applying it within existing authority.',
+ 'method_selected': 'A saved method fits this turn: follow the contract in task_context.methods '
+                    'where it fits, within existing authority. Use `read_page` on its read_ref '
+                    'first when the contract is cut.',
  'related': 'Related pages (not loaded). Use `read_page` to read a relevant ref before relying on '
             'it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
@@ -2411,6 +2415,32 @@ def _task_link_line(item: dict, carried_ref: str) -> str:
     return "  " + " ".join(f"links{origin}: {listed}{more}".split())
 
 
+def _skill_method_line(item: dict, max_chars: int) -> str:
+    """One skill or collection method's line: its quoted name and description, and its quoted contract when sent.
+
+    The contract is cut, never the whole line dropped, when it alone would exceed the cap. Every field is page
+    text, so each is quoted and escaped and no line of it reads as part of the fixed instruction.
+    """
+    read_ref = str(item.get("read_ref") or "")
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
+    contract = item.get("contract") if isinstance(item.get("contract"), dict) else None
+    plain = _packet_line(kind, f"{name}: {description}; load it with read_page before acting.", read_ref)
+    if not contract or not contract.get("text"):
+        return plain
+    text, complete = str(contract["text"]), bool(contract.get("complete"))
+    while True:
+        guide = "its whole text follows; follow it where it fits" if complete else "its opening follows; load the rest with read_page before acting"
+        line = _packet_line(kind, f"{name}: {description}; {guide}: {json.dumps(text, ensure_ascii=False)}", read_ref)
+        if len(line) + 1 <= max_chars or not text:
+            return line if text else plain
+        # Escaping lengthens the text, so the cut repeats until the line fits. It keeps whole lines, as the service
+        # cuts a contract, and falls back to whole words only inside the first line.
+        limit = max(0, len(text) - (len(line) + 1 - max_chars))
+        cut = text.rfind("\n", 0, limit + 1)
+        text, complete = (text[:cut] if cut > 0 else text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else "").rstrip(), False
+
+
 def _format_task_context(block: object, max_chars: int, slice_block: object = None, *, links: bool = True) -> str:
     """Render current read routes, with invalidation before every method projection.
 
@@ -2422,16 +2452,33 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
     shown = _slice_refs(slice_block)
     methods = block.get("methods") or {}
     entries: list[tuple[str, str]] = []  # (the route line, the link line that sits under it)
+    # A skill the service selected for this turn leads, with its contract, so a tight cap cuts leads first.
+    selected = [
+        item for item in methods.get("items") or ()
+        if item.get("kind") in ("skill", "collection") and item.get("selection") == "method_fit"
+    ]
+    header = _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", "")
+    # The header line is charged first, so a selected skill's line is sized to the room the header leaves.
+    room = max_chars - len(header) - 1
+    # Each selected method keeps room for the plain lines of those after it, so one long contract never drops another.
+    plains = [len(_skill_method_line({**item, "contract": None}, room)) + 1 for item in selected]
+    used = 0
+    for position, item in enumerate(selected):
+        line = _skill_method_line(item, room - used - sum(plains[position + 1:]))
+        entries.append((line, ""))
+        used += len(line) + 1
     for item in block.get("candidates") or ():
+        if any(item.get("source_ref") == method.get("source_ref") for method in selected):
+            continue  # the selected skill's own line already routes to it
         carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
         lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")
-        if item.get("kind") == "skill":
-            # The name and description are page text, so they are quoted and escaped like a method's title.
-            name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
-            entries.append((_packet_line("skill", f"{name}: {description}; load it with read_page before acting.", read_ref), ""))
+        if any(item is chosen for chosen in selected):
+            continue  # already rendered first, with its contract
+        if item.get("kind") in ("skill", "collection"):
+            entries.append((_skill_method_line(item, room), ""))
             continue
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
@@ -2442,7 +2489,7 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         entries.append((_packet_line("method", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
     entries = [entry for entry in entries if any(entry)]
     if entries:
-        entries.insert(0, (_packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""), ""))
+        entries.insert(0, (header, ""))
     kept, used = [], 0
     for route, link_line in entries:
         cost = len(route) + 1 if route else 0
@@ -2626,16 +2673,33 @@ def _positions_overflow_line(refs: list[str], omitted: int) -> str:
     return f"- positions not shown, read by ref: {', '.join(f'[{ref}]' for ref in refs)}{more}"
 
 
+#: A reason is one of the service's closed tokens; this only caps a malformed one.
+_POSITIONS_REASON_MAX_CHARS = 40
+
+
+def _positions_state_line(block: dict) -> str:
+    """The line that says the block is not the whole, so a position the service did not read never reads as none."""
+    # nosemgrep: ep-word-set -- the positions block's closed states that say the block is not the whole
+    state = block.get("state")
+    if state not in ("partial", "unavailable"):
+        return ""
+    reason = " ".join(str(block.get("reason") or "").split())[:_POSITIONS_REASON_MAX_CHARS]
+    because = f" ({reason})" if reason else ""
+    return f"- positions {state}{because}: a recorded position may exist that is not shown; search before you treat one as absent"
+
+
 def _format_positions_block(block: object) -> str:
     """The person's recorded positions under the service's framing line, whole lines; nothing when none is served.
 
     The block has its own bound beside the working set's, so it takes nothing from the map's or the turn's room.
     The refs of the positions the service could not fit as lines follow them, within the same bound, and a count of
-    the rest always renders, so a full block never reads as the whole.
+    the rest always renders, so a full block never reads as the whole. A partial or unavailable block ends with a
+    line that says so, beside the bound, even when it carries no position.
     """
-    # nosemgrep: ep-word-set -- the positions block's closed states that carry items or references
-    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial"):
+    # nosemgrep: ep-word-set, ep-word-membership -- the positions block's closed states that render
+    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial", "unavailable"):
         return ""
+    note = _positions_state_line(block)
     lines, used = [], 0
     for item in block.get("items") or ():
         if not isinstance(item, dict) or not item.get("text"):
@@ -2654,10 +2718,10 @@ def _format_positions_block(block: object) -> str:
         shown.append(ref)
     unseen = len(refs) - len(shown) + omitted
     if not lines and not shown and not unseen:
-        return ""
+        return note
     tail = [_positions_overflow_line(shown, unseen)] if shown or unseen else []
     about = " ".join(str(block.get("about") or "").split())
-    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail])
+    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail, *([note] if note else [])])
 
 
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:

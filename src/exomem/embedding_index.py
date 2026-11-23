@@ -8,6 +8,7 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -34,6 +35,7 @@ from . import (
     foreground_priority,
     index_paths,
     passage_matrix,
+    passage_terms,
     recall_space,
     reserved_paths,
     semantic_index,
@@ -296,13 +298,23 @@ class PageScorer:
 
     A page withheld by the store or changed since the matrix (a lagging view's `stale_paths`) has no rows here.
     `token` names everything a score read from this scorer depends on, so a result kept under it stays correct.
-    `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
+    It names the withheld pages by a digest: a cache keyed on it keeps no copy of a set that a store census can
+    make large. `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
     """
 
     def __init__(self, resident: _EmbCache, withheld: frozenset[str]) -> None:
         self._resident = resident
         self._skip = withheld | (resident.stale_paths or frozenset())
-        self.token = (resident.epoch, resident.generation, resident.instance, resident.stale_paths, withheld)
+        self._withheld = withheld
+
+    @functools.cached_property
+    def token(self) -> tuple:
+        # Computed on first use: profile selection builds a scorer and never reads its token.
+        digest = hashlib.blake2b(digest_size=16)
+        for path in sorted(self._withheld):
+            digest.update(path.encode() + b"\0")  # NUL frames each path; a vault path cannot contain NUL
+        resident = self._resident
+        return (resident.epoch, resident.generation, resident.instance, resident.stale_paths, digest.digest())
 
     def rows(self, path: str) -> np.ndarray | None:
         if path in self._skip:
@@ -339,10 +351,15 @@ class ChunkRef(NamedTuple):
 
 
 class ChunkSelection(NamedTuple):
-    """Passage hits and the scoring backend that actually supplied them."""
+    """Passage hits and the scoring backend that actually supplied them.
+
+    `lexical` holds the lexical hits of a fused selection, read in the same snapshot as the
+    dense hits, or None when the selection asked for none or the terms do not cover it.
+    """
 
     hits: list[tuple[str, int, str | ChunkRef, float]]
     scoring_mode: str
+    lexical: list[tuple[str, int, ChunkRef, float]] | None = None
 
 
 def _cache_covers_publication(
@@ -1068,6 +1085,13 @@ class EmbeddingIndex:
         self._catch_up_lock = threading.Lock()
         self._matrix_load_failed_at: float | None = None
         self._matrix_load_failures = 0
+        # Guards `_terms_backfill`, the one background lexical backfill (a leaf lock).
+        self._terms_lock = threading.Lock()
+        self._terms_backfill: threading.Thread | None = None
+        self._terms_failed_at: float | None = None
+        # The row counts at the token a search last read; replaced at the next token. It is
+        # cheap to build, so concurrent searches may each build one and keep the last.
+        self._terms_counts: passage_terms.Counts | None = None
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1133,6 +1157,7 @@ class EmbeddingIndex:
         # that a writer which bumps the generation without logging its paths is
         # DETECTED rather than silently caught up (see sidecar_store).
         sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
+        passage_terms.attach(conn)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
@@ -2170,30 +2195,35 @@ class EmbeddingIndex:
                 return loaded
 
     def _resident_current(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it is the current publication, read without the lock.
 
-        Counts no use: the idle reaper must not read a publisher's check as a
+        `token` is the sidecar token the caller already read; without it, the token is
+        peeked. Counts no use: the idle reaper must not read a publisher's check as a
         reader.
         """
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
-        served = (
-            sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
-            if c is not None and c.recall_policy_identity == policy_identity
-            else None
-        )
+        if c is None or c.recall_policy_identity != policy_identity:
+            served = None
+        elif token is None:
+            served = sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
+        else:
+            # The caller read the token in its own snapshot, so no second connection peeks it.
+            served = c if sidecar_store.cache_is_fresh(c, self.path, *token[:3]) else None
         if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
             return served
         return None
 
     def _serve_resident(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it serves the current publication, read without the lock."""
-        served = self._resident_current(policy_identity, nonblocking=nonblocking)
+        served = self._resident_current(policy_identity, nonblocking=nonblocking, token=token)
         if served is not None:
             self._hits += 1
         return served
@@ -2871,55 +2901,68 @@ class EmbeddingIndex:
             defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
 
-    def best_scores_for_paths(self, query_vec: np.ndarray, paths: AbstractSet[str]) -> dict[str, float] | None:
-        """The best chunk score of each of `paths` that has rows, or None when no resident matrix serves them.
-
-        Profile scoring must cost O(profile chunks), not O(vault): this scores only those paths' rows, where
-        `_search` scores the whole matrix and masks afterwards. A path `_search` would mask scores nothing: one a
-        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
-        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
-        The disk-scoring profile keeps no matrix, so it answers None.
-
-        `metadata` is sorted by file_path, so each path's rows are one block that bisection finds
-        (`_without_paths` relies on the same order); no row pass and no memo is needed.
-        """
-        scorer = self.page_scorer()
-        return None if scorer is None else scorer.best_scores(query_vec, paths)
-
     def page_scorer(self) -> PageScorer | None:
         """A scorer bound to the matrix that serves now, or None when no resident matrix serves this profile.
 
-        It reads what `best_scores_for_paths` reads, once: a cold matrix starts the one background load and raises
-        `recall_space.CorpusMatrixCold`, and the disk-scoring profile answers None.
+        Scoring through it costs O(scored pages' chunks), not O(vault): it scores only those pages' rows, where
+        `_search` scores the whole matrix and masks afterwards. A page `_search` would mask scores nothing: one a
+        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
+        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
+        The disk-scoring profile keeps no matrix, so it answers None before reading what the store withholds.
         """
-        withheld = self._withheld()
-        if withheld.everything:
-            return None
         resident = self.require_resident_matrix()
         if resident is None:
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
             return None
         return PageScorer(resident, frozenset(withheld.paths))
 
 
     def select_passage_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
-        encoded_for: Any = _UNSPECIFIED_SPACE,
+        encoded_for: Any = _UNSPECIFIED_SPACE, lexical_query: str | None = None,
     ) -> ChunkSelection:
-        """Prefer a current admitted matrix; otherwise use disk without waiting."""
+        """Prefer a current admitted matrix; otherwise use disk without waiting.
+
+        With `lexical_query`, the top `k` lexical hits of `allowed_paths` are read on the
+        connection and in the snapshot whose token the dense hits carry, and are returned
+        as `lexical`. When the terms do not cover that snapshot, `select_passage_terms`
+        decides whether this request can make them whole.
+        """
         from . import recall_policy
 
-        resident = None
-        if passage_matrix.ceiling():
-            resident = self._serve_resident(
-                recall_policy.recall_policy_identity(self.vault_root), nonblocking=True
-            )
-            if resident is not None and not resident.passage_admitted:
-                resident = None
+        fusing = lexical_query is not None and self.path.exists()
+        if fusing and allowed_paths is None:
+            raise ValueError("a lexical passage selection needs its allowed paths")
+        policy = (
+            recall_policy.recall_policy_identity(self.vault_root) if passage_matrix.ceiling() else None
+        )
         withheld = self._withheld()
+        eligible = set(allowed_paths) - withheld.paths if fusing else set()
+        lexical: list[tuple[str, int, ChunkRef, float]] | None = None
+        resident = None
+        if fusing and policy is not None and not withheld.everything:
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. The one
+            # token it reads proves the matrix current and the lexical hits.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                resident = self._admitted_resident(policy, token)
+                if resident is not None:
+                    lexical = self._passage_terms_at(
+                        conn, token, resident.space, lexical_query, k, eligible
+                    )
+            finally:
+                conn.rollback()
+                conn.close()
+        else:
+            resident = self._admitted_resident(policy)
         # These are the scoring backend's fixed protocol names, not content categories.
         mode = "resident" if resident is not None else "disk"
         if withheld.everything:
-            return ChunkSelection([], mode)
+            return ChunkSelection([], mode, [] if fusing else None)
         if resident is not None:
             hits = self._score_chunks(
                 query_vec, k, resident.metadata, resident.matrix, resident=resident,
@@ -2927,6 +2970,10 @@ class EmbeddingIndex:
                 defer_text=True,
             )
         else:
+            def lexical_stage(conn: sqlite3.Connection, token: tuple[int, ...], space: Any) -> None:
+                nonlocal lexical
+                lexical = self._passage_terms_at(conn, token, space, lexical_query, k, eligible)
+
             self.prepare_passage_matrix()
             with foreground_priority.foreground():
                 hits = self._disk_score(
@@ -2935,8 +2982,114 @@ class EmbeddingIndex:
                         allowed_paths is None or path in allowed_paths
                     ),
                     encoded_for=encoded_for, hydrate=True, defer_text=True,
+                    in_snapshot=lexical_stage if fusing else None,
                 )[0]
-        return ChunkSelection(hits, mode)
+        if fusing and lexical is None:
+            lexical = self.select_passage_terms(lexical_query, k, allowed_paths=allowed_paths)
+        return ChunkSelection(hits, mode, lexical)
+
+    def _admitted_resident(
+        self, policy: tuple[str, str] | None, token: tuple[int, ...] | None = None,
+    ) -> _EmbCache | None:
+        """The current matrix when passage search may score it, else None."""
+        if policy is None:
+            return None
+        resident = self._serve_resident(policy, nonblocking=True, token=token)
+        return resident if resident is not None and resident.passage_admitted else None
+
+    def _passage_terms_at(
+        self, conn: sqlite3.Connection, token: tuple[int, ...], space: Any,
+        query: str, k: int, eligible: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical hits under a proof of the caller's snapshot at `token`, or None when the
+        terms do not cover that snapshot."""
+        if token[1] <= 0 or not passage_terms.covered(conn, token[1]):
+            return None
+        proof = ChunkProof(self, token[:3], space)
+        counts = self._terms_counts
+        if counts is None or counts.token != proof.token:
+            counts = passage_terms.Counts(conn, proof.token)
+            self._terms_counts = counts
+        with foreground_priority.foreground():
+            rows = passage_terms.select(conn, query, k, eligible, counts)
+        return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
+
+    def select_passage_terms(
+        self, query: str, k: int, *, allowed_paths: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical passage hits under a chunk proof, or None while the terms table is not whole.
+
+        A sidecar of at most one backfill batch is made whole inline; a larger one starts
+        the background backfill, and the caller ranks without lexical matching meanwhile.
+        After a failed backfill, neither runs again until the retry delay has passed.
+        """
+        if not self.path.exists():
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
+            return []
+        eligible = set(allowed_paths) - withheld.paths
+        for attempt in range(2):
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. Each
+            # passage's text is read again, under the proof, by `matching_chunks`.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                hits = self._passage_terms_at(
+                    conn, token, recall_space.read_identity(conn, tables=_VECTOR_TABLES),
+                    query, k, eligible,
+                )
+                if hits is not None:
+                    return hits
+                rows_held = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            finally:
+                conn.rollback()
+                conn.close()
+            if attempt or rows_held > passage_terms.BACKFILL_ROWS or self._terms_backing_off():
+                break
+            self._backfill_passage_terms()
+        self.prepare_passage_terms()
+        return None
+
+    def prepare_passage_terms(self) -> threading.Thread | None:
+        """Start the one background lexical backfill, or return the one running."""
+        if not self.path.exists():
+            return None
+        with self._terms_lock:
+            running = self._terms_backfill
+            if running is not None and running.is_alive():
+                return running
+            if self._terms_backing_off():
+                return None
+            running = threading.Thread(
+                target=self._backfill_passage_terms, name="exomem-passage-terms", daemon=True
+            )
+            running.start()
+            self._terms_backfill = running
+            return running
+
+    def passage_terms_failed(self) -> bool:
+        """Whether the last lexical backfill failed; the next waits out the retry delay."""
+        return self._terms_failed_at is not None
+
+    def _terms_backing_off(self) -> bool:
+        # A failing backfill rescans every row, so a request does not restart it at once.
+        failed_at = self._terms_failed_at
+        return failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS
+
+    def _backfill_passage_terms(self) -> None:
+        try:
+            conn = self._connect()
+            try:
+                passage_terms.backfill(conn, CHUNK_PATH_LOG)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, OpError) as error:
+            self._terms_failed_at = time.monotonic()
+            log.warning("passage terms backfill failed: %s", error)
+            return
+        self._terms_failed_at = None
 
     def _search(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
@@ -3184,8 +3337,12 @@ class EmbeddingIndex:
         self, query_vecs, k: int, *, admits: Callable[[str], bool],
         encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
         defer_text: bool = False,
+        in_snapshot: Callable[[sqlite3.Connection, tuple[int, ...], Any], None] | None = None,
     ) -> list[list[tuple[str, int, str | ChunkRef, float]]]:
-        """Exact eligible top-k with bounded vectors and one scoring snapshot."""
+        """Exact eligible top-k with bounded vectors and one scoring snapshot.
+
+        `in_snapshot` runs once in that snapshot, with its connection, token and space.
+        """
         if not self.path.exists():
             return [[] for _ in query_vecs]
         # Fixed phase names form the disk-scoring instrumentation protocol.
@@ -3202,6 +3359,8 @@ class EmbeddingIndex:
                     recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
                 self._observe_identity(identity, token)
                 proof = ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
+            if in_snapshot is not None:
+                in_snapshot(conn, token, identity)
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
@@ -4176,6 +4335,7 @@ class EmbeddingIndex:
                         "rebuild_embeddings: serving or source snapshot changed; publication refused"
                     )
                     return 0
+                passage_terms.suspend(conn)
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
                 recall_space.write_identity(conn, producer)

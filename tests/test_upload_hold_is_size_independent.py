@@ -8,11 +8,16 @@ the boundary only to plan and install, which grows with nothing in the payload.
 The proof runs the real resumable-session commit on generated (sparse) bytes at two sizes. It asserts what
 a person sees: a note saved while the big file is still being staged is neither refused nor made to wait,
 and the boundary hold of the big file does not grow with the file.
+
+The commit's derived fan-out (lexical, resolver, graph and embedding refresh) is the other cost that once grew
+under the hold. The last proofs slow that fan-out down and assert that the hold does not grow with it, that a
+note saved meanwhile does not wait, and that a fan-out stopped after the release is recovered by the next drain.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import threading
 import time
@@ -22,8 +27,13 @@ from pathlib import Path
 import pytest
 
 from exomem import (
+    add,
     artifact_lifecycle,
+    deferred_index,
+    index_sync,
+    mutation_lock,
     original_pool,
+    schema,
     server_transfer,
     upload_sessions,
     upload_stage,
@@ -195,3 +205,189 @@ def test_a_note_saved_while_a_big_upload_is_staging_is_neither_refused_nor_made_
     assert waited < 0.5, f"the save waited {waited:.2f} s for the boundary while the upload staged"
     assert isinstance(outcome[0], dict), outcome[0]
     assert recording.holding.is_set()
+
+
+# A fan-out this slow would add three seconds to a hold that runs it. A hold that only plans and installs
+# moves by the swing of a few fsyncs, far below half a second.
+SLOW_FANOUT_SECONDS = 3.0
+HOLD_GROWTH_LIMIT_MS = 500
+
+
+class _HoldClock:
+    """Each vault boundary hold, by operation, as the boundary itself times it for `mutation_lock_released`."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.holds: list[tuple[str, float]] = []
+        real = mutation_lock._record_timing
+
+        def record(coordinator, timing):  # noqa: ANN001, ANN202 - the boundary's own private hook
+            if coordinator.kind == mutation_lock.COORDINATOR_VAULT_BOUNDARY:
+                self.holds.append((timing["operation"], timing["hold_ms"]))
+            real(coordinator, timing)
+
+        monkeypatch.setattr(mutation_lock, "_record_timing", record)
+
+    def last(self, operation: str) -> float:
+        held = [hold_ms for name, hold_ms in self.holds if name == operation]
+        assert held, f"no {operation} hold was recorded"
+        return held[-1]
+
+
+class _SlowFanout:
+    """The real index fan-out, made to sleep once before its next call."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.sleeping = threading.Event()
+        self._delay: float | None = None
+        real = index_sync.upsert_after_write
+
+        def upsert_after_write(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            delay, self._delay = self._delay, None
+            if delay is not None:
+                self.sleeping.set()
+                time.sleep(delay)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(index_sync, "upsert_after_write", upsert_after_write)
+
+    def arm(self, delay: float) -> None:
+        self.sleeping.clear()
+        self._delay = delay
+
+
+def _upload_bytes(name: str) -> bytes:
+    return f"The original bytes of {name}, uploaded once.\n".encode()
+
+
+def _evidence_session_upload(vault: Path, name: str) -> dict:
+    data = _upload_bytes(name)
+    target = {"filename": name, "scope": "Device", "category": "Uploads", "description": f"Upload {name}",
+              "raw_protection": False, "archive": None}
+    session, _secret = upload_sessions.create(
+        vault, binding=f"bearer:{name}", length=len(data), sha256=hashlib.sha256(data).hexdigest(),
+        target=target, max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+    session.part.write_bytes(data)
+    return server_transfer.commit_session(vault, session.part, session.record)
+
+
+def _source_session_upload(vault: Path, name: str) -> dict:
+    data = _upload_bytes(name)
+    digest = hashlib.sha256(data).hexdigest()
+    target = {"lane": "source", "filename": name, "title": f"Upload {name}", "source_type": "session",
+              "domain": None, "url": None, "content_type": None, "raw_protection": False}
+    target["destination"] = server_transfer._source_session_destination(vault, target, size=len(data), sha256=digest)
+    session, _secret = upload_sessions.create(
+        vault, binding=f"bearer:{name}", length=len(data), sha256=digest, target=target,
+        max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+    session.part.write_bytes(data)
+    return server_transfer.commit_session(vault, session.part, session.record)
+
+
+def _source_capture_upload(vault: Path, name: str) -> dict:
+    data = _upload_bytes(name)
+    return server_transfer._capture_source_under_guard(
+        writer_lease.get_manager(), vault, schema.load_source_schema(vault), title=f"Upload {name}",
+        filename=name, stream=io.BytesIO(data), content_type=None, source_type="session", domain=None,
+        add_module=add, max_bytes=len(data),
+    )
+
+
+UPLOAD_DOORS = [
+    pytest.param(_evidence_session_upload, "upload_preserve", id="evidence"),
+    pytest.param(_source_capture_upload, "upload_capture", id="source-capture"),
+    pytest.param(_source_session_upload, "upload_source_session", id="source-session"),
+]
+
+
+@pytest.mark.parametrize(("upload", "operation"), UPLOAD_DOORS)
+def test_an_upload_holds_the_boundary_no_longer_when_its_derived_fanout_is_slow(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, upload, operation: str
+) -> None:
+    clock = _HoldClock(monkeypatch)
+    fanout = _SlowFanout(monkeypatch)
+    manager = writer_lease.get_manager()
+    queued_before = set(deferred_index.list_full_paths(vault))
+
+    fanout.arm(0.0)
+    quick = upload(vault, "quick-fanout.bin")
+    quick_hold = clock.last(operation)
+
+    fanout.arm(SLOW_FANOUT_SECONDS)
+    outcome: list[BaseException | dict] = []
+
+    def slow_upload() -> None:
+        try:
+            outcome.append(upload(vault, "slow-fanout.bin"))
+        except BaseException as error:  # noqa: BLE001 - handed to the test thread to assert on
+            outcome.append(error)
+
+    uploader = threading.Thread(target=slow_upload)
+    uploader.start()
+    try:
+        assert fanout.sleeping.wait(60), "the upload never reached its derived fan-out"
+        note = vault / "Knowledge Base" / "Notes" / "saved-during-fanout.md"
+        started = time.monotonic()
+        with manager.mutation_guard(vault, operation="note_save"):
+            waited = time.monotonic() - started
+            vault_module.batch_atomic_write(
+                [vault_module.PlannedWrite(
+                    note, "saved during the fan-out\n", create_only=True,
+                    expected_hash=vault_module.MISSING_CONTENT_HASH,
+                )],
+                vault_root=vault,
+            )
+    finally:
+        uploader.join(timeout=120)
+    slow_hold = clock.last(operation)
+    print(f"{operation}: hold {quick_hold:.0f} ms with an instant fan-out, {slow_hold:.0f} ms with a "
+          f"{SLOW_FANOUT_SECONDS:.0f} s fan-out; a note save waited {waited * 1000:.0f} ms")
+
+    assert slow_hold - quick_hold < HOLD_GROWTH_LIMIT_MS, (
+        f"the {operation} hold grew from {quick_hold:.0f} ms to {slow_hold:.0f} ms when the fan-out took "
+        f"{SLOW_FANOUT_SECONDS:.0f} s longer"
+    )
+    assert waited < 1.0, f"a note save waited {waited:.2f} s behind the upload's derived fan-out"
+    slow = outcome[0]
+    assert isinstance(slow, dict), slow
+    assert quick["derived_sync"] == slow["derived_sync"] == "completed"
+    assert set(deferred_index.list_full_paths(vault)) <= queued_before, "the upload left full-refresh custody behind"
+
+
+def test_a_fanout_stopped_after_the_release_is_recovered_by_the_next_drain(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = writer_lease.get_manager()
+    custody_at_fanout: list[tuple[bool, list[str]]] = []
+
+    def stopped_fanout(vault_root, replaced, *_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        custody_at_fanout.append(
+            (manager.holds_mutation_boundary(vault_root), deferred_index.list_full_paths(vault_root))
+        )
+        raise RuntimeError("the process stopped before its derived fan-out")
+
+    with monkeypatch.context() as stopped:
+        stopped.setattr(vault_module, "post_commit_batch_fanout", stopped_fanout)
+        receipt = _evidence_session_upload(vault, "stopped-fanout.bin")
+
+    page = receipt["sidecar_path"]
+    [(held, queued_at_fanout)] = custody_at_fanout
+    assert not held, "the derived fan-out ran while the upload still held the boundary"
+    assert page in queued_at_fanout, "the page had no durable full-refresh custody when its fan-out began"
+    assert receipt["derived_sync"] == "pending"
+    assert page in deferred_index.list_full_paths(vault)
+
+    refreshed: list[str] = []
+    real_refresh = index_sync.upsert_after_write
+
+    def recorded_refresh(vault_root, paths, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        refreshed.extend(path.relative_to(vault_root).as_posix() for path in paths)
+        return real_refresh(vault_root, paths, *args, **kwargs)
+
+    with monkeypatch.context() as drain:
+        drain.setattr(index_sync, "upsert_after_write", recorded_refresh)
+        index_sync.drain_deferred_work(vault)
+
+    assert page in refreshed, "the next drain did not refresh the page's lexical, resolver and graph rows"
+    assert page not in deferred_index.list_full_paths(vault)

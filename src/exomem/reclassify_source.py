@@ -29,30 +29,49 @@ plausible guess for approval is how a fallback becomes permanent.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
+import os
 import re
-from collections.abc import Callable, Mapping
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from types import MappingProxyType
 from typing import Any, Literal
 
-from . import move_file as move_file_module
 from . import (
+    access,
+    file_watcher,
+    foreground_priority,
+    freshness,
     originals,
     page_lineage,
     path_mentions,
     pointer_write,
+    recall_policy,
     record_formats,
+    request_budget,
     semantic_writes,
     source_pointers,
     source_taxonomy,
+    vault,
     vocabulary_resolution,
 )
+from . import move_file as move_file_module
+from .cli_ops import OpError
+from .governance import authorization_session_authority, bridges, egress, lifecycle, policy, store
+from .governance.authorization_session_lifecycle import AuthorizationSessionUnavailable
+from .governance.principal import RequestPrincipal, effective_principal
 from .kbdir import managed_form, managed_join, managed_split
 from .vault import (
     InboundLink,
     PathGuard,
+    PathGuardError,
     PlannedWrite,
     VaultPathError,
     admit_write_target,
@@ -581,6 +600,8 @@ def propose(
     *,
     source_kind: str | None = None,
     domain: str | None = None,
+    candidate_limit: int | None = None,
+    paged: bool = False,
 ) -> ReclassifyProposal:
     """Report what a correction would do, without writing anything.
 
@@ -602,8 +623,52 @@ def propose(
     approved it. The report names only pages the caller may see.
     """
     vault_root = Path(vault_root)
+    who = effective_principal()
+    surface = who.surface
+    owner = managed_preview_stop(vault_root, who)
+    check = request_budget.current_checkpoint()
+    served = surface == "rest" or (surface == "mcp" and request_budget.current() is not None)
+    if served and (owner is None) != (check is None):
+        # The transport selected whether to manage this preview before the leaf.
+        raise preview_warming()
+    if owner is None:
+        if paged:
+            raise preview_warming()
+        return _propose(vault_root, path, source_kind=source_kind, domain=domain)
+
+    try:
+        admission = preview_release_policy(vault_root, who)
+        visible = _preview_referrer_view(vault_root, who, admission.erasure.paths,
+                                         bounded=candidate_limit is not None)
+        with nullcontext() if paged else foreground_priority.cancellable(owner):
+            foreground_priority.check_cancelled()
+            result = _propose(vault_root, path, source_kind=source_kind, domain=domain, owner=owner,
+                              candidate_limit=candidate_limit, paged=paged, visible=visible)
+            foreground_priority.check_cancelled()
+            if (managed_preview_stop(vault_root, who) is not owner
+                    or preview_release_policy(vault_root, who) != admission):
+                raise preview_warming()
+            return result
+    except foreground_priority.BulkCancelled:
+        raise preview_warming() from None
+
+
+def _propose(
+    vault_root: Path, path: str, *, source_kind: str | None, domain: str | None,
+    owner: Event | None = None,
+    candidate_limit: int | None = None, paged: bool = False,
+    visible: Callable[[str], bool] | None = None,
+) -> ReclassifyProposal:
     rel, absolute = _require_source(vault_root, path)
-    text, _ = read_guarded_text(vault_root, absolute)
+    if visible is not None and not visible(rel):
+        raise ReclassifyError("SOURCE_NOT_FOUND", "source does not exist")
+    held_sink: _HeldSink | None = _HELD_EVIDENCE.get() if paged else None
+    read_text = _read_inline_text if candidate_limit is not None else read_guarded_text
+    text, source_guard = (
+        _witnessed_read(read_text, held_sink, vault_root, absolute)
+        if held_sink is not None
+        else read_text(vault_root, absolute)
+    )
     front, _, _ = parse_frontmatter(text)
     current_kind, current_domain = _current_classification(text)
 
@@ -657,10 +722,11 @@ def propose(
         _refuse_unchosen_kind(proposed_kind)
     effective_domain = proposed_domain or current_domain
     destination: str | None = None
+    classification = None
     relocation_required = False
     if proposed_kind is not None or proposed_domain is not None:
         try:
-            _, _, destination = _projection(
+            kind, resolved_domain, destination = _projection(
                 vault_root,
                 rel,
                 taxonomy,
@@ -668,16 +734,36 @@ def propose(
                 effective_domain,
                 supplied=domain is not None,
             )
+            classification = (kind.key, resolved_domain.key if resolved_domain else None)
             relocation_required = destination != rel
         except (source_taxonomy.TaxonomyError, vocabulary_resolution.VocabularyResolutionError):
             destination = None
 
-    inbound = _visible_inbound(vault_root, rel)
+    generation = _preview_generation(vault_root) if owner is not None else None
+    read_hashes = {rel: source_guard.expected_content_hash} if owner is not None else None
+    inbound = (
+        _visible_inbound(vault_root, rel) if owner is None
+        else _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
+                                     candidate_limit=candidate_limit, visible=visible)
+    )
     outcome = (
-        _referrer_outcome(vault_root, rel, text, destination, inbound)
+        _referrer_outcome(vault_root, rel, text, destination, inbound, read_hashes=read_hashes,
+                          candidate_limit=candidate_limit,
+                          paged_classification=classification if paged else None,
+                          visible=visible, held_sink=held_sink)
         if destination is not None
         else _ReferrerOutcome()
     )
+    if owner is not None and read_hashes is not None:
+        foreground_priority.check_cancelled()
+        try:
+            source_guard.recheck(vault_root)
+        except PathGuardError:
+            raise preview_warming() from None
+        current_inbound = _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
+                                                   candidate_limit=candidate_limit, visible=visible)
+        if current_inbound != inbound or _preview_generation(vault_root) != generation:
+            raise preview_warming()
     return ReclassifyProposal(
         path=rel,
         current_kind=current_kind,
@@ -695,7 +781,8 @@ def propose(
         refusals=outcome.refusals,
         warnings=() if outcome.mentions_checked else (path_mentions.NOT_CHECKED,),
         preview_digest=(
-            pointer_write.preview_digest({rel: destination}, outcome.repoints)
+            (outcome.paged_digest if paged else
+             pointer_write.preview_digest_from_hashes({rel: destination}, outcome.repoint_hashes))
             if destination is not None and destination != rel and not outcome.refusals
             else None
         ),
@@ -707,16 +794,153 @@ def propose(
 _PREVIEW_CALL = MappingProxyType({"operation": "propose-reclassification"})
 
 
+def is_preview_call(command: str, arguments: Mapping[str, object]) -> bool:
+    """Select the read-only preview operation from the command schema."""
+    return (
+        command == "manage_memory_file"
+        and arguments.get("operation") == _PREVIEW_CALL["operation"]
+    )
+
+
+def managed_preview_stop(vault_root: Path, who: RequestPrincipal) -> Event | None:
+    """A live managed observer can prove the unrestricted owner's preview."""
+    # MCP and REST are the served protocol surfaces defined by RequestPrincipal.
+    if who.surface not in ("mcp", "rest"):
+        return None
+    stop = file_watcher.observing_inbound_recovery_stop(vault_root)
+    if stop is None:
+        return None
+    request_budget.checkpoint()
+    allowed = egress.unrestricted_content_access(vault_root, who)
+    request_budget.checkpoint()
+    return stop if allowed else None
+
+
+@dataclass(frozen=True)
+class PreviewReleaseBasis:
+    policy_fingerprint: str
+    access_fingerprint: str
+    session_stamp: tuple[str | None, tuple[str, ...]] | None
+    complete: bool
+
+
+@dataclass(frozen=True)
+class PreviewReleaseAuthority:
+    basis: PreviewReleaseBasis
+    erasure: lifecycle.TombstoneSnapshot
+
+
+def preview_release_basis(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseBasis:
+    """Read current actor and policy scope independently of lifecycle history."""
+    compiled = policy.load(vault_root)
+    exact_access = access.publication_policy_exclusions(vault_root)
+    if exact_access is None:
+        raise preview_warming()
+    access_identity, excludes_paths = exact_access
+    complete = not (
+        compiled.blocked or compiled.conflicted or excludes_paths
+        or any(rule.audience == who.audience_id and rule.options.get("suspended") is not True
+               for rule in compiled.rules)
+    )
+    session = who.verified_authorization_session
+    session_stamp = None
+    if session is not None and not compiled.empty:
+        try:
+            with closing(
+                store.open_authorization_session_read_connection(vault_root)
+            ) as connection:
+                session_stamp = authorization_session_authority.session_release_stamp(
+                    connection, context=session, audience=who.audience_id, now=int(time.time()),
+                )
+        except AuthorizationSessionUnavailable:
+            raise preview_warming() from None
+    return PreviewReleaseBasis(compiled.fingerprint, access_identity, session_stamp, complete)
+
+
+def preview_release_authority(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseAuthority:
+    basis = preview_release_basis(vault_root, who)
+    try:
+        erasure = lifecycle.tombstone_snapshot(vault_root)
+    except request_budget.ReadBudgetExhausted:
+        stop = file_watcher.observing_inbound_recovery_stop(vault_root)
+        if stop is not None:
+            from .find import schedule_tombstone_proof_warm
+
+            schedule_tombstone_proof_warm(vault_root, stop=stop)
+        raise
+    request_budget.checkpoint()
+    if lifecycle.FAIL_CLOSED_TOMBSTONE in erasure.paths:
+        raise preview_warming()
+    return PreviewReleaseAuthority(basis, erasure)
+
+
+def preview_release_policy(vault_root: Path, who: RequestPrincipal) -> PreviewReleaseAuthority:
+    """Admit a managed report only when the caller can approve its full write plan."""
+    authority = preview_release_authority(vault_root, who)
+    if not authority.basis.complete:
+        raise OpError(
+            "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+            "The current policy does not authorize a complete managed reference report.",
+        )
+    return authority
+
+
+def _preview_referrer_view(
+    vault_root: Path, who: RequestPrincipal, tombstones: frozenset[str], *,
+    bounded: bool = False,
+    failure: Callable[[], Exception] | None = None,
+) -> Callable[[str], bool]:
+    def unavailable() -> None:
+        raise (failure or preview_warming)()
+
+    def large() -> None:
+        raise PreviewNeedsJob()
+
+    def read_inline_page(path: str) -> bytes:
+        try:
+            return _read_inline_text(vault_root, vault_root.resolve() / path)[0].encode()
+        except (OSError, PathGuardError, UnicodeError):
+            raise (failure or preview_warming)() from None
+
+    read_page = read_inline_page if bounded else None
+    keep = egress.release_walk_filter(vault_root, principal=who, tombstones=tombstones,
+                                     read_page=read_page, on_unavailable=unavailable)
+    if keep is None:
+        keep = egress.content_permits_filter(
+            vault_root, who, read_page=read_page, on_unavailable=unavailable
+        )
+
+    def visible(path: str) -> bool:
+        request_budget.checkpoint()
+        if lifecycle.is_tombstoned_in(tombstones, path):
+            return False
+        with bridges.preview_read_bound(
+            _INLINE_MARKDOWN_BYTES if bounded else None, unavailable, large
+        ):
+            return keep(path)
+
+    return visible
+
+
+def _preview_generation(vault_root: Path) -> tuple:
+    """Bind both the literal inbound index and the projected prose candidates."""
+    generation = freshness.preview_reference_generation(vault_root)
+    if generation is None:
+        raise preview_warming()
+    return generation, recall_policy.recall_policy_identity(vault_root)
+
+
 @dataclass(frozen=True)
 class _ReferrerOutcome:
     rewritten: tuple[str, ...] = ()
     repointed: tuple[str, ...] = ()
-    #: The pointer writes behind `repointed`, which the preview digest binds.
-    repoints: tuple[Any, ...] = ()
+    #: Keep only the pointer proofs behind `repointed`, independent of page body size.
+    repoint_hashes: tuple[tuple[str, str, str], ...] = ()
     append_only_unchanged: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     refusals: tuple[Mapping[str, str], ...] = ()
     #: False when the catalogue could not say which pages cite the source's path in prose.
     mentions_checked: bool = True
+    paged_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -734,14 +958,227 @@ def _visible_inbound(vault_root: Path, rel: str) -> list[InboundLink]:
     """Inbound links over the caller's view, as in a vault without the pages
     withheld from it: a writer other than the owner never learns of a link
     from a page it may not see."""
-    from .governance import egress
-
     visible = egress.visible_page_filter(vault_root)
     return [
         hit
         for hit in find_inbound_wikilinks(vault_root, rel, visible=visible, lineage=False)
         if visible is None or visible(hit.path)
     ]
+
+
+def _managed_preview_inbound(
+    vault_root: Path, rel: str, owner: Event, *,
+    read_hashes: Mapping[str, str | None] | None = None,
+    candidate_limit: int | None = None, visible: Callable[[str], bool] | None = None,
+) -> list[InboundLink]:
+    from . import find
+
+    try:
+        inbound = vault.cached_inbound_wikilinks(
+            vault_root, rel, visible=visible, read_hashes=read_hashes,
+            candidate_limit=candidate_limit,
+        )
+    except vault.InboundCandidatesExceeded:
+        raise PreviewNeedsJob() from None
+    if file_watcher.observing_inbound_recovery_stop(vault_root) is owner:
+        if inbound is not None:
+            return inbound
+        find.schedule_inbound_rebuild(vault_root, stop=owner)
+    raise preview_warming()
+
+
+def preview_warming() -> OpError:
+    """The fact-free retry shared by an incomplete or expired preview."""
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_WARMING",
+        "The source's references are still being checked. Retry the same preview shortly.",
+        details={"retry_after_ms": 1000},
+    )
+
+
+def preview_unavailable() -> OpError:
+    return OpError(
+        "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
+        "The current search backend cannot check prose references to the source.",
+        remediation="Use a server with the maintained lexical index to preview the move.",
+    )
+
+
+class PreviewNeedsJob(Exception):
+    """Current evidence exceeds the interactive admission bound."""
+
+
+# Keep one large parse out of the interactive request even when it has few candidates.
+_INLINE_MARKDOWN_BYTES = 1024 * 1024
+_PAGED_APPROVAL_PREFIX = "reclassification-report-v1:"
+
+
+def _read_inline_text(root: Path, path: Path) -> tuple[str, PathGuard]:
+    if path.lstat().st_size > _INLINE_MARKDOWN_BYTES:
+        raise PreviewNeedsJob()
+    absolute_root = root.resolve()
+    rel = path.relative_to(absolute_root).as_posix()
+    raw, guard = vault.read_bounded_guarded_bytes(absolute_root, rel, limit=_INLINE_MARKDOWN_BYTES)
+    return raw.decode("utf-8"), guard
+
+
+class _HeldSink(dict):
+    """path -> release record, plus the build's identity context, computed once on first use."""
+
+    context_ready = False
+    context_usable = False
+    compiled = None
+    identity = None
+
+
+#: A private preview job's held-evidence sink, set only inside its own thread. Every other
+#: preview sees ``None`` and pays no capture cost.
+_HELD_EVIDENCE: ContextVar[_HeldSink | None] = ContextVar(
+    "reclassify_source_held_evidence", default=None,
+)
+
+
+@contextmanager
+def held_evidence_sink() -> Iterator[dict[str, dict[str, Any]]]:
+    """Collect per-row release evidence for the duration of one preview build."""
+    sink: _HeldSink = _HeldSink()
+    token = _HELD_EVIDENCE.set(sink)
+    try:
+        yield sink
+    finally:
+        sink.compiled = None
+        _HELD_EVIDENCE.reset(token)
+
+
+def _load_held_context(sink: _HeldSink, vault_root: Path, who: RequestPrincipal) -> None:
+    """Load the row-independent release identity once; a failed load records nothing all build."""
+    if sink.context_ready:
+        return
+    sink.context_ready = True
+    try:
+        compiled = policy.load(vault_root)
+        tombstones = lifecycle.tombstoned_paths(vault_root)
+        declared_purpose = egress._declared_purpose(vault_root, who, None)
+        identity = egress._frozen_release_identity(egress._release_admission_identity(
+            vault_root, compiled, who, declared_purpose, egress._grants_hash(compiled), tombstones,
+        ))
+    except Exception:  # noqa: BLE001 - no provable identity means every row takes the full path
+        return
+    if identity is not None:
+        sink.compiled = compiled
+        sink.identity = identity
+        sink.context_usable = True
+
+
+def _stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _record_held_row(
+    vault_root: Path,
+    sink: _HeldSink,
+    who: RequestPrincipal,
+    rel: str,
+    text: str,
+    guard: PathGuard,
+    witness: tuple[int, int, int, int, int],
+) -> None:
+    """Record one simple governed row's release evidence while its bytes are still in hand.
+
+    A row is simple when its permit depends on no other file: no container-parent binding and no
+    bridge contribution. Anything unclear leaves no record and takes the full release path. Only
+    scalars are stored — the page text dies with this frame.
+    """
+    from . import document_containers
+    from .governance import connector_boundary
+
+    if not rel.lower().endswith(".md") or sink.compiled is None:
+        return
+    # Only a file's content guard carries a stat witness; a store-guarded page cannot.
+    if guard.leaf_policy != "content" or guard.expected_content_hash is None:
+        return
+    raw = text.encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != guard.expected_content_hash:
+        return
+    if document_containers.parent_binding_for_path(vault_root, rel, content=raw) is not None:
+        return
+    if bridges.maybe_bridge(raw) or any(
+            rel == grant.path or any(rel == dependency.path for dependency in grant.bridge_of)
+            for grant in sink.compiled.release_grants):
+        return
+    scopes = connector_boundary._membership_sets(
+        vault_root, rel, sink.compiled, content=raw, who=who,
+    )
+    sink[rel] = {
+        "path": rel,
+        "sha256": digest,
+        "size": len(raw),
+        "witness": list(witness),
+        "scopes": [sorted(scope) for scope in scopes],
+        "identity": sink.identity,
+    }
+
+
+def _witnessed_read(
+    reader: Callable[[Path, Path], tuple[str, PathGuard]],
+    sink: _HeldSink,
+    root: Path,
+    page: Path,
+) -> tuple[str, PathGuard]:
+    """Read a page and record its release evidence only when both stat witnesses agree."""
+    try:
+        resolved = page.resolve()
+        before = os.stat(resolved)
+    except OSError:
+        return reader(root, page)
+    text, guard = reader(root, page)
+    try:
+        rel = resolved.relative_to(root.resolve()).as_posix()
+        after = os.stat(resolved)
+    except (OSError, ValueError):
+        return text, guard
+    if _stat_witness(before) == _stat_witness(after):
+        try:
+            who = effective_principal()
+            _load_held_context(sink, root, who)
+            if sink.context_usable:
+                _record_held_row(root, sink, who, rel, text, guard, _stat_witness(before))
+        except Exception:  # noqa: BLE001 - one unprovable row must not lose the others
+            pass
+    return text, guard
+
+
+class _PagedPlanProof:
+    """Bind the Source and the ordered effects that produce every row of a paged report."""
+
+    def __init__(
+        self, path: str, destination: str, text: str, inbound: Sequence[InboundLink],
+        classification: tuple[str | None, str | None],
+    ) -> None:
+        self.moves = {path: destination}
+        self._hash = hashlib.sha256(_PAGED_APPROVAL_PREFIX.encode())
+        self._add([path, destination, vault.content_hash(text), classification])
+        for hit in sorted((link.path, link.line_number, link.raw_target) for link in inbound):
+            self._add(hit)
+
+    def _add(self, value: Any) -> None:
+        self._hash.update(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode())
+        self._hash.update(b"\n")
+
+    def examine(
+        self, item: move_file_module.InboundRewrite, *, visible: bool, writable: bool
+    ) -> None:
+        self._add([
+            item.path, item.guard.expected_content_hash, vault.content_hash(item.content),
+            item.changes, item.mentions, item.left_mentions, item.append_only, item.refusal,
+            pointer_write.preview_digest(self.moves, (item.repoint,))
+            if item.repoint is not None else None,
+            visible, writable,
+        ])
+
+    def digest(self) -> str:
+        return _PAGED_APPROVAL_PREFIX + self._hash.hexdigest()
 
 
 def _link_form(raw_target: str) -> str:
@@ -761,6 +1198,11 @@ def _referrer_outcome(
     inbound: list[InboundLink],
     *,
     undo: bool = False,
+    read_hashes: dict[str, str | None] | None = None,
+    candidate_limit: int | None = None,
+    paged_classification: tuple[str | None, str | None] | None = None,
+    visible: Callable[[str], bool] | None = None,
+    held_sink: _HeldSink | None = None,
 ) -> _ReferrerOutcome:
     """What moving the source to `destination` does to each page that links it.
 
@@ -772,15 +1214,33 @@ def _referrer_outcome(
     from .governance import connector_boundary, egress
     from .vault_store import read as store_read
 
+    def borrow_resolver() -> vault.WikilinkResolver:
+        from .find import borrow_preview_resolver
+
+        resolver = borrow_preview_resolver(vault_root)
+        if resolver is None:
+            raise preview_warming()
+        return resolver
+
     relocating = destination != rel
     writable_page = connector_boundary.effect_admission(vault_root)
     paired = move_file_module.paired_move(vault_root, rel, destination) if relocating else None
-    visible = egress.visible_page_filter(vault_root)
-    lookup = (
-        path_mentions.find_pages(vault_root, [rel, *([paired[0]] if paired else [])])
-        if relocating
-        else None
-    )
+    if visible is None:
+        visible = egress.visible_page_filter(vault_root)
+    lookup = None
+    if relocating:
+        targets = [rel, *([paired[0]] if paired else [])]
+        if read_hashes is None:
+            lookup = path_mentions.find_pages(vault_root, targets)
+        else:
+            lookup = path_mentions.find_pages(vault_root, targets, current_published=True,
+                                             candidate_limit=candidate_limit)
+            if lookup.overflow:
+                raise PreviewNeedsJob()
+            if lookup.unsupported:
+                raise preview_unavailable()
+            if not lookup.complete:
+                raise preview_warming()
     named_in = [
         page
         for page in (lookup.pages if lookup is not None else ())
@@ -791,14 +1251,37 @@ def _referrer_outcome(
         forms.setdefault(hit.path, set()).add(_link_form(hit.raw_target))
     rewritten: list[str] = []
     repointed: list[str] = []
-    repoints: list[Any] = []
+    repoint_hashes: list[tuple[str, str, str]] = []
     unchanged: dict[str, list[str]] = {}
     refusals: list[dict[str, str]] = []
-    plans = move_file_module.plan_inbound_rewrites(
+    proof = (
+        _PagedPlanProof(rel, destination, text, inbound, paged_classification)
+        if paged_classification is not None else None
+    )
+    iter_reader: Callable[[Path, Path], tuple[str, PathGuard]] | None = (
+        _read_inline_text if candidate_limit is not None else None
+    )
+    if held_sink is not None:
+        base_reader = iter_reader or read_guarded_text
+
+        def _held_iter_reader(root: Path, page: Path) -> tuple[str, PathGuard]:
+            return _witnessed_read(base_reader, held_sink, root, page)
+
+        iter_reader = _held_iter_reader
+
+    plans = move_file_module.iter_inbound_rewrites(
         vault_root, rel, destination, inbound, named_in=named_in, paired=paired, undo=undo,
+        check=foreground_priority.check_cancelled if read_hashes is not None else None,
+        resolver_factory=borrow_resolver if read_hashes is not None else None,
+        read_text=iter_reader,
     )
     for item in plans:
-        if not writable_page(item.path):
+        if read_hashes is not None:
+            read_hashes[item.path] = item.guard.expected_content_hash
+        writable = writable_page(item.path)
+        if proof is not None:
+            proof.examine(item, visible=visible is None or visible(item.path), writable=writable)
+        if not writable:
             continue  # the move leaves a page its mover may not write unchanged
         changes = item.changes if relocating else 0
         if relocating and item.left_mentions:
@@ -809,12 +1292,19 @@ def _referrer_outcome(
             refusals.append({"code": code, "path": item.path, "reason": reason})
         elif changes and item.repoint is not None:
             repointed.append(item.path)
-            repoints.append(item.repoint)
+            if proof is None:
+                repoint_hashes.append(
+                    (item.repoint.path, item.repoint.before_hash, item.repoint.after_hash)
+                )
         elif changes or item.mentions:
             rewritten.append(item.path)
         elif item.append_only:
             for form in sorted(forms.get(item.path, ())):
                 unchanged.setdefault(form, []).append(item.path)
+    if read_hashes is not None:
+        planned_paths = forms.keys() | set(named_in)
+        if not planned_paths.issubset(read_hashes):
+            raise preview_warming()
     if relocating:
         _, self_links = semantic_writes.rewrite_wikilinks_for_move(text, rel, destination)
         if self_links:
@@ -830,13 +1320,22 @@ def _referrer_outcome(
                 "path": destination,
                 "reason": f"another page already occupies {destination}",
             })
+    if held_sink is not None:
+        row_paths = {
+            rel, *rewritten, *repointed,
+            *(path for paths in unchanged.values() for path in paths),
+            *(refusal["path"] for refusal in refusals),
+        }
+        for recorded in set(held_sink) - row_paths:
+            del held_sink[recorded]
     return _ReferrerOutcome(
         rewritten=tuple(rewritten),
         repointed=tuple(repointed),
-        repoints=tuple(repoints),
+        repoint_hashes=tuple(repoint_hashes),
         append_only_unchanged={form: tuple(paths) for form, paths in sorted(unchanged.items())},
         refusals=tuple(refusals),
         mentions_checked=lookup is None or lookup.complete,
+        paged_digest=proof.digest() if proof is not None else None,
     )
 
 
@@ -855,6 +1354,7 @@ def _write_correction(
     lineage_entry: Mapping[str, Any] | None = None,
     undo_lineage: bool = False,
     preview_digest: str | None = None,
+    classification: tuple[str | None, str | None] = (None, None),
 ) -> _Written:
     """Commit a correction and return where the source is and what the relocation rewrote.
 
@@ -866,6 +1366,10 @@ def _write_correction(
     referrers only with the preview's `preview_digest`, and its lineage entry names the
     move's operation, by which an undo finds their pointer-write records and restores each.
     """
+    paged = preview_digest is not None and preview_digest.startswith(_PAGED_APPROVAL_PREFIX)
+    who = effective_principal()
+    if paged and (destination == rel or not egress.unrestricted_content_access(vault_root, who)):
+        raise _stale_paged_approval()
     if destination == rel:
         batch_atomic_write(
             [
@@ -876,12 +1380,67 @@ def _write_correction(
             _validate_prepared_bindings=_validate_prepared_bindings,
         )
         return _Written(rel)
-    outcome = _referrer_outcome(
-        vault_root, rel, text, destination, _visible_inbound(vault_root, rel), undo=undo_lineage
+    if not paged:
+        outcome = _referrer_outcome(
+            vault_root, rel, text, destination, _visible_inbound(vault_root, rel), undo=undo_lineage
+        )
+        if outcome.refusals:
+            refusal = outcome.refusals[0]
+            raise ReclassifyError(refusal["code"], refusal["reason"])
+
+    def current_reference_generation() -> tuple:
+        generation = freshness.preview_reference_generation(vault_root)
+        if generation is None or generation[1] is None or generation[3] is not None:
+            raise _stale_paged_approval()
+        try:
+            release = preview_release_policy(vault_root, who)
+        except OpError:
+            raise _stale_paged_approval() from None
+        return generation, release
+
+    approved_generation = current_reference_generation() if paged else None
+    approved_view = (
+        _preview_referrer_view(
+            vault_root, who, approved_generation[1].erasure.paths,
+            failure=_stale_paged_approval
+        )
+        if approved_generation is not None else None
     )
-    if outcome.refusals:
-        refusal = outcome.refusals[0]
-        raise ReclassifyError(refusal["code"], refusal["reason"])
+    if approved_view is not None and not approved_view(rel):
+        raise _stale_paged_approval()
+
+    def verify_referrers(inbound, named_in, plans, visible, writable, complete):
+        candidates = {hit.path for hit in inbound}.union(named_in)
+        planned = {rel, *(item.path for item in plans)}
+        if not complete or not candidates.issubset(planned):
+            raise _stale_paged_approval()
+        proof = _PagedPlanProof(rel, destination, text, inbound, classification)
+        for item in plans:
+            proof.examine(
+                item, visible=visible is None or visible(item.path),
+                writable=writable(item.path)
+            )
+        if proof.digest() != preview_digest:
+            raise _stale_paged_approval()
+        guards = (source_guard, *(item.guard for item in plans))
+
+        def recheck():
+            current_generation, current_authority = current_reference_generation()
+            if (current_generation, current_authority) != approved_generation:
+                raise _stale_paged_approval()
+            still_visible = _preview_referrer_view(vault_root, who, current_authority.erasure.paths,
+                                                  failure=_stale_paged_approval)
+            if not still_visible(rel) or any(not still_visible(item.path) for item in plans):
+                raise _stale_paged_approval()
+            try:
+                for guard in guards:
+                    guard.recheck(vault_root)
+            except (OSError, PathGuardError):
+                raise _stale_paged_approval() from None
+            if current_reference_generation() != approved_generation:
+                raise _stale_paged_approval()
+
+        return recheck
 
     def bound_transform(current: str) -> str:
         # Refuse stale history instead of overwriting an external metadata edit.
@@ -901,6 +1460,10 @@ def _write_correction(
             content_transform=bound_transform,
             extra_writes=extra_writes,
             _validate_prepared_bindings=_validate_prepared_bindings,
+            _referrer_proof=(
+                move_file_module.ReferrerProof(approved_view, verify_referrers)
+                if approved_view is not None else None
+            ),
             lineage_entry=lineage_entry,
             undo_lineage=undo_lineage,
             preview_digest=preview_digest,
@@ -913,6 +1476,14 @@ def _write_correction(
     return _Written(
         result.new_path, result.wikilinks_updated, result.path_mentions_updated,
         tuple(result.warnings), tuple(result.pointer_repointed),
+    )
+
+
+def _stale_paged_approval() -> ReclassifyError:
+    return ReclassifyError(
+        "RECLASSIFICATION_PREVIEW_STALE",
+        "The current correction does not match its paged preview."
+        " Preview it again before applying.",
     )
 
 
@@ -1046,6 +1617,7 @@ def reclassify(
         ),
         lineage_entry=entry_extra if changed and destination != rel else None,
         preview_digest=preview_digest,
+        classification=(kind_key, corrected_domain),
     )
     return ReclassifyResult(
         old_path=rel,

@@ -12,7 +12,9 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -786,14 +788,28 @@ def _read_exact_snapshot(
     """Acquire one unique held leaf, retaining the logical approval path."""
     if Path(rel_path).suffix.casefold() != ".md":
         return None
+    limit = _PREVIEW_READ_BOUND.get()
     try:
         physical = reserved_paths.resolve_physical_relative(vault_root, rel_path)
+        bound = {} if limit is None or limit.max_bytes is None else {"max_bytes": limit.max_bytes}
         snapshot = reserved_paths.read_generic_bytes(
-            vault_root, physical, physical=True
+            vault_root, physical, physical=True, **bound,
         )
-    except (OSError, reserved_paths.ReservedPathLeafError):
+    except reserved_paths.ReservedPathLeafError as error:
+        if limit is not None:
+            if error.code == "INPUT_TOO_LARGE":
+                limit.large()
+            # The held-file boundary fixes these terminal codes. Other failures leave custody unknown.
+            if error.code not in {"MISSING", "RESERVED_PATH", "INVALID_PATH"}:
+                limit.unavailable()
+        return None
+    except OSError:
+        if limit is not None:
+            limit.unavailable()
         return None
     if expected_raw is not None and snapshot.data != expected_raw:
+        if limit is not None:
+            limit.unavailable()
         return None
     parsed = find_corpus.parse_page(
         vault_root / rel_path,
@@ -803,6 +819,28 @@ def _read_exact_snapshot(
         resolved_relative=rel_path,
     )
     return snapshot.data, parsed
+
+
+@dataclass(frozen=True)
+class _PreviewReadBound:
+    max_bytes: int | None
+    unavailable: Callable[[], None]
+    large: Callable[[], None]
+
+
+_PREVIEW_READ_BOUND: ContextVar[_PreviewReadBound | None] = ContextVar("preview_bridge_read_bound", default=None)
+
+
+@contextmanager
+def preview_read_bound(
+    max_bytes: int | None, unavailable: Callable[[], None], large: Callable[[], None],
+) -> Iterator[None]:
+    """Carry Source preview admission through nested bridge dependency reads."""
+    token = _PREVIEW_READ_BOUND.set(_PreviewReadBound(max_bytes, unavailable, large))
+    try:
+        yield
+    finally:
+        _PREVIEW_READ_BOUND.reset(token)
 
 
 def _reference_resolves_exactly_to(

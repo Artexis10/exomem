@@ -49,6 +49,51 @@ contract may declare a companion owner for external execution artifacts; Records
 preserves only observed outcomes and opaque references, never companion state.
 Outcomes and reusable lessons can then become governed Notes.
 
+## Agent-initiated collections
+
+Recurring structured work (stable identities, repeated observations, comparisons, changing
+state, a need to query exactly) belongs in Records. When no compatible collection exists and
+the identity, type and scope are clear, the agent creates one minimal collection. Your
+`proactive_capture` setting decides how:
+
+| Setting | What the agent does |
+| --- | --- |
+| `silent` | Creates the collection and adds the first row in one `add_record` call with `new_collection`, and reports both in the same reply. |
+| `advisory` | Proposes the collection and creates it after one inline confirmation. |
+| `off` | Creates nothing on its own. A creation you ask for is still served. |
+
+`new_collection` is `{"natural_key": [...]}`, the fields of the row that identify it. When
+`collection` is a title that names no collection, the server drafts a minimal manifest from the
+row: one field per key of `item`, typed from its value, with the natural key required. It
+creates the collection as an automatic creation and appends the row, as one call with one
+receipt that names the created collection. A title that names a collection makes the call a
+plain append. A refusal creates nothing and returns the create call, with the manifest it
+would have made, for the agent to make after you confirm.
+
+A collection is rarely complete at its first row. When a later fact has no field, such as a
+claim from an outside source, the agent adds the field in the same call that writes the row:
+`add_record` or `edit_record` with `options: {"new_fields": [...]}`, which names the fields of
+the row that the collection does not declare. Under `silent` the server adds each one, typed
+from its value (a whole number and a decimal are both a number), leaves the earlier rows
+without a value for it, and reports `added_fields` in the reply. Under `advisory` or `off`, or
+when an automatic collection would pass 12 fields, the call is refused with a proposal and the
+confirmed `revise` that makes the change: under `advisory` the agent proposes it first, and
+under `off` it makes it only if you asked. Renaming, retyping or removing a field is never
+automatic.
+
+An automatic creation, whether through `new_collection` or `records.create` with
+`automatic: true`, gets `AUTOMATIC_CREATION_REFUSED`: the server names the failed
+bound and creates nothing, unless all of these hold: capture is `silent`; the collection is a
+Records collection with a declared natural key and a short field list, where the properties of
+an object field count too; it declares only the keys of a minimal manifest, so no saved views,
+references, rollups, templates or governance; and the vault has created fewer than three collections
+automatically in the last 24 hours. A vault with a collection store and a vault of plain
+files both qualify. The limits live in `exomem.automatic_collection`. Every other creation,
+every Planning collection and every schema change other than adding fields, merge or deletion still needs your
+confirmation. The inventory shows `created_automatically` for each collection, so you can
+review what the agent created. A file collection whose create the inventory cannot place in
+the recent activity log shows `null`.
+
 ## One public action surface
 
 Use `query_records`, `add_record` and `edit_record`, and the `records` operations of `inspect_memory` and `manage_memory`, for collection actions:
@@ -56,7 +101,7 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | Action | Use it for |
 | --- | --- |
 | `inspect` | Report a collection's contract, direct-edit drift, schema issues, template availability, or bounded audit gaps. It never repairs canonical data. |
-| `create` | Explicitly create a reviewed collection manifest and optional empty source scaffold. It never silently adopts a tracker. |
+| `create` | Create a reviewed collection manifest and optional empty source scaffold. It never silently adopts a tracker. An agent starting a minimal collection on its own passes `automatic`, or lets `add_record` create it with `new_collection`; see [Agent-initiated collections](#agent-initiated-collections). |
 | `query` | Read a bounded current view, filters, aggregation, saved view, continuation, or optional bounded agent history. Derived JSON, Markdown, and CSV output is not persisted. |
 | `append` | Safely add a new item with a concise reason and current container guard. |
 | `update` | Target one item with its item key, current container and item-version guards, and a concise reason. |

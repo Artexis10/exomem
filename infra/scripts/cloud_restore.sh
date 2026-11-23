@@ -362,11 +362,9 @@ delete_helper() { k -n "$NS" delete pod "$HELPER" --ignore-not-found --wait=true
 # volume move|rollback: cloud_restore_volume.sh in the helper, on the cell's backed-up paths.
 volume() { k -n "$NS" exec -i "$HELPER" -- sh -s "$1" "$RUN_ID" "${BACKUP_PATHS[@]}" < "$VOLUME"; }
 
-# Pods in the cell namespace that may still use the volume: every pod not yet
-# Succeeded or Failed (Kubernetes' terminal phases), except this run's helper.
+# Pods that could still use the volume, except this run's helper.
 running_pods() {
-  k -n "$NS" get pods -o jsonpath='{range .items[*]}{.metadata.name} {.status.phase}{"\n"}{end}' \
-    | awk -v helper="$HELPER" '$1 != helper && $2 != "Succeeded" && $2 != "Failed" {print $1}'
+  py "$MANIFESTS" running-pods --context break-glass --cell-id "$CELL_ID" --except-pod "$HELPER"
 }
 
 only_helper_runs() {

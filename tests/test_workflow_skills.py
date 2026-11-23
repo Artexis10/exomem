@@ -419,8 +419,9 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
         text = " ".join(path.read_text(encoding="utf-8").split())
         assert "without waiting for a magic verb" in text
         assert "exactly one compatible existing collection" in text
-        assert "propose a concise collection" in text
-        assert "must not silently create" in text
+        # The creation rule follows the served capture disposition, bounded by the server.
+        assert "`new_collection`" in text and "AUTOMATIC_CREATION_REFUSED" in text
+        assert "must not silently create" not in text
 
     for path in operation_copies:
         text = " ".join(path.read_text(encoding="utf-8").split())

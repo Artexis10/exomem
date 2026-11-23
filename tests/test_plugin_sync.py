@@ -11,6 +11,7 @@ Regenerate with:  exomem package-skills --plugin-root plugins/claude-code
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -139,8 +140,50 @@ def test_hook_commands_resolve_through_the_plugin_root_placeholder() -> None:
                 assert "${CLAUDE_PLUGIN_ROOT}" in command, event
                 # Quoted: the expanded install path routinely contains spaces.
                 assert '"${CLAUDE_PLUGIN_ROOT}' in command, event
-                script = command.rstrip('"').rsplit("/", 1)[-1]
+                script = command.split('"')[1].rsplit("/", 1)[-1]
                 assert (PLUGIN_ROOT / "hooks" / script).is_file(), script
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None and shutil.which("python") is None,
+    reason="the checkpoint wrapper needs python3 or python on PATH",
+)
+def test_plugin_checkpoint_survives_a_compaction(tmp_path: Path) -> None:
+    """Claude Code runs the generated commands verbatim: a checkpoint saved at PreCompact
+    must come back as SessionStart context after the compaction."""
+    document = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    pre_compact = document["hooks"]["PreCompact"][0]["hooks"][0]["command"]
+    session_start = next(
+        entry["hooks"][0]["command"]
+        for entry in document["hooks"]["SessionStart"]
+        if "compact" in entry.get("matcher", "")
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {
+        **os.environ,
+        "CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT),
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+    }
+
+    def run(command: str, payload: dict) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", "-c", command],
+            input=json.dumps({"session_id": "s1", "cwd": str(tmp_path), **payload}),
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=tmp_path,
+            timeout=60,
+        )
+
+    run(pre_compact, {"hook_event_name": "PreCompact", "trigger": "auto"})
+    resumed = run(session_start, {"hook_event_name": "SessionStart", "source": "compact"})
+
+    output = json.loads(resumed.stdout)["hookSpecificOutput"]
+    assert output["hookEventName"] == "SessionStart"
+    assert output["additionalContext"], resumed.stderr
 
 
 def test_marketplace_points_at_the_plugin_directory() -> None:

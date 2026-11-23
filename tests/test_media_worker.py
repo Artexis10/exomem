@@ -2581,6 +2581,77 @@ def test_worker_persists_speaker_verification_metadata(
     assert f"[{label}]: hello" in body
 
 
+@pytest.mark.parametrize("requested", [False, True])
+def test_recovered_speech_request_keeps_its_diarization_choice(
+    vault: Path, requested: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = _preserve_media_stub(vault, filename="speech.m4a")
+    binary = vault / saved.path
+    sidecar = vault / saved.sidecar_path
+    calls: list[bool] = []
+
+    def transcribe(_path, *, media_type, diarize, **_options):
+        calls.append(diarize)
+        return extract.ExtractResult(
+            text="[0:00] recorded speech", media_type=media_type, engine="test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    request = media_processing.process_declared_media(vault, binary, diarize=requested)
+    original = media_jobs.MediaJobStore(vault).claim_next()
+    assert original is not None and original.id == request.job_id
+
+    reopened = media_jobs.MediaJobStore(vault)
+    assert reopened.recover_interrupted() == 1
+    recovered = reopened.claim_next()
+    assert recovered is not None and recovered.id == request.job_id
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._process(recovered)
+    worker._drain_parent_results()
+
+    assert calls == [requested]
+    published = _parsed_frontmatter(sidecar)
+    assert published["diarize_requested"] is requested
+    assert published["speaker_verification"] == ("unavailable" if requested else "not-requested")
+    assert b"[0:00] recorded speech" in sidecar.read_bytes()
+    assert binary.read_bytes() == b"FAKEBYTES"
+
+
+@pytest.mark.parametrize("awaiting_dependency", [False, True])
+def test_a_disabled_speech_engine_retains_the_accepted_choice(vault, monkeypatch, awaiting_dependency) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "speech")
+    saved = _preserve_media_stub(vault, filename="recording.wav")
+    binary = vault / saved.path
+    media_processing.process_declared_media(vault, binary, diarize=False)
+    store = media_jobs.MediaJobStore(vault)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    if awaiting_dependency:
+        claimed = store.claim_next()
+        store.mark(
+            claimed, media_jobs.BLOCKED, "speech dependency unavailable",
+            blocked_reason=media_jobs.ENGINE_UNAVAILABLE, blocked_context="faster_whisper",
+        )
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr")
+    monkeypatch.setattr(extract, "get_transcriber", lambda: pytest.fail("speech is disabled"))
+
+    if awaiting_dependency:
+        worker._converge_engines([store.get_by_binary(binary)])
+    else:
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+        worker._drain_parent_results()
+
+    waiting = store.get_by_binary(binary)
+    expected_reason = media_jobs.ENGINE_UNAVAILABLE if awaiting_dependency else media_jobs.ENGINE_DISABLED
+    assert waiting.blocked_reason == expected_reason
+    assert waiting.diarize is False
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "speech")
+    monkeypatch.setattr(media_worker, "_module_findable", lambda _: True)
+    monkeypatch.setattr(media_worker.media_engines, "stage_available", lambda _: True)
+    worker._converge_engines([waiting])
+    assert store.claim_next().diarize is False
+
+
 def test_worker_does_not_downgrade_human_verified_speaker_state(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1198,14 +1198,17 @@ def write_graph_commit_receipt(vault_root: Path, receipt: GraphCommitReceipt) ->
     return path
 
 
-def floor_state(vault_root: Path) -> tuple[str, GraphSyncGenerationFloor | None]:
+def floor_state(vault_root: Path, *, deadline: float | None = None) -> tuple[str, GraphSyncGenerationFloor | None]:
     try:
         raw = _read_bounded_bytes(
-            floor_path(vault_root), limit=_FLOOR_READ_LIMIT, vault_root=Path(vault_root)
+            floor_path(vault_root), limit=_FLOOR_READ_LIMIT, vault_root=Path(vault_root),
+            deadline=deadline,
         )
     except FileNotFoundError:
         return "absent", None
-    except (OSError, ValueError):
+    except OSError:
+        return ("unreadable" if deadline is not None else "malformed"), None
+    except ValueError:
         return "malformed", None
     floor = GraphSyncGenerationFloor.parse(raw)
     return ("valid", floor) if floor is not None else ("malformed", None)
@@ -1220,14 +1223,18 @@ def read_checkpoint(vault_root: Path) -> GraphSyncCheckpoint | None:
     return checkpoint
 
 
-def checkpoint_state(vault_root: Path) -> tuple[str, GraphSyncCheckpoint | None]:
+def checkpoint_state(vault_root: Path, *, deadline: float | None = None) -> tuple[str, GraphSyncCheckpoint | None]:
     """Return whether the durable handoff is absent, valid, or malformed."""
     path = checkpoint_path(vault_root)
     try:
-        raw = _read_bounded_bytes(path, limit=_CHECKPOINT_READ_LIMIT, vault_root=Path(vault_root))
+        raw = _read_bounded_bytes(
+            path, limit=_CHECKPOINT_READ_LIMIT, vault_root=Path(vault_root), deadline=deadline
+        )
     except FileNotFoundError:
         return "absent", None
-    except (OSError, ValueError):
+    except OSError:
+        return ("unreadable" if deadline is not None else "malformed"), None
+    except ValueError:
         return "malformed", None
     checkpoint = GraphSyncCheckpoint.parse(raw)
     return ("valid", checkpoint) if checkpoint is not None else ("malformed", None)
@@ -1548,7 +1555,9 @@ def publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     raise GraphEpochIncoherent("graph floor/checkpoint/ack epoch is not coherent for publication")
 
 
-def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
+def canonical_publication_epoch(
+    vault_root: Path, *, deadline: float | None = None,
+) -> GraphPublicationEpoch:
     """Read the bounded canonical epoch used by a private publication ticket.
 
     This deliberately consults only the floor and checkpoint artifacts, so it
@@ -1559,8 +1568,12 @@ def canonical_publication_epoch(vault_root: Path) -> GraphPublicationEpoch:
     publication's ticket does this, once, because the acknowledgement it keeps
     is what its publication must not move.
     """
-    floor_status, floor = floor_state(vault_root)
-    checkpoint_status, checkpoint = checkpoint_state(vault_root)
+    floor_status, floor = (
+        floor_state(vault_root) if deadline is None else floor_state(vault_root, deadline=deadline)
+    )
+    checkpoint_status, checkpoint = (
+        checkpoint_state(vault_root) if deadline is None else checkpoint_state(vault_root, deadline=deadline)
+    )
     if floor_status == "absent" and checkpoint_status == "absent":
         return GraphPublicationEpoch(None, None, None)
     if floor_status == "absent" and checkpoint_status == "valid" and checkpoint is not None:
@@ -1922,7 +1935,9 @@ def _epoch_artifacts_changed(
     )
 
 
-def _read_bounded_bytes(path: Path, *, limit: int, vault_root: Path | None = None) -> bytes:
+def _read_bounded_bytes(
+    path: Path, *, limit: int, vault_root: Path | None = None, deadline: float | None = None
+) -> bytes:
     """Read one stable in-vault regular protocol artifact without following links."""
     from . import reserved_paths
 
@@ -1952,6 +1967,7 @@ def _read_bounded_bytes(path: Path, *, limit: int, vault_root: Path | None = Non
                     path,
                     descriptor_id,
                     limit=limit,
+                    deadline=deadline,
                 )
         except FileNotFoundError:
             raise

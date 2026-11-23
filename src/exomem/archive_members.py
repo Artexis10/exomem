@@ -11,10 +11,10 @@ the member's uncompressed bytes, and then one manifest with its companion page.
 Every path in the family carries the raw-protection prefix, so each is
 owner-only before its first byte exists. Blobs land outside the vault mutation
 guard and only when absent; the manifest is the commit point, written last
-through the ordinary Evidence write path. A crash before it leaves blobs that no
-manifest names, and the next expansion reuses them. An archive a family manifest
-already records writes nothing, except that any blob the manifest names and the
-pool lost comes back from the uploaded archive.
+through the ordinary Evidence write path. A disk floor refusal removes blobs this
+expansion added. A crash before the manifest leaves blobs that the next expansion
+can reuse. Repeating a recorded archive restores any blobs its manifest names
+that the pool lost.
 
 One expansion at a time runs in a vault, under a file lock, so each one can
 first remove the member temps that a killed expansion left in the pool.
@@ -29,20 +29,21 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
-import tempfile
 import unicodedata
 import zipfile
 import zlib
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, BinaryIO
 
 from filelock import FileLock
 
+from . import held_fs, media_capacity
 from .governance import raw_protection
 
 INVALID = "ARCHIVE_INVALID"
@@ -265,31 +266,64 @@ def _member_digest(zip_file: zipfile.ZipFile, entry: Entry) -> str:
     return digest.hexdigest()
 
 
-def _write_blob(zip_file: zipfile.ZipFile, entry: Entry, blob: Path, sha256: str) -> None:
-    """Gzip one member into the pool, landing it only when no blob of its name exists."""
-    blob.parent.mkdir(parents=True, exist_ok=True)
-    # Checked per blob, so a re-export needs room only for what it adds; a blob is about its member's size.
-    if entry.info.file_size > shutil.disk_usage(blob.parent).free:
-        raise ArchiveError(NO_SPACE, "the archive's new members exceed the free disk space")
-    descriptor, raw = tempfile.mkstemp(prefix=".", suffix=_TEMP_SUFFIX, dir=blob.parent)
-    staged = Path(raw)
-    try:
+def _packed_chunks(zip_file: zipfile.ZipFile, entry: Entry, sha256: str) -> Iterator[bytes]:
+    """Yield bounded gzip output, including the header and trailer."""
+    with io.BytesIO() as sink:
         digest = hashlib.sha256()
-        with os.fdopen(descriptor, "wb") as sink:
-            with blob_writer(sink) as packed:
-                for chunk in member_chunks(zip_file, entry):
-                    digest.update(chunk)
-                    packed.write(chunk)
-            sink.flush()
-            os.fsync(sink.fileno())
+        with blob_writer(sink) as packed:
+            for chunk in member_chunks(zip_file, entry):
+                digest.update(chunk)
+                packed.write(chunk)
+                if data := sink.getvalue():
+                    yield data
+                    sink.seek(0)
+                    sink.truncate()
         if digest.hexdigest() != sha256:
             raise ArchiveError(INVALID, "an archive member does not match its recorded SHA-256")
-        # Same name, same uncompressed bytes: a concurrent expansion that lands
-        # the blob first is as good as this one.
-        if not blob.exists():
-            os.replace(staged, blob)
-    finally:
-        staged.unlink(missing_ok=True)
+        yield sink.getvalue()
+
+
+def _remove_owned_blob(
+    filesystem: held_fs.HeldFilesystem, parent: held_fs.HeldDirectory, leaf: str,
+    identity: held_fs.StableIdentity, *, version: held_fs.FileVersion | None = None,
+) -> None:
+    found = filesystem.file(parent, leaf, access="mutate")
+    if found.error is not None and found.error.code == "MISSING":
+        return
+    with found.require() as file:
+        if file.identity == identity and (version is None or file.version() == version):
+            filesystem.unlink(file).require()
+
+
+def _write_blob(
+    filesystem: held_fs.HeldFilesystem, vault_root: Path, zip_file: zipfile.ZipFile, entry: Entry,
+    blob: Path, sha256: str, *, floor_enabled: bool, upload_size: int,
+) -> held_fs.FileVersion | None:
+    """Gzip one member and publish by native no-replace rename."""
+    directory = blob.parent.relative_to(vault_root).as_posix()
+    with filesystem.parent(directory, create=True, access="mutate").require() as parent:
+        if not floor_enabled and entry.info.file_size > shutil.disk_usage(blob.parent).free:
+            raise ArchiveError(NO_SPACE, "the archive's new members exceed the free disk space")
+        temporary = f".{secrets.token_hex(16)}{_TEMP_SUFFIX}"
+        with filesystem.file(parent, temporary, access="write", create=True, exclusive=True).require() as writable:
+            try:
+                packed = _packed_chunks(zip_file, entry, sha256)
+                guarded = (media_capacity.metered_chunks(
+                    vault_root, os.fstat(writable.descriptor).st_dev, packed, upload_size=upload_size,
+                ) if media_capacity.managed_allocations(vault_root) else packed)
+                with closing(packed), closing(guarded) as parts:
+                    filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
+                with filesystem.file(parent, temporary, access="mutate").require() as staged:
+                    if staged.version() != writable.version():
+                        raise held_fs.HeldFsError("IDENTITY_CHANGED", "member temporary changed")
+                    published = filesystem.rename(staged, parent, blob.name)
+                    if published.error is not None and published.error.code == "DESTINATION_EXISTS":
+                        return None
+                    published.require()
+                    writable.close()
+                    return staged.version()
+            finally:
+                _remove_owned_blob(filesystem, parent, temporary, writable.identity)
 
 
 #: A member's temp in the pool: `.<random><suffix>` beside the blob it becomes.
@@ -435,7 +469,10 @@ def _free_bytes(vault_root: Path, folder: Path) -> int:
     return shutil.disk_usage(probe).free
 
 
-def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[Any]) -> int:
+def _restore(
+    filesystem: held_fs.HeldFilesystem, vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[Any],
+    *, floor_enabled: bool, upload_size: int,
+) -> int:
     """Re-expand only the members a recorded manifest names whose blobs left the pool.
 
     Each comes back from the uploaded archive, verified against its recorded SHA-256
@@ -453,7 +490,10 @@ def _restore(vault_root: Path, folder: Path, stream: BinaryIO, recorded: list[An
         if any(path not in entries for path in missing):
             raise ArchiveError(INVALID, "the archive lacks a member its manifest records")
         for path, sha256 in sorted(missing.items()):
-            _write_blob(zip_file, entries[path], folder / member_blob(sha256), sha256)
+            _write_blob(
+                filesystem, vault_root, zip_file, entries[path], folder / member_blob(sha256), sha256,
+                floor_enabled=floor_enabled, upload_size=upload_size,
+            )
     return len(missing)
 
 
@@ -469,15 +509,18 @@ def preserve_members(
     verified: str,
     description: str | None = None,
     sha256: str | None = None,
+    defer_fanout_to_terminal: bool = False,
 ) -> tuple[dict[str, Any], bool]:
     """Preserve a seekable zip as members; return the receipt and whether it stored.
 
     `verified` says what checked the archive's SHA-256 (`session` or `upload`).
     `guard` opens the vault mutation guard around the manifest commit only. A
     caller that already verified the archive passes its `sha256` to skip a pass.
-    Raises `ArchiveError` or `preserve.PreserveError`; neither leaves a manifest.
+    `defer_fanout_to_terminal` passes the upload doors' opt-in to `preserve`.
+    A refusal leaves no new manifest. A floor refusal also removes newly unowned blobs.
     """
     from . import preserve as preserve_module
+    from .cli_ops import OpError
 
     refusals = [
         refusal
@@ -508,63 +551,80 @@ def preserve_members(
         "bytes": size,
         "verified": verified,
     }
+    floor_enabled = media_capacity.upload_floor(vault_root) is not None
 
-    def already_stored() -> tuple[dict[str, Any], bool] | None:
+    def already_stored(filesystem: held_fs.HeldFilesystem) -> tuple[dict[str, Any], bool] | None:
         found = _recorded(vault_root, folder, sha256)
         if found is None:
             return None
         stored, manifest_size, recorded = found
-        restored = _restore(vault_root, folder, stream, recorded)
+        restored = _restore(filesystem, vault_root, folder, stream, recorded, floor_enabled=floor_enabled,
+                            upload_size=size)
         receipt = stored.receipt(size=manifest_size, content_type="application/json")
         return {**receipt, "archive": {**archive, "restored": restored}}, False
 
-    with _expansion_lock(vault_root):
+    with _expansion_lock(vault_root), held_fs.acquire(vault_root).require() as filesystem:
         _sweep_pool(folder)
         # Before any member is read: the same archive into the same family is one fact.
-        if (receipt := already_stored()) is not None:
+        if (receipt := already_stored(filesystem)) is not None:
             return receipt
-        with open_zip(stream) as zip_file:
-            entries = central_directory(zip_file)
-            # A small check before any member is read; each new blob checks its own room.
-            if max((entry.info.file_size for entry in entries), default=0) > _free_bytes(vault_root, folder):
-                raise ArchiveError(NO_SPACE, "the archive's largest member exceeds the free disk space")
-            members: list[dict[str, Any]] = []
-            written = 0
-            for entry in entries:
-                digest = _member_digest(zip_file, entry)
-                blob = folder / member_blob(digest)
-                if not blob.exists():
-                    _write_blob(zip_file, entry, blob, digest)
-                    written += 1
-                members.append(
-                    {
-                        "path": entry.path,
-                        "sha256": digest,
-                        "bytes": entry.info.file_size,
-                        "modified": _modified(entry.info),
-                        "blob": member_blob(digest),
-                        "stored_bytes": blob.stat().st_size,
-                    }
+        written: dict[Path, held_fs.FileVersion] = {}
+        try:
+            with open_zip(stream) as zip_file:
+                entries = central_directory(zip_file)
+                if not floor_enabled and max((entry.info.file_size for entry in entries), default=0) > _free_bytes(
+                    vault_root, folder
+                ):
+                    raise ArchiveError(NO_SPACE, "the archive's largest member exceeds the free disk space")
+                members: list[dict[str, Any]] = []
+                for entry in entries:
+                    digest = _member_digest(zip_file, entry)
+                    relative_blob = member_blob(digest)
+                    blob = folder / relative_blob
+                    if not blob.exists():
+                        version = _write_blob(
+                            filesystem, vault_root, zip_file, entry, blob, digest,
+                            floor_enabled=floor_enabled, upload_size=size,
+                        )
+                        if version is not None:
+                            written[blob] = version
+                    members.append(
+                        {
+                            "path": entry.path,
+                            "sha256": digest,
+                            "bytes": entry.info.file_size,
+                            "modified": _modified(entry.info),
+                            "blob": relative_blob,
+                            "stored_bytes": blob.stat().st_size,
+                        }
+                    )
+            manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "archive": archive, "members": members}
+            data = (json.dumps(manifest, sort_keys=True, ensure_ascii=True, indent=1) + "\n").encode("ascii")
+            if len(data) > MAX_MANIFEST_BYTES:  # read_manifest refuses a larger manifest unread, so never write one
+                raise ArchiveError(TOO_LARGE, f"the archive's manifest would exceed {MAX_MANIFEST_BYTES:,} bytes")
+            with guard():
+                if (receipt := already_stored(filesystem)) is not None:
+                    return receipt
+                result = preserve_module.preserve(
+                    vault_root,
+                    scope=scope,
+                    category=category,
+                    filename=_manifest_name(archive["filename"], sha256),
+                    content_stream=io.BytesIO(data),
+                    content_type="application/json",
+                    description=description
+                    or f"Archive {archive['filename']} preserved as {len(members):,} members.",
+                    max_stream_bytes=len(data),
+                    raw_protection=True,
+                    defer_fanout_to_terminal=defer_fanout_to_terminal,
                 )
-        manifest = {"schema_version": MANIFEST_SCHEMA_VERSION, "archive": archive, "members": members}
-        data = (json.dumps(manifest, sort_keys=True, ensure_ascii=True, indent=1) + "\n").encode("ascii")
-        if len(data) > MAX_MANIFEST_BYTES:  # read_manifest refuses a larger manifest unread, so never write one
-            raise ArchiveError(TOO_LARGE, f"the archive's manifest would exceed {MAX_MANIFEST_BYTES:,} bytes")
-        with guard():
-            if (receipt := already_stored()) is not None:
-                return receipt
-            result = preserve_module.preserve(
-                vault_root,
-                scope=scope,
-                category=category,
-                filename=_manifest_name(archive["filename"], sha256),
-                content_stream=io.BytesIO(data),
-                content_type="application/json",
-                description=description
-                or f"Archive {archive['filename']} preserved as {len(members):,} members.",
-                max_stream_bytes=len(data),
-                raw_protection=True,
-            )
+        except OpError as error:
+            if error.code == media_capacity.UPLOAD_SPACE_BUSY:
+                for blob, version in written.items():
+                    directory = blob.parent.relative_to(vault_root).as_posix()
+                    with filesystem.parent(directory, access="mutate").require() as parent:
+                        _remove_owned_blob(filesystem, parent, blob.name, version.identity, version=version)
+            raise
         receipt = result.as_dict()
-        receipt["archive"] = {**archive, "members": len(members), "new_blobs": written}
+        receipt["archive"] = {**archive, "members": len(members), "new_blobs": len(written)}
         return receipt, True

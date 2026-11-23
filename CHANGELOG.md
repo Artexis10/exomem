@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.200.0](https://github.com/Artexis10/exomem/compare/v0.199.0...v0.200.0) (2026-11-22)
+
+
+### Features
+
+* **cloud:** verify retained restic backup packs ([#3030](https://github.com/Artexis10/exomem/issues/3030)) ([86e5db9](https://github.com/Artexis10/exomem/commit/86e5db9922237d7d14feef403ec7805a3c948ee2))
+* **media:** evict personal originals to a declared disk ([#3025](https://github.com/Artexis10/exomem/issues/3025)) ([c83d34b](https://github.com/Artexis10/exomem/commit/c83d34b7a24217c975cfcf76e1c71aa20ea996e2))
+* **media:** select speaker labels per recording ([#3033](https://github.com/Artexis10/exomem/issues/3033)) ([63ed9be](https://github.com/Artexis10/exomem/commit/63ed9be340a2a52a9b2aa7fe229245bb95acc480))
+
+
+### Bug Fixes
+
+* **audit:** scope the custody-only corpus read to custody-marked Sources ([#3043](https://github.com/Artexis10/exomem/issues/3043)) ([e0a20d4](https://github.com/Artexis10/exomem/commit/e0a20d4ef75391987f5ae51ef948971e6fdecc04))
+* **brief:** close the scorer review follow-ups and record the release proof ([#3035](https://github.com/Artexis10/exomem/issues/3035)) ([4011a0e](https://github.com/Artexis10/exomem/commit/4011a0e71530f70fd0281d3473e347a0c25a25a3))
+* **collection-store:** release a view that an earlier store instance rendered ([#3047](https://github.com/Artexis10/exomem/issues/3047)) ([cfb27c9](https://github.com/Artexis10/exomem/commit/cfb27c96d0797d64f60e16032160ab407c41c5b7))
+* **graph:** drop a fatal-family fence left behind by an older release ([#3053](https://github.com/Artexis10/exomem/issues/3053)) ([aa71b91](https://github.com/Artexis10/exomem/commit/aa71b91aa4e90c272820f5ade4c77dffc9955650))
+* **graph:** preserve startup proof and scoped repair across upgrades ([#3010](https://github.com/Artexis10/exomem/issues/3010)) ([eb54572](https://github.com/Artexis10/exomem/commit/eb54572e2c32cfb37736e0a7a721d280a5b03b61))
+* **lexstore:** re-queue a catch-up that a write outran before its proof ([#3059](https://github.com/Artexis10/exomem/issues/3059)) ([4accb37](https://github.com/Artexis10/exomem/commit/4accb37ecb2f3c3156e1d1837e73a586c4a8a4ee))
+* **outcome:** run the planted suite on the typed tool surface ([#3060](https://github.com/Artexis10/exomem/issues/3060)) ([bc82732](https://github.com/Artexis10/exomem/commit/bc8273213eae9303c10d4ffc219143cfc89ac606))
+* **plugin:** pass --client claude to the continuation checkpoint hooks ([#3040](https://github.com/Artexis10/exomem/issues/3040)) ([620781f](https://github.com/Artexis10/exomem/commit/620781f711233acde995fe21289ce66ba057f695))
+* **search:** keep dataset values searchable after a card read fails at start-up ([#3044](https://github.com/Artexis10/exomem/issues/3044)) ([b8087f7](https://github.com/Artexis10/exomem/commit/b8087f724e9be77087f7e2affd229346b549e89a))
+
+
+### Performance
+
+* **lexical:** keep BM25 first-seen order incrementally after a write ([#3048](https://github.com/Artexis10/exomem/issues/3048)) ([8e78313](https://github.com/Artexis10/exomem/commit/8e78313441d9947366a8f92dae7f1c39dc243096))
+* **passages:** rank lexical passage candidates from the terms index alone ([#3039](https://github.com/Artexis10/exomem/issues/3039)) ([6cec0dd](https://github.com/Artexis10/exomem/commit/6cec0dd2af2079b1e2224414baeb03fe14a8b3f5))
+* **store:** stop re-deciding every view on each owner save ([#3055](https://github.com/Artexis10/exomem/issues/3055)) ([93a1e75](https://github.com/Artexis10/exomem/commit/93a1e75015881982678fbd4bf23d82b1262f2e15))
+* **upload:** run an upload's derived fan-out after it releases the vault boundary ([#3052](https://github.com/Artexis10/exomem/issues/3052)) ([fcb88df](https://github.com/Artexis10/exomem/commit/fcb88dfc49329e7ba7ffea7cd99f5d4522b9f759))
+
+## [0.199.0](https://github.com/Artexis10/exomem/compare/v0.198.0...v0.199.0) (2026-11-22)
+
+
+### Features
+
+* **passages:** fuse lexical ranking with dense similarity in passage search ([#3031](https://github.com/Artexis10/exomem/issues/3031)) ([25c9f1e](https://github.com/Artexis10/exomem/commit/25c9f1e959ff3d4327c6cb425fb89bb4bf28b3b1))
+
+
+### Bug Fixes
+
+* **curation:** count a preference saved later on the profile's own day ([#3038](https://github.com/Artexis10/exomem/issues/3038)) ([de39e53](https://github.com/Artexis10/exomem/commit/de39e5319ec4a99efaa6e6be0ec7952ea385d526))
+* **positions:** report a cut-short task discovery as unavailable or partial ([#3029](https://github.com/Artexis10/exomem/issues/3029)) ([f9bbcd1](https://github.com/Artexis10/exomem/commit/f9bbcd1ba58063dd25e480b965881501641b538d))
+* **release:** land cuts without manual retries and stop waiting on latency suites ([#3036](https://github.com/Artexis10/exomem/issues/3036)) ([9421ca5](https://github.com/Artexis10/exomem/commit/9421ca5337d8d208618e81f1d01ae3f20ac1c818))
+
+## [0.198.0](https://github.com/Artexis10/exomem/compare/v0.197.0...v0.198.0) (2026-11-22)
+
+
+### Features
+
+* **media-replicas:** verify stored replicas on a cycle, quarantine and copy again ([#2978](https://github.com/Artexis10/exomem/issues/2978)) ([c91290c](https://github.com/Artexis10/exomem/commit/c91290ce3e541071c1097c540c92333823311def))
+* **media:** persist governed previews ([#3016](https://github.com/Artexis10/exomem/issues/3016)) ([14f3f3d](https://github.com/Artexis10/exomem/commit/14f3f3db648324d395fca019f128cedaddde49c0))
+* **records:** retract a store-backed row from current state, keeping its history (store schema 19) ([#2988](https://github.com/Artexis10/exomem/issues/2988)) ([d9c3727](https://github.com/Artexis10/exomem/commit/d9c37275500446f808997c8b82d397b1541ce316))
+
+
+### Performance
+
+* **governance:** avoid resolving page version IDs as file paths ([#3019](https://github.com/Artexis10/exomem/issues/3019)) ([cb3f040](https://github.com/Artexis10/exomem/commit/cb3f0401da43d8dd657c89673b72fabc9012d4d2))
+
 ## [0.197.0](https://github.com/Artexis10/exomem/compare/v0.196.0...v0.197.0) (2026-11-22)
 
 

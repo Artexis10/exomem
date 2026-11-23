@@ -362,6 +362,7 @@ def test_the_drain_picks_its_next_original_from_an_index_with_no_sort(vault: Pat
     assert "USING INDEX" in plan and "TEMP B-TREE" not in plan
 
 
+@pytest.mark.parametrize("selected_store", [False], indirect=True)
 def test_the_owner_s_key_export_is_what_makes_a_replica_recoverable(vault: Path, selected_store, mirrored: Path) -> None:
     """Recoverable status must not be assumed: a replica whose key lives only on a lost machine cannot be read."""
     _offload(vault, _preserved(vault))
@@ -393,6 +394,7 @@ def test_failure_domains_read_unknown_when_a_store_that_holds_replicas_declares_
     assert (totals["distinct_failure_domains"], totals["stores_without_failure_domain"]) == (None, 1)
 
 
+@pytest.mark.parametrize("selected_store", [False], indirect=True)
 def test_the_status_keeps_a_replica_known_not_to_survive_apart_from_one_whose_custody_is_unstated(
         vault: Path, selected_store, mirrored: Path) -> None:
     _offload(vault, _preserved(vault))
@@ -1558,13 +1560,13 @@ def test_eviction_of_a_shared_original_whose_pointer_is_absent_or_condemned_quar
     if failure == "absent":
         (Path(values["root"]) / reference.object / reference.version).unlink()
     else:
-        head = media_store.FilesystemStore.head
+        head = media_store.FilesystemStore._head_held
 
-        def condemned(self, name: str, version: str, **options):
-            found = head(self, name, version, **options)
-            return found if found is None else dataclasses.replace(found, condemned=True)
+        def condemned(self, file, before, name: str, version: str, **options):
+            found = head(self, file, before, name, version, **options)
+            return dataclasses.replace(found, condemned=True)
 
-        monkeypatch.setattr(media_store.FilesystemStore, "head", condemned)
+        monkeypatch.setattr(media_store.FilesystemStore, "_head_held", condemned)
 
     assert not media_store.evict(vault, path)
 
@@ -1574,8 +1576,9 @@ def test_eviction_of_a_shared_original_whose_pointer_is_absent_or_condemned_quar
     assert original_pool.object_path(vault, digest).exists()  # the bytes that the copy again reads
 
 
-def test_eviction_of_a_shared_original_records_a_damaged_pointer_that_another_filing_holds(
-        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("published", [False, True])
+def test_eviction_of_a_shared_original_needs_proof_for_the_other_filings_version(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch, published: bool) -> None:
     """The filing under eviction may hold a healthy pointer: the damaged one of the object's other filing is still recorded."""
     values, _config = selected_store
     path = _preserved(vault)
@@ -1583,34 +1586,37 @@ def test_eviction_of_a_shared_original_records_a_damaged_pointer_that_another_fi
     digest = _pooled(vault, path, monkeypatch)
     stored = Path(values["root"]) / healthy.object / healthy.version
     other = healthy.version + "-other"
+    other_ref = dataclasses.replace(healthy, version=other)
+    other_path = "Other/holder-of-the-other-pointer.txt"
     damaged = bytearray(stored.read_bytes())
     damaged[len(damaged) // 2] ^= 0xFF
     (stored.parent / other).write_bytes(damaged)  # a second version of the object, whose bytes are not the recorded ones
     with closing(media_jobs.MediaJobStore(vault)._connect()) as conn, conn:
         conn.execute("INSERT INTO media_bindings SELECT ?, companion_rel, companion_hash, object_key, sha256, size, "
                      "resident_only, ? FROM media_bindings WHERE binary_rel = ?",
-                     ("Other/holder-of-the-other-pointer.txt", json.dumps({**healthy.fields(), "version": other}),
-                      path.relative_to(vault).as_posix()))
+                     (other_path, json.dumps(other_ref.fields()), path.relative_to(vault).as_posix()))
+    if published:
+        media_replicas.record(vault, other_path, other_ref, verified_at=time.time() - 60)
 
     assert not media_store.evict(vault, path)
 
     with closing(sqlite3.connect(media_jobs.MediaJobStore(vault).path)) as ledger:
         found = ledger.execute("SELECT binary_rel, version, failure FROM media_replicas WHERE state = ?",
                                (media_replicas.QUARANTINED,)).fetchall()
-    assert found == [("Other/holder-of-the-other-pointer.txt", other, "digest_mismatch")]
+    assert found == ([(other_path, other, "digest_mismatch")] if published else [])
     assert original_pool.object_path(vault, digest).exists()
 
 
 def _quarantined_while_the_store_answers(vault: Path, relative: str, reference: originals.StoredObject,
                                          monkeypatch: pytest.MonkeyPatch) -> None:
     """A check finds the pointer damaged at the moment eviction asks the store about it: the finding lands during the HEAD."""
-    head = media_store.FilesystemStore.head
+    head = media_store.FilesystemStore._head_held
 
-    def answering_after_a_finding(store, name, version, **options):
+    def answering_after_a_finding(store, file, before, name, version, **options):
         media_replicas.quarantine(vault, relative, reference, level=media_replicas.CONTENT, failure="digest_mismatch")
-        return head(store, name, version, **options)
+        return head(store, file, before, name, version, **options)
 
-    monkeypatch.setattr(media_store.FilesystemStore, "head", answering_after_a_finding)
+    monkeypatch.setattr(media_store.FilesystemStore, "_head_held", answering_after_a_finding)
 
 
 def test_eviction_keeps_the_local_bytes_when_the_pointer_is_quarantined_while_the_store_answers(
@@ -2996,18 +3002,15 @@ def test_a_reuse_that_stops_after_it_protected_the_replacement_publishes_nothing
     first, second, pointer = _two_filings_of_one_version(vault, selected_store)
     media_store.recopy(vault, first, pointer.store)
     replacement = _entry(vault, first, pointer.store)
-    confirmed = media_store._confirmed
-    asked: list[object] = []
+    confirm_publication = media_store._confirm_publication
 
-    def filing_deleted_after_the_hold_was_taken(backend, reference):
-        found = confirmed(backend, reference)
-        if reference == replacement:
-            asked.append(reference)
-            if len(asked) == 2:  # the first answer picks the replacement; the second comes after the hold, before the write
-                media_store.forget_original(vault, first)
-        return found
+    def filing_deleted_after_the_hold_was_taken(held, backend, reference):
+        witness = confirm_publication(held, backend, reference)
+        if reference == replacement:  # the store confirmed the replacement after the hold, before the write
+            media_store.forget_original(vault, first)
+        return witness
 
-    monkeypatch.setattr(media_store, "_confirmed", filing_deleted_after_the_hold_was_taken)
+    monkeypatch.setattr(media_store, "_confirm_publication", filing_deleted_after_the_hold_was_taken)
 
     with pytest.raises(media_store.MediaStoreError) as stopped:
         media_store.recopy(vault, second, pointer.store)
@@ -3146,23 +3149,23 @@ def test_offload_does_not_publish_a_version_that_a_finding_condemned_after_it_wa
     first = _preserved(vault, category="first")
     pointer = _offload(vault, first)
     second = _preserved(vault, category="second")
-    confirmed = media_store._confirmed
+    confirm_publication = media_store._confirm_publication
 
-    def found_bad_right_after_it_answered_well(backend, replica):
-        answer = confirmed(backend, replica)
-        if replica == pointer and answer:
+    def found_bad_right_after_it_answered_well(held, backend, replica):
+        witness = confirm_publication(held, backend, replica)
+        if replica == pointer:  # the store confirmed the version; the finding lands before the binding's write
             media_replicas.quarantine(vault, first.relative_to(vault).as_posix(), pointer,
                                       level=media_replicas.CONTENT, failure="digest_mismatch")
-        return answer
+        return witness
 
-    monkeypatch.setattr(media_store, "_confirmed", found_bad_right_after_it_answered_well)
+    monkeypatch.setattr(media_store, "_confirm_publication", found_bad_right_after_it_answered_well)
 
     with pytest.raises(media_store.MediaStoreError) as stopped:
         media_store.offload(vault, second)
 
     assert stopped.value.code == media_store.STORE_BUSY_CODE
     assert originals.original_state(vault, second).reference is None
-    monkeypatch.setattr(media_store, "_confirmed", confirmed)
+    monkeypatch.setattr(media_store, "_confirm_publication", confirm_publication)
 
     assert _offload(vault, second).object != pointer.object  # the retry gives these bytes a version of their own
 
@@ -4671,9 +4674,10 @@ def test_a_copy_again_does_not_read_a_replica_in_a_store_that_is_not_immediate(
         (media_replicas.REFUSED, media_store.NO_VERIFIED_SOURCE)]
 
 
-def test_a_cache_row_that_failed_to_follow_a_replaced_pointer_is_recorded_by_the_retry_so_the_original_can_be_evicted(
+def test_a_cloud_cache_row_that_failed_to_follow_a_replaced_pointer_is_recorded_by_the_retry(
         vault: Path, selected_store, mirrored: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The binding changed but the cache row stayed on the old pointer: eviction refuses a cache row that names another pointer."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     values, _config = selected_store
     relative, _mirror = _replicated(vault)
     pointer = originals.original_state(vault, relative).reference

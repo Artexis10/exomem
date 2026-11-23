@@ -8,16 +8,30 @@ from dataclasses import replace
 import pytest
 from test_media_policy_transfer import _policy, _versions
 from test_media_replicas import MIRROR, _declare
-from test_media_store import _offload, selected_store as selected_store
+from test_media_store import _offload
+from test_media_store import selected_store as selected_store
 from test_original_fixity import _stored
 
 from exomem import (
-    artifact_lifecycle, media_bindings, media_jobs, media_protection, media_protection_work, media_replicas,
-    media_store, original_fixity, original_pool, originals, preserve, vault as vault_files,
+    artifact_lifecycle,
+    media_bindings,
+    media_jobs,
+    media_protection,
+    media_protection_work,
+    media_replicas,
+    media_store,
+    original_fixity,
+    original_pool,
+    originals,
+    preserve,
+)
+from exomem import (
+    vault as vault_files,
 )
 from exomem.governance.principal import library_scope
 
 
+@pytest.mark.parametrize("selected_store", [False], indirect=True)
 def test_policy_counts_only_exact_verified_versions_with_recovery_keys(vault, selected_store, tmp_path):
     _declare(vault, selected_store, tmp_path / "mirror")
     original = _stored(vault, "original", b"synthetic protected document")
@@ -124,6 +138,7 @@ def test_a_policy_budget_refusal_does_not_hold_the_owner_copy_queue(vault, selec
     assert media_replicas.status(vault)["protection"]["transfer_allowance"]["confirmed_bytes"] == 0
 
 
+@pytest.mark.parametrize("selected_store", [False], indirect=True)
 @pytest.mark.parametrize("key_before_repair", [True, False], ids=["key-first", "repair-first"])
 def test_managed_eviction_keeps_local_bytes_until_the_current_policy_has_a_verified_recovery(
     vault, selected_store, tmp_path, key_before_repair,

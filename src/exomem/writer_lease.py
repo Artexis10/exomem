@@ -389,6 +389,98 @@ def _drain_post_terminal_fanout(queue: list[Any]) -> tuple[list[Any], bool]:
     return reports, failed
 
 
+@dataclass(slots=True)
+class ReleasedFanout:
+    """What the receipted derived fan-out of one `fanout_after_release` scope reported."""
+
+    reports: list[Any] = field(default_factory=list)
+    completed: list[bool] = field(default_factory=list)
+    drain_failed: bool = False
+
+    @property
+    def derived_sync(self) -> str:
+        """`completed` only when a fan-out ran and finished every component; otherwise `pending`.
+
+        A failed fan-out keeps its durable full-refresh receipt, which the next drain replays, so the
+        reader is told the derived state is still catching up. No fan-out observed is not a completion.
+        """
+        if self.drain_failed or not self.completed or not all(self.completed):
+            return "pending"
+        derived_sync, _unfinished, _diagnostics = _derived_sync_of(self.reports, drain_failed=False)
+        return "completed" if derived_sync == "completed" else "pending"
+
+
+_ACTIVE_RELEASED_FANOUT: ContextVar[ReleasedFanout | None] = ContextVar(
+    "exomem_active_released_fanout", default=None
+)
+
+
+def note_released_fanout(reports: list[Any], *, completed: bool) -> None:
+    """Record one receipted fan-out's outcome for the enclosing `fanout_after_release` scope, if any.
+
+    The scope cannot read it from its own queue alone: a governed command inside it binds and drains
+    the command's own queue, after that command's boundary is released.
+    """
+    released = _ACTIVE_RELEASED_FANOUT.get()
+    if released is not None:
+        released.reports.extend(reports)
+        released.completed.append(completed)
+
+
+@contextmanager
+def fanout_after_release(vault_root: os.PathLike[str] | str) -> Iterator[ReleasedFanout]:
+    """Run the derived fan-out its body defers once the body has released the vault mutation boundary.
+
+    The body takes and releases the boundary itself. Work it hands to `defer_until_terminal_persisted`
+    runs on exit, still before the caller answers, so the hold covers only planning and install. Opened
+    inside a held boundary, the scope still runs the fan-out, but in that hold. The scope starts the graph
+    rebuild that the fan-out registered, as a direct guard does on release.
+    """
+    queue: list[Any] = []
+    released = ReleasedFanout()
+    queue_token = _ACTIVE_POST_TERMINAL_FANOUT.set(queue)
+    released_token = _ACTIVE_RELEASED_FANOUT.set(released)
+    try:
+        yield released
+    finally:
+        _ACTIVE_POST_TERMINAL_FANOUT.reset(queue_token)
+        try:
+            if queue:
+                _reports, released.drain_failed = _drain_post_terminal_fanout(queue)
+                # The fan-out registered its graph work under this same manager's state root.
+                _start_registered_graph_after_release(Path(vault_root), active_manager().config.state_dir)
+        finally:
+            _ACTIVE_RELEASED_FANOUT.reset(released_token)
+
+
+def _start_registered_graph_after_release(root: Path, state_dir: Path) -> None:
+    """Start the graph rebuild a direct writer registered, and take its outcome only if it has one."""
+    from . import graph_sync
+
+    try:
+        graph_sync.start_registered(root, state_root=state_dir)
+        # The second unbounded join (#576), and the one that produced
+        # the worst case measured in production: a 300 s single-unit
+        # `observe_memory` append, against 14.3 s for the `remember`
+        # immediately before it. This guard is held while serving a
+        # request exactly like `after_operation_guard` is, so it takes
+        # the same seam. There is no terminal envelope here to carry
+        # `pending`, so the honest report is the log line below -- the
+        # leaf's own bounded index/readiness paths already tell its
+        # caller the derived graph is not current.
+        if not graph_sync.join_registered_if_settled(root, state_root=state_dir):
+            logger.info("direct mutation left its graph rebuild running")
+    except graph_sync.GraphRebuildRegistrationError:
+        # Direct leaf APIs have no terminal-envelope seam for a graph
+        # failure. Canonical bytes and the exact durable failure handle
+        # remain authoritative; their bounded index/readiness paths
+        # expose the recovery requirement.
+        logger.warning(
+            "direct mutation graph join failed after canonical release",
+            exc_info=True,
+        )
+
+
 #: Housekeeping a leaf moved out of its own critical section, to be run once
 #: this mutation's terminal is durable -- the same deferral `_ACTIVE_
 #: POST_TERMINAL_FANOUT` gives derived-index work, but for a registrant that
@@ -472,6 +564,20 @@ def _with_post_terminal_fanout_acknowledgement(
     if not reports and not drain_failed:
         return result
 
+    derived_sync, unfinished, diagnostics = _derived_sync_of(reports, drain_failed=drain_failed)
+    return with_fast_acknowledgement(
+        result,
+        derived_sync=derived_sync,
+        derived_sync_components=unfinished,
+        component_diagnostics=diagnostics,
+        advisory_sync="not_required",
+    )
+
+
+def _derived_sync_of(
+    reports: list[Any], *, drain_failed: bool
+) -> tuple[str, tuple[str, ...], list[dict[str, str | None]]]:
+    """Classify drained fan-out reports: the outcome, its unfinished components and their diagnostics."""
     from . import index_sync
 
     component_outcomes: dict[str, tuple[str, str | None]] = {}
@@ -520,13 +626,7 @@ def _with_post_terminal_fanout_acknowledgement(
         for component, (outcome, _code) in component_outcomes.items()
         if outcome != "completed"
     )
-    return with_fast_acknowledgement(
-        result,
-        derived_sync=derived_sync,
-        derived_sync_components=unfinished,
-        component_diagnostics=diagnostics,
-        advisory_sync="not_required",
-    )
+    return derived_sync, unfinished, diagnostics
 
 
 def _fast_ack_enabled(command: str | None = None, action: str | None = None) -> bool:
@@ -1426,6 +1526,27 @@ def _durable_graph_outcome(vault_root: Path) -> Any:
             return None
         state, acknowledged = graph_sync.acknowledgement_state(vault_root, require_available=True)
         if deferred_index.list_graph_paths(vault_root, limit=1):
+            return graph_sync.committed_graph_queued(committed)
+        if deferred_index.held_graph_proofs(
+            vault_root, digest=committed.checkpoint_sha256, paths=(rel for rel, _ in committed.paths),
+        ):
+            return {
+                **graph_sync.committed_graph_unavailable(committed),
+                "graph_sync_code": "GRAPH_SYNC_PAGE_HELD",
+                "graph_sync_remediation": (
+                    "The write is durable. A page in this write is held for graph repair. "
+                    "Its graph relations will update after the page can be read and repaired."
+                ),
+            }
+        try:
+            full_rebuild = deferred_index.graph_full_rebuild_details(
+                vault_root, deadline=time.monotonic() + 0.05,
+            )
+        except deferred_index.GraphFullRebuildStateUnavailable:
+            return graph_sync.committed_graph_unavailable(committed)
+        if full_rebuild is not None:
+            if full_rebuild.fatal_family is not None:
+                return graph_sync.committed_graph_unavailable(committed)
             return graph_sync.committed_graph_queued(committed)
         if acknowledged is not None and acknowledged.covers(committed):
             if state == "unavailable":
@@ -5881,33 +6002,7 @@ class LeaseManager:
             isinstance(vault_root, os.PathLike)
             or (isinstance(vault_root, str) and Path(vault_root).is_absolute())
         ):
-            from . import graph_sync
-
-            root = Path(vault_root)
-            try:
-                graph_sync.start_registered(root, state_root=self.config.state_dir)
-                # The second unbounded join (#576), and the one that produced
-                # the worst case measured in production: a 300 s single-unit
-                # `observe_memory` append, against 14.3 s for the `remember`
-                # immediately before it. This guard is held while serving a
-                # request exactly like `after_operation_guard` is, so it takes
-                # the same seam. There is no terminal envelope here to carry
-                # `pending`, so the honest report is the log line below -- the
-                # leaf's own bounded index/readiness paths already tell its
-                # caller the derived graph is not current.
-                if not graph_sync.join_registered_if_settled(
-                    root, state_root=self.config.state_dir
-                ):
-                    logger.info("direct mutation left its graph rebuild running")
-            except graph_sync.GraphRebuildRegistrationError:
-                # Direct leaf APIs have no terminal-envelope seam for a graph
-                # failure. Canonical bytes and the exact durable failure handle
-                # remain authoritative; their bounded index/readiness paths
-                # expose the recovery requirement.
-                logger.warning(
-                    "direct mutation graph join failed after canonical release",
-                    exc_info=True,
-                )
+            _start_registered_graph_after_release(Path(vault_root), self.config.state_dir)
 
     @contextmanager
     def writer_authority_guard(
@@ -7027,16 +7122,13 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal, forward or compensating, prepares read-only, then
-        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
-        # mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and applying a
-        # compensation write step by step and keep the wide boundary. The two
-        # actions are members of the closed curation action enum.
-        narrow_curation_proposal = (
+        # A curation proposal seals, and an apply or resume writes, under short holds that
+        # curation takes itself and re-checks its bindings under (`curation._step_boundary`).
+        # Preparation, probes and a self-guarded step's leaf run without curation's hold, so
+        # other writers commit between a step's seams.
+        narrow_curation = (
             command.name == "maintain_memory"
-            and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") in ("propose", "propose-compensation")
+            and curation_module.guards_own_boundary(kwargs)
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -7056,7 +7148,7 @@ class LeaseManager:
             or narrow_maintenance_job_cancel
             or narrow_maintenance_job
             or narrow_reconcile
-            or narrow_curation_proposal
+            or narrow_curation
             or narrow_episode_record
             # Issuance writes no vault-owned file: upload and download mint a token over a private
             # copy or store, and a session open or rotate writes only its own SQLite transaction.
@@ -8662,6 +8754,25 @@ def active_mutation_request_id() -> str | None:
     return trace[0] if trace is not None else None
 
 
+@contextmanager
+def mutation_step(step: str) -> Iterator[None]:
+    """Run an earlier store transaction of a command that commits more than one, under `<request id>:<step>`.
+
+    The store keeps one transaction per request identity, so a command's extra transactions each take a
+    derived one. The command's own identity stays on its last transaction, which a retry replays.
+    Outside a mutation it changes nothing.
+    """
+    trace = _ACTIVE_MUTATION_TRACE.get()
+    if trace is None:
+        yield
+        return
+    token = _ACTIVE_MUTATION_TRACE.set((f"{trace[0]}:{step}", trace[1], trace[2]))
+    try:
+        yield
+    finally:
+        _ACTIVE_MUTATION_TRACE.reset(token)
+
+
 def active_mutation_trace() -> tuple[str, str, str] | None:
     """`(request_id, command, receipt)` of the mutation this code runs inside,
     or `None` outside one (a CLI helper, the watcher, a direct call). The heat
@@ -9074,6 +9185,8 @@ def invoke_command(
         SelectorCoverageError,
         disclosure_boundary,
         emit_boundary_receipt,
+        exact_report_paths,
+        held_report_evidence,
         is_vault_root,
         postfilter,
         postfilter_error,
@@ -9291,11 +9404,18 @@ def invoke_command(
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted
 
+        preview_checkpoint = None
+        if command.name == "manage_memory_file":
+            from .reclassify_source import is_preview_call
+
+            if is_preview_call(command.name, kwargs):
+                preview_checkpoint = request_budget.current_checkpoint()
         budget = request_budget.current()
-        checkpoint = (
+        audit_checkpoint = (
             request_budget.ReadCheckpoint(budget)
             if budget is not None and invocation_is_audit(command, kwargs) else None
         )
+        checkpoint = audit_checkpoint or preview_checkpoint
 
         def finish_ownership(check: request_budget.ReadCheckpoint | None) -> None:
             with request_budget.checking(check), call_spans.span("command.ownership_finish"):
@@ -9314,11 +9434,24 @@ def invoke_command(
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                retained_report = None
+                if preview_checkpoint is not None:
+                    from .reclassification_preview import RetainedReport
+
+                    if isinstance(result, RetainedReport):
+                        retained_report = result
                 # The terminal filter asks the store live rather than replaying the body's verdict.
-                with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
+                with (
+                    call_spans.span("command.terminal_filter"), published_admission.deciding(own=True),
+                    exact_report_paths(retained_report.exact_paths) if retained_report is not None else nullcontext(),
+                    held_report_evidence(retained_report.held_evidence)
+                    if retained_report is not None else nullcontext(),
+                ):
                     result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
-                                        checkpoint=checkpoint)
+                                        checkpoint=checkpoint, reprove_aggregate=audit_checkpoint is not None)
                     result = store_preview.note_withheld_pages(command.name, result, injected[0])
+                    if retained_report is not None:
+                        retained_report.require_complete_projection(result)
                 finish_ownership(checkpoint)
             except BaseException as error:
                 # This exact internal terminal contains no content to scan or prove again.
@@ -9345,6 +9478,10 @@ def invoke_command(
                             raise
                         finish_ownership(error_checkpoint)
                 except request_budget.ReadBudgetExhausted:
+                    if preview_checkpoint is not None:
+                        from .reclassify_source import preview_warming
+
+                        raise preview_warming() from None
                     if budget is not None:
                         budget.note_truncated("audit.release")
                     raise _AuditBudgetExhausted() from None

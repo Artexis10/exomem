@@ -1,0 +1,11 @@
+{
+  "id": "m15-approve-itinerary",
+  "title": "A draft holiday itinerary is approved",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "Here's where I've landed for the Marrow Coast weekend. Friday ferry at 08:40, two nights at the Saltwick harbour guesthouse, the cliff path ride to Quillmere on Saturday, and the 18:10 ferry home on Sunday.",
+    "Yes, let's go with that itinerary. Hold Sunday morning free and tell me what I still need to book."
+  ]
+}

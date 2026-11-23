@@ -1,9 +1,21 @@
 """Query routing and lifecycle; the release workflow proves real model outputs."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from exomem import accel, clip_query, embeddings, model_reaper, readiness
+from exomem import (
+    accel,
+    clip_query,
+    embeddings,
+    find_candidates,
+    model_reaper,
+    readiness,
+    runtime_resources,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -90,3 +102,35 @@ def test_query_only_reaping_waits_for_encodes_and_never_loads_torch(monkeypatch)
 
     embeddings.embed_clip_text("a blue bicycle")
     assert len(constructions) == 2
+
+
+def test_a_page_search_image_query_does_not_wait_for_a_bulk_batch_on_the_shared_turn(monkeypatch, tmp_path):
+    """Page search encoded its image query on the shared turn, so it waited out every bulk batch first."""
+    gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    # The served text encoder runs inferences side by side, so search queries get their own lane.
+    monkeypatch.setattr(embeddings, "_MODEL", SimpleNamespace(concurrent_encodes=True))
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: SimpleNamespace(has_vectors=lambda: True))
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "__init__", lambda self: None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "encode",
+                        lambda self, texts: np.ones((len(texts), embeddings.CLIP_DIM), dtype=np.float32))
+    # Warm-up preloads the query tower; a cold load still takes the shared turn by design.
+    monkeypatch.setattr(embeddings, "_CLIP_QUERY_MODEL", clip_query.OnnxClipQueryEncoder())
+    holding, release = threading.Event(), threading.Event()
+
+    def bulk_batch():
+        with gate.admission(), gate.execution():
+            holding.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        batch = pool.submit(bulk_batch)
+        assert holding.wait(5)
+        try:
+            prepared = pool.submit(find_candidates._prepare_clip_query, tmp_path, "harbour at dusk").result(timeout=5)
+        finally:
+            release.set()
+        batch.result()
+    assert prepared.error is None and prepared.vector is not None, prepared

@@ -1365,17 +1365,15 @@ def _a_standing_marker_owns_the_repair(root: Path) -> None:
     [_the_queue_owns_the_repair, _a_standing_marker_owns_the_repair],
     ids=["queued_receipt", "standing_marker"],
 )
-def test_a_fan_out_whose_repair_is_owned_marks_nothing(
-    handoff_vault: Path, owned_by: Callable[[Path], None]
+def test_a_fan_out_with_owned_repair_keeps_only_its_observation_until_commit(
+    handoff_vault: Path, owned_by: Callable[[Path], None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The watcher marks an incomplete fan-out only when nothing else owns its repair.
+    """A receipt or full marker owns the repair, and the scoped event tracks its source.
 
     A receipt-owned write reaches the watcher as an outside edit, and a freshly
     started worker has no resident resolver, so the watcher's refresh queues
-    the batch instead of deriving it. Queued receipts for the batch, or a
-    standing whole-vault marker, already owe the graph its repair. A mark on
-    top fenced later writes to those paths, or, unscoped, every write, until
-    the watcher acknowledged it.
+    the batch. Keep the observed path until the graph commits its repair.
+    Widening this to an unscoped mark would fence later unrelated writes.
     """
     root = handoff_vault
     page = root / GENERATED / "generated-note-0004.md"
@@ -1393,7 +1391,27 @@ def test_a_fan_out_whose_repair_is_owned_marks_nothing(
 
     assert not EpistemicGraphIndex(root).available(), "the fan-out converged; nothing to own"
     assert deferred_index.list_graph_paths(root), "the batch's repair is not queued"
-    assert not freshness.external_pending(root), "an owned repair was marked as unknown"
+    assert len(freshness.external_pending_paths(root)) == 1
+    assert freshness.external_pending_for(root, [page])
+    assert not freshness.external_pending_unscoped(root)
+
+    if owned_by is _the_queue_owns_the_repair:
+        spy = _RebuildSpy(monkeypatch)
+        drain = index_sync.drain_deferred_work
+
+        def drain_after_reconcile(vault_root: Path, **kwargs: object) -> int:
+            assert freshness.external_pending_for(vault_root, [page])
+            assert not EpistemicGraphIndex(vault_root).available()
+            return drain(vault_root, **kwargs)
+
+        monkeypatch.setattr(index_sync, "drain_deferred_work", drain_after_reconcile)
+        assert watcher._reconcile_once(seed=False)
+        assert spy.count == 0
+    else:
+        assert _drain_graph_queue(root) == 0
+    assert deferred_index.list_graph_paths(root) == []
+    assert not freshness.external_pending(root)
+    assert EpistemicGraphIndex(root).available()
 
 
 def test_a_records_view_rewrite_leaves_a_current_graph_readable_and_queues_no_rebuild(

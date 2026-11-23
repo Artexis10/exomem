@@ -222,11 +222,13 @@ _GLOBAL_STANCE_CAPTURE = (
     "Authorize each promoted unit; keep scoped rules local. "
 )
 
-#: A correction the user states is durable: an uncorrected note keeps recommending what the user
-#: already found wrong, and recall returns it as authoritative. Scoped by `proactive_capture`, so
-#: advisory offers the fix and silent makes it. `balanced`, `maximal` and the activation block share it.
+#: What the owner settles in conversation is durable: stored advice that failed or a claim the user
+#: corrected (an uncorrected note keeps recommending what the user already found wrong, and recall returns
+#: it as authoritative), and a decision or standing rule agreed here (a harness-local file never reaches
+#: another session). Scoped by `proactive_capture`, so advisory offers the save and silent makes it. One
+#: sentence: `balanced`, `maximal` and the activation block share it, and the core has no spare bytes.
 _CORRECTION_CAPTURE = (
-    "Stored advice the user says failed, or a claim they correct, is durable: correct it under "
+    "Failed stored advice, a corrected claim, or an agreed decision or standing rule is durable: save under "
     "proactive_capture."
 )
 
@@ -237,8 +239,8 @@ _BASELINE_CAPTURE = (
     "Capture stable preferences, recurring routines, historical baselines, or durable "
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
-    "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Before an affiliation facet, check the relation queue: a match the user "
+    "there, else one concise compiled observation; Records for recurring named items or "
+    "measurements. Before an affiliation facet, check the relation queue: a match the user "
     "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
     "incidental associations and trivia get no note."
 )
@@ -275,6 +277,16 @@ _CAPTURE_RULES = (
     "stays unwritten."
 )
 
+#: The recognition cue for recurring structured work, appended to `_CAPTURE_RULES` in the per-turn
+#: block. It names the kinds of item the agent judges (never a word the server matches), and routes
+#: them by the owner's `proactive_capture`, so advisory proposes the collection and silent makes it.
+#: The create step is the one call `add_record` with `new_collection`. Per-turn only: the bootstrap core
+#: has no bytes to spare, and the scaffold's Records procedure (`records_planning`) carries the full rule.
+_STRUCTURED_WORK_CAPTURE = (
+    "Named items that recur, are compared or change: add_record to a matching collection by natural key, "
+    "else with new_collection per proactive_capture; prose stays in Notes."
+)
+
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
 #: trigger: waiting for the agent to notice a selection lost files the user went on to use. The
 #: activation block carries it with the baseline doctrine; the rest stays in bootstrap.
@@ -295,8 +307,8 @@ _ORIGINAL_CAPTURE = (
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
 #: Shared like the doctrine above, so the block and bootstrap give one route.
 _DELIVERY_CAPTURE = (
-    "Reported delivery: search for the artifact's Evidence receipt, then append one "
-    "delivery Record linking it to the compatible existing collection; no remote byte "
+    "Reported delivery: search for the artifact's Evidence receipt, then append a "
+    "delivery Record linking it to the compatible collection; no remote byte "
     "inference."
 )
 
@@ -307,7 +319,7 @@ _ARTIFACT_ADOPTION_CAPTURE = (
     + _ADOPTION_TRIGGER
     + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
-    + " Missing collection: structural_suggestions."
+    + " Missing collection: create a minimal one."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -325,7 +337,7 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
     " After capture, make one bounded episode pass over the recent exchange for material "
-    "value in later work or recall, e.g. outcomes; not a closed set. "
+    "value in later work or recall, e.g. outcomes. "
     "Skip what the response lists as written recently; stay silent if nothing qualifies."
 )
 
@@ -859,7 +871,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
         "disposition": disposition,
         "link_acceptance": link_acceptance,
         "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_EPISTEMIC_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
-        CAPTURE_RULES_KEY: _CAPTURE_RULES,
+        CAPTURE_RULES_KEY: f"{_CAPTURE_RULES} {_STRUCTURED_WORK_CAPTURE}",
     }
 
 

@@ -30,7 +30,7 @@ import unicodedata
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import Context, ContextVar, copy_context
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -1982,6 +1982,14 @@ STAT_GENERATION_TRUSTED = os.name != "nt"
 GENERATION_RACY_WINDOW_NS = 2_000_000_000
 
 
+def generation_can_bind_bytes(info: os.stat_result, observed_at_ns: int) -> bool:
+    """Whether this source's generation can witness bytes across a replay."""
+    return (
+        STAT_GENERATION_TRUSTED
+        and observed_at_ns - max(info.st_mtime_ns, info.st_ctime_ns) > GENERATION_RACY_WINDOW_NS
+    )
+
+
 def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
     return (
         first.device == second.device and first.inode == second.inode and first.mode == second.mode
@@ -2187,9 +2195,10 @@ def _verified_chunks(artifact: _WorkspaceArtifact) -> Iterator[bytes]:
     and nothing reaches the destination.
     """
     digest = hashlib.sha256()
-    for chunk in _descriptor_chunks(artifact.descriptor, artifact.identity):
-        digest.update(chunk)
-        yield chunk
+    with contextlib.closing(_descriptor_chunks(artifact.descriptor, artifact.identity)) as chunks:
+        for chunk in chunks:
+            digest.update(chunk)
+            yield chunk
     if digest.hexdigest() != artifact.content_hash:
         raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
 
@@ -2301,6 +2310,15 @@ class _BatchPayloadCustody:
     finished: Callable[[], None] | None = None
 
 
+@dataclass(frozen=True)
+class _BatchFileWitness:
+    """A trusted owner's durable intent and proof at the native file commit boundaries."""
+
+    begin: Callable[[], None]
+    seal: Callable[[], None]
+    retire_rolled_back: Callable[[], None]
+
+
 @dataclass(slots=True)
 class _WorkspaceArtifact:
     workspace: _BatchWorkspace
@@ -2320,6 +2338,7 @@ class _WorkspaceArtifact:
     installation_witness: held_fs.InstallationWitness | None = None
     requires_installation_witness: bool = False
     custody: _ArtifactCustody | None = None
+    allocation_vault: Path | None = None
     #: Renamed in from an upload stage: installing it renames it again and copies nothing.
     adopted: bool = False
 
@@ -2903,7 +2922,7 @@ class _BatchWorkspace:
                 iterator.close()
 
     def create_artifact(
-        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None,
+        self, name: str, content: bytes, *, custody: _ArtifactCustody | None = None, allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         self.recheck()
         if custody is not None:
@@ -2959,7 +2978,13 @@ class _BatchWorkspace:
             if custody is not None:
                 assert held_file is not None
                 custody.temporary.bind(name, held_file)
-            _write_all(descriptor, content)
+            from . import media_capacity
+
+            with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                  if allocation_vault is not None else nullcontext()) as room:
+                if room is not None:
+                    room.require(len(content))
+                _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.content_bound = True
@@ -2984,6 +3009,7 @@ class _BatchWorkspace:
         expected_size: int,
         expected_hash: str,
         custody: _ArtifactCustody | None = None,
+        allocation_vault: Path | None = None,
     ) -> _WorkspaceArtifact:
         """Copy a reviewed seekable stream into one held private stage."""
 
@@ -3066,6 +3092,9 @@ class _BatchWorkspace:
             written = 0
             os.lseek(descriptor, 0, os.SEEK_SET)
             os.ftruncate(descriptor, 0)
+            from . import media_capacity
+
+            meter = allocation_vault is not None and media_capacity.managed_allocations(allocation_vault)
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -3080,7 +3109,11 @@ class _BatchWorkspace:
                         "PATH_GUARD_CONTENT", "binary batch size changed"
                     )
                 digest.update(chunk)
-                _append_all(descriptor, chunk)
+                with (media_capacity.upload_room(allocation_vault, device=info.st_dev)
+                      if meter and allocation_vault is not None else nullcontext()) as room:
+                    if room is not None:
+                        room.require(len(chunk), offset=written - len(chunk), upload_size=expected_size)
+                    _append_all(descriptor, chunk)
             if written != expected_size or digest.hexdigest() != expected_hash:
                 raise PathGuardError(
                     "PATH_GUARD_CONTENT", "binary batch content changed"
@@ -3315,8 +3348,6 @@ class _BatchWorkspace:
                 return self.install_adopted_artifact(
                     artifact, final, relative.as_posix(), inverse_recheck=inverse_recheck
                 )
-            # Copied a chunk at a time on each publish attempt: an artifact may be gigabytes.
-            content = held_fs.Chunks(functools.partial(_verified_chunks, artifact))
             acquired = held_fs.acquire(root)
             if not acquired.ok:
                 raise PathGuardError(
@@ -3427,19 +3458,30 @@ class _BatchWorkspace:
                         )
                         if inverse_recheck is not None:
                             inverse_recheck()
-                        published = held_fs.publish_bytes(
-                            filesystem,
-                            parent,
-                            relative.name,
-                            content,
-                            expected_identity=expected_stable,
-                            expected_sha256=expected_content_hash,
-                            prepare=prepare_published,
-                            custody=attempt_custody.temporary if attempt_custody is not None else None,
-                            before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
-                            after_install=after_install if attempt_custody is not None else None,
-                            after_retire=attempt_custody.retired if attempt_custody is not None else None,
-                        )
+                        # Close the allocation iterator even if native publication rejects the temporary.
+                        with ExitStack() as copied:
+                            chunks = copied.enter_context(contextlib.closing(_verified_chunks(artifact)))
+                            if artifact.allocation_vault is not None:
+                                from . import media_capacity
+
+                                if media_capacity.managed_allocations(artifact.allocation_vault):
+                                    device = os.fstat(parent.descriptor).st_dev
+                                    chunks = copied.enter_context(contextlib.closing(media_capacity.metered_chunks(
+                                        artifact.allocation_vault, device, chunks,
+                                    )))
+                            published = held_fs.publish_bytes(
+                                filesystem,
+                                parent,
+                                relative.name,
+                                held_fs.Chunks(lambda: chunks),
+                                expected_identity=expected_stable,
+                                expected_sha256=expected_content_hash,
+                                prepare=prepare_published,
+                                custody=attempt_custody.temporary if attempt_custody is not None else None,
+                                before_install=before_install if attempt_custody is not None or inverse_recheck is not None else None,
+                                after_install=after_install if attempt_custody is not None else None,
+                                after_retire=attempt_custody.retired if attempt_custody is not None else None,
+                            )
                         if (
                             not published.ok
                             and published.error is not None
@@ -5173,13 +5215,11 @@ def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, Pa
     _require_read_limit(limit)
     rel = "/".join(_safe_guard_target(target))
     try:
-        page = read.owned_page(root, rel)
+        page = read.owned_page(root, rel, max_bytes=limit)
     except FileNotFoundError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
     if page is None:
         return None
-    if page.meta.size > limit:
-        raise _refuse_unbounded_leaf(target, _over_limit_reason(page.meta.size, limit))
     return page.body, _store_guard(rel, page.meta.sha256)
 
 
@@ -5235,7 +5275,7 @@ def read_bounded_guarded_bytes_with_generation(
         or not _same_identity(identity, after)
         or stat_generation(after) != generation
         or before.st_size != len(data)
-        or started - max(before.st_mtime_ns, before.st_ctime_ns) <= GENERATION_RACY_WINDOW_NS
+        or not generation_can_bind_bytes(before, started)
     ):
         return data, guard, None
     bound = PathGuard(target, guard.ancestors, guard.missing_parents, identity, "generation", None)
@@ -5327,6 +5367,7 @@ class PlannedWrite:
     guard: PathGuard | None = None
     expected_hash: str | None = None
     ensure_directories: tuple[Path, ...] = ()
+    media_allocation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -6221,6 +6262,7 @@ def batch_atomic_write(
     _publish_originals: Callable[[], None] | None = None,
     _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _file_commit_witness: _BatchFileWitness | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -6256,6 +6298,7 @@ def batch_atomic_write(
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
                 publish_originals=_publish_originals, retained_original=_retained_original,
+                file_commit_witness=_file_commit_witness,
             )
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
@@ -6323,6 +6366,7 @@ def batch_atomic_write(
                     _publish_originals, curation_witness.publication_hook(curation_witness_state)
                 ),
                 _payload_custody=_payload_custody,
+                _file_commit_witness=_file_commit_witness,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -6374,6 +6418,7 @@ def _stage_binary_artifact(
     *,
     adoptable: bool,
     custody: _ArtifactCustody | None = None,
+    allocation_vault: Path | None = None,
 ) -> _WorkspaceArtifact:
     """Adopt a staged upload into the workspace by rename, or copy the stream when the stage cannot be adopted."""
     if content.staged is not None:
@@ -6394,6 +6439,7 @@ def _stage_binary_artifact(
         content.stream,
         expected_size=content.size,
         expected_hash=content.sha256,
+        allocation_vault=content.staged.vault_root if content.staged is not None else allocation_vault,
         **({"custody": custody} if custody is not None else {}),
     )
 
@@ -6417,6 +6463,7 @@ def _batch_atomic_write_locked(
     _graph_epoch: bool = True,
     _before_commit_point: Callable[[], None] | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _file_commit_witness: _BatchFileWitness | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -6677,9 +6724,11 @@ def _batch_atomic_write_locked(
             rollback_ancestry.append((ancestry_root, ancestry_guard))
             custody = _payload_custody.stage(write, workspace, False) if _payload_custody is not None else None
             custody_options = {"custody": custody} if custody is not None else {}
+            allocation_vault = vault_root if write.media_allocation else None
             if isinstance(write.content, str):
                 artifact = workspace.create_artifact(
-                    f"stage-{index}.tmp", write.content.encode("utf-8"), **custody_options,
+                    f"stage-{index}.tmp", write.content.encode("utf-8"),
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             elif isinstance(write.content, PreparedBinaryContent):
                 if not write.create_only or write.expected_hash != MISSING_CONTENT_HASH:
@@ -6689,12 +6738,13 @@ def _batch_atomic_write_locked(
                     )
                 artifact = _stage_binary_artifact(
                     workspace, f"stage-{index}.tmp", write.content, adoptable=_payload_custody is None,
-                    **custody_options,
+                    allocation_vault=allocation_vault, **custody_options,
                 )
             else:  # pragma: no cover - the public union is closed
                 raise PathGuardError(
                     "PATH_GUARD_INVALID", "batch content type is unsupported"
                 )
+            artifact.allocation_vault = allocation_vault
             staged.append((write.path, workspace, artifact))
         for write, (final, _workspace, _artifact) in zip(writes, staged, strict=True):
             if not os.path.lexists(final):
@@ -6880,6 +6930,7 @@ def _batch_atomic_write_locked(
     # diff about whitespace hides that.
     canonical_started_monotonic = _fast_ack_monotonic()
     additive_guard = None
+    file_commit_sealed = False
     try:
         from . import vocabulary_auxiliaries, vocabulary_gate
         from .writer_lease import (
@@ -6971,9 +7022,12 @@ def _batch_atomic_write_locked(
                     (write.path.relative_to(vault_root).as_posix() for write in caller_writes
                      if write.path.is_relative_to(vault_root)),
                 )
-            if index == 0 and _before_first_install is not None:
-                # The owner's own durable write, never in `replaced`: a rollback does not revert it.
-                _before_first_install()
+            if index == 0:
+                if _file_commit_witness is not None:
+                    _file_commit_witness.begin()
+                if _before_first_install is not None:
+                    # The owner's own durable write, never in `replaced`: a rollback does not revert it.
+                    _before_first_install()
             replacement_intents: tuple[Any, ...] = ()
             if publication_intents_enabled:
                 from . import file_watcher
@@ -7040,6 +7094,10 @@ def _batch_atomic_write_locked(
             _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
+        if _file_commit_witness is not None:
+            # A provisional file receipt can precede the final validation and the authority commit.
+            _file_commit_witness.seal()
+            file_commit_sealed = True
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
         # Opens the span the writer lease closes when the mutation row reaches
         # `canonically_committed`. On the 0.83.1 deploy that stretch was the
@@ -7058,10 +7116,10 @@ def _batch_atomic_write_locked(
             with call_spans.span("commit_tail.mutation_committed"):
                 mark_active_mutation_committed()
     except Exception as commit_error:
-        if additive_guard is not None and additive_guard.committed:
-            # Authority and canonical bytes are already committed together.
+        if file_commit_sealed or (additive_guard is not None and additive_guard.committed):
+            # A seal or a spent authority proves the canonical bytes already committed.
             # A later diagnostic failure must recover that outcome, never
-            # roll the bytes back while leaving an exact approval spent.
+            # roll the bytes back while leaving committed proof.
             mark_active_mutation_committed()
             raise
         rollback_errors: list[BaseException] = []
@@ -7171,6 +7229,8 @@ def _batch_atomic_write_locked(
 
             file_watcher.abort_publication_intents(publication_intents)
         _remove_empty_created_dirs(created_dirs)
+        if _file_commit_witness is not None:
+            _file_commit_witness.retire_rolled_back()
         raise
     except BaseException:
         if publication_intents:
@@ -8476,6 +8536,10 @@ class InboundLink:
         }
 
 
+class InboundCandidatesExceeded(Exception):
+    """The current inbound index holds more candidates than the caller can process."""
+
+
 # ---------------- inbound-link index ----------------
 # One full-vault read pass builds normalized-target -> entry buckets plus a
 # basename count map; `find_inbound_wikilinks` becomes a lookup with output
@@ -8895,22 +8959,30 @@ def _catch_up_inbound(
     return False
 
 
-def inbound_rebuild_needed(vault_root: Path) -> bool:
+def inbound_rebuild_needed(vault_root: Path, *, check_patch_chain: bool = False) -> bool:
     """Whether only an owner build can restore this vault's index.
 
-    True when nothing is resident, or the resident data has no proven checkpoint.
-    Data that is resident under a checkpoint merely behind the registry is
-    completed by the patch the watcher is about to run, so a rebuild would repeat
-    work the patch does for the cost of the change.
+    A managed preview checks without waiting for the index lock. A reseed or
+    expired history needs a build even when a prior checkpoint is resident.
     """
     if _store_inbound_mode(vault_root):
         return False  # a commit writes the store's rows: nothing builds them
-    with _INBOUND_INDEX_LOCK:
-        cached = _INBOUND_INDEX.get(str(vault_root.resolve()))
-    return cached is None or cached[1].checkpoint is None
+    root = str(vault_root.resolve())
+    if not _INBOUND_INDEX_LOCK.acquire(blocking=not check_patch_chain):
+        return False
+    try:
+        cached = _INBOUND_INDEX.get(root)
+        checkpoint = cached[1].checkpoint if cached is not None else None
+    finally:
+        _INBOUND_INDEX_LOCK.release()
+    return checkpoint is None or (
+        check_patch_chain and not freshness.consumer_delta_available(vault_root, "vault", checkpoint)
+    )
 
 
-def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
+def prime_inbound_index(
+    vault_root: Path, *, eager: bool = False, defer_to_patch: bool = False,
+) -> bool:
     """Rebuild requested link metadata on the existing background owner.
 
     At most one pass builds a vault's index at a time: a caller that finds
@@ -8930,6 +9002,8 @@ def prime_inbound_index(vault_root: Path, *, eager: bool = False) -> bool:
     if not state.building.acquire(blocking=False):
         return False
     try:
+        if defer_to_patch and not inbound_rebuild_needed(vault_root, check_patch_chain=True):
+            return False
         data = _inbound_index(vault_root, require_current=True)
     finally:
         state.building.release()
@@ -9079,16 +9153,32 @@ def _inbound_target_forms(target_rel_path: str) -> tuple[str, str, str, str]:
     return target, full, managed_relative(full), target.rsplit("/", 1)[-1]
 
 
-def _snapshot_inbound(data: _InboundIndexData, target_rel_path: str) -> _InboundIndexData:
+def _inbound_candidate_keys(
+    full: str, stripped: str, basename: str, *, basename_unique: bool,
+) -> tuple[str, ...]:
+    keys = (full,) if stripped == full else (full, stripped)
+    if basename_unique and basename not in keys:
+        return (*keys, basename)
+    return keys
+
+
+def _snapshot_inbound(
+    data: _InboundIndexData, target_rel_path: str, *,
+    candidate_keys: tuple[str, ...] | None = None, include_stems: bool = True,
+) -> _InboundIndexData:
     """Copy only this target's evidence. The caller holds `_INBOUND_INDEX_LOCK`.
 
     Visibility checks and ordering then run on the copy, outside the lock.
     """
     _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+    keys = (full, stripped, basename) if candidate_keys is None else candidate_keys
     return _InboundIndexData(
-        buckets={key: list(data.buckets.get(key, ())) for key in (full, stripped, basename)},
+        buckets={key: list(data.buckets.get(key, ())) for key in keys},
         stem_counts={basename: data.stem_counts.get(basename, 0)},
-        sources={rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())},
+        sources=(
+            {rel: data.sources[rel] for rel in data.stem_paths.get(basename, ())}
+            if include_stems else {}
+        ),
     )
 
 
@@ -9486,6 +9576,8 @@ def cached_inbound_wikilinks(
     target_rel_path: str,
     *,
     visible: Callable[[str], bool] | None = None,
+    read_hashes: Mapping[str, str | None] | None = None,
+    candidate_limit: int | None = None,
 ) -> list[InboundLink] | None:
     """Borrow complete current evidence without a walk, build or cache wait.
 
@@ -9493,12 +9585,20 @@ def cached_inbound_wikilinks(
     registry only by pages that reader may not see is complete for it, so a
     write to such a page does not turn the answer into `None`.
 
+    A file-mode planner can require the cache to have seen the same guarded bytes.
+
     A store-mode vault's rows are current at the request's snapshot, so the
     answer is the complete read, never `None`.
+
+    A candidate limit applies to file-mode reads with a current index. The
+    bound covers possible candidates before the caller's view reads them.
     """
-    stored = _store_inbound(vault_root, (target_rel_path,), visible)
-    if stored is not None:
-        return stored[target_rel_path]
+    if candidate_limit is None:
+        stored = _store_inbound(vault_root, (target_rel_path,), visible)
+        if stored is not None:
+            return stored[target_rel_path]
+    elif _store_inbound_mode(vault_root):
+        return None
     from .governance import egress
     from .published_admission import admission_of
 
@@ -9508,8 +9608,24 @@ def cached_inbound_wikilinks(
         return None
     # Owner registration makes this signal stable even while evidence is contended.
     state.demanded.set()
-    instance = freshness.consumer_checkpoint_instance()
-    generation = freshness.generation(vault_root, "vault")
+
+    def registry_state(*, pending: bool = False) -> tuple[str, int | None, int | None] | None:
+        if read_hashes is not None or candidate_limit is not None:
+            sample = freshness.preview_reference_generation(vault_root)
+            if sample is None:
+                return None
+            instance, generation, _, epoch = sample
+            return instance, generation, epoch
+        return (
+            freshness.consumer_checkpoint_instance(),
+            freshness.generation(vault_root, "vault"),
+            freshness.external_pending_epoch(vault_root) if pending else None,
+        )
+
+    before = registry_state()
+    if before is None:
+        return None
+    instance, generation, _ = before
     if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9520,12 +9636,27 @@ def cached_inbound_wikilinks(
         if generation is None or checkpoint is None:
             return None
         if (
-            visible is None
+            (visible is None or read_hashes is not None or candidate_limit is not None)
             and (checkpoint.instance_id, checkpoint.generation) != (instance, generation)
         ):
             return None
         cache_generation = state.generation
-        snapshot = _snapshot_inbound(cached[1], target_rel_path)
+        data = cached[1]
+        candidate_keys = None
+        exceeded = False
+        if candidate_limit is not None:
+            _target, full, stripped, basename = _inbound_target_forms(target_rel_path)
+            stems = data.stem_counts.get(basename, 0)
+            candidate_keys = _inbound_candidate_keys(
+                full, stripped, basename, basename_unique=stems == 1 or (visible is not None and stems > 1),
+            )
+            checks = sum(len(data.buckets.get(key, ())) for key in candidate_keys)
+            if visible is not None and stems > 1:
+                checks += stems
+            exceeded = checks > max(0, candidate_limit)
+        snapshot = None if exceeded else _snapshot_inbound(
+            data, target_rel_path, candidate_keys=candidate_keys, include_stems=visible is not None,
+        )
     finally:
         _INBOUND_INDEX_LOCK.release()
 
@@ -9539,11 +9670,7 @@ def cached_inbound_wikilinks(
             return False
         target, pending_epoch = checked
         # Instance and generation identify this exact endpoint without rehashing the registry map.
-        return (
-            freshness.consumer_checkpoint_instance() == target.instance_id
-            and freshness.generation(vault_root, "vault") == target.generation
-            and freshness.external_pending_epoch(vault_root) == pending_epoch
-        )
+        return registry_state(pending=True) == (target.instance_id, target.generation, pending_epoch)
 
     def withheld_before(paths: frozenset[str], reader: egress.ReaderView) -> frozenset[str]:
         if not _INBOUND_INDEX_LOCK.acquire(blocking=False):
@@ -9568,16 +9695,17 @@ def cached_inbound_wikilinks(
             current_admission = admission_of(reader)
             if reader is None or current_admission is None or current_admission.identity() != authority:
                 return False
-        pending_epoch = freshness.external_pending_epoch(vault_root)
+        live = registry_state(pending=True)
+        if live is None:
+            return False
+        _, _, pending_epoch = live
         target = checkpoint
         if (
             (checkpoint.instance_id, checkpoint.generation) == (instance, generation)
-            and freshness.consumer_checkpoint_instance() == instance
-            and freshness.generation(vault_root, "vault") == generation
-            and not freshness.external_pending(vault_root)
+            and live == (instance, generation, None)
         ):
             held = frozenset()
-        elif visible is None:
+        elif visible is None or read_hashes is not None or candidate_limit is not None:
             return False
         else:
             try:
@@ -9603,7 +9731,7 @@ def cached_inbound_wikilinks(
 
     if not current():
         return None
-    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading)
+    result = _select_inbound_wikilinks(snapshot, target_rel_path, reading) if snapshot is not None else None
     if not current() or not _INBOUND_INDEX_LOCK.acquire(blocking=False):
         return None
     try:
@@ -9611,10 +9739,15 @@ def cached_inbound_wikilinks(
             state.generation != cache_generation
             or _INBOUND_INDEX.get(root) is not cached
             or not registry_current()
+            or (read_hashes is not None and any(
+                sha is None or cached[1].sources.get(path) != sha for path, sha in read_hashes.items()
+            ))
         ):
             return None
     finally:
         _INBOUND_INDEX_LOCK.release()
+    if exceeded:
+        raise InboundCandidatesExceeded()
     return result
 
 
@@ -9640,18 +9773,10 @@ def _select_inbound_wikilinks(
         stem_count += 1
     basename_unique = stem_count == 1
 
-    candidates: list[_InboundEntry] = []
-    candidates.extend(data.buckets.get(target_full, ()))
-    if target_stripped != target_full:
-        candidates.extend(data.buckets.get(target_stripped, ()))
-    # The basename bucket only contributes when it isn't already one of the
-    # path-form buckets (e.g. a KB-root file where stripped == basename).
-    if (
-        basename_unique
-        and "/" not in target_basename
-        and target_basename not in (target_full, target_stripped)
-    ):
-        candidates.extend(data.buckets.get(target_basename, ()))
+    keys = _inbound_candidate_keys(
+        target_full, target_stripped, target_basename, basename_unique=basename_unique,
+    )
+    candidates = [entry for key in keys for entry in data.buckets.get(key, ())]
 
     self_keys = (target_full, target_stripped)
     return [
@@ -11326,6 +11451,44 @@ def latest_operation_id(vault_root: Path, path: str) -> str | None:
         if newest is not None:
             return newest[1]
     return None
+
+
+def operation_log_lines(
+    vault_root: Path, prefix: str, *, rotated_since: float | None = None, max_archives: int | None = None
+) -> tuple[list[str], bool]:
+    """Every line that starts with `prefix` in the live log and its rotated archives, and whether that is all of them.
+
+    Archives are read newest first by modification time. With `rotated_since` (a Unix time) an archive last
+    written before it is skipped without losing a line: rotation writes an archive after every entry it holds,
+    so it holds nothing newer than that time. With `max_archives` the read stops after that many, and the second
+    value is False when older archives went unread. A store-held archive has no file time and counts as newest.
+    A log that is absent holds no line; one that cannot be read raises, so a count never reads part as the whole.
+    """
+    live, *archives = _operation_log_paths(vault_root)
+
+    def rotated_at(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return float("inf")
+
+    chosen: list[Path] = []
+    complete = True
+    for at, path in sorted(((rotated_at(path), path) for path in archives), key=lambda pair: pair[0], reverse=True):
+        if rotated_since is not None and at < rotated_since:
+            break
+        if max_archives is not None and len(chosen) >= max_archives:
+            complete = False
+            break
+        chosen.append(path)
+    lines: list[str] = []
+    for log_path in (live, *chosen):
+        try:
+            text, _guard = read_guarded_text(vault_root, log_path)
+        except FileNotFoundError:
+            continue
+        lines.extend(line for line in text.splitlines() if line.startswith(prefix))
+    return lines, complete
 
 
 def plan_log_writes_many(

@@ -202,6 +202,21 @@ class _Gateway(httpx.BaseTransport):
                               content=response.content)
 
 
+def test_cloud_reports_its_one_shot_cap_for_a_large_source(cell):
+    from exomem import upload_handoff
+
+    key, app, _ = cell
+
+    async def scenario(client):
+        requested = {**_prepare_arguments(), "hold": False, "size_bytes": upload_handoff.MAX_BYTES + 1}
+        result = await _tool(client, "upload_files", requested, _mcp_origin(key, LOGIN_A))
+        assert result["error"]["code"] == "TOO_LARGE"
+        assert f"{upload_handoff.MAX_BYTES:,}" in result["error"]["message"]
+        assert "token" not in result
+
+    _run(app, scenario)
+
+
 def test_agent_handoff_cli_upload_and_capture_keep_exact_bytes_for_one_login(cell, tmp_path, capsys):
     key, app, vault = cell
     digest = hashlib.sha256(ORIGINAL).hexdigest()

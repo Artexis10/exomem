@@ -1,0 +1,40 @@
+# Cloud backup repository verification
+
+## Context
+
+The controller starts backup and restore Jobs, then observes their results in fleet-wide Kubernetes reads. Restic 0.19.1 allows a read-only check without a repository lock. An actual pinned-binary probe confirmed that it can verify while a backup holds its own lock. [Pinned restic implementation](https://github.com/restic/restic/blob/v0.19.1/cmd/restic/cmd_check.go#L214-L233)
+
+## Decisions
+
+### Schedule verification through the controller
+
+Run a distinct Job with the current cell image and existing restic repository selection. Mount temporary scratch, with no vault volume, Kubernetes API token, or media credentials. Validate the manifest under existing Job admission and network policies.
+
+Start at most one verification Job across the fleet, in an idle cell with a prior successful backup. Select the oldest due eligible cell. An empty allowlist disables new work. Bound the observation and both workload lifetimes. Run the read-only check without a repository lock so independent and managed repository clients keep their ordinary priority.
+
+### Record evidence before cleanup
+
+Store a versioned verification receipt on the cell StatefulSet. Bind it to the configured repository address, attempt, and exact slice. Patch the observed StatefulSet UID. Read Jobs and Pods with paged fleet-wide observation. Match the create-issued Job UID and native container digest and timing. Persist the outcome before deleting the completed Job.
+
+An unavailable observation, missing attempt, deadline, or failed check preserves the next slice and triggers backoff. Preserve the last verified slice and its time. Keep a successful receipt within its originating StatefulSet and configured repository address. A result covers the exact observed check and its time.
+
+The rendered command has an absolute start cutoff. Before submitting a Job, cellctl reserves the slot in one Helm-provisioned ConfigMap with a resource-version precondition. That reservation survives replacement of the controller or cell StatefulSet. An ambiguous create keeps it through the runtime and termination bounds. An observed active orphan keeps it until Kubernetes reports terminal or absent.
+
+The result observer and the in-place restore guards share the same admitted scratch-only Pod check. The restore guards bound their Kubernetes requests and subprocesses.
+
+### Bound work and retain the existing backup contract
+
+Use restic's `--read-data-subset=n/N`. Advance and wrap on success. Restic assigns packs using the first byte of their IDs. As pack membership changes, successful rotations measure observed slices. A recovery exercise separately proves restore.
+
+The fleet planning target is 43 cells per node with 10 GiB of live data per cell. Retained repositories can hold more data. Defaults are a five-minute Job deadline, one daily slice, 24 slices, and an 8 MiB/s download limit. The rehearsal measures observed runtime and the corrupted pack size. Verification adds no per-cell read to the settled controller pass.
+
+## Proof
+
+Use the existing isolated k3s and MinIO test environment with the production-pinned restic binary.
+
+1. Back up synthetic bytes and observe a passing first slice.
+2. Corrupt one byte in a pack assigned to the next slice and observe a failing verification.
+3. Verify the cell still serves and retains its successful backup receipt.
+4. Restore the exact pack bytes and restart the controller. Verify it repeats the failed slice and then advances.
+
+MinIO proves repository behavior and workload coordination. Provider-specific credential and transfer behavior require separate rollout evidence. Roll back by clearing the allowlist and waiting for verification Pods to finish before downgrading.

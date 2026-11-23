@@ -673,13 +673,13 @@ def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
     real_create_artifact = vault_module._BatchWorkspace.create_artifact
     stage_writes = 0
 
-    def fail_second_stage(workspace, name: str, content: bytes):  # noqa: ANN001
+    def fail_second_stage(workspace, name: str, content: bytes, **options):  # noqa: ANN001, ANN003
         nonlocal stage_writes
         if name.startswith("stage-"):
             stage_writes += 1
             if stage_writes == 2:
                 raise OSError("injected supersession staging failure")
-        return real_create_artifact(workspace, name, content)
+        return real_create_artifact(workspace, name, content, **options)
 
     monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", fail_second_stage)
 

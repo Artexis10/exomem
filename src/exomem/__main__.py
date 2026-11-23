@@ -602,6 +602,11 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         help="with --scope/--category: keep the original owner-only until a whole-artifact release",
     )
     parser.add_argument(
+        "--diarize",
+        action=argparse.BooleanOptionalAction,
+        help="with --scope/--category: request or skip speaker labels for this recording",
+    )
+    parser.add_argument(
         "--archive",
         choices=("members",),
         default="",
@@ -633,9 +638,9 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     )
     args = parser.parse_args(argv)
     if args.handoff_file:
-        if (args.scope or args.category or args.description or args.raw_protection
+        if (args.scope or args.category or args.description or args.raw_protection or args.diarize is not None
                 or args.archive or args.resumable or args.token_file or args.port):
-            parser.error("--handoff-file accepts only a held file, --root, --filename and its bound --lane")
+            parser.error("--handoff-file accepts a file, --root, --filename and its bound --lane")
         return _attach_handoff(args, transport=transport)
     if args.root:
         parser.error("--root requires --handoff-file")
@@ -660,6 +665,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     if hold and args.raw_protection:
         parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
+    if hold and args.diarize is not None:
+        parser.error("--diarize and --no-diarize need --scope/--category; a held file takes the choice when redeemed")
     if hold and (args.archive or args.resumable):
         parser.error("--archive and --resumable need --scope/--category")
     fields = {
@@ -676,6 +683,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         }.items()
         if value
     }
+    if args.diarize is not None:
+        fields["diarize"] = "true" if args.diarize else "false"
 
     import httpx
 
@@ -741,7 +750,7 @@ def _attach_handoff(args, *, transport=None) -> int:
 
     import httpx
 
-    from . import held_fs, held_uploads, upload_handoff, upload_tokens
+    from . import held_fs, held_uploads, upload_handoff, upload_sessions, upload_tokens
     from .source_capture import validate_sha256
 
     try:
@@ -758,16 +767,33 @@ def _attach_handoff(args, *, transport=None) -> int:
         if not isinstance(descriptor, dict) or not fields <= set(descriptor):
             raise ValueError("expected an upload handoff descriptor")
         token = descriptor["token"]
+        resumable = upload_handoff.parse_ticket(token, resumable=True) is not None
+        expected_hold = not resumable
         if (upload_handoff.parse_handoff_token(token) is None
-                or descriptor["hold"] is not True or descriptor["committed"] is not False
+                or descriptor["hold"] is not expected_hold or descriptor["committed"] is not False
                 or descriptor["handoff_status"] != "handoff_prepared"
                 or descriptor["lane"] not in upload_tokens.UPLOAD_LANES
                 or type(descriptor["ttl_seconds"]) is not int
                 or not 0 < descriptor["ttl_seconds"] <= upload_tokens.DEFAULT_TTL
                 or type(descriptor["max_bytes"]) is not int
-                or not 0 < descriptor["max_bytes"] <= upload_handoff.MAX_BYTES):
+                or descriptor["max_bytes"] <= 0
+                or (not resumable and descriptor["max_bytes"] > upload_handoff.MAX_BYTES)):
             raise ValueError("invalid upload handoff descriptor")
         endpoint = upload_handoff.upload_endpoint(descriptor["upload_url"])
+        base = endpoint.removesuffix("/upload")
+        if resumable:
+            transfer = descriptor["resumable"]
+            size = descriptor["size_bytes"]
+            if (descriptor["lane"] != "source" or type(size) is not int or size != descriptor["max_bytes"]
+                    or transfer["create_url"] != base + upload_sessions.SESSIONS_PATH
+                    or transfer["protocol"] != f"tus {upload_sessions.TUS_VERSION}"
+                    or transfer["resend_header"] != upload_sessions.SECRET_HEADER
+                    or not isinstance(transfer["metadata"], list)
+                    or sorted(transfer["metadata"]) != sorted(upload_sessions.required_metadata("source"))
+                    or type(transfer["max_part_bytes"]) is not int
+                    or not 0 < transfer["max_part_bytes"] <= upload_sessions.MAX_PATCH_BYTES
+                    or type(transfer["max_bytes"]) is not int or size > transfer["max_bytes"]):
+                raise ValueError("invalid resumable Source descriptor")
         expected = validate_sha256(descriptor["expected_sha256"])
         if args.lane is not None and args.lane != descriptor["lane"]:
             raise ValueError("--lane must match the handoff")
@@ -778,10 +804,32 @@ def _attach_handoff(args, *, transport=None) -> int:
         root = root.absolute()
         source = source if source.is_absolute() else root / source
         relative = source.relative_to(root)
+        name = args.filename or relative.name
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(relative.parent.as_posix()).require() as parent:
                 with filesystem.file(parent, relative.name).require() as handle:
                     version = handle.version()
+                    if resumable:
+                        if version.size != size or not isinstance(handle.descriptor, int):
+                            raise ValueError("file does not match the declared size")
+                        with os.fdopen(os.dup(handle.descriptor), "rb") as stream:
+                            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                            if digest != expected or handle.version() != version:
+                                raise ValueError("file does not match the declared SHA-256")
+                            try:
+                                with httpx.Client(
+                                    transport=transport, trust_env=False, follow_redirects=False,
+                                    timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
+                                ) as client:
+                                    return _send_upload_session(
+                                        client, base, token, stream, name, {}, digest, size,
+                                        max_part_bytes=transfer["max_part_bytes"], delegated=True,
+                                        current=lambda: handle.version() == version,
+                                    )
+                            except httpx.HTTPError:
+                                print("attach: upload acknowledgement unavailable; use the same handoff to resume",
+                                      file=sys.stderr)
+                                return 1
                     data = filesystem.read(handle, max_bytes=descriptor["max_bytes"]).require()
                     if version != handle.version():
                         raise ValueError("file changed while reading")
@@ -792,7 +840,6 @@ def _attach_handoff(args, *, transport=None) -> int:
         print("attach: invalid handoff or file; use a regular file within --root with the expected SHA-256", file=sys.stderr)
         return 2
 
-    name = args.filename or relative.name
     try:
         with httpx.Client(
             transport=transport, trust_env=False, follow_redirects=False,
@@ -823,59 +870,110 @@ def _attach_handoff(args, *, transport=None) -> int:
     return 0
 
 
-def _attach_refused(response, payload: object) -> int:
+def _attach_refused(response, payload: object, *, retained_source: bool = False) -> int:
+    if retained_source and response.status_code in (404, 410):
+        print("attach: the session is unavailable and the Source outcome is unknown. "
+              "Check Source custody before starting another upload", file=sys.stderr)
+        return 1
     code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+    next_step = ". Request a new handoff before trying again" if (
+        isinstance(payload, dict) and payload.get("handoff_spent") is True
+    ) else ""
     print(
-        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''}){next_step}",
         file=sys.stderr,
     )
     return 1
 
 
-def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
-    """Send `source` through an upload session, continuing one an earlier run left open.
+def _matches_source_receipt(receipt: object, sha256: str, size: int) -> bool:
+    from pathlib import PurePosixPath
 
-    The session's URL and secret are kept in a 0600 file under the user's state
-    directory, keyed by the file's SHA-256 and its destination, until the
-    service reports the session settled.
-    """
+    from .memory_refs import canonical_memory_ref
+
+    if (not isinstance(receipt, dict) or receipt.get("hash_algorithm") != "sha256"
+            or receipt.get("hash") != sha256 or type(receipt.get("size")) is not int or receipt["size"] != size):
+        return False
+    try:
+        canonical_memory_ref(receipt.get("ref"))
+        page, artifact = receipt.get("path"), receipt.get("artifact_path")
+        if not isinstance(page, str) or not isinstance(artifact, str) or page == artifact:
+            return False
+        paths = (PurePosixPath(page), PurePosixPath(artifact))
+        if any(path.is_absolute() or len(path.parts) < 2 or ".." in path.parts or "\\" in path.as_posix()
+               for path in paths):
+            return False
+        return paths[0].parent == paths[1].parent and paths[0].suffix == ".md"
+    except ValueError:
+        return False
+
+
+def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
+    """Send an ordinary local upload through the same session client."""
+    import hashlib
+
+    with source.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        sha256 = hashlib.file_digest(handle, "sha256").hexdigest()
+        return _send_upload_session(client, base, token, handle, name, fields, sha256, size)
+
+
+def _send_upload_session(
+    client, base: str, token: str, handle, name: str, fields: dict, sha256: str, size: int,
+    *, max_part_bytes: int | None = None, delegated: bool = False, current=None,
+) -> int:
+    """Send a file in bounded parts. The saved session can reconcile the last acknowledged offset."""
     import base64
     import hashlib
 
     import httpx
 
-    from . import upload_sessions
+    from . import private_state, upload_sessions
     from .state_paths import state_store_root
 
-    # Half the bytes one part may carry, so a part never meets the service's cap.
-    part_bytes = upload_sessions.MAX_PATCH_BYTES // 2
+    part_bytes = max(1, (max_part_bytes or upload_sessions.MAX_PATCH_BYTES) // 2)
 
-    digest = hashlib.sha256()
-    with source.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    sha256 = digest.hexdigest()
-    size = source.stat().st_size
     # nosemgrep: ep-word-set -- the session metadata keys that `/upload/sessions` defines.
     destination = {key: fields[key] for key in ("scope", "category", "description",
-                                                "raw_protection", "archive") if key in fields}
+                                                "raw_protection", "archive", "diarize") if key in fields}
     key = hashlib.sha256(json.dumps(
-        {"sha256": sha256, "target": base, "filename": name, **destination}, sort_keys=True
+        {"sha256": sha256, "target": base, "filename": name, **destination,
+         **({"handoff": hashlib.sha256(token.encode()).hexdigest()} if delegated else {})}, sort_keys=True
     ).encode()).hexdigest()
     records = state_store_root() / "attach-sessions"
     record_path = records / f"{key}.json"
-    tus = {"Authorization": f"Bearer {token}", "Tus-Resumable": "1.0.0"}
+    tus = {"Tus-Resumable": upload_sessions.TUS_VERSION}
+    authorize = {"Authorization": f"Bearer {token}"}
+    if not delegated:
+        tus.update(authorize)
+    prefix = upload_sessions.SESSIONS_PATH + "/"
+
+    def checked_location(path: str, secret: str) -> str:
+        session_id = path.removeprefix(prefix)
+        if (not path.startswith(prefix) or not upload_sessions.valid_session_id(session_id)
+                or upload_sessions.delegated_source(session_id) != delegated
+                or not upload_sessions.valid_session_secret(secret)):
+            raise ValueError("the service returned an invalid upload session")
+        return base + path
 
     session = None
     offset = 0
     try:
         session = json.loads(record_path.read_text(encoding="utf-8"))
-        url, secret = str(session["url"]), str(session["secret"])
+        saved_url, secret = str(session["url"]), str(session["secret"])
+        if not saved_url.startswith(base + prefix):
+            raise ValueError("the saved upload belongs to another endpoint")
+        url = checked_location(saved_url.removeprefix(base), secret)
     except (OSError, ValueError, KeyError, TypeError):
         session = None
     if session is not None:
         held = client.head(url, headers={**tus, "Exomem-Upload-Secret": secret})
-        if held.status_code in (404, 410):
+        if delegated and held.status_code == 410:
+            # HEAD also returns 410 for a retained failed record. GET can still give its exact failure.
+            offset = size
+        elif held.status_code in (404, 410):
+            if delegated:
+                return _attach_refused(held, None, retained_source=True)
             record_path.unlink(missing_ok=True)
             session = None
         elif held.status_code != 200:
@@ -887,93 +985,125 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
                 return 1
     if session is None:
         metadata = {"filename": name, "sha256": sha256, **destination}
-        created = client.post(
-            f"{base}/upload/sessions",
-            headers={
-                **tus,
-                "Upload-Length": str(size),
-                "Upload-Metadata": ",".join(
-                    f"{field} {base64.b64encode(str(value).encode()).decode()}"
-                    for field, value in metadata.items()
-                ),
-            },
-        )
+        try:
+            created = client.post(
+                base + upload_sessions.SESSIONS_PATH,
+                headers={
+                    **tus, **authorize,
+                    "Upload-Length": str(size),
+                    "Upload-Metadata": ",".join(
+                        f"{field} {base64.b64encode(str(value).encode()).decode()}"
+                        for field, value in metadata.items()
+                    ),
+                },
+            )
+        except httpx.HTTPError:
+            if not delegated:
+                raise
+            print("attach: no session creation acknowledgement; request a new handoff", file=sys.stderr)
+            return 1
         if created.status_code != 201:
             try:
                 payload = created.json()
             except ValueError:
                 payload = None
             return _attach_refused(created, payload)
-        url, secret = base + created.headers["location"], created.headers["exomem-upload-secret"]
+        secret = created.headers.get(upload_sessions.SECRET_HEADER, "")
+        try:
+            url = checked_location(created.headers.get("location", ""), secret)
+        except ValueError:
+            print("attach: the service returned an invalid upload session"
+                  + (". Request a new handoff before trying again" if delegated else ""), file=sys.stderr)
+            return 1
         records.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(record_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
-            json.dump({"url": url, "secret": secret}, sink)
-    headers = {**tus, "Exomem-Upload-Secret": secret}
+        private_state.write_record(records, key, {"url": url, "secret": secret}, temp_suffix=".tmp", durable=True)
+        private_state.sync_directory(records)
+    headers = {**tus, upload_sessions.SECRET_HEADER: secret}
     stalls = 0
-    with source.open("rb") as handle:
-        while offset < size:
-            handle.seek(offset)
-            chunk = handle.read(part_bytes)
-            try:
-                sent = client.patch(
-                    url,
-                    headers={
-                        **headers,
-                        "Upload-Offset": str(offset),
-                        "Content-Type": "application/offset+octet-stream",
-                    },
-                    content=chunk,
-                )
-            except httpx.HTTPError:
-                sent = None
-            if sent is not None and sent.status_code == 204:
-                advanced = upload_sessions.header_count(sent.headers.get("upload-offset", ""))
-                if advanced is None or not offset < advanced <= offset + len(chunk):
-                    print("attach: the service returned an invalid upload offset; run the same command again to reconcile",
-                          file=sys.stderr)
-                    return 1
-                offset, stalls = advanced, 0
-                continue
-            # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
-            if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
-                return _attach_refused(sent, None)
-            held = client.head(url, headers=headers)
-            if held.status_code != 200:
-                return _attach_refused(held, None)
-            advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
-            if advanced is None or not offset <= advanced <= offset + len(chunk):
-                print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+    while offset < size:
+        handle.seek(offset)
+        chunk = handle.read(min(part_bytes, size - offset))
+        if not chunk or current is not None and not current():
+            print("attach: the file changed during upload", file=sys.stderr)
+            return 1
+        try:
+            sent = client.patch(
+                url,
+                headers={
+                    **headers,
+                    "Upload-Offset": str(offset),
+                    "Content-Type": "application/offset+octet-stream",
+                },
+                content=chunk,
+            )
+        except httpx.HTTPError:
+            sent = None
+        if sent is not None and sent.status_code == 204:
+            advanced = upload_sessions.header_count(sent.headers.get("upload-offset", ""))
+            if advanced is None or not offset < advanced <= offset + len(chunk):
+                print("attach: the service returned an invalid upload offset; run the same command again to reconcile",
+                      file=sys.stderr)
                 return 1
-            stalls = stalls + 1 if advanced == offset else 0
-            if stalls >= 3:
-                print("attach: the upload made no progress; run the same command again to resume", file=sys.stderr)
-                return 1
-            offset = advanced
-            # Smaller requests reduce repeated timeout exposure without discarding accepted bytes.
-            part_bytes = max(1, part_bytes // 2)
-    while True:
+            offset, stalls = advanced, 0
+            continue
+        # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
+        if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
+            return _attach_refused(sent, None, retained_source=delegated)
+        held = client.head(url, headers=headers)
+        if delegated and held.status_code == 410:
+            offset = size
+            break
+        if held.status_code != 200:
+            return _attach_refused(held, None, retained_source=delegated)
+        advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
+        if advanced is None or not offset <= advanced <= offset + len(chunk):
+            print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+            return 1
+        stalls = stalls + 1 if advanced == offset else 0
+        if stalls >= 3:
+            print("attach: the upload made no progress; run the same command again to resume", file=sys.stderr)
+            return 1
+        offset = advanced
+        # Smaller requests reduce repeated timeout exposure without discarding accepted bytes.
+        part_bytes = max(1, part_bytes // 2)
+    deadline = time.monotonic() + 120
+    while not delegated or time.monotonic() < deadline:
         state = client.get(url, headers=headers)
         try:
             payload = state.json()
         except ValueError:
             payload = None
         if state.status_code != 200 or not isinstance(payload, dict):
-            return _attach_refused(state, payload)
+            return _attach_refused(state, payload, retained_source=delegated)
         if payload.get("state") == upload_sessions.COMMITTED:
-            record_path.unlink(missing_ok=True)
-            print(json.dumps(payload.get("receipt"), ensure_ascii=False))
+            receipt = payload.get("receipt")
+            if delegated and not _matches_source_receipt(receipt, sha256, size):
+                print("attach: the Source receipt does not match the file bytes", file=sys.stderr)
+                return 1
+            if not delegated:
+                record_path.unlink(missing_ok=True)
+            # The same command can recover a delegated receipt if stdout closes after commit.
+            print(json.dumps(receipt, ensure_ascii=False))
             return 0
         if payload.get("state") == upload_sessions.FAILED:
             record_path.unlink(missing_ok=True)
             print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
             return 1
         if payload.get("state") == upload_sessions.RETRYABLE:
+            if delegated and payload.get("code") == upload_sessions.SOURCE_RECEIPT_PENDING:
+                time.sleep(0.25)
+                continue
+            if payload.get("code") == "SOURCE_OUTCOME_UNKNOWN":
+                print("attach: the Source outcome is unknown. Run the same command again to check its receipt",
+                      file=sys.stderr)
+                return 1
             # The service holds every byte; the session record stays so the next run retries the commit.
             print(f"attach: the upload is held but not preserved yet ({payload.get('code')}); "
                   "run the same command again to retry", file=sys.stderr)
             return 1
         time.sleep(0.25)
+    print("attach: Source publication is pending; run the same command again to check its receipt", file=sys.stderr)
+    return 1
 
 
 def _serve_main(argv: list[str]) -> int:
@@ -1146,9 +1276,8 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--rediarize",
         action="store_true",
-        help="re-extract audio/video transcribed before diarization (extracted_by without "
-        "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
-        "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
+        help="add speaker labels to existing unlabeled recordings. An explicit recording choice "
+        "takes precedence over EXOMEM_DIARIZE in this shell.",
     )
     parser.add_argument(
         "--retime",
@@ -1157,8 +1286,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
         "does not read .env). One re-extraction serves --retime and --rediarize together. "
-        "Already-diarized recordings are SKIPPED unless EXOMEM_DIARIZE is also set, so "
-        "re-timing never drops their speaker labels.",
+        "Re-timing a labeled recording requires an enabled speaker-label choice so it keeps its labels.",
     )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -5186,7 +5314,7 @@ def _cell_export_main(argv: list[str]) -> int:
 
 
 def _media_replicas_main(argv: list[str]) -> int:
-    """The owner's commands for replica stores: declare a store's root, confirm a key export, page the replicas."""
+    """The owner's commands for replica stores and personal eviction."""
     parser = argparse.ArgumentParser(
         prog="exomem media-replicas",
         description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
@@ -5202,6 +5330,16 @@ def _media_replicas_main(argv: list[str]) -> int:
     confirm = actions.add_parser("confirm-key-export", parents=[common],
                                  help="record that you exported the key outside this machine")
     confirm.add_argument("--key-version", help="the key version; default is the vault's current one")
+    enable = actions.add_parser("enable-eviction", parents=[common], help="evict idle originals to a declared store")
+    enable.add_argument("store", help="the name of a declared filesystem store")
+    enable.add_argument("--free-bytes", required=True, type=int, help="vault bytes to keep free before eviction starts")
+    enable.add_argument("--margin-bytes", type=int, help="extra vault bytes to free in each pass")
+    enable.add_argument("--upload-floor-bytes", type=int, help="minimum free bytes to keep after an upload")
+    enable.add_argument("--minimum-idle-seconds", type=int, default=600)
+    enable.add_argument("--eviction-settle-seconds", type=int, default=600)
+    enable.add_argument("--max-temporary-bytes", type=int)
+    enable.add_argument("--max-hydrations", type=int)
+    actions.add_parser("disable-eviction", parents=[common], help="stop evicting and restore originals as space allows")
     listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
     listing.add_argument("--after", help="the path that the previous page ended on")
     listing.add_argument("--limit", type=int, default=100)
@@ -5213,7 +5351,7 @@ def _media_replicas_main(argv: list[str]) -> int:
     if not args.vault:
         print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
         return 2
-    from . import media_replicas, media_store, state_migration
+    from . import held_fs, media_replicas, media_store, personal_eviction, state_migration
     from .vault_store import cli_fence
 
     vault = Path(args.vault).expanduser()
@@ -5224,12 +5362,24 @@ def _media_replicas_main(argv: list[str]) -> int:
             print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
         elif args.action == "confirm-key-export":
             print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "enable-eviction":
+            personal_eviction.enable(
+                vault, args.store, free_bytes=args.free_bytes, margin_bytes=args.margin_bytes,
+                upload_floor_bytes=args.upload_floor_bytes, minimum_idle_seconds=args.minimum_idle_seconds,
+                eviction_settle_seconds=args.eviction_settle_seconds, max_temporary_bytes=args.max_temporary_bytes,
+                max_hydrations=args.max_hydrations,
+            )
+            print(f"Eviction is enabled for {args.store}.")
+            print("Eviction removes plaintext from the vault and its current mirrors. "
+                  "Recover an evicted original from the store with its exported decryption key.")
+        elif args.action == "disable-eviction":
+            print(f"Eviction is disabled for {personal_eviction.disable(vault)}. Originals return as space allows.")
         elif args.action == "findings":
             cursor = None if args.after_path is None else (args.after_path, args.after_store)
             print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
         else:
             print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
-    except (media_store.MediaStoreError, ValueError) as error:
+    except (held_fs.HeldFsError, media_store.MediaStoreError, ValueError) as error:
         print(f"Error [{getattr(error, 'code', 'INVALID')}]: {error}", file=sys.stderr)
         return 1
     return 0

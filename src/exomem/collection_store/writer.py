@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import (
+    automatic_collection,
     call_spans,
     held_fs,
     item_keys,
@@ -1501,18 +1502,15 @@ class CollectionWriter:
             projection = (None if item is None else self._publication.previous(item["view_path"]))
             if outside and (projection is None or projection["path"] != facts["old_path"]):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "moved source basis changed")
-            stamp, identity = facts["stamp"], self._publication.identity
-            lineage = {entry["instance_id"] for entry in json.loads(self.connection.execute(
-                "SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+            stamp, owned = facts["stamp"], edit_back.owned_stamp(self.connection)
             code = edit_back.MOVED if outside else edit_back.UNBOUND if item is None else edit_back.CONFLICT
-            current = bool(item is not None and projection is not None and stamp is not None
-                           and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
+            current = bool(item is not None and projection is not None and stamp is not None and owned(stamp)
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
             legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
                 self.connection, projection)
             legacy_exact = legacy is not None and legacy[0] == facts["digest"]
             current = current or legacy_exact
-            if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+            if stamp is not None and not owned(stamp):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
                 code = edit_back.CONFLICT if stamp and stamp["v"] < item["row_version"] else edit_back.INVALID
@@ -2267,24 +2265,34 @@ class CollectionWriter:
         why: str,
         scaffold: bool = True,
         request_id: str | None = None,
+        automatic: bool = False,
     ) -> dict[str, Any]:
-        return self._create_collection(manifest_path, manifest_text, why=why,
-                                       scaffold=scaffold, request_id=request_id)
+        return self._create_collection(manifest_path, manifest_text, why=why, scaffold=scaffold,
+                                       request_id=request_id, automatic=automatic)
+
+    @staticmethod
+    def create_arguments(manifest_text, why, scaffold, automatic=False):
+        """The arguments a create's request identity covers, one shape for the direct and the admitted create.
+
+        Only a flagged request carries the flag, so every earlier request keeps its recorded hash.
+        """
+        return {"manifest_text": manifest_text, "why": why, "scaffold": scaffold,
+                **({"automatic": True} if automatic else {})}
 
     def _create_collection(self, manifest_path, manifest_text, *, why, scaffold,
-                           request_id, admission=None):
+                           request_id, admission=None, automatic=False):
         records._validate_why(why)
         with self._mutation():
             identity, digest, replay = self._identity(
-                "create",
-                manifest_path,
-                {"manifest_text": manifest_text, "why": why, "scaffold": scaffold},
-                request_id,
+                "create", manifest_path, self.create_arguments(manifest_text, why, scaffold, automatic), request_id,
             )
             if admission is not None:
                 admission.check(identity, digest, replay)
             if replay is not None:
                 return replay
+            if automatic:
+                # Under the mutation lock, so two concurrent creates cannot both pass the count.
+                automatic_collection.require_daily_room(self.root, self.connection)
             manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
             try:
                 connector_boundary.require_create(self.root, manifest.path)
@@ -2361,6 +2369,9 @@ class CollectionWriter:
                 outcome="committed",
                 audit_correlation=txn["transition_id"],
             )
+            if automatic:
+                # Stored with the receipt: the daily count and the inventory read it back from the create's transaction.
+                receipt = {**receipt, "automatic": True}
             # Stored with the receipt, so a replay and the served create report it too.
             receipt = records._with_warnings(receipt, [
                 f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
@@ -2404,6 +2415,16 @@ class CollectionWriter:
         """
         with self.read_snapshot(mutation=True):
             self._prepare_create(manifest_path, manifest_text, scaffold)
+
+    def automatic_collection_ids(self) -> frozenset[str]:
+        """The collections whose create transaction recorded the automatic flag (a legacy import has none), in one read."""
+        with self.read_snapshot():
+            rows = self.connection.execute(automatic_collection.AUTOMATIC_COLLECTION_IDS).fetchall()
+        return frozenset(row[0] for row in rows)
+
+    def created_automatically(self, collection_id: str) -> bool:
+        """Whether the collection's create transaction recorded the automatic flag."""
+        return collection_id in self.automatic_collection_ids()
 
     def _new_item_key_scheme(self, manifest) -> str:
         """The item key scheme a collection takes at creation; the store fixes it for the collection's life.
@@ -3521,6 +3542,16 @@ class CollectionWriter:
         row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
                         for key, values in plans.items()}
         return proposed, mode_change, plans, metadata, row_metadata
+
+    def manifest_text(self, collection):
+        """The collection's current manifest and the text the store holds for it: what an additive revision edits."""
+        with self.read_snapshot(mutation=True):
+            row, current, _declared = self._collection(collection)
+            (text,) = self.connection.execute(
+                "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (row["collection_id"], row["manifest_version"]),
+            ).fetchone()
+            return current, text
 
     def validate_revision(self, collection, *, manifest_text):
         """Return current guards for a valid proposal without writer admission or side effects."""

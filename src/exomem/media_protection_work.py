@@ -10,7 +10,14 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import media_bindings, media_protection, media_protection_budget, media_replicas, media_store, originals
+from . import (
+    media_bindings,
+    media_protection,
+    media_protection_budget,
+    media_replicas,
+    media_store,
+    originals,
+)
 from .media_jobs import MediaJobStore
 
 _PAGE = 16

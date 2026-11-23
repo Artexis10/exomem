@@ -8,7 +8,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from typing import BinaryIO
 
@@ -124,11 +124,14 @@ class Transfer:
         self.previous: int | None = None
         self.sent: Attempt | None = None
 
-    def _head(self, replica: originals.StoredObject) -> media_store.ObjectHead | None:
-        with media_store._transport("head"):
-            return self.backend.head(replica.object, replica.version, policy_identity=self.identity)
+    def _hold_copy(self, replica: originals.StoredObject, held: ExitStack) -> media_store._StoredVersionWitness | None:
+        try:
+            with media_store._transport("head"):
+                return held.enter_context(self.backend.hold_verified(replica, policy_identity=self.identity))
+        except (media_store.ReplicaAbsent, media_store.ReplicaMismatch):
+            return None
 
-    def replay(self) -> Attempt | None:
+    def replay(self, held: ExitStack) -> tuple[Attempt, media_store._StoredVersionWitness] | None:
         with closing(self.ledger._connect(readonly=True)) as conn:
             installed = conn.execute(
                 "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'media_policy_transfers'"
@@ -151,12 +154,13 @@ class Transfer:
                      or (replica.key_version, replica.ciphertext_size, replica.ciphertext_sha256) !=
                      (source.key_version, source.ciphertext_size, source.ciphertext_sha256)))):
             raise _unavailable()
-        if self._head(replica) != media_store.ObjectHead(replica.ciphertext_size, replica.ciphertext_sha256):
+        witness = self._hold_copy(replica, held)
+        if witness is None:
             return None  # Even a confirmed absence cannot show how many bytes an earlier attempt sent.
         self._settle(previous)
         if source is not None and media_replicas.has_quarantined(self.ledger.vault_root, (source,)):
             return None
-        return previous
+        return previous, witness
 
     def send(
         self, name: str, ciphertext: BinaryIO, head: media_store.ObjectHead, copied_from: originals.StoredObject | None,
@@ -201,12 +205,15 @@ class Transfer:
             assert receipt.lastrowid is not None
             return Attempt(receipt.lastrowid, replica, copied)
 
-    def confirm(self, replica: originals.StoredObject) -> None:
+    def confirm(self, replica: originals.StoredObject, held: ExitStack) -> media_store._StoredVersionWitness:
         attempt = self.sent
-        if (attempt is None or attempt.replica != replica
-                or self._head(replica) != media_store.ObjectHead(replica.ciphertext_size, replica.ciphertext_sha256)):
+        if attempt is None or attempt.replica != replica:
+            raise _unavailable()
+        witness = self._hold_copy(replica, held)
+        if witness is None:
             raise _unavailable()
         self._settle(attempt)
+        return witness
 
     def _settle(self, attempt: Attempt) -> None:
         with _durable_write(self.ledger) as conn:

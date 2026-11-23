@@ -330,6 +330,22 @@ def test_a_preference_older_than_the_profile_or_of_another_category_raises_nothi
     assert _open(vault) is None
 
 
+def test_a_preference_saved_later_on_the_profiles_own_day_raises_the_item(tmp_path: Path) -> None:
+    vault = fx.build(tmp_path)
+    fx.write(vault, f"{KB}/_Schema/source-taxonomy.yaml", TAXONOMY)
+    fx.edit(vault, PROFILE, _profile(topics="games", updated="2026-06-01T09:00:00Z"))
+    fx.edit(vault, DETAIL, _note("Games detail", "- [preference] Prefer co-op. ^coop\n", updated="2026-06-01T08:00:00Z", topics="games"))
+    _quiet(vault)
+    assert _open(vault) is None
+
+    fx.edit(vault, SESSIONS, _note("Games sessions", "- [preference] Prefer short sessions. ^brief\n", updated="2026-06-01T15:00:00Z", topics="games"))
+    _quiet(vault)
+
+    row = _open(vault)
+    assert row is not None
+    assert {item["path"] for item in row["evidence"] if item["role"] == "unit"} == {SESSIONS}
+
+
 def test_a_new_preference_on_a_linked_page_with_no_domain_raises_the_item(tmp_path: Path) -> None:
     vault = _vault(tmp_path, links="Detail in [[Notes/Insights/games-detail]].")
 

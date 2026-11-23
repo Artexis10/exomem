@@ -12,7 +12,7 @@ Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer
 
 ## CI load: the PR tier is the merge evidence
 
-`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs ~800 runner-minutes across 147 jobs. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
+`ci.yml` runs one fast tier per pull request: the integration jobs plus the pull request's own changed test modules and the repository-wide guard modules in `tests/pr_guard_modules.txt` (core on py3.11 and py3.13, harness on py3.11), without the core and harness shards. Every push to `main` runs all those shards on py3.11, and the Full tier runs on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs an estimated 490 runner-minutes across about 92 jobs (815 across 148 before the latency suites moved, measured 2026-11-15 to 2026-11-22). Latency measurements run nightly in `latency-measurements.yml` and do not gate releases. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A failure that only the shards on `main` or the Full tier catch is fixed forward on `main`.
 
 ## Delegated worker tasks
 
@@ -69,7 +69,11 @@ its non-optional tasks are complete, synchronize its delta into the current
 canonical specs and archive it with `openspec archive` in the same delivery.
 Never archive by moving the directory. Preserve requirements and scenarios added
 by later work when refreshing a stale `MODIFIED` block, and run
-`openspec validate --all --strict` before and after the archive. A task-complete
+the strict gate (`source infra/tool-versions.env` then
+`node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --`,
+which fails only on warnings missing from `openspec/strict-baseline.json`;
+regenerate that baseline only to shrink it or to carry a renamed requirement)
+before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
 ## OpenSpec is the sole specification system

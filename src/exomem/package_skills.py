@@ -24,6 +24,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import workflow_skills
+from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
@@ -238,6 +239,11 @@ _PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
     "SessionEnd": "exomem-continuation-checkpoint.sh",
     "SessionStart": "exomem-continuation-checkpoint.sh",
 }
+# The checkpoint core requires --client; the nudge cores infer it, so only this wrapper
+# needs it. The value comes from the installer's own continuation command.
+_PLUGIN_HOOK_ARGS: dict[str, str] = {
+    "exomem-continuation-checkpoint.sh": CLAUDE_CONTINUATION_CLIENT_ARG,
+}
 
 
 def _write_generated(path: Path, payload: dict) -> None:
@@ -315,14 +321,11 @@ def _plugin_hooks() -> dict:
         entry: dict = {}
         if matcher is not None:
             entry["matcher"] = matcher
-        entry["hooks"] = [
-            {
-                "type": "command",
-                "command": (
-                    f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{_PLUGIN_HOOK_SCRIPTS[event]}"'
-                ),
-            }
-        ]
+        script = _PLUGIN_HOOK_SCRIPTS[event]
+        command = f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}"'
+        if script in _PLUGIN_HOOK_ARGS:
+            command += f" {_PLUGIN_HOOK_ARGS[script]}"
+        entry["hooks"] = [{"type": "command", "command": command}]
         events.setdefault(event, []).append(entry)
     return {
         "description": "Exomem capture, retrieval, and continuation hooks.",
