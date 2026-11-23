@@ -30,7 +30,7 @@ MEANING = (
     "Use evidence from this host's read and write logs within "
     f"{METHOD_USE_WINDOW_MINUTES} minutes of each serving. The logs carry no conversation identity, so other work "
     "by the same principal in that window can produce it; not observed means the logs hold no matching event in a "
-    "closed window, and unknown covers an open window, a rotated or disabled log and a method that links nowhere. "
+    "closed window, and unknown covers an open window, a rotated or disabled log and a skill or collection that links nowhere. "
     "Records import jobs commit outside the logged call, so their batches never count as followed."
 )
 

@@ -40,6 +40,14 @@
 - [x] 5.2 Carry each selected skill's contract under `method_contract_max_chars` in the MCP packet and the start-of-turn hook; verify whole, cut and over-allowance cases.
 - [x] 5.3 Report method use evidence in the owner served-context readout from the served rows and the local read and write logs; verify followed, not observed and disabled-log cases.
 - [x] 5.4 Add the no-magic-word fixtures (technology discussed, experiment approved, outcome reported, Exomem failure, each with a negative twin) as session-close scenarios with scorer-only keys; record the packet-level run against base and candidate.
-- [ ] 5.5 Run the fixtures through the session-close bench on real models; record whether the agent followed the contract and wrote to the keyed destination.
-- [ ] 5.6 Compare method selection with no judgment, a local placement and an API placement on the same cases; record per-case exact match with intervals, and recommend a placement.
+- [x] 5.5 Run the fixtures through the session-close bench on real models; record whether the agent followed the contract and wrote to the keyed destination.
+- [x] 5.6 Compare method selection with no judgment, a local placement and an API placement on the same cases; record per-case exact match with intervals, and recommend a placement.
 - [ ] 5.7 Verify on the installed service: an ordinary turn serves the matching vault skill with its contract, and the owner readout shows its use evidence.
+
+## 6. Catalogue-first activation
+
+- [x] 6.1 List visible Records collections in the catalogue beside skills, with `kind`, and prove that reading an item's ref returns the whole page.
+- [x] 6.2 Keep the listing turn-independent and name an overflowing catalogue's unlisted items of the turn's touched domains, then those the task context reached, in `turn_items`; verify fit, overflow, no-domain and held-across-turns cases.
+- [x] 6.3 Serve `advice` in the catalogue and apply the no-hook lever the tool-only dev run supports (next action, task projection or server instructions); name skills and collections in agent-facing text.
+- [x] 6.4 Seed the session-close bench warm (catalogue built before the actor's first recall), count warming abstentions, and let an arm carry a selector placement.
+- [x] 6.5 Decide the catalogue shape on a fresh held-out set with a tool-only real client: catalogue alone against catalogue plus the selector, per-case exact with intervals; keep the selector off by default.

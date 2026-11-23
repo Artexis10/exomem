@@ -71,9 +71,11 @@ def test_the_slice_lists_what_the_turn_reached(vault: Path) -> None:
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
 
-def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path) -> None:
+def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The turn changes the slice alone: not the map, its generation or the continuity token."""
     _structured(vault)
+    # The fixture's collection would list a catalogue and point this turn at it; this test is about the slice's moves.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_SKILLS", "off")
     resolving = _activate(vault, turn=SLED_TURN)
     irrelevant = _activate(vault, turn=IRRELEVANT_TURN)
     blank = _activate(vault, turn="")

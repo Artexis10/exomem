@@ -10,7 +10,8 @@ reaches no real state. The scaffold comes from the arm's `init_vault`, so each a
 A seeded vault has no relation graph, and the product marks nothing from relations while the graph is unknown. A live
 vault has one, because its writes build it. `--ready-graph` brings a seeded vault to that state before anything reads it:
 the arm's own `exomem maintain --reconcile` (the reconcile that `maintain_memory` runs) rewrites no page of the seed, and
-then the arm's own graph index proves its state is `available`, independently of the activation packet.
+then the arm's own graph index proves its state is `available`, independently of the activation packet, and the arm's
+activation index and context catalogue are built, so the actor's first recall is served warm.
 `record_worker.py` runs the same two steps (`reconcile`, then `wait_for_graph`). The process prints one JSON line: the graph state
 it saw and the seconds it took.
 """
@@ -47,7 +48,20 @@ def main(seed: Path, vault: Path, product_root: Path, ready_graph: bool = False)
     started = time.monotonic()
     reconcile()
     state = wait_for_graph(vault)
-    return {"graph": state, "seconds": round(time.monotonic() - started, 1)}
+    return {"graph": state, "catalogue": warm_catalogue(vault), "seconds": round(time.monotonic() - started, 1)}
+
+
+def warm_catalogue(vault: Path) -> str:
+    """Build the arm's activation index and context catalogue on disk, as a live vault's service already has them.
+
+    The actor's own stdio server is a fresh process: without this, its first `recall_context` answers
+    `index_warming` while its background pass builds the catalogue, and serves no context or skills catalogue.
+    This process is unmanaged, so `ensure` builds both inline and the actor's server opens them warm.
+    """
+    from exomem import context_catalogue
+
+    state, _catalogue, _stale = context_catalogue.ensure(vault)
+    return state
 
 
 def reconcile() -> None:

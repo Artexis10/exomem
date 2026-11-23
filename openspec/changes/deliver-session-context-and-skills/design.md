@@ -122,3 +122,19 @@ The service already logs reads and writes locally (`reads.jsonl`, `writes.jsonl`
 - Agent level, real models: the same cases run through the session-close bench, scoring whether the agent followed the contract and wrote to the keyed destination.
 - Installed: an ordinary turn on the installed service serves the matching vault skill with its contract, and the owner readout shows its use evidence.
 - Decision model: the method-fit judgment on the same cases with a local placement and an API placement; the per-case exact-match difference against no judgment, with its interval, decides which placement to recommend.
+
+## Catalogue first, selector optional
+
+The agent the owner is talking to is the strongest model in the loop, so Exomem shows it the owner's skills and collections and lets it choose, as Agent Skills clients do with installed skills. This works in every MCP client, with no hooks, no selector model, no provider egress and no added latency.
+
+Evidence, 2026-11-23, invented seed vault, one draw:
+
+- A bounded selector on 24 held-out cases: no selector 8/24 exact, embedding similarity 9/24, GPT-5-nano 17/24, local qwen3:14b 20/24, Claude Haiku 5.5 22/24 (+0.58 [+0.33, +0.79] over none, 2.65 s median).
+- Embedding similarity is too weak to cut the catalogue: the right skill is in the top 3 of 11 for 11 of 16 held-out positives.
+- End to end with a tool-only Sonnet client on the same cases, before the pointer: the catalogue alone 19/24, the catalogue plus the Haiku selector 21/24; selector minus catalogue +0.08 [−0.08, +0.25], which includes zero.
+- On 20 development cases, a `next_action` that points the catalogue's turn at the catalogue lifted the catalogue from 15/20 to 18/20 (+0.15 [0.00, +0.30], 3 won, 0 lost).
+- Decision run on 24 fresh held-out cases with the finished catalogue: the catalogue alone 19/24, with the Haiku selector 20/24; selector minus catalogue +0.04 [−0.08, +0.17], which includes zero. A blind judge of what the session then wrote, which sees page edits only, gives 16/24 and 18/24, +0.08 [−0.08, +0.25]. Run records `catalogue-e2e-iter1` and `catalogue-e2e-d2` in the owner's eval-runs collection.
+
+So the catalogue leads, and the selector stays an off-by-default deployment option for the start-of-turn hook path. A catalogue that fits is listed whole, because it is cheap; one that overflows a real vault (about 90 Records collections) keeps one turn-independent listing, so it is still sent once per conversation and pointed at once, and names beside it, on each turn, the unlisted items of the turn's touched domains from the domain registry (then those the task context reached), within their own small bound. No vocabulary enters code.
+
+Text a person or agent reads says skill and collection. The packet keeps its existing field names, such as `task_context.methods`, because renaming them would break every client and hook for no gain to the reader.
