@@ -70,6 +70,8 @@ One drainer thread applies queued saves by acceptance sequence. A new eligible s
 
 `review_memory(mode="queued-write")` lists queued, applying and failed saves (bounded), oldest first, with command, state, age, attempts and refusal. With `ref` it returns one save, including its arguments while it is queued or failed. `coordination_status` reports `write_intake` counts and the oldest age. An unreadable store reports `unknown`, never zero. Both reads use the acceptance test for the caller (`write_intake.principal_record`): only a caller whose saves may queue reads queued saves, so a delegated session of the owner reads none.
 
+A failure must also reach a caller who does not ask. The drainer raises an in-memory flag when a save fails. The next successful reply to the owner's eligible save then reads the failures newer than the last one named, and adds one sentence and a `queued_writes_failed` count after the save's own outcome. The save's outcome stays first, because agents and the capture hook read the leading `Saved` outcome. Only after a failure does the reply read the store, and the notice never fails the save it rides on. The flag starts raised, so after a restart the failures still on record are named once again. A real-model check (Claude Haiku and Sonnet, one case with one failure and one with two, one draw each) relayed the failure to the user in all four replies.
+
 ## Risks
 
 - A queued save is not readable until it lands. The receipt says so, and the drainer starts as soon as the boundary frees.

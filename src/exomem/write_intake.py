@@ -482,6 +482,13 @@ def _note_finished(vault_root: Path, origin: str | None, intake_id: str, expires
         drainer.note_finished(origin, intake_id, expires_at)
 
 
+def _note_failed(vault_root: Path) -> None:
+    with _DRAINERS_LOCK:
+        drainer = _DRAINERS.get(Path(vault_root).resolve())
+    if drainer is not None:
+        drainer.note_failed()
+
+
 def _owner_identity() -> tuple[str | None, Path]:
     from . import writer_lease
 
@@ -525,6 +532,11 @@ class Drainer:
         self._inserting = 0
         #: Acceptances so far; a store read that an acceptance overlapped is read again.
         self._accepts = 0
+        #: A save failed since an owner reply last named failures. True at start, so the first owner
+        #: reply after a restart names the failures still on record (`failure_notice`).
+        self._failure_unannounced = True
+        #: The newest `finished_at` of a failure that a reply has named.
+        self._announced_through = 0.0
 
     @property
     def running(self) -> bool:
@@ -551,6 +563,10 @@ class Drainer:
     def notify(self) -> None:
         with self._condition:
             self._condition.notify_all()
+
+    def note_failed(self) -> None:
+        with self._condition:
+            self._failure_unannounced = True
 
     def backlog(self) -> int | None:
         """Open saves, or None while the store has not been read."""
@@ -840,6 +856,8 @@ def _claim_head(vault_root: Path) -> _Claim | float | None:
         return None
     for origin, intake_id in undecodable:
         _note_finished(vault_root, origin, intake_id, None)
+    if undecodable:
+        _note_failed(vault_root)
     return claimed
 
 
@@ -1005,6 +1023,7 @@ def _finish_failed(vault_root: Path, claim: _Claim, code: str, refusal: Mapping[
         log.warning("write intake dropped a stale finish of %s", claim.id)
         return
     _note_finished(vault_root, claim.origin, claim.id, None)
+    _note_failed(vault_root)
     log.warning("write intake save %s failed with %s", claim.id, code)
 
 
@@ -1299,6 +1318,70 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         origin=origin[0],
         origin_ttl=origin[1],
     )
+
+
+# --------------------------------------------------------------------------- failure notice
+
+
+def failure_notice(vault_root: Path) -> int | None:
+    """How many queued saves failed since an owner reply last named failures, or ``None``.
+
+    The drainer flags each failure in memory, so a reply reads the store only after one. A
+    store that cannot be read leaves the flag set for the next reply.
+    """
+    drainer = drainer_for(vault_root)
+    if drainer is None:
+        return None
+    with drainer._condition:  # noqa: SLF001 - the module owns its drainer's state
+        if not drainer._failure_unannounced:  # noqa: SLF001
+            return None
+        # Cleared before the read: a failure that lands during it raises the flag again.
+        drainer._failure_unannounced = False  # noqa: SLF001
+        since = drainer._announced_through  # noqa: SLF001
+    try:
+        with _store(vault_root, mode="read") as conn:
+            count, latest = conn.execute(
+                "SELECT COUNT(*), MAX(finished_at) FROM intake WHERE state = ? AND finished_at > ?",
+                (FAILED, since),
+            ).fetchone()
+    except FileNotFoundError:
+        return None
+    except Exception:  # noqa: BLE001 - the notice must never fail the save it rides on
+        log.warning("write intake could not read its failed saves for a reply", exc_info=True)
+        drainer.note_failed()
+        return None
+    if not count:
+        return None
+    with drainer._condition:  # noqa: SLF001
+        drainer._announced_through = max(drainer._announced_through, float(latest))  # noqa: SLF001
+    return int(count)
+
+
+def with_failure_notice(command: Any, injected: tuple[Any, ...], result: Any) -> Any:
+    """`result` of an owner's save, telling them about queued saves that failed since the last notice."""
+    if not getattr(command, "busy_intake", False) or not injected or not isinstance(result, Mapping):
+        return result
+    if result.get("success") is False or isinstance(result.get("error"), Mapping):
+        return result
+    from .governance import principal as principal_module
+
+    if principal_record(principal_module.current_principal()) is None:
+        return result
+    count = failure_notice(injected[0])
+    if not count:
+        return result
+    sentence = (
+        f"{count} queued saves sent earlier failed and were not saved; review_memory mode=queued-write "
+        "lists them with their text to correct and send again."
+        if count > 1 else
+        "1 queued save sent earlier failed and was not saved; review_memory mode=queued-write shows it "
+        "with its text to correct and send again."
+    )
+    noticed = {**result, "queued_writes_failed": count}
+    summary = result.get("user_summary")
+    if isinstance(summary, str) and summary:
+        noticed["user_summary"] = f"{summary} {sentence}" if summary.endswith(".") else f"{summary}. {sentence}"
+    return noticed
 
 
 # --------------------------------------------------------------------------- reads and owner operations
