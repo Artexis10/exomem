@@ -205,6 +205,32 @@ _WATCHERS_LOCK = threading.Lock()
 _WATCHERS: dict[str, weakref.WeakSet[FileWatcher]] = {}
 
 
+def observing_inbound_recovery_stop(vault_root: Path) -> threading.Event | None:
+    """The stop signal for a seeded file watcher with live event delivery."""
+    from .vault_store.mode import store_mode_for_reads
+
+    if not freshness.event_indexes_enabled() or store_mode_for_reads(vault_root):
+        return None
+    root = _canon_root(vault_root)
+    with _WATCHERS_LOCK:
+        watchers = tuple(_WATCHERS.get(root, ()))
+    for watcher in watchers:
+        stop = watcher._stop
+        dispatch = watcher._thread
+        reconcile = watcher._reconcile_thread
+        observer_alive = getattr(watcher._observer, "is_alive", None)
+        if (
+            watcher._importer is None and watcher._optional_recovery_armed
+            and watcher._seed_complete.is_set() and watcher._seed_succeeded
+            and dispatch is not None and dispatch.is_alive()
+            and reconcile is not None and reconcile.is_alive()
+            and observer_alive is not None and observer_alive()
+            and not stop.is_set()
+        ):
+            return stop
+    return None
+
+
 def _canon_root(vault_root: Path) -> str:
     try:
         return str(vault_root.resolve())
@@ -1328,6 +1354,7 @@ class FileWatcher:
         self._kb_root = managed_root(vault_root)
         self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
         self._pending_media: set[Path] = set()
@@ -2536,11 +2563,21 @@ class FileWatcher:
             observed_rels = {
                 path: freshness.registry_rel(self._vault_root, path) for path in observed
             }
+            # The queue owns a path's repair only while a graph drain can
+            # actually commit it. With the index disabled or its sidecar
+            # absent every receipt is unowned dead work — the same
+            # `rebuild_graph` gate `_recover_external_pending` applies — so
+            # retaining those marks would fence reads until the next periodic
+            # reconcile for no repair that can ever run.
+            drain_owns_repair = (
+                epistemic_graph.graph_enabled()
+                and epistemic_graph.EpistemicGraphIndex(self._vault_root).path.exists()
+            )
             queued = {
                 receipt.rel_path for receipt in deferred_index.snapshot_graph(
                     self._vault_root, paths={rel for rel in observed_rels.values() if rel is not None},
                 )
-            } if observed_rels else set()
+            } if observed_rels and drain_owns_repair else set()
             freshness.retire_external_pending_paths(
                 self._vault_root,
                 {path: epoch for path, epoch in observed.items()
@@ -2798,8 +2835,6 @@ class FileWatcher:
         return self._importer is not None or freshness.event_indexes_enabled()
 
     def _start_reconcile_thread(self) -> None:
-        if self._reconcile_thread is not None and self._reconcile_thread.is_alive():
-            return
         self._reconcile_thread = threading.Thread(
             target=self._run_reconcile,
             name="kb-freshness-reconcile",
@@ -2808,6 +2843,47 @@ class FileWatcher:
         self._reconcile_thread.start()
 
     # ---- lifecycle ----
+    def start(self) -> bool:
+        """Start dispatch and seed, or reconcile-only polling without an observer."""
+        with self._lifecycle_lock:
+            return self._start()
+
+    def _start(self) -> bool:
+        observer_alive = getattr(self._observer, "is_alive", None)
+        # A pending promotion arm owns observer liveness itself: `start` then
+        # re-judges it through `arming.is_alive()` and the observation stamp,
+        # which a degraded backend fails even while the observer thread lives.
+        if any(
+            worker is not None and worker.is_alive() for worker in (self._thread, self._reconcile_thread)
+        ) or (
+            self._observer_arming is None and observer_alive is not None and observer_alive()
+        ):
+            log.warning("file watcher: a previous worker is still running; restart deferred")
+            return False
+        self._current_startup_graph()
+        if not self._vault_root.is_dir() or not self._kb_root.is_dir():
+            return False
+        arming = self._observer_arming
+        if arming is not None:
+            if self._stop.is_set():
+                return False
+            observation_started = arming.is_alive() or self.promotion_observation_stamp() is not None
+        else:
+            observation_started = self._arm_observer()
+        if not observation_started:
+            if not self._runs_reconcile():
+                return False
+            self._start_reconcile_thread()
+            return True
+        self._dispatch_waits_for_seed = self._importer is None and freshness.event_indexes_enabled()
+        self._thread = threading.Thread(
+            target=self._run_dispatch, name="kb-file-watcher", daemon=True
+        )
+        self._thread.start()
+        if self._runs_reconcile():
+            self._start_reconcile_thread()
+        log.info("file watcher started on %s", self._vault_root)
+        return True
 
     def _arm_observer(self, *, reset: bool = True) -> bool:
         """Start the normal observer while dispatch and seeding stay deferred."""
@@ -2822,11 +2898,10 @@ class FileWatcher:
             return False
 
         if reset:
-            # Hosted quiesce/resume deliberately reuses the watcher instance. A
-            # stopped threading.Event is sticky, so reset both loop controls before
-            # recreating the dispatch/observer threads.
+            # A restarted watcher gets a new stop signal. A rebuild from the
+            # previous run must still see its own run's shutdown.
             self._raw_witness = capture_inventory.new_raw_witness(self._vault_root)
-            self._stop.clear()
+            self._stop = foreground_priority.StopEvent()
             self._wake.clear()
             self._seed_published.clear()
             self._seed_complete.clear()
@@ -2962,33 +3037,6 @@ class FileWatcher:
                 return None
             return (observer, backends, self._raw_witness.instance), self._raw_witness.epoch
 
-    def start(self) -> bool:
-        """Start dispatch and seed, or reconcile-only polling without an observer."""
-        self._current_startup_graph()
-        if not self._vault_root.is_dir() or not self._kb_root.is_dir():
-            return False
-        arming = self._observer_arming
-        if arming is not None:
-            if self._stop.is_set():
-                return False
-            observation_started = arming.is_alive() or self.promotion_observation_stamp() is not None
-        else:
-            observation_started = self._arm_observer()
-        if not observation_started:
-            if not self._runs_reconcile():
-                return False
-            self._start_reconcile_thread()
-            return True
-        self._dispatch_waits_for_seed = self._importer is None and freshness.event_indexes_enabled()
-        self._thread = threading.Thread(
-            target=self._run_dispatch, name="kb-file-watcher", daemon=True
-        )
-        self._thread.start()
-        if self._runs_reconcile():
-            self._start_reconcile_thread()
-        log.info("file watcher started on %s", self._vault_root)
-        return True
-
     @staticmethod
     def _stop_observer(observer) -> None:
         if observer is None:
@@ -3000,6 +3048,10 @@ class FileWatcher:
             log.debug("file watcher: observer stop failed", exc_info=True)
 
     def stop(self) -> None:
+        with self._lifecycle_lock:
+            self._stop_workers()
+
+    def _stop_workers(self) -> None:
         self._raw_witness.withdraw(stopped=True)
         with self._lock:
             self._stop.set()

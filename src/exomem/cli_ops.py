@@ -209,6 +209,8 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         # prove completeness — retryable with bounded `retry_after_ms`, never a
         # client-fault 400.
         "RETRIEVAL_INDEX_WARMING",
+        "RECLASSIFICATION_PREVIEW_WARMING",
+        "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
         # A name-linked retained input the lookup could not yet check; the refusal
         # schedules the build that settles it, so the same write succeeds on retry.
         "ORIGIN_INPUT_LOOKUP_STALE",
@@ -249,6 +251,7 @@ _CONFLICT_CODES = frozenset(
         # A maintenance job holds the one slot, or its plan changed since the preview.
         "MAINTENANCE_JOB_ACTIVE",
         "STALE_MAINTENANCE_PLAN",
+        "RECLASSIFICATION_PREVIEW_STALE",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,
