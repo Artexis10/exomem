@@ -5479,9 +5479,10 @@ class EpistemicGraphIndex:
             attempts += 1
             # Read before this attempt samples its epoch: whole-vault debt that
             # already exists now is paid by the publication this attempt makes.
-            marker = deferred_index.graph_full_rebuild_details(
-                self.vault_root, deadline=time.monotonic() + 0.05,
-            )
+            # No deadline: this read holds no boundary, so it waits out a brief
+            # lock (another connection's close checkpoints the WAL) instead of
+            # stopping the whole rebuild on it.
+            marker = deferred_index.graph_full_rebuild_details(self.vault_root)
             self._check_graph_rebuild_destination(marker)
             covered_marker = marker.token if marker is not None else None
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
