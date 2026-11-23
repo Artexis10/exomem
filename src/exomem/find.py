@@ -2359,8 +2359,7 @@ def find(
             # another sidecar serving by then refuses it (`require_same_space`).
             index = embeddings.get_embedding_index(vault_root)
             encoded_for = getattr(index, "identity", None)
-            with recall_space.encoding_for(index):
-                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
+            query_vector = (encoded_for, embeddings.encode_query(index, query))
             query_vector_ready = True
         return query_vector
 
@@ -3913,8 +3912,7 @@ def _vector_unit_candidates(
                     encoded_for, query_vector = query_vector_provider()
                 else:
                     encoded_for = getattr(index, "identity", None)
-                    with recall_space.encoding_for(index):
-                        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+                    query_vector = embeddings.encode_query(index, query)
         recall_space.require_same_space(index, encoded_for, query_vector)
         incomplete: list[str] = []
         hits = index.search_semantic_units(

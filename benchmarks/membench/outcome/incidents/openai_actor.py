@@ -24,6 +24,8 @@ from pathlib import Path
 
 from ..isolation import mcp_server
 from . import warmup
+from . import withhold as withholding
+from .turns import user_turns
 
 #: The default actor model; ``--model`` overrides it.
 OPENAI_MODEL = "gpt-6.1-sol"
@@ -138,12 +140,39 @@ def record_spend(model: str, usage: dict[str, int]) -> str:
     return text if done.returncode == 0 else f"not recorded (exit {done.returncode}): {text}"
 
 
+async def run_turns(run, turns: list[str], trace: dict) -> list[str]:
+    """Each user turn in order on one agent, the conversation so far carried into the next; each turn's answer.
+
+    ``run`` plays one input and returns the SDK's run result: the first turn's text, then the conversation so
+    far (``to_input_list``, the SDK's own way to continue a conversation) with the next user turn after it.
+    What a turn spent and did joins ``trace`` as soon as it ends, so a later turn that fails leaves it.
+    """
+    answers: list[str] = []
+    conversation: object = turns[0]
+    for later in [*turns[1:], None]:
+        result = await run(conversation)
+        trace["responses"] += result.raw_responses
+        trace["items"] += result.new_items
+        answers.append(str(result.final_output or "").strip())
+        if later is not None:
+            conversation = result.to_input_list() + [{"role": "user", "content": later}]
+    return answers
+
+
 async def converse(
-    spec: dict, root: Path, instructions: str, prompt: str, model: str, max_turns: int, record: dict
-):
-    """One user turn to one agent on the arm's server, once that server is warm (``warmup``); the SDK's run result.
+    spec: dict,
+    root: Path,
+    instructions: str,
+    turns: list[str],
+    model: str,
+    max_turns: int,
+    record: dict,
+    trace: dict,
+) -> list[str]:
+    """The user turns, as one session on one agent and one server, once that server is warm (``warmup``); each answer.
 
     The server is this actor's own stdio process, so the wait runs on the connection that the session then uses.
+    ``trace`` collects the model responses and tool-call items of every turn (``run_turns``).
     """
     from agents import Agent, ModelSettings, OpenAIResponsesModel, Runner, set_tracing_disabled
     from agents.mcp import MCPServerStdio
@@ -181,25 +210,36 @@ async def converse(
                 instructions=instructions,
                 model_settings=ModelSettings(include_usage=True),
             )
-            return await Runner.run(agent, prompt, max_turns=max_turns)
+            return await run_turns(
+                lambda conversation: Runner.run(agent, conversation, max_turns=max_turns),
+                turns,
+                trace,
+            )
     finally:
         await client.close()
 
 
 def keep_run(
-    record: dict, root: Path, model: str, responses: list, items: list, started: float
-) -> list[dict]:
-    """What a run leaves whether it finished or stopped part-way: its tokens metered, its tool calls written down."""
-    usage = usage_of(responses)
-    calls = tool_calls(items)
+    record: dict, root: Path, model: str, traces: list[dict], started: float
+) -> list[list[dict]]:
+    """What a run leaves whether it finished or stopped part-way: its tokens metered over every session, its tool
+    calls written down. Returns each session's calls, the main session's first.
+
+    ``traces`` holds one ``{"responses", "items"}`` per session (``run_turns``): the main session, then the
+    follow-up's when the case has one.
+    """
+    usage = usage_of([response for trace in traces for response in trace["responses"]])
+    sessions = [tool_calls(trace["items"]) for trace in traces]
     record |= {
         "seconds": round(time.monotonic() - started, 1),
         "model_reported": model,
         "usage": usage,
         "spend_receipt": record_spend(model, usage),
     }
-    (root / "calls.json").write_text(json.dumps(calls, indent=1, default=str))
-    return calls
+    (root / "calls.json").write_text(json.dumps(sessions[0], indent=1, default=str))
+    if len(sessions) > 1:
+        (root / "calls-follow-up.json").write_text(json.dumps(sessions[1], indent=1, default=str))
+    return sessions
 
 
 def play(
@@ -213,8 +253,14 @@ def play(
     max_turns: int,
     timeout: float,
     arm_env: Mapping[str, str] | None = None,
+    withhold: dict | None = None,
 ) -> dict:
-    """Run one session on the seeded vault; returns it as ``__main__.play_claude`` documents.
+    """Run the case's session on the seeded vault; returns it as ``__main__.play_claude`` documents.
+
+    The turns are one session. A ``follow_up`` is a second session on the same vault: a fresh server, agent
+    and conversation, as a later day's client would have. With ``withhold`` (``arm_side.py withhold``) the main
+    session's server runs behind the relay that withholds one write's acknowledgement (``withhold.py``); the
+    follow-up's does not.
 
     The skill files are read at run time from the arm that is run, and ``server_instructions`` come from its
     own server, so neither can drift from what the arm's users have.
@@ -229,44 +275,81 @@ def play(
     record["instructions_chars"] = len(instructions)
     # This actor always runs its own stdio server, whatever transport the case names for a client that cannot.
     record["transport"] = "stdio"
+    sessions = [user_turns(case)] + ([[case["follow_up"]]] if "follow_up" in case else [])
+    traces: list[dict] = []
+    answers: list[list[str]] = []
     started = time.monotonic()
     try:
-        result = asyncio.run(
-            asyncio.wait_for(
-                converse(
-                    mcp_server(root, arm, arm_env),
-                    root,
-                    instructions,
-                    case["prompt"],
-                    model,
-                    max_turns,
-                    record,
-                ),
-                timeout,
+        for number, session_turns in enumerate(sessions):
+            traces.append({"responses": [], "items": []})
+            # The follow-up's own wait would overwrite the main session's `warm_seconds`.
+            warm: dict = record if number == 0 else {}
+            spec = mcp_server(root, arm, arm_env)
+            answers.append(
+                asyncio.run(
+                    asyncio.wait_for(
+                        converse(
+                            withholding.relayed(spec, withhold, root)
+                            if withhold and number == 0
+                            else spec,
+                            root,
+                            instructions,
+                            session_turns,
+                            model,
+                            max_turns,
+                            warm,
+                            traces[number],
+                        ),
+                        timeout * len(session_turns),
+                    )
+                )
             )
-        )
+            if number:
+                record["follow_up_warm_seconds"] = warm.get("warm_seconds")
     except Exception as error:  # noqa: BLE001 - a provider error, a timeout or a server fault is unknown, never a product failure
         # The SDK attaches what a run that stopped part-way (the turn limit, a bad model output) had done by then,
-        # and its tokens were spent; any other fault leaves nothing to meter.
+        # and its tokens were spent; any other fault leaves only the turns that had already finished.
         stopped = getattr(error, "run_data", None)
-        if stopped is None:
+        if stopped is not None:
+            traces[-1]["responses"] += stopped.raw_responses
+            traces[-1]["items"] += stopped.new_items
+        if not any(trace["responses"] or trace["items"] for trace in traces):
             record["seconds"] = round(time.monotonic() - started, 1)
             record["usage"] = "unknown: the run did not return its responses"
             calls: list[dict] = []
         else:
-            calls = keep_run(record, root, model, stopped.raw_responses, stopped.new_items, started)
+            calls = keep_run(record, root, model, traces, started)[0]
+            if stopped is None:
+                record["usage_partial"] = "the turn that failed returned no responses"
         return {
             "answer": "",
             "tools": [call["name"] for call in calls],
             "calls": calls,
             "fault": f"{type(error).__name__}: {str(error)[:300]}",
         }
-    calls = keep_run(record, root, model, result.raw_responses, result.new_items, started)
-    answer = str(result.final_output or "").strip()
-    (root / "answer.txt").write_text(answer)
+    calls_by_session = keep_run(record, root, model, traces, started)
+    main = answers[0]
+    (root / "answer.txt").write_text(main[-1])
+    if len(sessions) > 1 or len(main) > 1:
+        (root / "answers.json").write_text(
+            json.dumps(
+                {"turns": main, "follow_up": answers[1][0] if len(answers) > 1 else None}, indent=1
+            )
+        )
+    follow_up = (
+        {
+            "answer": answers[1][0],
+            "tools": [call["name"] for call in calls_by_session[1]],
+            "calls": calls_by_session[1],
+        }
+        if len(answers) > 1
+        else None
+    )
     return {
-        "answer": answer,
-        "tools": [call["name"] for call in calls],
-        "calls": calls,
+        "answer": main[-1],
+        "answers": main,
+        "tools": [call["name"] for call in calls_by_session[0]],
+        "calls": calls_by_session[0],
+        "follow_up": follow_up,
         "fault": None,
     }

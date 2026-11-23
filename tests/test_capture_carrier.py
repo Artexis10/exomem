@@ -310,6 +310,24 @@ def test_every_carrying_block_survives_the_hooks_cap_with_the_epistemic_sentence
             assert rendered.isascii() and rules.isascii(), (disposition, acceptance)
 
 
+@pytest.mark.parametrize("disposition", ("advisory", "silent"))
+def test_a_carrying_block_serves_the_durable_sentence_and_the_structured_work_cue(disposition) -> None:
+    """A hookless client reads both every turn: the sentence in `say`, the cue in the rule that follows it."""
+    block = prominence.capture_policy(disposition, "advisory")
+
+    assert prominence._CORRECTION_CAPTURE in block["say"]
+    assert prominence._STRUCTURED_WORK_CAPTURE in block["rules"]
+    assert prominence._STRUCTURED_WORK_CAPTURE not in block["say"]
+
+
+def test_a_quiet_block_carries_no_instruction_to_save_or_create() -> None:
+    """Under `off` neither the durable sentence nor the cue is served, so nothing tells the agent to write unasked."""
+    block = prominence.capture_policy("off", "advisory")
+
+    assert set(block) == {"disposition", "say"}
+    assert prominence._CORRECTION_CAPTURE not in block["say"]
+
+
 def test_a_rule_text_over_its_cap_is_dropped_and_say_is_kept() -> None:
     """A newer server may send a longer rule than an installed hook was built for; `say` must not pay for it."""
     from test_retrieve_nudge_working_set import hook

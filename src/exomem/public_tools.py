@@ -798,9 +798,10 @@ class AddRecord(Wire):
     collection: str
     item: dict[str, Any] = Field(description="Fields by column name.")
     why: str
-    body: str | None = Field(default=None, description="Free text kept with the row.")
-    hold: bool | None = Field(default=None, description="Hold a row that fails validation.")
-    held: str | None = Field(default=None, description="The id of a held row to resume.")
+    new_collection: dict[str, Any] | None = Field(default=None, description="{natural_key: [item fields that identify a row]}")
+    body: str | None = None
+    hold: bool | None = None
+    held: str | None = None
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL
 
@@ -809,7 +810,7 @@ def _add_record(wire: dict[str, Any], ctx: Context) -> Translated:
     leaf = {
         "action": "append", "collection": wire["collection"], "item": wire["item"], "why": wire["why"],
         "body": wire.get("body"), "hold": wire.get("hold"), "held": wire.get("held"),
-        "response_detail": wire.get("detail"),
+        "new_collection": wire.get("new_collection"), "response_detail": wire.get("detail"),
     }
     return "record_memory", _leaf_call(wire, "options", ctx, "record_memory", "add_record", leaf)
 
@@ -824,15 +825,17 @@ class EditRecord(Wire):
     refresh_presentation: bool | None = Field(
         default=None, description="Rebuild the row's Markdown view; `changes` may then be empty."
     )
+    options: dict[str, Any] | None = Field(default=None, description="Rare knobs: new_fields.")
     detail: Detail | None = _DETAIL
 
 
 def _edit_record(wire: dict[str, Any], ctx: Context) -> Translated:
-    return "record_memory", {"action": "update", **_given({
-        "collection": wire["collection"], "item_id": wire["record"], "changes": wire["changes"],
+    leaf = {
+        "action": "update", "collection": wire["collection"], "item_id": wire["record"], "changes": wire["changes"],
         "why": wire["why"], "body": wire.get("body"), "held": wire.get("held"),
-        "refresh_presentation": wire.get("refresh_presentation"),
-        "response_detail": wire.get("detail")})}
+        "refresh_presentation": wire.get("refresh_presentation"), "response_detail": wire.get("detail"),
+    }
+    return "record_memory", _leaf_call(wire, "options", ctx, "record_memory", "edit_record", leaf)
 
 
 class QueryPlanItems(Wire):
@@ -996,7 +999,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           ReadInstructions, "read", _read_instructions, [Route("bootstrap")], idempotent=True,
           claims=(("bootstrap", "instructions"),)),
     _tool("create_note", "Create note",
-          "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
+          "Save a conclusion. Named items compared or tracked: add_record. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
           CreateNote, "write", _create_note,
           [Route("remember", inverse={"note_type": "type", "suggestions": "suggest_links", **_NOTE_INVERSE},
                  bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],
@@ -1076,7 +1079,9 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           example={"collection": "Workouts", "filters": [{"column": "type", "op": "eq", "value": "run"}], "sort_by": "date", "descending": True, "limit": 20},
           claims=(("record_memory", "query"),)),
     _tool("add_record", "Add record",
-          "Add a row to a Records collection the person owns. Outcomes go here; intentions go to Planning.",
+          "Add a Records row. Outcomes go here; intentions go to Planning. "
+          "If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, "
+          "your proposals and outside claims each get a field; `options.new_fields` adds one.",
           AddRecord, "write", _add_record,
           [Route("record_memory", when={"action": "append"}, inverse={"response_detail": "detail"}, bag="options")],
           claims=(("record_memory", "append"),),
@@ -1085,7 +1090,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           "Change fields of one record.",
           EditRecord, "write", _edit_record,
           [Route("record_memory", when={"action": "update"}, inverse={"item_id": "record", "response_detail": "detail"},
-                 derived=frozenset({"item_key", "expected_item_version", "expected_container_hash"}))],
+                 bag="options", derived=frozenset({"item_key", "expected_item_version", "expected_container_hash"}))],
           destructive=True,
           example={"collection": "Workouts", "record": "b3k9q2x.7mna", "changes": {"distance_km": 12.4}, "why": "Watch sync was wrong"},
           claims=(("record_memory", "update"),),

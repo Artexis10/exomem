@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Never
 
 from . import (
+    automatic_collection,
     collection_refs,
     operation_entries,
     query_data,
@@ -16,6 +17,7 @@ from . import (
     record_history,
     records,
     structured_collections,
+    writer_lease,
 )
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
@@ -100,6 +102,9 @@ def record_memory(
     import_request: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     item_id: str | None = None,
+    automatic: bool | None = None,
+    new_collection: dict[str, Any] | None = None,
+    new_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
 
@@ -150,9 +155,9 @@ def record_memory(
             append or update otherwise preserves the complete candidate as a held
             file under the collection and returns its reference beside the refusal.
         rows: bulk_upsert only: 1 to 50 objects of `item`, optional `body` and
-            optional `source`, committed under ONE `expected_container_hash`.
-        source: bulk_upsert only: default provenance, the path of a preserved
-            Sources or Evidence page, for rows that name none.
+            `source`, committed under ONE `expected_container_hash`.
+        source: bulk_upsert only: the path of a preserved Sources or Evidence page.
+            Required once for the batch or on each row; a row's own `source` wins.
         on_reject: bulk_upsert only: `abort` (default) writes nothing when any row
             is rejected and reports every would-be outcome; `skip` commits the rest.
         import_request: import only, for a store-routed collection: a durable job
@@ -164,6 +169,20 @@ def record_memory(
         item_id: update or retract only: the row `id` a query returned. It stands for item_key,
             expected_item_version and expected_container_hash, which the call reads under
             the writer lease. A stale id is refused with the current one.
+        automatic: create only: true when you start the collection yourself under silent
+            proactive_capture. Unless the bounds in `automatic_collection` hold, the server refuses
+            AUTOMATIC_CREATION_REFUSED and names the failed bound; nothing is created. The receipt
+            and the inventory then report the collection as automatic.
+        new_collection: append only, `{"natural_key": [<item fields that identify a row>]}`: when
+            `collection` is a title that names no collection, create a minimal one from `item` through
+            the same automatic create (so its bounds hold) and append the row, in one call with one
+            receipt. A title that names a collection is a plain append. A refusal creates nothing and
+            carries the manifest it would have created in its details.
+        new_fields: append or update only, the fields of `item` (append) or `changes` (update) that the
+            collection does not declare yet. Under silent proactive_capture the server adds them, typed
+            from the values, then writes the row, in one call; the reply names them in `added_fields`.
+            Under advisory or off, or past the field bound, it refuses AUTOMATIC_FIELDS_REFUSED with the
+            proposal. A declared field is never retyped, renamed or removed this way.
 
     retract takes one row out of current state with a required why. Its history stays, and
     appending the same natural key later brings the row back. A store-routed collection
@@ -221,8 +240,13 @@ def record_memory(
         "on_reject": on_reject,
         "import_request": import_request,
         "query": query,
+        "automatic": automatic,
+        "new_collection": new_collection,
+        "new_fields": new_fields,
     }
     _validate_arguments(action, values)
+    # A leaf takes only the arguments it declares, and these two are the facade's alone.
+    del values["new_collection"], values["new_fields"]
     if action in {"update", "retract"} and None in (item_key, expected_container_hash, expected_item_version):
         _invalid_arguments(f"{action} requires item_id, or item_key with expected_container_hash and expected_item_version")
     from .query_engine.errors import QueryError
@@ -230,6 +254,12 @@ def record_memory(
     try:
         from .collection_store import preview
 
+        if action == "create" and automatic:
+            automatic_collection.require_bounds(vault_root, manifest_path, manifest_text)
+        if new_fields is not None:
+            return _with_new_fields(vault_root, action, values, new_fields, new_collection)
+        if automatic_collection.creates_from_row(action, collection, new_collection):
+            return _append_creating(vault_root, values, new_collection)
         selected, result = preview.dispatch(vault_root, "records", action, values)
         if selected:
             return result
@@ -293,6 +323,7 @@ def record_memory(
                 manifest_text,
                 why=why,
                 scaffold=True if scaffold is None else scaffold,
+                automatic=bool(automatic),
             )
         if action == "query":
             assert collection is not None
@@ -434,17 +465,197 @@ def record_memory(
             hold=True if hold is None else hold,
         )
     except (CollectionError, query_data.QueryDataError) as error:
-        raise OpError(
-            error.code,
-            error.reason,
-            collection_remediation(error) if isinstance(error, CollectionError) else None,
-            details=_json_safe_details(getattr(error, "details", None)),
-        ) from error
+        details = _json_safe_details(getattr(error, "details", None))
+        remediation = collection_remediation(error) if isinstance(error, CollectionError) else None
+        reason = error.reason
+        if isinstance(error, CollectionError) and error.code == "SCHEMA_UNKNOWN_FIELD" and action in {"append", "update"}:
+            details, reason = _unknown_field_route(vault_root, action, values, details or {}, reason)
+        raise OpError(error.code, reason, remediation, details=details) from error
     except QueryError as error:
         from .query_engine import route
 
         refusal = route.details(error)
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
+
+
+def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:
+    """`add_record` with `new_collection` for a title that names no collection: create it from the row, then append.
+
+    Both steps are the ordinary commands: the automatic create, whose bounds all hold, and the append.
+    The row is checked against the drafted collection first, so a refused row leaves no empty collection.
+    The create takes a derived request identity, because the store keeps one transaction per identity and the
+    append keeps the call's own. A call that fails after the create is reported committed-uncertain by the writer
+    lease, and its retry finds the collection and appends the row.
+    """
+    for name in ("held", "expected_container_hash", "delivery", "item_key"):
+        if values[name] is not None:
+            _invalid_arguments(f"new_collection starts the collection with this row, so it takes no {name}")
+    natural_key = declared["natural_key"] if isinstance(declared, Mapping) and set(declared) == {"natural_key"} else None
+    if not (
+        isinstance(natural_key, list) and natural_key and len(set(natural_key)) == len(natural_key)
+        and all(isinstance(name, str) and name for name in natural_key)
+    ):
+        _invalid_arguments('new_collection is {"natural_key": [one or more distinct fields of item]}')
+    root = Path(vault_root)
+    title = str(values["collection"]).strip()
+    item, body = values["item"], values["body"]
+    if not isinstance(item, Mapping):
+        raise CollectionError("INVALID_ITEM", "item must be an object")
+    draft = automatic_collection.minimal_manifest(root, title, item, natural_key)
+    manifest = structured_collections.parse_manifest_bytes(
+        root, root / draft.manifest_path, draft.manifest_text.encode("utf-8")
+    )
+    records.validate_new_row(manifest, item, body=body)
+    try:
+        with writer_lease.mutation_step("create"):
+            created = record_memory(
+                vault_root, "create", manifest_path=draft.manifest_path, manifest_text=draft.manifest_text,
+                why=values["why"], automatic=True,
+            )
+    except OpError as refusal:
+        if refusal.code != "AUTOMATIC_CREATION_REFUSED":
+            raise
+        # The confirmed create is the call that can succeed: it carries the manifest this call would have created.
+        retry_call = {
+            "action": "create", "manifest_path": draft.manifest_path, "manifest_text": draft.manifest_text,
+            "why": values["why"],
+        }
+        raise OpError(
+            refusal.code, refusal.message, refusal.remediation, details={**refusal.details, "retry_call": retry_call}
+        ) from refusal
+    made = {
+        "collection_id": created["collection_id"], "title": title, "manifest_path": draft.manifest_path,
+        "natural_key": list(draft.natural_key), "fields": list(draft.fields),
+    }
+    appended = record_memory(
+        vault_root, "append", collection=draft.manifest_path, item=item, why=values["why"], body=body,
+        hold=values["hold"],
+    )
+    warnings = [*created.get("warnings", ()), *appended.get("warnings", ())]
+    return {**appended, "automatic": True, "created_collection": made, **({"warnings": warnings} if warnings else {})}
+
+
+def _current_manifest(
+    vault_root: Path, collection: Any
+) -> tuple[structured_collections.CollectionManifest, str, bool | None]:
+    """The Records collection `collection` names, with its manifest text, from the store that owns it or from its file.
+
+    A store collection also reports whether its create transaction was automatic, read on the store thread with
+    the manifest; None marks a file collection, whose create record `automatic_collection` reads when it needs it.
+    """
+    from .collection_store import preview
+
+    selected, found = preview.dispatch(vault_root, "records", "manifest_text", {"collection": collection})
+    if selected:
+        return found
+    manifest = record_governance.require_records_profile(
+        record_governance.resolve_collection_for_mutation(vault_root, collection)
+    )
+    return manifest, records.manifest_text(vault_root, manifest), None
+
+
+def _field_revision(
+    vault_root: Path, manifest: structured_collections.CollectionManifest, text: str, added: Mapping[str, str], why: str
+) -> dict[str, Any]:
+    """The `revise` that adds `added` to the collection: the confirmed route to the same change, with its guards read now."""
+    revised = automatic_collection.with_added_fields(text, added)
+    guards = record_memory(vault_root, "validate", collection=manifest.collection_id, manifest_text=revised)
+    return {"collection": manifest.collection_id, "manifest_text": revised, **guards["lifecycle_guards"], "why": why}
+
+
+def _field_refusal_details(
+    vault_root: Path, manifest: structured_collections.CollectionManifest, text: str, added: Mapping[str, str],
+    why: str, refusal: CollectionError,
+) -> dict[str, Any]:
+    """The details of a refused automatic addition: the failed bound, the proposal, and the confirmed `revise` for it.
+
+    A revise that cannot be drafted leaves the proposal standing and names why in `retry_unavailable`.
+    """
+    details = {**refusal.details, "proposal": {"collection": manifest.title, "add_fields": added}}
+    try:
+        return {**details, "retry_call": {"action": "revise", **_field_revision(vault_root, manifest, text, added, why)}}
+    except CollectionError as unavailable:
+        return {**details, "retry_unavailable": unavailable.reason}
+    except OpError as unavailable:
+        return {**details, "retry_unavailable": unavailable.message}
+
+
+def _with_new_fields(
+    vault_root: Path, action: str, values: dict[str, Any], names: Any, new_collection: Any
+) -> dict[str, Any]:
+    """`add_record` or `edit_record` with `new_fields`: add the fields the call names, typed from its values, then run the write.
+
+    The addition is the ordinary `revise` (its guards, its audit event, the store's own writer for a store
+    collection), under the bounds of `automatic_collection`. A field the collection already declares adds nothing, and
+    the row's own validation judges its value, so a replay of the call, or a second call with the same row, writes only the row. The fields
+    commit before the row, and a failure of the row leaves them declared; the retry adds nothing twice.
+    """
+    carried_key = "item" if action == "append" else "changes"
+    carried = values[carried_key]
+    if new_collection is not None:
+        _invalid_arguments("new_fields adds fields to an existing collection, and new_collection starts one")
+    if not (
+        isinstance(names, list) and names and len(set(names)) == len(names)
+        and all(isinstance(name, str) and name for name in names)
+    ):
+        _invalid_arguments("new_fields is a list of distinct field names")
+    if not isinstance(carried, Mapping) or [name for name in names if name not in carried]:
+        _invalid_arguments(f"new_fields names fields that {carried_key} does not carry")
+    manifest, text, store_created = _current_manifest(vault_root, values["collection"])
+    added = automatic_collection.fields_to_add(manifest, {name: carried[name] for name in names})
+    if added:
+        try:
+            automatic_collection.require_field_bounds(vault_root, manifest, added, store_created=store_created)
+        except CollectionError as refusal:
+            raise CollectionError(
+                refusal.code, refusal.reason,
+                _field_refusal_details(vault_root, manifest, text, added, values["why"], refusal),
+            ) from refusal
+        revision = _field_revision(vault_root, manifest, text, added, values["why"])
+        with writer_lease.mutation_step("fields"):
+            revised = record_memory(vault_root, "revise", **revision)
+        # The revise moved the container hash. A caller's guard that named the hash it revised from now names the
+        # revised one, and a guard from an older state stays and refuses the write as stale.
+        if values["expected_container_hash"] == revision["expected_container_hash"]:
+            values = {**values, "expected_container_hash": revised["after_container_hash"]}
+    reply = record_memory(vault_root, action, **values)
+    return {**reply, "automatic": True, "added_fields": added} if added else reply
+
+
+def _unknown_field_route(
+    vault_root: Path, action: str, values: dict[str, Any], details: dict[str, Any], reason: str
+) -> tuple[dict[str, Any], str]:
+    """The refusal of an undeclared field, with the next step for the disposition it was refused under.
+
+    Only a refusal whose every issue is an undeclared field has one: the call can succeed with `new_fields`
+    under silent capture, and otherwise the agent proposes the field to the user, with the confirmed `revise` ready.
+    The held candidate keeps the row meanwhile, so the retry resumes it. Any other refusal is returned as it is.
+    """
+    issues = details.get("issues") or []
+    names = [issue.get("field") for issue in issues]
+    carried = values["item" if action == "append" else "changes"]
+    if not names or any(issue.get("code") != "SCHEMA_UNKNOWN_FIELD" for issue in issues) or not isinstance(carried, Mapping):
+        return details, reason
+    if any(name not in carried for name in names):
+        # The undeclared field came from a held candidate, whose values this call does not carry.
+        return details, reason
+    try:
+        manifest, text, store_created = _current_manifest(vault_root, values["collection"])
+        added = automatic_collection.fields_to_add(manifest, {name: carried[name] for name in names})
+        try:
+            automatic_collection.require_field_bounds(vault_root, manifest, added, store_created=store_created)
+            # A layout that `new_fields` cannot extend in place refuses that retry too, so it is not offered.
+            automatic_collection.with_added_fields(text, added)
+        except CollectionError as refusal:
+            kept = {key: value for key, value in details.items() if key != "retry_with"}
+            fields = _field_refusal_details(vault_root, manifest, text, added, values["why"], refusal)
+            return {**kept, **fields}, f"{reason}: {refusal.reason}"
+    except (CollectionError, OpError):
+        # The original refusal stands: this only adds a next step, and a manifest it cannot read gives none.
+        return details, reason
+    held = details.get("held")
+    resume = {"held": held["held_id"]} if isinstance(held, Mapping) and "held_id" in held else {}
+    return {**details, "retry_with": {"new_fields": names, **resume}}, reason
 
 
 def parse_manifest_contract(*, store_mode: bool = False, store_vault: bool = False) -> dict[str, Any]:
@@ -475,14 +686,15 @@ def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
             "collection": "the Records collection",
             "rows": (
                 f"1 to {records.BULK_UPSERT_MAX_ROWS} objects of item, optional body and "
-                "optional source per call; send a larger import as repeated calls, each "
+                "source per call (source is required once for the batch or on each row); "
+                "send a larger import as repeated calls, each "
                 "chained from the previous response's after_container_hash"
             ),
             "expected_container_hash": "required; compared once for the whole batch",
             "why": "one audit reason for the batch",
             "source": (
-                "optional default provenance: the vault path of a preserved Sources or "
-                "Evidence page; a row's own source overrides it"
+                "required once for the batch or on each row: the vault path of a preserved "
+                "Sources or Evidence page; a row's own source overrides the batch's"
             ),
             "on_reject": "abort (default) or skip",
         },
@@ -573,7 +785,8 @@ def _bulk_upsert_contract(*, store_mode: bool = False) -> dict[str, Any]:
         from .collection_store.writer import BULK_UPSERT_MAX_ROWS
 
         contract["arguments"]["rows"] = (
-            f"1 to {BULK_UPSERT_MAX_ROWS} objects of item, optional body and optional source per call; "
+            f"1 to {BULK_UPSERT_MAX_ROWS} objects of item, optional body and source per call "
+            "(source is required once for the batch or on each row); "
             "chain larger imports from the previous response's after_container_hash"
         )
         contract["audit"] = (

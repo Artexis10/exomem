@@ -216,12 +216,16 @@ def test_serving_runtime_reclaims_abandoned_parts_and_receipts_without_a_request
         assert client.get("/health").status_code == 200
         activation = mcp._exomem_local_runtime_activation
         startup_deadline = time.monotonic() + 10
-        # The runtime publishes its thread before starting it, so wait until the thread has started.
-        while activation._thread is None or activation._thread.ident is None:
+        # The runtime publishes and starts its thread under its lock, so read the thread under it.
+        while True:
+            with activation._lock:
+                thread = activation._thread
+            if thread is not None:
+                break
             assert time.monotonic() < startup_deadline, "the runtime did not activate"
             time.sleep(0.02)
-        activation._thread.join(20)
-        assert not activation._thread.is_alive()
+        thread.join(20)
+        assert not thread.is_alive()
 
         data = b"sample"
         legacy, _ = _create(vault, data, source=False)

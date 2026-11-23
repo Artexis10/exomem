@@ -917,7 +917,8 @@ def route(command, vault_root, arguments, *, write=False):
 def route_with_proof(command, vault_root, arguments, *, write=False):
     """The store thread a request must run on, or None when file collections answer it, with the proof.
 
-    A selector the vault's marker routes to the store, a NEW summary collection's create,
+    A selector the vault's marker routes to the store, a NEW summary collection's create (or an append that
+    starts one from its row, ``automatic_collection.creates_from_row``),
     Records discovery, a Planning progress review, and a curation or episode command that runs a Records step or
     structured-files maintenance on a store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
@@ -928,6 +929,7 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     through the store, which only the store thread holds, so every such write runs there, and
     without the service it refuses.
     """
+    from .. import automatic_collection
     from .preview import bound_writer
 
     root = Path(vault_root).resolve()
@@ -949,6 +951,11 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     selector = arguments.get("collection", arguments.get("manifest_path"))
     proof = ownership.current(root)
     summary = arguments.get("action") == "create" and summary_create(root, arguments)
+    # A call that may create its collection keeps its title (`titled_arguments`), so a vault with a store runs it
+    # where `summary` runs: its collection is new, or the facade resolves the title there to the one that exists.
+    # Without a store the new collection is a file collection, created in process.
+    from_row = proof.marker is not None and automatic_collection.creates_from_row(
+        arguments.get("action"), selector, arguments.get("new_collection"))
     if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
@@ -964,11 +971,15 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
         # Inventory and composite review need the writer for every collection they select.
         server = None if proof.marker is None else _server(root)
         return Routed(server, proof) if server is not None and server.runtime is not None else Routed(None)
-    elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
+    elif selector is None or (
+        proof.selected(root, selector) is None and not _creating(root, selector) and not from_row
+    ):
         return Routed(None)
     server = _server(root)
     if server is None and not summary:
-        return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
+        # Collection resolution decides visibility before reporting an unavailable store. A call that may create
+        # gets the same refusal there, in process, once its collection proves to be new.
+        return Routed(None)
     if server is None:
         refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
@@ -987,10 +998,11 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
     that manifest path would where no file collection carries it, and the store thread answers it
     once open or refuses it as it refuses the path. While the store is not open, a `write` queues so
     even where a file collection carries the title, because the open store may call it ambiguous. A
-    vault with no store, a process that serves no store, and a title that names no visible
-    collection leave `arguments` as they are, and the facade answers.
+    vault with no store, a process that serves no store, a title that names no visible
+    collection, and a call that may create its collection (``creates_from_row``) leave `arguments` as they are,
+    and the facade answers.
     """
-    from .. import collection_refs
+    from .. import automatic_collection, collection_refs
     from ..collection_profiles import PROFILES
     from . import capability, ownership
     from .preview import bound_writer
@@ -998,6 +1010,11 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
     selector = arguments.get("collection")
     profile = next((profile.name for profile in PROFILES.values() if profile.tool == command), None)
     if profile is None or not isinstance(selector, str) or collection_refs.names_a_manifest(selector.strip()):
+        return arguments
+    if automatic_collection.creates_from_row(arguments.get("action"), selector, arguments.get("new_collection")):
+        # Such a call may create its collection, so it names it by title until it runs and the facade resolves it.
+        # Swapping in the path of a collection that an earlier attempt created would change the call's identity,
+        # and the retry of that attempt would be refused as a reused idempotency key instead of replayed.
         return arguments
     root = Path(vault_root).resolve()
     if bound_writer(root) is not None:
@@ -1198,7 +1215,7 @@ def served_create(vault_root, arguments, facade_profile=None):
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
-            facade_profile=facade_profile)
+            facade_profile=facade_profile, automatic=bool(arguments.get("automatic")))
         if (receipt := result.get("receipt")) and receipt.get("warnings"):
             # The create's own warnings lead, where the tool result shows them.
             result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}
