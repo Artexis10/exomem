@@ -21,6 +21,24 @@ running="$(trivy --version | sed -n 's/^Version: //p')"
 [[ -n "${pinned}" && "${running}" == "${pinned}" ]] \
   || { echo "trivy ${running:-missing} is not the pinned ${pinned}" >&2; exit 1; }
 
-exec trivy image --skip-version-check \
+# One scan, read as JSON: a forbidden licence fails the check, and each licence
+# that trivy cannot classify (free text, or a licence no category lists) is
+# printed as a warning. Free text cannot be classified reliably, so it is shown
+# to the release reader instead of gating the release.
+report="$(mktemp)"
+trap 'rm -f "${report}"' EXIT
+trivy image --skip-version-check --quiet \
   --config "${here}/image-licences/trivy.yaml" \
-  --ignorefile "${here}/image-licences/elections.yaml" "$@"
+  --ignorefile "${here}/image-licences/elections.yaml" \
+  --severity CRITICAL,UNKNOWN --exit-code 0 --format json --output "${report}" "$@"
+
+jq -r '.Results[]? | .Licenses[]? | select(.Severity == "UNKNOWN")
+  | "::warning title=Unclassified licence::\(.PkgName): \(.Name)"' "${report}"
+forbidden="$(jq -r '.Results[]? | .Licenses[]? | select(.Severity == "CRITICAL")
+  | "\(.PkgName): \(.Name) (\(.FilePath // "-"))"' "${report}")"
+if [[ -n "${forbidden}" ]]; then
+  echo "GPL- or AGPL-only Python distributions:" >&2
+  echo "${forbidden}" >&2
+  exit 1
+fi
+echo "No GPL- or AGPL-only Python distribution found."
