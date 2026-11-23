@@ -1088,6 +1088,7 @@ class Admission:
                 self.drainer.note_accepted(self.origin, inserted)
         finally:
             self.drainer.end_insert()
+        if inserted is not None:
             _journal_queued(self, inserted, reason, started)
         return receipt
 

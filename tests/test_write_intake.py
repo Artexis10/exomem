@@ -637,3 +637,24 @@ def test_a_save_between_its_insert_and_its_count_holds_later_saves_behind_it(dra
     assert drainer.has_backlog()
     drainer.end_insert()
     assert not drainer.has_backlog()
+
+
+def test_an_acceptance_that_meets_a_busy_store_is_retried_and_queues_the_save(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A busy intake store during acceptance must not refuse the save: the acceptance retries.
+    real_insert = write_intake.Admission._insert
+    calls: list[int] = []
+
+    def busy_once(self, reason, *, create):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OpError("MUTATION_BUSY", "intake store busy", "retry", details={"committed": False})
+        return real_insert(self, reason, create=create)
+
+    monkeypatch.setattr(write_intake.Admission, "_insert", busy_once)
+    _writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 29)))
+    assert len(calls) >= 2
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert len(_pages_titled(vault, "Queued save 29")) == 1
