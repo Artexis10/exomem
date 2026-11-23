@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Evermatter note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: 5ee94d5e0e4e1919f24f352d3ad9f2788ec1ded8727a6e6ef8cf52904b52672d
+  skill_contract: e14f3c0c1daf7436b2597f8f4d937991a3bf7d3b291e41931b7a3f33a4d51680
   version: "0.2.0"
 ---
 
@@ -116,7 +116,7 @@ Preserve history. Prefer supersession when meaning changes. Keep links useful, n
 ## Mistakes to avoid
 Do not rewrite the content of raw sources or evidence. Do not mass-edit without reading the relevant notes. Do not collapse distinct conclusions just because they share keywords. Do not reuse a forward approval for compensation, continue a run whose `next_action` is not `resume`, or turn one confirmation into standing approval.
 
-<!-- exomem-semantic-authoring:v12 sha256:c7b7cd67fb4b4c8d67ed13f82cebb1956c54533f527ec025eeef45f5422154d0 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -129,7 +129,7 @@ Semantic roles:
 - Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind.
 - Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind.
 
-Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Evermatter writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
+Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Exomem writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
 
 - Compact category: the unit's one primary open-vocabulary subject or domain label. After trimming, use 1-64 Unicode code points; begin with a Unicode letter; then use only Unicode letters or digits, spaces, `_`, or `-`. Apply Unicode NFKC and casefold, then collapse runs of spaces, `_`, and `-` to one `_`. Registry alias resolution is separate from authored canonicalization; an unseen valid category needs no registry write.
 - Compact content: the unit's substantive observation. Use non-empty content that remains on one Markdown line. Escaped parentheses, embedded hashes, and non-trailing tag-like text remain content.
