@@ -121,6 +121,11 @@ RUN_LIVE = os.environ.get("RUN_CELLCTL_K3S_TEST") == "1"
 HELM = os.environ.get("HELM_BIN") or shutil.which("helm")
 K3S_IMAGE = json.loads(K3S_GATE.read_text(encoding="utf-8"))["k3sImage"]
 STANDIN_REPOSITORY = "cellctl-standin.test/exomem-cell"
+
+
+def _cell_repositories(repository: str) -> str:
+    """The `--set-json` value that admits one cell image repository, built by a stand-in builder."""
+    return "cellctl.cellImageRepositories=" + json.dumps([{"repository": repository, "builder": "example/standin"}])
 NAMESPACE_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567"
 # MinIO's own community images (quay.io/minio/minio, minio/minio) are no
 # longer pullable; Chainguard's digest-pinned build stands in. It runs as
@@ -560,7 +565,7 @@ def test_protected_import_waits_for_real_cleanup_pod_gc(
     """A deleted Job with a terminating Pod cannot publish done or release import admission."""
     image = import_storage["image"]
     documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml", settings=(
-                                     "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
+                                     "--set-json", _cell_repositories("cellctl-import.test/exomem-cell"),
                                      "--set-json", "cells.jobEgressExcept=[]"))
     storage_class = next(document for document in documents if document["kind"] == "StorageClass")
     storage_class.update(provisioner="rancher.io/local-path", reclaimPolicy="Delete",
@@ -886,7 +891,7 @@ def test_owner_export_packs_the_real_volume_and_serves_one_verified_archive(
     expiry deletes every version."""
     image = import_storage["image"]
     documents = _render_platform("templates/cellctl.yaml", "templates/cloud-storage-class.yaml", settings=(
-                                     "--set", "cellctl.cellImageRepository=cellctl-import.test/exomem-cell",
+                                     "--set-json", _cell_repositories("cellctl-import.test/exomem-cell"),
                                      "--set-json", "cells.jobEgressExcept=[]"))
     storage_class = next(document for document in documents if document["kind"] == "StorageClass")
     storage_class.update(provisioner="rancher.io/local-path", reclaimPolicy="Delete",
@@ -1056,7 +1061,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             HELM, "template", "cellctl-k3s-test", str(PLATFORM_CHART),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
-            "--set", f"cellctl.cellImageRepository={repository}",
+            "--set-json", _cell_repositories(repository),
             # This cellctl renders job-egress with no except list, so MinIO on
             # the docker network stays reachable; the admission policy pins
             # job-egress to the chart's list, which must match.
@@ -1091,7 +1096,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
             HELM, "template", "cellctl-k3s-test", str(PLATFORM_CHART),
             "--namespace", "exomem-platform",
             "--values", str(PLATFORM_CHART / "values.validation.yaml"),
-            "--set", f"cellctl.cellImageRepository={repository}",
+            "--set-json", _cell_repositories(repository),
             # This cellctl renders job-egress with no except list, so MinIO on
             # the docker network stays reachable; the admission policy pins
             # job-egress to the chart's list, which must match.
@@ -2208,7 +2213,7 @@ def test_dedicated_cell_admission_allows_only_own_exact_pair(k3s: K3sCluster, pl
         if placement_mode == "all-shared":
             settings += ("--set-json", f'cellctl.dedicatedCellIds=["{other_id}"]')
     documents = _render_platform("templates/cellctl.yaml", settings=(
-        *settings, "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        *settings, "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     selected = CellManifestSpec(cell_id=selected_id, image=STANDIN_REPOSITORY + "@sha256:" + "a" * 64,
@@ -2283,7 +2288,7 @@ def test_artifact_broker_selected_cell_edge_and_admission(k3s: K3sCluster) -> No
         "--set-string", f"artifactBroker.image={image}",
         "--set-string", f"artifactBroker.endpoint={endpoint}",
         "--set-json", f'artifactBroker.cellIds=["{selected_id}"]',
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     )
     documents = _render_platform("templates/cellctl.yaml", "templates/artifact-broker.yaml", settings=settings)
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
@@ -2424,7 +2429,7 @@ def test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch
         "--set-string", f"artifactBroker.endpoint={endpoint}",
         "--set-json", f'artifactBroker.cellIds=["{listed_id}"]',
         "--set", f"artifactBroker.allCells={str(all_cells).lower()}",
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     # cellctl renders the broker edge for a cell the switch selects, listed or not.
@@ -2505,7 +2510,7 @@ def test_media_edge_peer_is_admitted_only_in_a_namespace_cellctl_labelled(k3s: K
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
         "--set-json", f'mediaEdge.cellIds=["{labelled_id}"]',
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     served = {cell_id: _spec(cell_id=cell_id, image=image, media_edge_url=endpoint)
@@ -2660,7 +2665,7 @@ def test_export_steps_get_only_their_own_media_keys_and_egress(k3s: K3sCluster) 
         "--set-string", "mediaEdge.bucket=media-bucket",
         "--set-string", "mediaEdge.bucketId=4a48fe8875c6214145260818",
         "--set-json", f'mediaEdge.cellIds=["{cell_id}"]',
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     deployment = next(doc for doc in documents if doc["kind"] == "Deployment" and doc["metadata"]["name"] == "cellctl")
@@ -3402,7 +3407,7 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
     local = LocalStorage()
     cellctl = "--as=system:serviceaccount:exomem-cloud:cellctl"
     documents = _render_platform("templates/cellctl.yaml", "templates/cell-local-storage.yaml", settings=(
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     # Policies, RBAC and the snapshot CRDs; nothing here needs a workload.
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"
@@ -3756,7 +3761,7 @@ def test_catalogue_build_admission_denies_placement_and_volume_forgery(k3s: K3sC
     image = STANDIN_REPOSITORY + "@sha256:" + "a" * 64
     documents = _render_platform("templates/cellctl.yaml", settings=(
         "--set", "cellctl.cataloguePrewarm=true",
-        "--set-string", f"cellctl.cellImageRepository={STANDIN_REPOSITORY}",
+        "--set-json", _cell_repositories(STANDIN_REPOSITORY),
     ))
     _apply_server_side(k3s.name, [doc for doc in documents if doc["kind"] != "Deployment"])
     deployment = next(doc for doc in documents

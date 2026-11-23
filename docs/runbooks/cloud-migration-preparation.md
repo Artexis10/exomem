@@ -138,7 +138,7 @@ disable certificate verification to make the connection pass.
 
 The values worksheet must resolve these current chart inputs:
 
-- `cellctl.image`, `cellctl.cellImageRepository`, the three `cellctl.b2*` identity/
+- `cellctl.image`, `cellctl.cellImageRepositories`, the three `cellctl.b2*` identity/
   endpoint values, and `cellctl.databaseEgressCidrs` with the database's public
   `/32`;
 - `cellctl.nodeSelector` and `cloudGateway.nodeSelector` left at the K3s server
@@ -151,7 +151,8 @@ The values worksheet must resolve these current chart inputs:
   address `kubectl get endpoints kubernetes` lists. The edge namespace's
   NetworkPolicy lets Traefik reach the API server only there, on 6443;
 - the initial cell image digest in the control database's Cloud settings,
-  separately from `cellImageRepository`, which is the admission repository;
+  separately from `cellImageRepositories`, which lists the admitted repositories
+  and the repository that built each one;
 - the captured existing platform values, including the intentionally stopped
   legacy workers and suspended schedules.
 

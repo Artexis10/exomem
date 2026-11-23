@@ -165,6 +165,34 @@ def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(
     assert commands == []
 
 
+def test_the_deploy_chart_and_release_name_the_same_cell_image_repositories() -> None:
+    # Catches a repository move that updates one copy of the cell image repositories and
+    # not the others: the deploy would resolve an image the chart refuses, or the release
+    # would publish where the deploy never looks.
+    chart = ROOT / "infra/helm/platform"
+    schema = json.loads((chart / "values.schema.json").read_text(encoding="utf-8"))
+    platform_jobs_image = re.compile(schema["properties"]["platformJobs"]["properties"]["image"]["pattern"])
+    for repository in cloud_deploy.CELL_IMAGE_BUILDERS:
+        assert platform_jobs_image.fullmatch(f"{repository}@{DIGEST}"), repository
+    assert not platform_jobs_image.fullmatch(f"ghcr.io/example-owner/evermatter@{DIGEST}")
+
+    validation = yaml.safe_load((chart / "values.validation.yaml").read_text(encoding="utf-8"))
+    pairs = {source["repository"]: source["builder"] for source in validation["cellctl"]["cellImageRepositories"]}
+    assert pairs == cloud_deploy.CELL_IMAGE_BUILDERS
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
+    (script,) = [step["run"] for job in workflow["jobs"].values() for step in job.get("steps", [])
+                 if "image_list=(" in step.get("run", "")]
+    # image_list is a bash array of "<target> <repository>:<tag> <floating tag>" strings, the
+    # closed release contract its comment names; splitting on whitespace reads it.
+    entries = [line.strip().strip('"').split() for line in script.split("image_list=(", 1)[1].split(")", 1)[0].splitlines()
+               if line.strip()]
+    published = {target: reference.rsplit(":", 1)[0] for target, reference, _ in entries}
+    newest = next(iter(cloud_deploy.CELL_IMAGE_BUILDERS))
+    assert published["cloud"] == newest
+    assert published["cellctl"] == f"{newest}-cellctl"
+
+
 @pytest.mark.parametrize("answer", ["substrate_error_image_seen", "substrate_error_release_older"])
 def test_a_release_not_newer_than_the_fleet_ends_as_success_with_nothing_set(capsys, answer: str) -> None:
     # Catches a red run on every merge after a withdrawal.

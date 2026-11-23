@@ -134,7 +134,7 @@ def cellctl_values(stack: Stack, *, image: str, cell_repository: str) -> dict[st
     return {
         "enabled": True,
         "image": image,
-        "cellImageRepository": cell_repository,
+        "cellImageRepositories": [{"repository": cell_repository, "builder": "example/rehearsal"}],
         "b2BucketName": BACKUP_BUCKET,
         "b2BucketId": "rehearsal-bucket-id",
         "b2Endpoint": stack.object_store.endpoint(from_host=False),

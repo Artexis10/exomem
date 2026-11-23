@@ -184,10 +184,17 @@ cellctl:
   # infra/cellctl/Dockerfile and recorded in the release notes on each release
   # tag (release-please.yml). Always a digest, never a tag.
   image: ""
-  # <cell repository>@sha256:<digest> the ValidatingAdmissionPolicy pins
-  # cellctl's own writes to (D4). cellctl itself resolves the per-cell image
-  # to run from the database, not from this value.
-  cellImageRepository: ""
+  # The cell image repositories the ValidatingAdmissionPolicy pins cellctl's
+  # own writes to (D4), each as <repository>@sha256:<digest> and matched in
+  # full. Each entry pairs a repository with the GitHub repository (owner/name)
+  # whose release workflow built it; the image admission profile
+  # (operatorDeploy) checks that pairing. List every repository a running cell
+  # or a rollback target uses: releases cut before the repository moved stay in
+  # ghcr.io/artexis10/exomem, built by Artexis10/exomem, and later ones are in
+  # ghcr.io/substrate-systems/evermatter, built by substrate-systems/evermatter.
+  # cellctl itself resolves the per-cell image to run from the database, not
+  # from this value.
+  cellImageRepositories: []
   namespace: exomem-cloud
   replicas: 1
   # The founder-account bucket of the cells created before D9 (those with a stored
@@ -705,6 +712,9 @@ cert-manager:
 operatorDeploy:
   enabled: false
   group: exomem:deploy
+  # The GitHub repository (owner/name) whose release workflow built the
+  # workload images below (cellctl.image). Cell images take their builder from
+  # cellctl.cellImageRepositories.
   sourceRepository: ""
   workflow: .github/workflows/release-please.yml
   cellFamily: cloud

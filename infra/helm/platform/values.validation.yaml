@@ -5,7 +5,11 @@ scheduler:
 cellctl:
   enabled: true
   image: ghcr.io/substrate-systems/evermatter-cellctl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  cellImageRepository: ghcr.io/substrate-systems/exomem-cloud-cell
+  cellImageRepositories:
+    - repository: ghcr.io/substrate-systems/evermatter
+      builder: substrate-systems/evermatter
+    - repository: ghcr.io/artexis10/exomem
+      builder: Artexis10/exomem
   b2BucketName: exomem-cloud-backups
   b2BucketId: b2-bucket-id-example
   b2Endpoint: https://s3.us-west-002.backblazeb2.com

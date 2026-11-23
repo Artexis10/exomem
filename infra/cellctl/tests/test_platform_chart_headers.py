@@ -518,7 +518,8 @@ def test_cloud_workload_images_and_cell_admission_are_digest_pinned() -> None:
 
     policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     (image_rule,) = [v for v in policy["spec"]["validations"] if "digest-pinned" in v["message"]]
-    repository = values["cellctl"]["cellImageRepository"]
+    repositories = [source["repository"] for source in values["cellctl"]["cellImageRepositories"]]
+    assert len(repositories) == 2
     expression = image_rule["expression"]
     assert "containers.all(c, c.image.matches(" in expression
     assert "initContainers.all(c, c.image.matches(" in expression
@@ -526,10 +527,42 @@ def test_cloud_workload_images_and_cell_admission_are_digest_pinned() -> None:
     assert len(image_patterns) == 2
     assert image_patterns[0] == image_patterns[1]
     pinned_cell_image = re.compile(json.loads(image_patterns[0]))
-    assert pinned_cell_image.search(f"{repository}@sha256:{'a' * 64}")
-    assert not pinned_cell_image.search(f"{repository}:latest")
-    assert not pinned_cell_image.search(f"{repository}@sha256:{'a' * 63}")
-    assert not pinned_cell_image.search(f"other/{repository}@sha256:{'a' * 64}")
+    # A cell still on a release built before the repository moved stays writable, and
+    # neither repository admits a name that merely starts or ends with it.
+    for repository in repositories:
+        assert pinned_cell_image.search(f"{repository}@sha256:{'a' * 64}")
+        assert not pinned_cell_image.search(f"{repository}:latest")
+        assert not pinned_cell_image.search(f"{repository}@sha256:{'a' * 63}")
+        assert not pinned_cell_image.search(f"other/{repository}@sha256:{'a' * 64}")
+        assert not pinned_cell_image.search(f"{repository}-other@sha256:{'a' * 64}")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cell_image_admission_pairs_each_repository_with_the_repository_that_built_it() -> None:
+    # Catches an image from one repository admitted on a signature from the other
+    # builder's release workflow, or a rollback image refused after the move.
+    import re
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    sources = values["cellctl"]["cellImageRepositories"]
+    documents = _helm_template(
+        "--set", "operatorDeploy.enabled=true",
+        "--set-string", "operatorDeploy.sourceRepository=substrate-systems/evermatter",
+        "--set-string", "operatorDeploy.registryReadSecretName=registry-read",
+    )
+    spec = _find(documents, "ImageValidatingPolicy", "exomem-release-image-cloud-cell")["spec"]
+    attestors = {attestor["name"]: attestor for attestor in spec["attestors"]}
+    assert len(attestors) == len(sources) == 2
+    signed = next(v["expression"] for v in spec["validations"] if "verifyAttestationSignatures" in v["expression"])
+    built = next(v["expression"] for v in spec["validations"] if "predicate.source.repository" in v["expression"])
+    for source in sources:
+        prefix = f'image.startsWith("{source["repository"]}@sha256:")'
+        (name,) = re.findall(re.escape(prefix) + r" && verifyAttestationSignatures\(image, attestations\.family, \[attestors\.(\w+)\]\)", signed)
+        (identity,) = attestors[name]["cosign"]["keyless"]["identities"]
+        for other in sources:
+            subject = f"https://github.com/{other['builder']}/.github/workflows/release-please.yml@refs/tags/v1.2.3"
+            assert bool(re.search(identity["subjectRegExp"], subject)) == (other is source), (name, other)
+        assert f'{prefix} && extractPayload(image,attestations.family).predicate.source.repository == "{source["builder"]}"' in built
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
