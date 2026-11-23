@@ -614,6 +614,7 @@ _REMAINING = {
     "bootstrap": (None, (_row("instructions", "bootstrap"),)),
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
     "inspect_captured_sources": (None, (_row("inventory", "read_memory"),)),
+    "inspect_name_drift": (None, (_row("name_drift", "check_memory"),)),
     "inspect_capture_erasure_policy": (None, (_row("erasure_policy", "read_memory"),)),
     "reserve_source_capture": (None, (_row("reserve_capture", "reserve_capture", verb="saved"),)),
     "settle_source_capture": (None, (_row("settle_capture", "settle_capture", verb="updated"),)),

@@ -118,7 +118,8 @@ log = logging.getLogger(__name__)
 # 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
 # 6 adds `note_cohesion`, for the same reason as 3.
 # 7 adds `ownership_review`, for the same reason as 3.
-SCHEMA_VERSION = 7
+# 8 adds `name_drift`, for the same reason as 3.
+SCHEMA_VERSION = 8
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -142,6 +143,12 @@ SOURCE_BACKLOG = "unprocessed_source"
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
 EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
+#: The vault-wide name-drift family: one row while any page's file name differs from its title's name.
+#: It is recompute-only. A page write does not settle it: the whole drifted set is the row, so the
+#: write path would need a vault scan. `reconcile` and `refresh_name_drift` rebuild it. After the
+#: ownership and cohesion questions, because a stale name is housekeeping and a page's home is not.
+NAME_DRIFT = "name_drift"
+
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
 #: down; `supersession_integrity` follows because it is the only defect among them;
@@ -161,6 +168,7 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     # Last: backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
     "ownership_review",
     "note_cohesion",
+    NAME_DRIFT,
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
 )
@@ -175,6 +183,7 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
 BACKLOG_CATEGORIES: tuple[str, ...] = (
     "ownership_review",
     "note_cohesion",
+    NAME_DRIFT,
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
 )
@@ -1868,6 +1877,30 @@ def apply_ownership_delta(
             else:
                 pages_map.pop(page.rel_path, None)
         categories["ownership_review"] = pages_map
+        _persist_delta(root, current, categories, today, count_write=False)
+
+
+def refresh_name_drift(vault_root: Path, *, today: dt.date | None = None) -> None:
+    """Replace the `name_drift` row from one pass over the corpus, and nothing else.
+
+    Off the write path, for a caller that has just renamed pages (`curation.relocate`) or
+    wants today's count. It bumps no emission counter, because no governed write happened.
+    """
+    from . import audit as audit_module
+    from .vault import kb_root
+
+    today = today or dt.date.today()
+    root = Path(vault_root)
+    if _load_shared(root) is None:
+        return
+    pages = audit_module._parse_all(kb_root(root), root)
+    rows = _entries_from_findings(root, audit_module._check_name_drift(root, pages)).get(NAME_DRIFT) or {}
+    with _LOCK:
+        current = _load_shared(root)
+        if current is None:
+            return
+        categories = dict(current.get("categories") or {})
+        categories[NAME_DRIFT] = {path: _bucket(entries, today) for path, entries in sorted(rows.items())}
         _persist_delta(root, current, categories, today, count_write=False)
 
 
@@ -4305,11 +4338,14 @@ def _served_entries_uncached(
     # The episode backlog is the owner's compiler queue: its stored rows count lines against the
     # owner's view of the citing pages, so a count served to a restricted caller would move with a
     # page withheld from it. That caller gets the family from its own audit, which reads the page as absent.
-    owner_queue = not categories.get(EPISODE_BACKLOG) or egress_module.owner_only_aggregate(
-        vault_root, principal=principal
-    ) is None
+    owner_queue = (
+        not (categories.get(EPISODE_BACKLOG) or categories.get(NAME_DRIFT))
+        or egress_module.owner_only_aggregate(vault_root, principal=principal) is None
+    )
     for category in PROJECTION_CATEGORIES:
-        if category == EPISODE_BACKLOG and not owner_queue:
+        # Name drift counts every page of the vault, so a count served to a restricted caller would
+        # move with a page withheld from it. That caller gets the item from its own audit instead.
+        if category in (EPISODE_BACKLOG, NAME_DRIFT) and not owner_queue:
             continue
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by

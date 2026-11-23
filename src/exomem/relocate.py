@@ -38,6 +38,8 @@ MAX_EXCLUSIONS: Final[int] = 3
 #: Measured 2026-11-23 on a laptop disk under WSL, corpus cache on: 100 pages relocated in a
 #: 3,000-page vault split 451 referring pages into 19 steps, and no step held the vault past 3.0 s.
 REFERRERS_PER_STEP: Final[int] = 25
+#: How often a review item's batch is halved when its plan is too large to seal (200 pages reach 12).
+MAX_HALVINGS: Final[int] = 4
 
 _CARRIES = page_fields.CARRIES_PROJECT_KEY
 
@@ -73,6 +75,8 @@ class _Derived:
     source_steps: set[str] = field(default_factory=set)
     #: Whether the catalogue could not answer which pages name a moved page's path in prose.
     mentions_unchecked: bool = False
+    #: Pages of a review item's batch left for its next batch, because the whole batch was too large to seal.
+    deferred: list[str] = field(default_factory=list)
 
 
 def propose(
@@ -95,7 +99,28 @@ def propose(
     selected, refused = _select(root, raw)
     #: The Sources a leaf refused at preparation: each keeps its keys and is listed as refused.
     held_sources: set[str] = set()
-    for _attempt in range(MAX_EXCLUSIONS + 1):
+    deferred: list[str] = []
+    exclusions = halvings = 0
+
+    def shrink(error: curation.CurationError) -> bool:
+        """Halve a review item's batch that is too large to seal. The server chose that batch, so it
+        shrinks; pages the caller named refuse instead, because dropping them would change the request."""
+        nonlocal selected, halvings
+        if (
+            error.code != "CURATION_PLAN_TOO_LARGE"
+            or review_ref is None
+            or len(selected) < 2
+            or halvings == MAX_HALVINGS
+        ):
+            return False
+        keep = len(selected) // 2
+        deferred.extend(item.path for item in selected[keep:])
+        selected = selected[:keep]
+        halvings += 1
+        return True
+
+    # Each pass either returns, raises, or spends one bounded exclusion or halving.
+    while True:
         derived = _derive(
             root,
             selected,
@@ -107,6 +132,7 @@ def propose(
             held_sources=held_sources,
         )
         derived.refused[:0] = refused
+        derived.deferred = list(deferred)
         if not derived.steps:
             summary = _summary(derived, to_project=to_project, registers=False)
             return {"action": "relocate", "mutated": False, "sealed": False, "summary": summary}
@@ -123,9 +149,12 @@ def propose(
         try:
             prepared = curation.prepare_proposal(root, plan, derived_by="relocate")
         except curation.CurationError as error:
+            if shrink(error):
+                continue
             page = derived.step_pages.get(error.step_id or "")
-            if page is None or _attempt == MAX_EXCLUSIONS:
+            if page is None or exclusions == MAX_EXCLUSIONS:
                 raise
+            exclusions += 1
             refused.append({"page": page, "code": error.code, "reason": error.reason})
             if error.step_id in derived.source_steps:
                 held_sources.add(page)
@@ -142,7 +171,12 @@ def propose(
             ),
         )
         # The plan seals the summary it is approved by, so a later preview shows the same groups.
-        sealed = curation.seal_proposal(root, dataclasses.replace(prepared, summary=summary))
+        try:
+            sealed = curation.seal_proposal(root, dataclasses.replace(prepared, summary=summary))
+        except curation.CurationError as error:
+            if shrink(error):
+                continue
+            raise
         response = {key: value for key, value in sealed.items() if key != "plan"}
         return {
             **response,
@@ -152,19 +186,20 @@ def propose(
             "summary": summary,
             "next_action": "apply",
         }
-    raise AssertionError("unreachable: the last attempt returns or raises")
 
 
 def _requested(root: Path, pages: Sequence[str] | None, review_ref: str | None) -> list[str]:
     if (pages is None) == (review_ref is None):
         raise _error("INVALID_RELOCATION", "a relocation names pages or one review_ref, not both")
     if review_ref is not None:
-        anchor = curation._page_of_review_item(root, str(review_ref))  # noqa: SLF001
-        if anchor is None:
+        covered = curation._pages_of_review_item(root, str(review_ref))  # noqa: SLF001
+        if covered is None:
             raise _error(
                 "RELOCATE_REVIEW_ITEM_UNKNOWN", "review_ref names no current review item on a page"
             )
-        return [anchor]
+        if not covered:
+            raise _error("RELOCATE_REVIEW_ITEM_EMPTY", "the review item names no page to relocate now")
+        return covered
     if (
         not isinstance(pages, list)
         or not 1 <= len(pages) <= MAX_PAGES
@@ -654,6 +689,8 @@ def _summary(
     }
     if derived.unchecked:
         summary["sources_unchecked"] = curation.summary_group(derived.unchecked)
+    if derived.deferred:
+        summary["deferred_to_next_batch"] = curation.summary_group(derived.deferred)
     if derived.mentions_unchecked:
         from . import path_mentions
 

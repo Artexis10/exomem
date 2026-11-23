@@ -2865,13 +2865,15 @@ def _structure_suggestion(
     unreadable review state, costs the caller the question, never the write:
     asking on every write when decisions cannot be read would turn it into noise.
 
-    A response carries one question. The ownership question leads the cohesion question:
+    A response carries one suggestion. A rename after the user's own retitle leads: it
+    asks nothing, the edit is the approval. The ownership question leads the cohesion question:
     a page's home decides what its size means. `created` and `previous` (the page before
     an edit) tell the ownership review whether this write opens its item.
     """
-    from . import note_cohesion, ownership_review
+    from . import name_drift, note_cohesion, ownership_review
 
     questions: tuple[Callable[[], dict[str, Any] | None], ...] = (
+        lambda: name_drift.suggestion_after_write(vault_root, state, previous=previous),
         lambda: ownership_review.suggestion_after_write(
             vault_root, state, created=created, previous=previous
         ),

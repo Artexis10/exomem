@@ -76,7 +76,12 @@ answering is the agent's decision with the user (see `writing.md`).
 Its `kind` is `ownership` while the written page is asked whether it belongs in its
 project and nobody has answered. It holds the review item's `ref`, `fingerprint` and
 `id`, and one `question` that carries the ownership test and the call that keeps the
-page where it is. A response carries one such advisory, and the ownership one leads.
+page where it is. A response carries one such advisory.
+Its `kind` is `rename` after a write that changed a page's title so that its file name no
+longer follows it. It holds the page's `ref`, its `current_name`, the `planned_name`,
+the spelled-out `call` that renames that page, and an `outcome` sentence. The user's edit
+is the approval. It is absent when the title did not change or the name still follows it,
+and the rename one leads.
 Use `detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed

@@ -1568,6 +1568,23 @@ def _page_of_review_item(vault_root: Path, review_ref: str) -> str | None:
     The audience filter of the review surface applies, so a page the caller may not see
     resolves to None exactly as a ref that names no item does.
     """
+    item = _page_review_item(vault_root, review_ref)
+    return None if item is None else item.path
+
+
+def _pages_of_review_item(vault_root: Path, review_ref: str) -> list[str] | None:
+    """The pages a current review item that is not an entity candidate stands for now, else None.
+
+    A page-level item stands for its page; a vault-wide family's one item stands for the batch
+    its family names (`attention.pages_of_item`). The audience filter applies as above.
+    """
+    from . import attention as attention_module
+
+    item = _page_review_item(vault_root, review_ref)
+    return None if item is None else attention_module.pages_of_item(vault_root, item)
+
+
+def _page_review_item(vault_root: Path, review_ref: str) -> Any:
     from . import attention as attention_module
 
     try:
@@ -1576,7 +1593,7 @@ def _page_of_review_item(vault_root: Path, review_ref: str) -> str | None:
         return None
     if any(reason.get("category") == ENTITY_CANDIDATE_FAMILY for reason in item.reasons):
         return None
-    return item.path
+    return item
 
 
 def _page_work_item(

@@ -173,6 +173,21 @@ do not change the page when you answer.
 Answer once and carry on with the task. Do not recite the field names to the user.
 A page that is asked and also at a size step carries the ownership question first.
 
+**When a write returns a rename.** A write that changed a page's title may return
+`structure_suggestion` of kind `rename`. The new title no longer matches the file name,
+and the suggestion holds the name that the title now gives, plus the spelled-out
+`curation_action='relocate'` call for that one page. The user's own retitle is the
+approval: do not ask again. Run the call as a preview, tell the user the new name in one
+line, and apply it. A rename keeps links working. When the suggestion is absent, the
+name still follows the title or the title did not change.
+
+**When many pages carry stale names.** Pages made before titles named files, or retitled
+since, keep a name that no longer follows their title. The review queue holds one item for
+the whole vault (`name_drift`), and `inspect_name_drift` lists the pages with the name each
+would get. Never rename a page that has no usable title; the list marks those. Propose the
+next batch to the user as one preview with the call the item carries, and apply it only
+on their yes. Repeat per batch until the item closes.
+
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
 *expression* — distillation, signal-density, no redundancy — never of *coverage*.

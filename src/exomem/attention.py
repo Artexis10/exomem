@@ -91,6 +91,9 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # vault meets its whole population at once, and a client that lists review items without
     # naming a queue is the only reader many sessions have; `note_cohesion` has no such bound.
     "ownership_review",
+    # After the page-level backlogs: one item for the whole vault, however many pages drift,
+    # so it cannot flood the queue it joins.
+    "name_drift",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -832,6 +835,24 @@ def entity_candidate_by_ref(
     raise ValueError(
         f"REVIEW_ITEM_NOT_FOUND: no current entity candidate for {reference}"
     )
+
+
+def pages_of_item(vault_root: Path, item: AttentionItem) -> list[str]:
+    """The pages one review item stands for now: its anchor page, or the batch a vault-wide family names.
+
+    A vault-wide family anchors its one item on some page, but the item stands for many
+    pages, which the family reads afresh: an action on the item (a relocation by its
+    `review_ref`) acts on that batch, not on the anchor.
+    """
+    from . import name_drift
+
+    # Review families are implemented in code, not authored data; each vault-wide one names its resolver here.
+    batches = {name_drift.CATEGORY: name_drift.pages_for_review}
+    for reason in item.reasons:
+        resolve = batches.get(reason.get("category"))
+        if resolve is not None:
+            return resolve(vault_root)
+    return [item.path]
 
 
 def item_by_ref(
