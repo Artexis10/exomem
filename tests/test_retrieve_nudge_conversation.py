@@ -102,7 +102,7 @@ def test_nothing_excluded_reaches_the_conversation() -> None:
     blob = json.dumps(hook._conversation_from_transcript(str(CLAUDE), CURRENT))
     for sentinel in SENTINELS:
         assert sentinel not in blob, sentinel
-    assert "Evermatter working set" not in blob
+    assert "Exomem working set" not in blob
 
 
 CLAUDE_LEAKS = FIXTURES / "claude_code_leaks.jsonl"

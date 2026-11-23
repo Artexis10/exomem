@@ -169,7 +169,7 @@ _MCP_ACTIVATION_HEAD = (
     "need none. "
     "Evermatter is disconnected when tool discovery offers no Evermatter tools or only an "
     "authenticate tool, or an Evermatter call fails authorization. Tell the user nothing is "
-    "saved and to reconnect Evermatter in the app's MCP or connector settings. "
+    "saved and to reconnect it in the app's MCP/connector settings. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.
@@ -1089,7 +1089,14 @@ _CONVERSATION_MAX_REFS = 12
 #: What Evermatter itself injects, recognised by its fixed data headers. A block
 #: carrying one is never conversation: feeding the hook's own previous
 #: injection back would be a self-reinforcing loop.
-_INJECTED_MARKERS = ("[Evermatter working set", "[Evermatter retrieval check]", "KB routing stubs.")
+#: Both product names: a transcript from before the rename carries the old headers.
+_INJECTED_MARKERS = (
+    "[Evermatter working set",
+    "[Evermatter retrieval check]",
+    "[Exomem working set",
+    "[Exomem retrieval check]",
+    "KB routing stubs.",
+)
 #: Envelopes a client wraps around text no human typed: shell input and
 #: output, task and subagent notifications, reminders, slash-command traffic,
 #: Codex's environment, instruction and skill bodies. A block that starts with
