@@ -406,14 +406,16 @@ def _summary(drifted: int, untitled: int, refused: int, codes: Mapping[str, int]
 
 
 #: The meta fields a finding is built from, which the due-state row stores (`stored_finding`).
+#: The scan time is `scanned_at`, not `as_of`: a listing's `as_of` names the held review pass it
+#: read, and an item must not carry that name.
 # nosemgrep: ep-word-set -- the meta fields that `finding` writes, not a vocabulary.
-_STORED = ("signal_version", "drifted", "untitled", "refused", "refused_codes", "as_of")
+_STORED = ("signal_version", "drifted", "untitled", "refused", "refused_codes", "scanned_at")
 
 
 def _finding_from(vault_root: Path, fields: dict[str, Any], ref: str) -> AuditFinding:
     """The review finding for these stored fields, with the item's call spelled now.
 
-    The counts are those of the scan made at `as_of`, which the text states: a finding rebuilt
+    The counts are those of the scan made at `scanned_at`, which the text states: a finding rebuilt
     from the stored row is as old as that row.
     """
     reading = _reading({**fields, "batch_pages": BATCH_PAGES})
@@ -427,7 +429,7 @@ def _finding_from(vault_root: Path, fields: dict[str, Any], ref: str) -> AuditFi
         int(fields.get("refused") or 0),
         fields.get("refused_codes") or {},
     )
-    as_of = f"As of {fields['as_of']}, " if fields.get("as_of") else ""
+    as_of = f"As of {fields['scanned_at']}, " if fields.get("scanned_at") else ""
     reading.detail = (
         f"{as_of}{summary} Propose the next batch of up to {min(BATCH_PAGES, drifted)} to the "
         f"user as one preview, then apply it on their yes: {call}"
@@ -454,7 +456,7 @@ def finding(vault_root: Path, drift: Scan) -> AuditFinding | None:
             "untitled": len(drift.untitled),
             "refused": len(drift.refused),
             "refused_codes": _refused_codes(drift),
-            "as_of": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M UTC"),
+            "scanned_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%d %H:%M UTC"),
         },
         ref,
     )

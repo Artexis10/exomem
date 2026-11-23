@@ -335,7 +335,7 @@ def test_the_review_listing_serves_the_item_from_its_stored_row_without_a_scan(
     detail = item["reasons"][0]["detail"]
     assert "curation_action='relocate'" in detail
     # Failure caught too: the stored counts read as current; the text says when they were taken.
-    assert detail.startswith(f"As of {due_state.name_drift_reading(vault)['as_of']}, ")
+    assert detail.startswith(f"As of {due_state.name_drift_reading(vault)['scanned_at']}, ")
 
 
 def test_the_one_item_changes_its_signal_with_the_drifted_set(vault: Path) -> None:
