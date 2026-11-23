@@ -3407,7 +3407,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             timeout=min(args.budget_seconds, 120),
         )
         # `uv build` names the wheel after the checkout's project.
-        project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        project = tomllib.loads(pyproject)["project"]["name"]
         wheels = sorted(dist.glob(f"{project}-*.whl"))
         if not wheels:
             raise RuntimeError("uv build produced no wheel")

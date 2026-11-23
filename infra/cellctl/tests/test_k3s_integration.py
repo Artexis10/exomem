@@ -1783,7 +1783,7 @@ def test_cellctl_against_a_real_k3s_cluster(k3s: K3sCluster, cell_db: CellDataba
         documents=[forged_statefulset], check=False,
     )
     assert denied_image.returncode != 0
-    assert "digest-pinned images from the configured cell repository" in denied_image.stderr, denied_image.stderr
+    assert "digest-pinned images from a configured cell repository" in denied_image.stderr, denied_image.stderr
 
     # NEW-1: projected sources are an allowlist, so a podCertificate source
     # (which a serviceAccountToken denylist let through) is denied, and so is

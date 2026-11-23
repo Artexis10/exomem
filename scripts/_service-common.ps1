@@ -203,7 +203,8 @@ function Get-ExomemInstalledVersion {
 
     if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
     # The release installs under `evermatter` or, for installs made before the
-    # rename, `exomem`; read whichever name the interpreter has.
+    # rename, `exomem`; read whichever name the interpreter has. A copy of
+    # install_info.DISTRIBUTION_NAMES, temporary: openspec rename-to-evermatter task 4.2 retires it.
     $probe = "import importlib.metadata as m`nfor n in ('evermatter', 'exomem'):`n    try:`n        print(m.version(n))`n        break`n    except m.PackageNotFoundError:`n        continue`nelse:`n    raise SystemExit(1)"
     $out = & $PythonPath -c $probe 2>$null
     if ($LASTEXITCODE -ne 0) { return $null }

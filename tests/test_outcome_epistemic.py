@@ -718,7 +718,8 @@ def test_case_text_that_holds_a_store_name_is_refused_because_the_judge_would_re
     problems = cases.structure_problems(project)
 
     assert problems == [
-        "probe p-early key.rubric[0] holds a store name the judge masks (memory/, exomem); reword it"
+        "probe p-early key.rubric[0] holds a store name the judge masks "
+        f"({', '.join(cases.STORE_NAMES)}); reword it"
     ]
 
 

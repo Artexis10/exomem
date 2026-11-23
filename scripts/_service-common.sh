@@ -550,6 +550,7 @@ exomem_service_binding_path() {
 
 # The release installs under `evermatter` or, for installs made before the
 # rename, `exomem`; the probe reads whichever name the interpreter has.
+# A copy of install_info.DISTRIBUTION_NAMES, temporary: openspec rename-to-evermatter task 4.2 retires it.
 exomem_installed_version() {
     local python="$1"
     [[ -x "$python" ]] || return 1

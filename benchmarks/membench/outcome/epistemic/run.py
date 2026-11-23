@@ -85,10 +85,10 @@ PRIVATE_DIRS = (
 #: ``folder_instruction`` fails when one misses, so a change to the product text cannot drift unseen.
 FOLDER_REPLACEMENTS = (
     (
-        "Use Exomem as the memory for my work.",
+        "Use Evermatter as the memory for my work.",
         "Use the folder `memory/` in your working directory as the memory for my work.",
     ),
-    ("recall what Exomem holds about", "read what that folder holds about"),
+    ("recall what Evermatter holds about", "read what that folder holds about"),
     ("as one concise observation", "as one concise note in that folder"),
 )
 
@@ -113,9 +113,10 @@ def folder_instruction() -> str:
                 "update FOLDER_REPLACEMENTS in membench/outcome/epistemic/run.py"
             )
         text = text.replace(old, new)
-    if "Exomem" in text:
+    # The product's own names, current and former: either one in arm F's prompt contaminates the arms.
+    if any(name in text for name in ("Evermatter", "Exomem")):
         raise RuntimeError(
-            "the folder instruction still names Exomem; update FOLDER_REPLACEMENTS in "
+            "the folder instruction still names the product; update FOLDER_REPLACEMENTS in "
             "membench/outcome/epistemic/run.py"
         )
     return text
