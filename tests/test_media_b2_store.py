@@ -36,6 +36,7 @@ SHA256 = hashlib.sha256(DATA).hexdigest()
 
 @pytest.fixture
 def b2(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(media_edge_b2, "UPLOAD_RETRY_SECONDS", 0.001)
     fake = FakeB2(minimum_part=128)
     fake.name_prefix = PREFIX
     faults = {}
@@ -163,10 +164,33 @@ def test_a_lost_small_request_does_not_reuse_another_attempts_version(b2):
     store = B2ReplicaStore.from_configuration(config)
     older = _upload(store)
     fake.lose("upload_file", "request")
-    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
-        _upload(store)
-    assert list(fake.files) == [older]
+    version = _upload(store)
+    assert version != older and set(fake.files) == {older, version}
     assert fake.calls.count("head_name") == 1
+
+
+@pytest.mark.parametrize("size", [100, 400], ids=["small", "multipart"])
+def test_a_busy_upload_pod_is_retried_with_a_growing_pause(b2, monkeypatch, size):
+    fake, config, faults = b2
+    monkeypatch.setattr(media_edge_b2, "DEFAULT_PART_BYTES", 128)
+    pauses, busy = [], {"left": 2}
+    delay = media_edge_b2.upload_retry_delay
+    monkeypatch.setattr(media_edge_b2, "upload_retry_delay", lambda attempt, error: pauses.append(
+        delay(attempt, error)) or 0.0)
+
+    async def too_busy(request, reply):
+        if busy["left"]:
+            busy["left"] -= 1
+            # A busy pod stores nothing; the fake has already applied the upload, so undo it.
+            fake.files.pop(reply.json().get("fileId"), None)
+            return httpx.Response(503, json={"code": "too_busy"}, headers={"Retry-After": "3"})
+        return reply
+
+    faults["upload_part" if size > 128 else "upload_file"] = too_busy
+    data = bytes(range(256)) * 2
+    version = _upload(B2ReplicaStore.from_configuration(config), data[:size])
+    assert fake.files[version]["data"] == data[:size]
+    assert pauses == [3.0, 3.0]  # The provider's Retry-After outweighs the shorter growing pause.
 
 
 def test_an_unfinished_or_mismatched_large_file_never_becomes_a_replica(b2, monkeypatch):

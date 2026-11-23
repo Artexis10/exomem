@@ -28,6 +28,7 @@ from .originals import is_sha256
 
 _BLOCK = 1024 * 1024
 _MAX_PART_BYTES = 64 * 1024 * 1024
+_UPLOAD_ATTEMPTS = 5  # With the native backoff, a busy pod gets about 15 seconds to recover.
 _CREDENTIAL_BYTES = 4096
 
 
@@ -113,7 +114,7 @@ class B2ReplicaStore:
                 client = run(held.enter_async_context(httpx.AsyncClient(
                     timeout=httpx.Timeout(60.0, connect=5.0), trust_env=False,
                 )))
-                yield native.B2(client, key_id=key_id, application_key=key,
+                yield native.B2(client, key_id=key_id, application_key=key, attempts=_UPLOAD_ATTEMPTS,
                                 bucket=self.scope.bucket_name, scope=self.scope), run, held
             finally:
                 runner.run(held.aclose())
@@ -162,18 +163,25 @@ class B2ReplicaStore:
         data = _take(stream, size)
         _check_size_and_digest(stream, hashlib.sha256(data).hexdigest(), sha256)
         nonce = uuid.uuid4().hex
-        target = await provider.upload_target()
-        try:
-            version = await provider.upload_file(
-                target, key, data, hashlib.sha1(data).hexdigest(),
-                {native.SHA256_INFO: sha256, native.NONCE_INFO: nonce},
-            )
-        except native.ProviderUncertain:
-            head = await provider.head_name(key)
-            if (head is None or head.name != key or head.size != size or head.info.get(native.SHA256_INFO) != sha256
-                    or head.info.get(native.NONCE_INFO) != nonce):
-                raise
-            version = head.file_id
+        for attempt in range(_UPLOAD_ATTEMPTS):
+            target = await provider.upload_target()
+            try:
+                version = await provider.upload_file(
+                    target, key, data, hashlib.sha1(data).hexdigest(),
+                    {native.SHA256_INFO: sha256, native.NONCE_INFO: nonce},
+                )
+                break
+            except native.ProviderError as error:
+                if isinstance(error, native.ProviderUncertain):
+                    # Only this attempt's nonce proves that its bytes landed.
+                    head = await provider.head_name(key)
+                    if (head is not None and head.name == key and head.size == size
+                            and head.info.get(native.SHA256_INFO) == sha256 and head.info.get(native.NONCE_INFO) == nonce):
+                        version = head.file_id
+                        break
+                if attempt + 1 == _UPLOAD_ATTEMPTS or not native.upload_retryable(error):
+                    raise
+                await asyncio.sleep(native.upload_retry_delay(attempt, error))
         await self._confirm_upload(provider, key, version, size, sha256, nonce=nonce)
         return version
 

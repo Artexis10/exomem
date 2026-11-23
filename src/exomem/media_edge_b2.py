@@ -41,17 +41,19 @@ _MAX_LIST_PAGES = 2500
 
 
 class ProviderError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, *, retry_after: float | None = None):
         self.status = status
+        self.retry_after = retry_after
         super().__init__(message)
 
 
 class ProviderRejected(ProviderError):
     """The provider refused the call before acting on it."""
 
-    def __init__(self, message: str, status: int | None = None, *, missing: bool = False):
+    def __init__(self, message: str, status: int | None = None, *, missing: bool = False,
+                 retry_after: float | None = None):
         self.missing = missing
-        super().__init__(message, status)
+        super().__init__(message, status, retry_after=retry_after)
 
 
 class ProviderUncertain(ProviderError):
@@ -125,9 +127,26 @@ def _classify(response: httpx.Response, *, identify_missing: bool = False) -> Pr
     # 408 and 5xx can follow partial work; other statuses mean the call was refused.
     status = response.status_code
     message = f"the provider answered {status}"
+    after = response.headers.get("Retry-After", "")
+    retry_after = float(after) if after.isdigit() else None
     if status >= 500 or status == 408:
-        return ProviderUncertain(message, status)
-    return ProviderRejected(message, status, missing=identify_missing and missing_reply(status, response.content))
+        return ProviderUncertain(message, status, retry_after=retry_after)
+    return ProviderRejected(message, status, missing=identify_missing and missing_reply(status, response.content),
+                            retry_after=retry_after)
+
+
+# Backblaze answers a busy upload pod with 503 and asks for a fresh upload URL after a growing pause.
+UPLOAD_RETRY_SECONDS = 1.0
+UPLOAD_RETRY_CAP_SECONDS = 16.0
+
+
+def upload_retryable(error: ProviderError) -> bool:
+    """Auth expiry, throttling and server faults recover with a fresh upload URL. A refused upload does not."""
+    return not isinstance(error, ProviderRejected) or error.status in (401, 429)
+
+
+def upload_retry_delay(attempt: int, error: ProviderError) -> float:
+    return min(UPLOAD_RETRY_CAP_SECONDS, max(error.retry_after or 0.0, UPLOAD_RETRY_SECONDS * 2**attempt))
 
 
 @contextmanager
@@ -288,12 +307,10 @@ class B2:
                                          "X-Bz-Content-Sha1": sha1}, data)
                 return
             except ProviderError as error:
-                # Auth refusal and throttling can recover with a fresh upload URL. A malformed part cannot.
-                if (attempt + 1 == self._attempts or
-                        (self._scope is not None and isinstance(error, ProviderRejected) and error.status not in (401, 429))):
+                if attempt + 1 == self._attempts or (self._scope is not None and not upload_retryable(error)):
                     raise
                 if self._scope is not None:
-                    await asyncio.sleep(0.05 * 2**attempt)
+                    await asyncio.sleep(upload_retry_delay(attempt, error))
 
     async def finish_large(self, file_id: str, part_sha1: list[str]) -> None:
         await self._post("b2_finish_large_file", {"fileId": file_id, "partSha1Array": part_sha1})
