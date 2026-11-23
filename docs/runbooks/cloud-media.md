@@ -356,6 +356,28 @@ That measurement excludes the speech runtime and the speech and image query arti
 Record their image growth during qualification instead of reusing the earlier total.
 `scripts/make-media-samples.py` regenerates the document and OCR samples; preserve the attributed speech fixtures separately.
 
+## Audio and video decoder
+
+The Cloud image decodes audio and video through PyAV, built in the `av-lgpl` stage of the `Dockerfile` against an FFmpeg that carries no GPL code.
+The PyPI `av` wheel bundles an FFmpeg linked with libx264 and libx265, which are GPL, so the Cloud image does not install it.
+No Exomem module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
+AV1 decoding uses libdav1d from the Debian package `libdav1d7`.
+The PyAV release is the one `uv.lock` pins, built from its hash-checked source distribution with pinned build tools.
+Decoder output is the same as the wheel's: H.264, HEVC, AV1, VP8, VP9, MPEG-4, AAC, MP3, Opus, FLAC, PCM and AMR decode to identical frames and samples.
+The image keeps the FFmpeg libraries as separate files in `/opt/ffmpeg-lgpl/lib`.
+Their licence, source address, checksum and configure line are in `/usr/share/doc/ffmpeg-lgpl/`.
+Pip installs keep the PyPI wheel.
+
+To move to a new FFmpeg release:
+
+1. Download the `.tar.xz` and its `.asc` from `https://ffmpeg.org/releases/`.
+2. Verify the signature against the FFmpeg release signing key, fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`.
+3. Set `FFMPEG_VERSION` and `FFMPEG_SHA256` together in the `av-lgpl` stage.
+4. Build `--target cloud`; the build gate decodes the audio and video samples.
+
+The build fails if the tarball differs from `FFMPEG_SHA256`.
+A PyAV release that needs a newer FFmpeg major version moves both pins in one change.
+
 ## HEIC photos
 
 The `media-cpu` and `embeddings` extras share the pinned `pi-heif` decoder through `image-codecs`.
