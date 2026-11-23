@@ -149,7 +149,7 @@ The server instructions now ask for recall before answering, per subject, even m
 
 Evidence, 2026-11-23, tool-only Sonnet client, one draw, at the balanced level, run record `subject-switch-s1`:
 
-- 12 fresh cases (8 positive, 4 negative) against main: 9/12 exact against 7/12, 2 won and 0 lost, +0.17 [0.00, +0.42]. The interval includes zero, so by itself this is no change. The text ships on the rule written before the run: no fresh case lost and no general-only case gains a write. Both wins were sessions in which main made no Exomem call. No fresh negative made a call on either arm.
+- 12 fresh cases (8 positive, 4 negative) against main: 9/12 exact against 7/12, 2 won and 0 lost, +0.17 [0.00, +0.42]. The interval includes zero, so by itself this is no change. The text ships on the rule written before the run: candidate minus main on exact is at least 0, and no general-only case gains a write. Both wins were sessions in which main made no Exomem call. No fresh negative made a call on either arm.
 - The 24 scale cases, against the earlier shipped run (an older base, before the recall tool description was trimmed): exact unchanged at 12/24. Positives fully delivered rose from 14/16 to 16/16, but the gain is the two cases the text was tuned on; on the other 22, exact went up on 2 and down on 3. No write was attempted to a wrong collection on either arm.
 - Precision: 7 of 8 scale negatives made an Exomem call, against 6 of 8. The new text also recalled once on a general first turn of a fresh case. The cost is one recall's latency on some general turns, with no writes.
 - One fresh case still makes no call after a general first turn on either arm.
