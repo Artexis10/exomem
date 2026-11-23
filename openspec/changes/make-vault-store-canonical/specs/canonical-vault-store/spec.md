@@ -29,25 +29,30 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
-A governed write in store mode SHALL commit every file it changes, the lexical catalogue rows, the graph nodes, edges and dependencies derived from those files, one audit row per file and one projection intent per file in one `BEGIN IMMEDIATE` transaction. The write SHALL acknowledge only after that transaction is durable. Derivation SHALL run from the bytes being written, before the transaction, with the same derivation code that file mode uses. When a write adds a title that makes links on other pages resolve, the same transaction SHALL update those pages' graph rows.
+A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. The writing request SHALL derive its own intents after it releases the boundary and before it acknowledges; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`.
 
-#### Scenario: Search and graph see the write at acknowledgement
+#### Scenario: Search and graph see the write when it returns
 - **WHEN** a governed write that adds a page and a link returns success
 - **THEN** a lexical search for a term in the page returns the page
 - **AND** the graph returns the new edge from that page
-- **AND** neither depends on a background drain, watcher event or repair
+- **AND** neither depends on a watcher event or repair
 
-#### Scenario: A hard kill leaves no half-applied write
-- **WHEN** the process is killed at any point while a governed write runs
-- **THEN** after restart every file of that write shows either all of its old state or all of its new state, in page bytes, lexical rows and graph rows together
-- **AND** no repair, rebuild or reconcile is needed to make the derived rows match the page bytes
+#### Scenario: The boundary hold does not grow with derivation
+- **WHEN** a governed write runs once with an instant derivation and once with a derivation slowed by seconds
+- **THEN** the two boundary holds differ by less than half the added derivation time
+- **AND** the slow write still returns with its rows derived
 
-#### Scenario: A new title resolves earlier links in the same transaction
-- **WHEN** a governed write creates a page whose title other pages already link to
-- **THEN** at acknowledgement the graph holds edges from those pages to the new page
+#### Scenario: A page's size reaches the commit only through its bytes
+- **WHEN** one governed write stores a page with one unit and another stores a page with 400 units and 400 links
+- **THEN** both run the same number of statements while they hold the vault mutation boundary
+
+#### Scenario: A hard kill loses no derivation
+- **WHEN** the process is killed at any point while a governed write or its derivation runs
+- **THEN** after restart every file of that write shows all of its old state or all of its new state, in page bytes, audit rows, projection intents and derivation intents together
+- **AND** each page whose derived rows are older than its bytes has a derivation intent, which the store thread derives before it starts other work, with no rebuild, repair or reconcile
 
 #### Scenario: Derived rows match file mode exactly
-- **WHEN** the same sequence of page bytes is written once in file mode and once in store mode from the same starting vault
+- **WHEN** the same sequence of page bytes is written once in file mode and once in store mode from the same starting vault, and store mode has derived every intent
 - **THEN** the lexical page rows, semantic unit rows, graph nodes, graph edges, graph dependencies and parent references are equal, apart from columns that record write time or write order
 
 #### Scenario: A governed page's trash keeps its tombstone and receipt around the transaction
@@ -59,6 +64,42 @@ A governed write in store mode SHALL commit every file it changes, the lexical c
 - **WHEN** a store-mode delete, move or recovery runs on a vault with an active governance catalog publication
 - **THEN** the catalog change is prepared before the writer's validation returns, the change and its log entry commit in one transaction, and the catalog publishes after it
 - **AND** a publication that fails after the transaction reports the catalog publication as uncertain
+
+### Requirement: Derived rows follow their page's derivation intent
+In store mode, the store thread SHALL derive the rows of each path that a derivation intent names, from its stored bytes or its unowned file, with the code that file mode uses. Each transaction SHALL take a bounded number of pages in revision order, delete their intents, re-derive the graph rows of pages whose links they re-resolve, and advance the store revision. The store thread SHALL derive due intents before other work, without the vault mutation boundary.
+
+#### Scenario: A write can cite the page that the write before it created
+- **WHEN** a governed write creates a Source and the next governed write cites it by its reference
+- **THEN** the second write resolves the Source and commits
+
+#### Scenario: A new title resolves earlier links in its derivation
+- **WHEN** a governed write creates a page whose title other pages already link to
+- **THEN** the transaction that derives the page also writes the edges from those pages to it
+
+#### Scenario: No canonical commit copies the write-ahead log
+- **WHEN** the store's write-ahead log passes the size at which SQLite would copy it into the store
+- **THEN** the store thread copies it between its work
+- **AND** no governed write's commit runs that copy
+
+### Requirement: Derivation lag is visible and bounded
+One intent SHALL stand for each path, keeping its oldest queue time. A failed derivation SHALL keep its intent and retry with backoff, then be marked failed with a reason code, and SHALL NOT hold back other intents. Status SHALL report the derived state as `current`, `behind`, `failed` or `unknown`, with counts and the oldest age. A reader whose snapshot holds unfinished intents SHALL say so, naming no path. A clean stop SHALL derive pending intents within its bound.
+
+#### Scenario: A failed derivation keeps the page and says so
+- **WHEN** the derivation of a committed page fails
+- **THEN** the page's bytes stay stored and a read by path returns them
+- **AND** status reports `failed` with the count and the reason code, and names no path
+- **AND** a later retry or the next start derives the page
+
+#### Scenario: An original's derived rows wait for room above the upload floor
+- **WHEN** a stored original's page fits above the vault's upload floor and the rows derived from it do not
+- **THEN** the write commits the page and acknowledges with its derived state `pending`
+- **AND** the derivation writes none of those rows and keeps the intent with the reason code `no_room`
+- **AND** a retry after room returns derives them
+
+#### Scenario: A reader during a drain is told what lags
+- **WHEN** a search runs while a committed page's derivation intent is pending
+- **THEN** the search answers from its snapshot's rows with the derived-behind notice and the pending count
+- **AND** the notice names no path
 
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.
@@ -243,7 +284,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
 
 ### Requirement: Knowledge writes share the store's availability
-In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical or graph tables; the Markdown projection is the in-vault copy of pages.
+In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical, graph or derivation-intent tables; the Markdown projection is the in-vault copy of pages.
 
 #### Scenario: An unavailable store refuses knowledge writes
 - **WHEN** the store reports that it cannot accept writes
@@ -252,7 +293,7 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 
 #### Scenario: The in-vault replica carries collections only
 - **WHEN** the collection store publishes its in-vault replica in a store-mode vault
-- **THEN** the replica holds the collection tables and no page, lexical or graph table
+- **THEN** the replica holds the collection tables and no page, lexical, graph or derivation-intent table
 
 #### Scenario: A store-mode service starts on a store that its writer has not yet migrated
 - **WHEN** a release whose collection-store schema is newer starts the service of a store-mode vault whose store is at an earlier schema that this release can still read pages from
@@ -260,7 +301,7 @@ In store mode, knowledge writes SHALL take the collection store's writer lease a
 - **AND** a knowledge write runs only after the writer holds the lease and has migrated the store
 
 ### Requirement: A change to the schema overlay settles the registry state in the background
-In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says or the record of the last overlay change cannot be read, and SHALL count the overlay paths that wait for the projector or a hold. A tick with no batch to run SHALL NOT take the vault's mutation boundary. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread. The same job SHALL give a store that an older build set up the derived tables that this build adds: until it has created them and derived every page, status SHALL report `unknown` with `owner_schema` as `behind`, and a reader of rows that the store does not hold yet SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` and SHALL NOT answer as if no row matched. The job SHALL record the tables it creates, so a rollback drops them.
+In store mode, a commit that changes a source of the schema overlay (a page under `_Schema/` or the access policy file) SHALL record its revision and return without deriving every page again. A background job SHALL then derive the stored pages again, one bounded transaction per batch, and SHALL record the overlay revision that the derived rows reflect. Status SHALL report `rebuilding` with the target revision while the rows reflect an older overlay, `current` when they reflect the latest, and `unknown` when no record says or the record of the last overlay change cannot be read, and SHALL count the overlay paths that wait for the projector or a hold. No batch of the job SHALL take the vault's mutation boundary, and a batch SHALL run only while no derivation intent is due. A batch and its cursor SHALL commit together, so a kill leaves the rows behind the store and never ahead of it, and the next start SHALL resume at the cursor. The job SHALL run on the store thread's scheduler and SHALL add no thread. The same job SHALL give a store that an older build set up the derived tables that this build adds: until it has created them and derived every page, status SHALL report `unknown` with `owner_schema` as `behind`, and a reader of rows that the store does not hold yet SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` and SHALL NOT answer as if no row matched. The job SHALL record the tables it creates, so a rollback drops them.
 
 #### Scenario: A policy change returns before its rows and the job then settles them
 - **WHEN** a commit changes the access policy of a store-mode vault
