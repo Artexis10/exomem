@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_curation_relocate import propose_relocation
 
 from exomem import audit as audit_module
 from exomem import due_state, name_drift, writer_lease
@@ -187,7 +188,7 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
             assert not set(batch) & {rel for _, done in batches for rel in done}
             assert not set(batch) & unchanged_refusals
             snapshot = {rel: (vault / rel).read_bytes() for rel in batch}
-            proposed = _maintain(vault, "relocate", review_ref=first["ref"])
+            proposed = propose_relocation(vault, review_ref=first["ref"])
             left_out = {row["page"]: row["code"] for row in proposed["summary"]["refused"]["shown"]}
             moved = [move["from"] for move in proposed["summary"]["moves"]["shown"]]
             assert sorted([*moved, *left_out]) == sorted(batch)
@@ -301,7 +302,7 @@ def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
     page.write_text(page.read_text(encoding="utf-8").replace("Hold", "Cap"), encoding="utf-8")
 
     with request_scope(owner_principal(surface="mcp")):
-        proposed = _maintain(vault, "relocate", review_ref=name_drift.item_ref(vault))
+        proposed = propose_relocation(vault, review_ref=name_drift.item_ref(vault))
         left_out = {row["page"]: row["code"] for row in proposed["summary"]["refused"]["shown"]}
         refused_batch = name_drift.pages_for_review(vault)
         page.write_text(page.read_text(encoding="utf-8").replace("Cap", "Hold"), encoding="utf-8")
@@ -325,7 +326,7 @@ def test_a_relocation_that_names_a_navigation_page_keeps_its_name(vault: Path) -
     rel = f"{AREA}/index.md"
     _put(vault, rel, _page("Harbour research index", number=40))
 
-    proposed = _maintain(vault, "relocate", pages=[rel])
+    proposed = propose_relocation(vault, pages=[rel])
 
     assert proposed["summary"]["moves"]["count"] == 0
     assert proposed["summary"]["unchanged"]["shown"] == [rel]
@@ -495,7 +496,7 @@ def test_a_batch_too_large_to_seal_shrinks_and_names_the_pages_left_for_the_next
 
     _invent(vault)
     ref = name_drift.item_ref(vault)
-    whole = _maintain(vault, "relocate", review_ref=ref)
+    whole = propose_relocation(vault, review_ref=ref)
     # The first call left out the pages the move contract refuses; the batch is now the rest.
     batch = name_drift.pages_for_review(vault)
     assert whole["summary"]["moves"]["count"] == len(batch)
@@ -510,7 +511,7 @@ def test_a_batch_too_large_to_seal_shrinks_and_names_the_pages_left_for_the_next
 
     monkeypatch.setattr(curation, "_prepare_step", counted)
 
-    proposed = _maintain(vault, "relocate", review_ref=ref)
+    proposed = propose_relocation(vault, review_ref=ref)
 
     moved = proposed["summary"]["moves"]["count"]
     assert proposed["sealed"] is True
