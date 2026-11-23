@@ -1151,11 +1151,13 @@ def _reachable_now(vault: Path, name: str, *, deadline: float | None = None, for
     """Wait briefly for an identity probe, leaving busy slots and other stores alone."""
     from . import media_store
 
-    timeout = media_store.STORE_PROBE_SECONDS
+    started = time.monotonic()
+    until = started + media_store.STORE_PROBE_SECONDS
     if deadline is not None:
-        timeout = min(timeout, deadline - time.monotonic())
+        until = min(until, deadline)
     try:
-        answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name), timeout=timeout)
+        answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name, until),
+                                             timeout=until - started)
     except media_store.StoreReadPending:
         return False
     except media_store.StoreReadTimedOut:
@@ -1169,8 +1171,8 @@ def observe(vault: Path, *, deadline: float | None = None) -> None:
     """Record whether each store that has a cheap check answers as itself now.
 
     Only the worker calls it (and the drain, when a copy meets a store that does not answer), so a status reports an
-    observation with its time and never reads a store itself. A store with no cheap check (a remote one) is not
-    probed and keeps no record.
+    observation with its time and never reads a store itself. A store with no cheap check is not probed and keeps
+    no record. A B2 store's check is a fresh authorization that also rechecks its key's scope.
     """
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
