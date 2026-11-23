@@ -495,7 +495,7 @@ crossed so far, not only the entries that its own upgrade crossed.
 3. Otherwise, read the list from the newest successful platform Deployment:
 
    ```bash
-   PREVIOUS=$(for id in $(gh api "repos/Artexis10/exomem/deployments?environment=cloud-platform&per_page=20" --jq '.[].id'); do if [ "$(gh api "repos/Artexis10/exomem/deployments/$id/statuses?per_page=1" --jq '.[0].state')" = success ]; then gh api "repos/Artexis10/exomem/deployments/$id" --jq '.payload | if type == "string" then fromjson else . end | .barriers_crossed // [] | tojson'; break; fi; done)
+   PREVIOUS=$(for id in $(gh api "repos/Artexis10/evermatter/deployments?environment=cloud-platform&per_page=20" --jq '.[].id'); do if [ "$(gh api "repos/Artexis10/evermatter/deployments/$id/statuses?per_page=1" --jq '.[0].state')" = success ]; then gh api "repos/Artexis10/evermatter/deployments/$id" --jq '.payload | if type == "string" then fromjson else . end | .barriers_crossed // [] | tojson'; break; fi; done)
    ```
 
 4. After you did each entry's runbook step, add the entries that this upgrade crossed. With none, use `'[]'`:
@@ -508,13 +508,13 @@ crossed so far, not only the entries that its own upgrade crossed.
 5. Create the Deployment and mark it successful:
 
    ```bash
-   id=$(jq -n --arg ref "$TAG" --argjson crossed "$CROSSED" '{ref: $ref, environment: "cloud-platform", auto_merge: false, required_contexts: [], payload: {barriers_crossed: $crossed}, description: "Platform upgrade"}' | gh api repos/Artexis10/exomem/deployments --input - --jq .id) && gh api "repos/Artexis10/exomem/deployments/$id/statuses" -f state=success --jq .state
+   id=$(jq -n --arg ref "$TAG" --argjson crossed "$CROSSED" '{ref: $ref, environment: "cloud-platform", auto_merge: false, required_contexts: [], payload: {barriers_crossed: $crossed}, description: "Platform upgrade"}' | gh api repos/Artexis10/evermatter/deployments --input - --jq .id) && gh api "repos/Artexis10/evermatter/deployments/$id/statuses" -f state=success --jq .state
    ```
 
 6. Start the workflow on `main`, so that it sets the release's cell image:
 
    ```bash
-   gh workflow run cloud-deploy.yml --ref main -R Artexis10/exomem
+   gh workflow run cloud-deploy.yml --ref main -R Artexis10/evermatter
    ```
 
 Expected result: step 5 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
@@ -579,43 +579,43 @@ Do these steps once, after Substrate has shipped the image history and you have 
 1. Create the `cloud-deploy` environment, with a branch policy:
 
    ```bash
-   echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/Artexis10/exomem/environments/cloud-deploy --input -
+   echo '{"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}' | gh api -X PUT repos/Artexis10/evermatter/environments/cloud-deploy --input -
    ```
 
 2. Admit only `main`:
 
    ```bash
-   gh api repos/Artexis10/exomem/environments/cloud-deploy/deployment-branch-policies -f name=main -f type=branch
+   gh api repos/Artexis10/evermatter/environments/cloud-deploy/deployment-branch-policies -f name=main -f type=branch
    ```
 
 3. Add the deploy token. Paste it at the prompt:
 
    ```bash
-   gh secret set EXOMEM_DEPLOY_TOKEN --env cloud-deploy -R Artexis10/exomem
+   gh secret set EXOMEM_DEPLOY_TOKEN --env cloud-deploy -R Artexis10/evermatter
    ```
 
 4. Add the alert receiver URL that carries the `cloud-deploy` capability. Paste it at the prompt:
 
    ```bash
-   gh secret set EXOMEM_CLOUD_DEPLOY_ALERT_URL --env cloud-deploy -R Artexis10/exomem
+   gh secret set EXOMEM_CLOUD_DEPLOY_ALERT_URL --env cloud-deploy -R Artexis10/evermatter
    ```
 
 5. Set Substrate's public origin. Load it into `EXOMEM_SUBSTRATE_URL` first, as an `https://` URL:
 
    ```bash
-   gh variable set EXOMEM_SUBSTRATE_URL --env cloud-deploy --body "$EXOMEM_SUBSTRATE_URL" -R Artexis10/exomem
+   gh variable set EXOMEM_SUBSTRATE_URL --env cloud-deploy --body "$EXOMEM_SUBSTRATE_URL" -R Artexis10/evermatter
    ```
 
 6. Optional: set the poll interval and timeout in seconds. The defaults are 30 and 3600.
 
    ```bash
-   gh variable set CLOUD_DEPLOY_POLL_INTERVAL_SECONDS --body 30 -R Artexis10/exomem && gh variable set CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS --body 3600 -R Artexis10/exomem
+   gh variable set CLOUD_DEPLOY_POLL_INTERVAL_SECONDS --body 30 -R Artexis10/evermatter && gh variable set CLOUD_DEPLOY_POLL_TIMEOUT_SECONDS --body 3600 -R Artexis10/evermatter
    ```
 
 7. Check the branch policy:
 
    ```bash
-   gh api repos/Artexis10/exomem/environments/cloud-deploy/deployment-branch-policies --jq '.branch_policies[].name'
+   gh api repos/Artexis10/evermatter/environments/cloud-deploy/deployment-branch-policies --jq '.branch_policies[].name'
    ```
 
 Expected result: step 7 prints only `main`.

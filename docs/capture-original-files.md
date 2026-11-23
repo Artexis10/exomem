@@ -41,7 +41,7 @@ It needs no user token.
 1. Compute the file's SHA-256 in the sandbox, for example with `sha256sum original.txt`; retain the digest.
 2. Call `upload_files` with `lane="source"` and `expected_sha256`; the digest holds the upload. Receive a handoff.
 3. Save the returned handoff JSON to `handoff.json` in the sandbox; keep its token private.
-4. Run `pip install exomem`, then `exomem attach original.txt --handoff-file handoff.json --root .`; receive a held file handle.
+4. Run `pip install evermatter`, then `exomem attach original.txt --handoff-file handoff.json --root .`; receive a held file handle.
 5. If the sandbox cannot run that command, send the fallback request below instead; receive the same reply.
 6. Call `save_source` with the returned `file` in `files`, a title, source kind and digest; receive the custody receipt.
 

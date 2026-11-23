@@ -264,7 +264,7 @@ image. The admission policy `exomem-cellctl-scope` in
 configured repository.
 
 **Check.** Run `gh attestation verify oci://ghcr.io/artexis10/evermatter:<version>-cloud --repo
-Artexis10/exomem --signer-workflow Artexis10/exomem/.github/workflows/release-please.yml --source-ref
+Artexis10/evermatter --signer-workflow Artexis10/evermatter/.github/workflows/release-please.yml --source-ref
 refs/tags/v<version>`.
 
 **Limits.** Admission checks no signatures, because the signature policy in
