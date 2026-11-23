@@ -21,7 +21,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -3062,13 +3062,50 @@ def test_the_services_background_activation_build_offers_a_store_collection(serv
     """Recall's map lists the collections its activation index anchors, and the service builds that index on a
     thread of its own, where no request binds the store. A store collection the build cannot see never reaches an
     agent, which then saves a prose note beside the list the user already keeps."""
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "")
+
+
+def _built_on_a_thread_of_its_own(root, stamp):
+    """Build the activation index on a thread no request binds, as the service does; the collection anchors after it."""
     from exomem import working_set_index, working_set_runtime
 
     def build():
-        working_set_runtime._warm_index(service.root, "", None)
+        with suppress(OpError):  # a store that refuses the read fails the build, as the service logs it
+            working_set_runtime._warm_index(root, stamp, None)
 
     thread = threading.Thread(target=build)
     thread.start()
     thread.join(120)
-    anchored = {row.path for row in working_set_index.WorkingSetIndex(service.root).anchors() if row.kind == "collection"}
-    assert manifest_path() in anchored
+    assert not thread.is_alive()
+    return {row.path for row in working_set_index.WorkingSetIndex(root).anchors() if row.kind == "collection"}
+
+
+def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_and_stays_stale(service, monkeypatch):
+    """A build that drops the store's anchors when the store refuses its read, and records itself fresh anyway,
+    keeps the store's lists out of recall until the vault next changes."""
+    from exomem import working_set_index
+
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "first")
+
+    def refused(*_args, **_kwargs):
+        raise connection.busy("the store is held")
+
+    monkeypatch.setattr(runtime.StoreServer, "read_beside", refused)
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "second")
+    assert working_set_index.WorkingSetIndex(service.root).freshness_stamp() == "first"
+
+
+def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(service):
+    """Recall's map reads its collections from the manifest registry. After a restart the registry is cold, and a
+    first read that swept without the store would publish a set without the store's collections for the generation."""
+    from exomem import working_set_index
+
+    working_set_index.reset_collection_manifests_for_tests()
+    found = []
+    thread = threading.Thread(target=lambda: found.extend(working_set_index.collection_manifests(service.root, 1)))
+    thread.start()
+    thread.join(60)
+
+    published = working_set_index.published_collection_manifests(service.root, 1)
+    assert CID in {manifest.collection_id for manifest in found}
+    assert published is not None and CID in {manifest.collection_id for manifest in published}

@@ -128,7 +128,10 @@ log = logging.getLogger(__name__)
 #: (`OVERFLOW_RELATION`, never part of `neighbourhood`) and a project's
 #: declared standing page under `STANDING_RELATION`: an older sidecar holds
 #: neither and must rebuild once.
-SCHEMA_VERSION = 12
+#: v13 anchors the collections whose rows live in the collection store, which
+#: a build on the service's own thread used to leave out: an older sidecar
+#: lacks them and must rebuild once.
+SCHEMA_VERSION = 13
 SIDECAR_NAME = ".working-set.sqlite"
 DISABLE_ENV = "EXOMEM_DISABLE_WORKING_SET"
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -1653,36 +1656,17 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
 
     The service runs that pass on a thread that no request binds to its
     collection store, so the store collections are read through the store
-    the service serves (`runtime.read_served`). A store that cannot answer
-    now costs its own collections' anchors, never the file collections'.
+    the service serves (`runtime.read_served`): the manifests in one short
+    read, and each store Planning collection's items in a read of its own. A
+    store that cannot answer now fails the build, which keeps the previous
+    index and its freshness stamp, so the next request builds again; dropping
+    the store's anchors would mark the index fresh without them.
     """
-    from .cli_ops import OpError
     from .collection_store import runtime as store_runtime
-    from .collection_store.connection import CollectionStoreError
-
-    try:
-        return store_runtime.read_served(vault_root, lambda: _discovered_candidates(vault_root))
-    except (CollectionStoreError, OpError):
-        log.debug("activation index: the collection store could not answer discovery", exc_info=True)
-        return _discovered_candidates(vault_root)
-
-
-def _discovered_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
-    from . import structured_collections
 
     records: list[_Candidate] = []
     plans: list[_Candidate] = []
-    try:
-        manifests = structured_collections.discover_collections(Path(vault_root))
-    except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
-        log.debug("activation index: collection discovery failed", exc_info=True)
-        _note_discovered_manifests(None)
-        return records, plans
-    _note_discovered_manifests(manifests)
-    for manifest in manifests:
-        rel = str(getattr(manifest, "path", "") or "")
-        if not rel:
-            continue
+    for manifest, rel, stored in store_runtime.read_served(vault_root, lambda: _discovered_manifests(vault_root)):
         absolute = Path(vault_root) / rel
         fields = tuple(getattr(getattr(manifest, "schema", None), "fields", {}) or ())
         claims = tuple(
@@ -1707,14 +1691,35 @@ def _discovered_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
                     aliases=(),
                     terms=terms_of(" ".join((title, *fields, *claims))),
                     categories=("fact",),
-                    source_signature=(manifest.manifest_version.hash
-                                      if selected_writer(vault_root, manifest) is not None
-                                      else _source_signature(absolute)),
+                    source_signature=stored or _source_signature(absolute),
                 )
             )
         elif profile == "planning":
-            plans.extend(_planning_candidates(vault_root, manifest, rel))
+            plans.extend(
+                _planning_candidates(vault_root, manifest, rel) if stored is None
+                else store_runtime.read_served(
+                    vault_root, functools.partial(_planning_candidates, vault_root, manifest, rel)
+                )
+            )
     return records, plans
+
+
+def _discovered_manifests(vault_root: Path) -> list[tuple[Any, str, str | None]]:
+    """Each discovered manifest with its path, and its store manifest version where the store owns it (else None)."""
+    from . import structured_collections
+
+    try:
+        manifests = structured_collections.discover_collections(Path(vault_root))
+    except Exception:  # noqa: BLE001 - an unreadable manifest costs its anchor, not the build
+        log.debug("activation index: collection discovery failed", exc_info=True)
+        _note_discovered_manifests(None)
+        return []
+    _note_discovered_manifests(manifests)
+    return [
+        (manifest, rel, manifest.manifest_version.hash if selected_writer(vault_root, manifest) is not None else None)
+        for manifest in manifests
+        if (rel := str(getattr(manifest, "path", "") or ""))
+    ]
 
 
 def _planning_candidates(vault_root: Path, manifest: Any, rel: str) -> list[_Candidate]:
@@ -2161,8 +2166,24 @@ def collection_manifests(
     if published is not None:
         return published
     from . import structured_collections
+    from .cli_ops import OpError
+    from .collection_store import runtime as store_runtime
+    from .collection_store.connection import CollectionStoreError
+    from .governance import principal
 
-    manifests = tuple(structured_collections.discover_collections(Path(vault_root)))
+    def discover() -> tuple[Any, ...]:
+        return tuple(structured_collections.discover_collections(Path(vault_root)))
+
+    try:
+        # The shared set is the owner's, as `_write` derives it, and no request binds this
+        # thread to the store, so the store this process serves is read beside its thread.
+        with principal.owner_local_producer(vault_root, "working_set_index"):
+            manifests = store_runtime.read_served(vault_root, discover)
+    except (CollectionStoreError, OpError):
+        # A store that cannot answer now leaves its collections out of this answer alone:
+        # publishing that set would keep them out until the index next moves.
+        log.debug("activation: the collection store could not answer manifest discovery", exc_info=True)
+        return discover()
     if _may_store(vault_root, generation, sidecar_identity(token)):
         publish_collection_manifests(vault_root, generation, manifests, token=token)
     return manifests

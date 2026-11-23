@@ -250,3 +250,29 @@ def test_a_view_deleted_again_after_the_store_restored_it_is_restored_again(idle
         release_on_idle(manager)
         view.unlink()
         _until(view.exists)
+
+
+def test_an_index_build_on_a_released_store_neither_takes_the_lease_nor_runs_on_the_store_thread(
+        idle_service, monkeypatch):
+    """Recall's index build reads the store's collections from a thread of its own. Queued on the store thread
+    instead, it would open a released store and take the lease back, so a holder that is not preferred would keep
+    taking writer authority from the one that is, on every build."""
+    from exomem import working_set_runtime
+
+    root, manager = idle_service.root, idle_service.manager
+    grants, _ticks = watching(monkeypatch, manager)
+    release_on_idle(manager)
+    granted = len(grants)
+
+    def build():
+        try:
+            working_set_runtime._warm_index(root, "", None)
+        except OpError:
+            pass  # refused as busy: the service logs it and builds again on the next request
+
+    thread = threading.Thread(target=build)
+    thread.start()
+    thread.join(60)
+
+    assert not thread.is_alive()
+    assert manager._fencing_token is None and len(grants) == granted

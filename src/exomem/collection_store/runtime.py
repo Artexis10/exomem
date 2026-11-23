@@ -1047,8 +1047,7 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
     """
     from .. import automatic_collection, collection_refs
     from ..collection_profiles import PROFILES
-    from . import capability, ownership
-    from .preview import bound_writer
+    from . import capability
 
     selector = arguments.get("collection")
     profile = next((profile.name for profile in PROFILES.values() if profile.tool == command), None)
@@ -1060,15 +1059,10 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
         # and the retry of that attempt would be refused as a reused idempotency key instead of replayed.
         return arguments
     root = Path(vault_root).resolve()
-    if bound_writer(root) is not None:
+    served = _unbound_server(root)
+    if served is None:
         return arguments
-    proof = ownership.current(root)
-    if proof.marker is None:
-        return arguments
-    server = _server(root)
-    if server is None:
-        return arguments
-    connection.load_store_libraries()
+    server, proof = served
 
     def resolve(unserved=None, certain=False):
         return collection_refs.resolve_collection(root, selector, profile=profile, unserved=unserved,
@@ -1086,27 +1080,44 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
     return arguments if path == selector else {**arguments, "collection": path}
 
 
+def _unbound_server(root):
+    """The store thread serving ``root`` and its ownership proof, for a call that no request binds to the store.
+
+    None where a request already binds the store, where the store owns nothing in the vault, or where this
+    process serves no store for it: there a call reads files alone.
+    """
+    from . import ownership
+    from .preview import bound_writer
+
+    if bound_writer(root) is not None:
+        return None
+    proof = ownership.current(root)
+    server = None if proof.marker is None else _server(root)
+    if server is None:
+        return None
+    connection.load_store_libraries()
+    return server, proof
+
+
 def read_served(vault_root, work):
     """Run read-only ``work`` over the store this process serves for the vault, from a thread no request binds.
 
     A background pass, such as the service's activation index build, otherwise reads every store
     collection as unserved and leaves it out. The work reads one snapshot of the store's last commit
-    (``StoreServer.read_beside``), so keep it short. A call that a request already binds, a vault
-    whose store owns nothing, a process that serves no store for it and a rolled-back store run
-    ``work`` as it is.
+    beside the store thread (``StoreServer.read_beside``), so keep it short. It never queues on the
+    store thread: where no admitted writer is open, as while the store opens or after it released its
+    lease when idle, it is refused as busy (`COLLECTION_STORE_BUSY`). A call that a request already
+    binds, a vault whose store owns nothing, a process that serves no store for it and a rolled-back
+    store run ``work`` as it is.
     """
-    from . import capability, ownership
-    from .preview import bound_writer
+    from . import capability
 
     root = Path(vault_root).resolve()
-    if bound_writer(root) is not None:
+    served = _unbound_server(root)
+    if served is None or capability.records_summary_disabled(root):
         return work()
-    proof = ownership.current(root)
-    server = None if proof.marker is None else _server(root)
-    if server is None or capability.records_summary_disabled(root):
-        return work()
-    connection.load_store_libraries()
-    return server.read_beside(work, initial=proof, progress=False)
+    server, proof = served
+    return server.read_beside(work, initial=proof, progress=False, queue=False)
 
 
 def _store_mode_server(root):
@@ -1633,7 +1644,7 @@ class StoreServer:
             raise request.error
         return request.result
 
-    def read_beside(self, work, *, initial, collection=None, progress=True):
+    def read_beside(self, work, *, initial, collection=None, progress=True, queue=True):
         """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
 
         For import status, which must answer while a batch keeps the store thread busy. The
@@ -1645,7 +1656,9 @@ class StoreServer:
         before (``call``), whose checkout opens one. ``collection`` is the request's selector: a
         collection the store keeps in full needs no read of the derived file. Work that reads no
         import progress, as title resolution reads titles alone, passes ``progress`` False and
-        skips that file.
+        skips that file. A background reader passes ``queue`` False: where no admitted writer is
+        open it is refused as busy instead, so it never runs on the store thread or takes back a
+        lease the store released.
         """
         from ..cli_ops import OpError
         from ..governance import policy
@@ -1675,6 +1688,8 @@ class StoreServer:
                         handle = None  # the store thread's checkout reacquires, as it does for any read
             if handle is None:
                 scope.close()
+                if not queue:
+                    raise connection.busy("the store has no open writer to read beside, and this read never queues")
                 return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
             reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
             entry = None if initial is None or collection is None else initial.selected(self.root, collection)
