@@ -627,3 +627,13 @@ def test_a_stale_finish_never_overwrites_an_applied_save(vault: Path, managers, 
     )
     write_intake._finish_failed(vault, stale, "STALE_ANCHOR", {"code": "STALE_ANCHOR"})
     assert write_intake.read(vault, ref=ref)["queued_write"]["state"] == "applied"
+
+
+def test_a_save_between_its_insert_and_its_count_holds_later_saves_behind_it(drainer) -> None:
+    # The row is durable before the in-memory count rises; a later save that saw an empty queue in
+    # that gap would commit ahead of a save already queued.
+    assert not drainer.has_backlog()
+    drainer.begin_insert()
+    assert drainer.has_backlog()
+    drainer.end_insert()
+    assert not drainer.has_backlog()

@@ -493,6 +493,8 @@ class Drainer:
         #: Origins with a send in flight (waiting for the boundary or being queued), with a count;
         #: a resend with one of them waits instead of running.
         self._accepting: dict[str, int] = {}
+        #: Acceptances between their durable insert and `note_accepted`.
+        self._inserting = 0
         #: Acceptances so far; a store read that an acceptance overlapped is read again.
         self._accepts = 0
 
@@ -527,14 +529,18 @@ class Drainer:
         with self._condition:
             return self._open
 
+    def _backlog_unsettled(self) -> bool:
+        # A save between its durable insert and its count is already queued: a later save waits behind it.
+        return self._open is None or self._open > 0 or self._inserting > 0
+
     def has_backlog(self) -> bool:
         with self._condition:
-            return self._open is None or self._open > 0
+            return self._backlog_unsettled()
 
     def wait_for_empty_queue(self, deadline: float) -> bool:
         """Wait until no save is open or `deadline` (monotonic) passes; return whether it emptied."""
         with self._condition:
-            while self._open is None or self._open > 0:
+            while self._backlog_unsettled():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self._stop.is_set():
                     return False
@@ -573,6 +579,15 @@ class Drainer:
             del self._applied_origins[origin]
             return None
         return applied[0], APPLIED
+
+    def begin_insert(self) -> None:
+        with self._condition:
+            self._inserting += 1
+
+    def end_insert(self) -> None:
+        with self._condition:
+            self._inserting -= 1
+            self._condition.notify_all()
 
     def hold(self, origin: str) -> None:
         with self._condition:
@@ -1060,14 +1075,19 @@ class Admission:
         return _with_store_retry(lambda: self._accept_once(reason=reason, started=started))
 
     def _accept_once(self, *, reason: str, started: float) -> dict[str, Any]:
-        # `run` holds this send in flight, so no resend runs between the insert and the index entry.
+        # `run` holds this send in flight, so no resend runs between the insert and the index entry;
+        # the insert count keeps a later save behind it in the same gap.
+        self.drainer.begin_insert()
         try:
-            receipt, inserted = self._insert(reason, create=False)
-        except FileNotFoundError:
-            # The first acceptance on this vault creates the store.
-            receipt, inserted = self._insert(reason, create=True)
-        if inserted is not None:
-            self.drainer.note_accepted(self.origin, inserted)
+            try:
+                receipt, inserted = self._insert(reason, create=False)
+            except FileNotFoundError:
+                # The first acceptance on this vault creates the store.
+                receipt, inserted = self._insert(reason, create=True)
+            if inserted is not None:
+                self.drainer.note_accepted(self.origin, inserted)
+        finally:
+            self.drainer.end_insert()
             _journal_queued(self, inserted, reason, started)
         return receipt
 
