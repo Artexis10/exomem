@@ -363,7 +363,9 @@ The PyPI `av` wheel bundles an FFmpeg linked with libx264 and libx265, which are
 No Exomem module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
 AV1 decoding uses libdav1d from the Debian package `libdav1d7`.
 The PyAV release is the one `uv.lock` pins, built from its hash-checked source distribution with pinned build tools.
-Decoder output is the same as the wheel's: H.264, HEVC, AV1, VP8, VP9, MPEG-4, AAC, MP3, Opus, FLAC, PCM and AMR decode to identical frames and samples.
+The build gate decodes only PCM audio and MPEG-4 Part 2 video.
+Parity with the wheel for H.264, HEVC, VP9 and AV1 was shown once on a local amd64 build on 2026-11-23, by comparing the two decoders.
+No build step checks it again.
 The image keeps the FFmpeg libraries as separate files in `/opt/ffmpeg-lgpl/lib`.
 Their licence, source address, checksum and configure line are in `/usr/share/doc/ffmpeg-lgpl/`.
 Pip installs keep the PyPI wheel.
@@ -373,7 +375,8 @@ To move to a new FFmpeg release:
 1. Download the `.tar.xz` and its `.asc` from `https://ffmpeg.org/releases/`.
 2. Verify the signature against the FFmpeg release signing key, fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`.
 3. Set `FFMPEG_VERSION` and `FFMPEG_SHA256` together in the `av-lgpl` stage.
-4. Build `--target cloud`; the build gate decodes the audio and video samples.
+4. Build `--target cloud`; the build gate decodes its PCM audio and MPEG-4 Part 2 video samples.
+5. Compare the new build's H.264, HEVC, VP9 and AV1 decoders against the old wheel; the gate does not.
 
 The build fails if the tarball differs from `FFMPEG_SHA256`.
 A PyAV release that needs a newer FFmpeg major version moves both pins in one change.
