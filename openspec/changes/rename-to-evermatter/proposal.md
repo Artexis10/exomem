@@ -11,8 +11,8 @@ The product name changes from Exomem to Evermatter before the commercial launch.
 - The old names keep working through a compatibility window:
   - each release is published under both the `evermatter` and the `exomem` PyPI names;
   - the `exomem` and `kb` commands stay;
-  - the published images keep their old names beside the new ones;
-  - GitHub redirects the old repository URL.
+  - images already published under the old names stay pullable;
+  - GitHub redirects the old repository URL after the move to the `substrate-systems` organisation.
 - The hosted service gets hosts on `evermatter.ai`. The old Cloud host keeps serving, so no connected agent signs out. The host move is specified and built in the control-plane repository (`move-cloud-to-evermatter-hosts`), because that code lives there.
 - The licence cut of `adopt-fair-source-licence` (its section 3) ships in the same release as this rename.
 

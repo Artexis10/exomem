@@ -39,9 +39,9 @@ Plugin and skill identifiers are what clients use to update an installed plugin.
 |---|---|---|
 | `pip install exomem`, `uvx exomem`, `uv tool upgrade exomem` | The release publishes the same build under both distribution names, with identical content | Reviewed on or after 2027-11-23 |
 | `exomem` and `kb` commands | Console scripts in `evermatter` | Reviewed on or after 2027-11-23 |
-| `ghcr.io/…/exomem*` images | The release publishes each image under both names | 2027-06-01 |
-| `github.com/Artexis10/exomem` | GitHub's repository-rename redirect | None; GitHub keeps it while the old name stays free |
-| MCP registry `io.github.Artexis10/exomem` | Marked deprecated, pointing at the new entry | 2027-06-01 |
+| `ghcr.io/artexis10/exomem*` images | Every tag already published stays pullable; new releases publish under `ghcr.io/substrate-systems/evermatter*` (see D7) | None; published tags are never deleted |
+| `github.com/Artexis10/exomem` | GitHub's redirect after the transfer and rename | None; GitHub keeps it while the old name stays free |
+| MCP registry `io.github.Artexis10/exomem` | Marked deprecated, pointing at `io.github.substrate-systems/evermatter` | 2027-06-01 |
 | Old Cloud host | Keeps serving the gateway (see the control-plane change) | When no live token family references it, and not before 2027-11-23 |
 
 Removal needs evidence that nothing uses the old surface, for example PyPI download counts for the old name or gateway traffic per host.
@@ -63,12 +63,17 @@ The rename release is the first release licensed FSL-1.1-ALv2 (`adopt-fair-sourc
 Specified in the control-plane repository. In outline:
 - `evermatter.ai` serves the product website and, later, the authorization server.
 - `mcp.evermatter.ai` serves the MCP gateway.
-- The gateway accepts a set of public resource URLs and binds each token to the resource of the host it arrived on. Old tokens stay valid at the old host. New connections get the new host.
+- The gateway accepts a configured set of resource URLs; a token is valid when its stored resource is in the set. Old tokens keep working. New connections get the new host.
 - The OAuth issuer stays where it is in the first step. Moving the issuer is a second step with its own review.
 
-### D7. Repository and registries
+### D7. Repository, images and registries
 
-The repository is renamed in place, and GitHub redirects the old URL for web, API and git traffic. Image names, the MCP registry entry and PyPI do not follow a rename, so the release workflow publishes the new names explicitly.
+The repository moves from the personal account to the `substrate-systems` organisation and takes the name `evermatter` in one move (approved on 2026-11-20, owned by the licence change). GitHub redirects the old URL for web, API and git traffic.
+
+Image names, the MCP registry entry and PyPI do not follow a move, so the release publishes the new names explicitly:
+- Images publish as `ghcr.io/substrate-systems/evermatter` and `ghcr.io/substrate-systems/evermatter-cellctl`. After the move, the repository's CI token cannot write to the personal account's registry namespace, and a personal token in a company pipeline is the wrong shape. So the old image names keep the tags they already have and receive no new ones.
+- The Cloud deploy verifies each image's build attestation against the repository that built it. It derives that repository from the image name: `ghcr.io/artexis10/exomem` from `Artexis10/exomem`, and `ghcr.io/substrate-systems/evermatter` from `substrate-systems/evermatter`. A rollback to a release cut before the move still verifies.
+- The MCP registry entry moves to `io.github.substrate-systems/evermatter`, the namespace that GitHub sign-in proves for the moved repository.
 
 ## Risks / Trade-offs
 
@@ -79,8 +84,8 @@ The repository is renamed in place, and GitHub redirects the old URL for web, AP
 ## Migration Plan
 
 1. Merge this change with the external-surface edits and the dual-name build.
-2. Create the PyPI pending publisher for `evermatter`, and rename the repository.
+2. Move and rename the repository; create the PyPI pending publisher for `evermatter` and point the `exomem` publisher at the moved repository.
 3. Cut the rename release together with the licence cut. Publish both distribution names, both image names and the new registry entry.
 4. Announce the rename once, through the README, the changelog, the website and the hosted service's notices.
 
-Rollback: the rename is additive. The old package, commands, images, URLs and host keep working, so rolling back means pointing docs back at the old names.
+Rollback: the rename is additive. The old package, commands, published images, URLs and host keep working, so rolling back means pointing docs back at the old names.

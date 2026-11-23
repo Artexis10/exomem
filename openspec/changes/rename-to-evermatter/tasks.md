@@ -8,12 +8,12 @@
 - [x] 1.4 Change the MCP server title and instructions, CLI help and banners, and doctor and setup output to say Evermatter; keep the server key `exomem`.
 - [x] 1.5 Rewrite the README, QUICKSTART, `docs/` and `TRADEMARK.md` for the new name; keep `EXOMEM_*` documented as the settings prefix.
 - [x] 1.6 Change plugin and skill display names and descriptions, the scaffold's prose and `server.json`; keep their identifiers; regenerate the plugin trees and `docs/capabilities.md`.
-- [x] 1.7 Publish every image under its new `evermatter` name and its old name from the same digest.
+- [ ] 1.7 Publish images as `ghcr.io/substrate-systems/evermatter*`; make the Cloud deploy verify each image against the repository its name identifies.
 
 ## 2. Repository and registries (operator steps marked)
 
 - [ ] 2.1 Operator: create the PyPI pending trusted publisher for `evermatter`.
-- [ ] 2.2 Operator: rename the GitHub repository; then update the `exomem` trusted publisher's repository name.
+- [ ] 2.2 Move the repository to `substrate-systems/evermatter` in one move (licence change owner); operator: point the `exomem` trusted publisher at it.
 - [ ] 2.3 Publish the new MCP registry entry; mark the old entry deprecated with a pointer to the new one.
 - [ ] 2.4 Submit the display-name change to the ChatGPT app directory and the Claude directory.
 

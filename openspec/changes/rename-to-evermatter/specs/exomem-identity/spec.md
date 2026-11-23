@@ -59,13 +59,18 @@ identical content. The `exomem` and `kb` commands SHALL run the same CLI as `eve
 - **THEN** the rename release is installed under the `exomem` name with every module file intact
 - **AND** the `exomem` command still starts the product with the user's existing state and settings
 
-### Requirement: Old Image Names Keep Working Until Their Removal Date
+### Requirement: Published Images Stay Pullable and Verifiable
 
-Each published image SHALL also be published under its old name from the same digest until the
-removal date that the design records. A removal SHALL wait for evidence that the old name is
-unused.
+Every image tag published under an old name SHALL stay pullable. The Cloud deploy SHALL verify an
+image's build attestation against the repository that built it, as the image name identifies it,
+so a release cut before the repository move still deploys.
 
-#### Scenario: A pinned image reference keeps pulling
+#### Scenario: A rollback to a release cut before the move
 
-- **WHEN** a deployment pulls an image by its old name and a release tag cut after the rename
-- **THEN** the pull succeeds with the same digest as the image under the new name
+- **WHEN** the Cloud deploy is asked for a release whose image is `ghcr.io/artexis10/exomem`
+- **THEN** it verifies the attestation against the `Artexis10/exomem` release workflow and deploys it
+
+#### Scenario: A release cut after the move
+
+- **WHEN** the Cloud deploy is asked for a release whose image is `ghcr.io/substrate-systems/evermatter`
+- **THEN** it verifies the attestation against the `substrate-systems/evermatter` release workflow
