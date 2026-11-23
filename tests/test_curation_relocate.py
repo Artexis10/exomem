@@ -17,8 +17,10 @@ from pathlib import Path
 import pytest
 
 import yaml
+from granted_writer import grant_writer
 
 from exomem import commands, curation, memory_refs, page_fields, relocate, writer_lease
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.vault import find_body_wikilinks, parse_frontmatter
 
 RESEARCH = "Knowledge Base/Notes/Research"
@@ -592,6 +594,69 @@ def test_a_page_that_changes_after_its_step_was_kept_refuses_the_seal(
     moves = _all_moves(vault, resealed["run_id"])
     landed = next(move["to"] for move in moves if move["from"] == pages[0])
     assert added in (vault / landed).read_text(encoding="utf-8")
+
+
+def _observed_note(title: str, finding: str) -> str:
+    return (
+        f"---\ntitle: {title}\ntype: research-note\nproject: harbor\nstatus: active\n"
+        f"exomem_id: {uuid.uuid4()}\n---\n\n## Observations\n\n- [finding] {finding} #harbor\n"
+    )
+
+
+def test_a_kept_preparation_goes_on_only_for_a_caller_under_the_same_ceiling(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preparation kept for the local owner, continued by an owner client whose connector
+    ceiling withholds one of the moved page's referrers.
+
+    It catches a client that seals the steps prepared under a wider ceiling: its proposal counts
+    the referrer withheld from it, and its apply stops on the rewrite it may not write.
+    """
+    inbox = f"{RESEARCH}/Harbor/Inbox"
+    plan = _write(vault, f"{inbox}/harbor-plan.md", _observed_note("Harbor Plan", "The plan."))
+    linking = f"See {_link(plan)}."
+    seen = _write(vault, f"{RESEARCH}/Harbor/tide-notes.md", _observed_note("Tide notes", linking))
+    withheld = _write(
+        vault, f"{INSIGHTS}/withheld-link.md", _observed_note("Withheld link", linking)
+    )
+    withheld_scope = "01ARZ3NDEKTSV4RRFFQ69G5GW6"
+    _write(
+        vault,
+        "Knowledge Base/_Governance/scopes/withheld.yaml",
+        f'governance_version: 1\nid: {withheld_scope}\nname: Withheld\n'
+        'paths: ["Notes/Insights/withheld-link.md"]\n',
+    )
+    client = grant_writer(
+        vault,
+        tmp_path,
+        monkeypatch,
+        writable_paths=["Notes/Research/Harbor/**"],
+        capture_paths=[inbox],
+        protected=[withheld_scope],
+    )("owner")
+    withheld_before = (vault / withheld).read_bytes()
+    with request_scope(client):
+        own = _maintain(vault, "relocate", pages=[plan])
+    assert own["summary"]["referrers_rewritten"] == 1
+
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+    with request_scope(owner_principal(surface="mcp")):
+        paused = _maintain(vault, "relocate", pages=[plan])
+    assert paused["phase"] == "preparing"
+    assert paused["progress"]["prepared"] == paused["progress"]["steps"]
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+
+    with request_scope(client):
+        continued = _maintain(vault, "relocate", pages=[plan])
+        assert continued["summary"]["referrers_rewritten"] == 1
+        assert continued["plan_fingerprint"] == own["plan_fingerprint"]
+        applied = _apply_to_the_end(vault, continued)
+
+    assert applied["phase"] == "completed", applied
+    [moved] = _all_moves(vault, continued["run_id"])
+    assert _link(moved["to"]) in (vault / seen).read_text(encoding="utf-8")
+    assert (vault / withheld).read_bytes() == withheld_before
 
 
 @pytest.mark.parametrize("folder", ["Survey/2026", "Survey: field"])

@@ -10,7 +10,8 @@ name no longer follows their title. This module finds them and proposes the rena
   collision numbers are all decided there;
 - a page with no usable title, a page whose rename this caller cannot plan, and a page whose
   rename the item's call was refused for, are counted apart and never proposed. A refusal is
-  remembered beside the due-state projection until the page or a page linking to it changes;
+  remembered beside the due-state projection, for the callers who see what its caller saw,
+  until the page or a page linking to it changes;
 - the one review item for the vault, anchored on the top index so that its own renames never
   move its identity, with the call that renames the next batch;
 - the bounded listing and the retitle suggestion.
@@ -51,6 +52,10 @@ BATCH_PAGES = 200
 #: the projection, so the memory outlives both. Losing the file costs one refused preparation per
 #: page, which records the refusal again.
 REFUSALS_FILENAME = "name-drift-refusals.json"
+#: How many readers keep their refusals; the least recently recorded is dropped. A configuration
+#: edit gives every reader a new key (`relocate.reader_key`) and orphans the old one, so without a
+#: bound the file grows with each edit. A dropped reader's pages cost one refused preparation each.
+REFUSAL_READERS = 16
 _REFUSALS_LOCK = threading.Lock()
 
 #: Closed verdicts of `judge`.
@@ -177,15 +182,33 @@ def _refusals_path(vault_root: Path) -> Path:
 
 
 def _refusals(vault_root: Path) -> dict[str, dict[str, Any]]:
-    """The remembered refusals by page path; none when the file is absent or cannot be read."""
+    """The refusals remembered for this caller (`relocate.reader_key`), by page path.
+
+    None are read when the file is absent or cannot be read, or the caller's key cannot be.
+    """
+    from . import relocate
+
+    reader = relocate.reader_key(vault_root)
+    pages = _stored_refusals(vault_root).get(reader) if reader is not None else None
+    return dict(pages) if pages else {}
+
+
+def _stored_refusals(vault_root: Path) -> dict[str, dict[str, dict[str, Any]]]:
+    """Every remembered refusal, by reader and then page path."""
     try:
         payload = json.loads(_refusals_path(vault_root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    pages = payload.get("pages") if isinstance(payload, dict) else None
-    if not isinstance(pages, dict):
+    readers = payload.get("readers") if isinstance(payload, dict) else None
+    if not isinstance(readers, dict):
         return {}
-    return {str(path): entry for path, entry in pages.items() if isinstance(entry, dict)}
+    return {
+        str(reader): {
+            str(path): entry for path, entry in pages.items() if isinstance(entry, dict)
+        }
+        for reader, pages in readers.items()
+        if isinstance(pages, dict)
+    }
 
 
 def _held(
@@ -225,16 +248,20 @@ def record_refused(
 
     Each row names a `page` and its refusal `code`. The memory binds the page's exact bytes and
     those of each page that links to it, so the scan proposes the page again once it or one of
-    those referrers changes. It keeps no reason text: a reason can name pages that another
-    audience may not see. The row is refreshed, so the item closes when every remaining drifted
-    page is refused.
+    those referrers changes. It is kept under the caller's key (`relocate.reader_key`), and only a
+    scan under the same key reads it; a caller without a key records nothing. It keeps no reason
+    text: a reason can name pages that another audience may not see. The row is refreshed, so the
+    item closes when every remaining drifted page is refused.
     """
-    from . import due_state, state_paths, vault
+    from . import due_state, relocate, state_paths, vault
     from .governance import egress
 
     if not _owns(vault_root, review_ref):
         return False
     root = Path(vault_root)
+    reader = relocate.reader_key(root)
+    if reader is None:
+        return True
     paths = sorted({str(row["page"]) for row in refused})
     inbound = vault.find_inbound_wikilinks_many(
         root, paths, visible=egress.visible_page_filter(root)
@@ -255,10 +282,15 @@ def record_refused(
     if not entries:
         return True
     with _REFUSALS_LOCK:
-        pages = {**_refusals(root), **entries}
+        readers = _stored_refusals(root)
+        # The reader recorded last goes last, so the bound drops the least recently recorded.
+        pages = {**readers.pop(reader, {}), **entries}
+        kept = [*readers.items(), (reader, pages)][-REFUSAL_READERS:]
         state_paths.ensure_vault_state_dir(root)
         # The projection's own atomic replace: a reader never sees half a file.
-        due_state._replace_json(_refusals_path(root), {"version": 1, "pages": pages})  # noqa: SLF001
+        due_state._replace_json(  # noqa: SLF001
+            _refusals_path(root), {"version": 1, "readers": dict(kept)}
+        )
     due_state.schedule_name_drift_refresh(root)
     return True
 

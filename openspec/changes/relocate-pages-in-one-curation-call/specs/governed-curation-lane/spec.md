@@ -169,7 +169,7 @@ The memory refs among `pages` SHALL resolve over one identity census.
 A relocation SHALL prepare its steps under the request budget, by the rule that
 stops execution between steps. When it stops before the seal, it SHALL keep the
 steps it prepared, seal nothing, and answer `preparing` with `progress` and
-`next_action: relocate`. The same relocation made again by the same audience
+`next_action: relocate`. The same relocation made again by the same caller
 SHALL go on from the kept steps, and SHALL seal the plan that one uninterrupted
 relocation would seal. The seal SHALL check every kept step's binding against
 the vault.
@@ -189,6 +189,20 @@ the vault.
   dropped
 - **AND** the same relocation made again prepares from the vault as it is, and
   seals
+
+### Requirement: Kept steps go on only for the caller who kept them
+
+A relocation SHALL go on from kept steps only for a caller with the same
+audience, purpose and connector ceiling as the caller who kept them. Any other
+caller SHALL prepare its own plan.
+
+#### Scenario: A caller under another ceiling prepares its own plan
+
+- **WHEN** the owner's relocation stops with kept steps, and an owner client
+  whose connector ceiling withholds one referrer makes the same relocation
+- **THEN** the client seals the plan that its own relocation gives, which counts
+  only the referrers it sees
+- **AND** its apply completes
 
 ### Requirement: A relocation lists what it cannot change and seals the rest
 

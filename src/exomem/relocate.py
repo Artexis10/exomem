@@ -132,6 +132,7 @@ def propose(
     exclusions = halvings = 0
     budget = curation._call_budget()  # noqa: SLF001 -- the lane's one request deadline
     preparation_key = _preparation_key(
+        root,
         {
             "pages": list(pages) if pages is not None else None,
             "review_ref": review_ref,
@@ -220,9 +221,14 @@ def propose(
         return True
 
     def out_of_time(slowest: float) -> bool:
-        """Whether this call stops before another step or the seal, by apply's rule (`_advance`)."""
+        """Whether this call stops before another step or the seal, by apply's rule (`_advance`).
+
+        A call with no preparation key can keep nothing, so it prepares to the seal in one call.
+        """
         from . import request_budget
 
+        if preparation_key is None:
+            return False
         return not budget.can_afford(slowest + request_budget.DELIVERY_RESERVE_SECONDS)
 
     def pause(derived: _Derived) -> dict[str, Any]:
@@ -343,14 +349,42 @@ def propose(
         raise
 
 
-def _preparation_key(request: Mapping[str, Any]) -> str:
-    """The paused preparation's name: the call's arguments and who asks, since the audience
-    decides which pages and referrers a plan holds."""
+def _preparation_key(root: Path, request: Mapping[str, Any]) -> str | None:
+    """The paused preparation's name: the call's arguments and who asks (`reader_key`), else
+    None, so a preparation is kept only for callers that would prepare the same steps."""
+    reader = reader_key(root)
+    if reader is None:
+        return None
+    identity = {"request": dict(request), "reader": reader}
+    return hashlib.sha256(curation.canonical_json_bytes(identity)).hexdigest()[:32]
+
+
+def reader_key(root: Path) -> str | None:
+    """Who asks, as one key for relocation state kept between calls; None when it cannot be read.
+
+    The audience, the purpose and the connector ceiling decide which pages and referrers a caller
+    sees and writes. The ceiling is `connector_boundary.admission_identity`: the denied scopes,
+    the configuration revision and the registry assignment. The writable scopes need no part of
+    their own: the host configuration makes each writable scope exclusive to one client, so
+    callers denied the same scopes write the same ones. A preparation or a refusal kept under one
+    key is read only under the same key, and a caller whose ceiling cannot be read keeps nothing.
+    """
+    from .governance import connector_boundary
     from .governance.principal import effective_principal
 
     who = effective_principal()
-    identity = {"request": dict(request), "audience": who.audience_id, "purpose": who.purpose}
-    return hashlib.sha256(curation.canonical_json_bytes(identity)).hexdigest()[:32]
+    try:
+        denied, revision, assignment = connector_boundary.admission_identity(root, who)
+    except connector_boundary.BoundaryUnavailable:
+        return None
+    identity = {
+        "audience": who.audience_id,
+        "purpose": who.purpose,
+        "denied": sorted(denied),
+        "revision": revision,
+        "assignment": assignment,
+    }
+    return hashlib.sha256(curation.canonical_json_bytes(identity)).hexdigest()
 
 
 def _paused_path(root: Path, key: str) -> Path:
@@ -359,13 +393,19 @@ def _paused_path(root: Path, key: str) -> Path:
     return state_paths.vault_state_dir(root) / PREPARATIONS_DIRNAME / f"{key}.json"
 
 
-def _paused(root: Path, key: str) -> dict[str, Any] | None:
-    """The preparation that this call paused, else None; an unreadable or old one is not kept."""
+def _paused(root: Path, key: str | None) -> dict[str, Any] | None:
+    """The preparation that this call paused, else None.
+
+    An unreadable one is not used. An expired one is deleted, since it holds page bytes.
+    """
     import json
 
+    if key is None:
+        return None
     path = _paused_path(root, key)
     try:
         if time.time() - path.stat().st_mtime > PREPARATION_TTL_SECONDS:
+            path.unlink(missing_ok=True)
             return None
         held = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -389,7 +429,9 @@ def _keep_paused(root: Path, key: str, state: Mapping[str, Any]) -> None:
     due_state._replace_json(path, {"version": 1, **state})  # noqa: SLF001 -- its atomic writer
 
 
-def _drop_paused(root: Path, key: str) -> None:
+def _drop_paused(root: Path, key: str | None) -> None:
+    if key is None:
+        return
     try:
         _paused_path(root, key).unlink(missing_ok=True)
     except OSError:
