@@ -1,13 +1,16 @@
 """Lexical terms of the embedding sidecar's chunk rows, for passage ranking.
 
-`chunk_terms` holds the `bm25.tokenize` stems of each chunk row's text under that row's
-rowid, and `chunk_terms_names` holds the row's path and chunk number under the same rowid.
-A connection that `attach` prepares writes a row's terms and name in the statement that
-writes the row, deletes them in the statement that deletes it, and keeps the count of rows
-in `meta`. Those triggers live on the connection only, so an older release that opens the
-sidecar never meets a function it lacks. A write it makes leaves `COVERAGE` behind the
+`chunk_lexical_terms` holds the `bm25.tokenize` stems of each chunk row's text under that
+row's rowid, and `chunk_lexical_names` holds the row's path and chunk number under the same
+rowid. A connection that `attach` prepares writes a row's terms and name in the statement
+that writes the row, deletes them in the statement that deletes it, and keeps the count of
+rows in `meta`. Those triggers live on the connection only, so an older release that opens
+the sidecar never meets a function it lacks. A write it makes leaves `COVERAGE` behind the
 sidecar's generation, and lexical ranking then waits until `backfill` proves the tables
 whole again.
+
+The release before names kept its terms in `chunk_terms`, which this release never ranks
+from. Until a backfill empties that table, this release's deletes erase its rows too.
 """
 
 from __future__ import annotations
@@ -18,19 +21,19 @@ from collections.abc import Set as AbstractSet
 
 from . import sidecar_store
 
-TABLE = "chunk_terms"
-_VOCABULARY = "chunk_terms_vocab"
+TABLE = "chunk_lexical_terms"
+_VOCABULARY = "chunk_lexical_vocab"
 #: Each chunk row's path and chunk number by rowid, so naming a match reads no chunk row.
-NAMES = "chunk_terms_names"
+NAMES = "chunk_lexical_names"
 #: The `meta` key of the number of chunk rows, which term selection needs on every search.
-ROWS = "chunk_terms_rows"
+ROWS = "chunk_lexical_rows"
 #: The sidecar generation at which every chunk row had its terms and name, no other row had
 #: either, and `ROWS` counted the chunk rows.
-COVERAGE = "chunk_terms_named_through"
-#: The marker of the release that kept terms without names. Its triggers still move it, so
-#: this release keeps its own marker; a rebuild deletes this one too, because that release
-#: would trust a half-rebuilt terms table after a rollback.
-_TERMS_ONLY_COVERAGE = "chunk_terms_through"
+COVERAGE = "chunk_lexical_through"
+#: The terms table and coverage marker of the release before names. These tables have their
+#: own names, so that release's rebuild never touches them and never trusts them.
+_LEGACY = "chunk_terms"
+_LEGACY_COVERAGE = "chunk_terms_through"
 _STEMS = "exomem_chunk_stems"
 #: Rows one backfill transaction indexes, so a writer never waits long behind it.
 BACKFILL_ROWS = 2000
@@ -70,65 +73,99 @@ def term_budget():
     )
 
 
+def _present(conn: sqlite3.Connection) -> set[str]:
+    return {name for (name,) in conn.execute(
+        "SELECT name FROM main.sqlite_master WHERE type = 'table' AND name IN (?, ?, ?)",
+        (TABLE, NAMES, _LEGACY),
+    )}
+
+
 def exists(conn: sqlite3.Connection) -> bool:
-    """Whether the terms and names tables both exist; a release before names made only terms."""
-    return conn.execute(
-        "SELECT count(*) FROM main.sqlite_master WHERE type = 'table' AND name IN (?, ?)",
-        (TABLE, NAMES),
-    ).fetchone()[0] == 2
+    """Whether this release's terms and names tables exist; `backfill` makes them together."""
+    return {TABLE, NAMES} <= _present(conn)
 
 
-def _triggers() -> dict[str, str]:
-    """The connection's TEMP triggers, by name, that keep the terms rows level with the chunks."""
+def _create(table: str) -> str:
+    from .lexstore import _FTS_TOKENIZE
+
+    if table == NAMES:
+        return (
+            f"CREATE TABLE IF NOT EXISTS {NAMES} (chunk_rowid INTEGER PRIMARY KEY, "
+            "file_path TEXT NOT NULL, chunk_idx INTEGER NOT NULL)"
+        )
+    return f"CREATE VIRTUAL TABLE IF NOT EXISTS {table} USING fts5(terms, {_FTS_TOKENIZE})"
+
+
+def _empty(conn: sqlite3.Connection, table: str) -> None:
+    # Dropping is one step where deleting every row is one per row. The table is created
+    # again in the same transaction, because other connections' triggers name it.
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(_create(table))
+
+
+def _triggers(present: AbstractSet[str]) -> dict[str, str]:
+    """The connection's TEMP triggers, by name, that keep the `present` tables level with the
+    chunks."""
     # TEMP triggers may name main tables; their bodies resolve the unqualified names there.
-    write = (
-        f"DELETE FROM {TABLE} WHERE rowid = NEW.rowid; "
-        f"INSERT INTO {TABLE}(rowid, terms) VALUES (NEW.rowid, {_STEMS}(NEW.chunk_text)); "
-        f"DELETE FROM {NAMES} WHERE chunk_rowid = NEW.rowid; "
-        f"INSERT INTO {NAMES} VALUES (NEW.rowid, NEW.file_path, NEW.chunk_idx);"
-    )
-    erase = (
-        f"DELETE FROM {TABLE} WHERE rowid = OLD.rowid; "
-        f"DELETE FROM {NAMES} WHERE chunk_rowid = OLD.rowid;"
-    )
-    return {
-        f"{TABLE}_insert": (
-            f"AFTER INSERT ON main.chunks BEGIN {write} "
-            f"UPDATE meta SET value = value + 1 WHERE key = '{ROWS}'; END"
-        ),
-        f"{TABLE}_delete": (
-            f"AFTER DELETE ON main.chunks BEGIN {erase} "
-            f"UPDATE meta SET value = value - 1 WHERE key = '{ROWS}'; END"
-        ),
-        f"{TABLE}_update": f"AFTER UPDATE ON main.chunks BEGIN {erase} {write} END",
-        # A write on this connection keeps the tables whole, so coverage moves with it,
-        # but only from the generation it already covered.
-        f"{TABLE}_coverage": (
-            "AFTER UPDATE OF value ON main.meta WHEN NEW.key = 'generation' BEGIN "
-            f"UPDATE meta SET value = NEW.value WHERE key = '{COVERAGE}' AND value = OLD.value; END"
-        ),
-    }
+    triggers = {}
+    if _LEGACY in present:
+        # An erased chunk's stems must not outlive it in the earlier release's table. Its
+        # marker stays behind the generation, so that release catches up its other rows.
+        erase = f"BEGIN DELETE FROM {_LEGACY} WHERE rowid = OLD.rowid; END"
+        triggers[f"{_LEGACY}_delete"] = f"AFTER DELETE ON main.chunks {erase}"
+        triggers[f"{_LEGACY}_update"] = f"AFTER UPDATE ON main.chunks {erase}"
+    if {TABLE, NAMES} <= present:
+        write = (
+            f"DELETE FROM {TABLE} WHERE rowid = NEW.rowid; "
+            f"INSERT INTO {TABLE}(rowid, terms) VALUES (NEW.rowid, {_STEMS}(NEW.chunk_text)); "
+            f"DELETE FROM {NAMES} WHERE chunk_rowid = NEW.rowid; "
+            f"INSERT INTO {NAMES} VALUES (NEW.rowid, NEW.file_path, NEW.chunk_idx);"
+        )
+        erase = (
+            f"DELETE FROM {TABLE} WHERE rowid = OLD.rowid; "
+            f"DELETE FROM {NAMES} WHERE chunk_rowid = OLD.rowid;"
+        )
+        triggers.update({
+            f"{TABLE}_insert": (
+                f"AFTER INSERT ON main.chunks BEGIN {write} "
+                f"UPDATE meta SET value = value + 1 WHERE key = '{ROWS}'; END"
+            ),
+            f"{TABLE}_delete": (
+                f"AFTER DELETE ON main.chunks BEGIN {erase} "
+                f"UPDATE meta SET value = value - 1 WHERE key = '{ROWS}'; END"
+            ),
+            f"{TABLE}_update": f"AFTER UPDATE ON main.chunks BEGIN {erase} {write} END",
+            # A write on this connection keeps the tables whole, so coverage moves with it,
+            # but only from the generation it already covered.
+            f"{TABLE}_coverage": (
+                "AFTER UPDATE OF value ON main.meta WHEN NEW.key = 'generation' BEGIN "
+                f"UPDATE meta SET value = NEW.value WHERE key = '{COVERAGE}' "
+                "AND value = OLD.value; END"
+            ),
+        })
+    return triggers
 
 
 def attach(conn: sqlite3.Connection) -> None:
-    """Bind this connection's chunk writes to their terms rows once the tables exist."""
+    """Bind this connection's chunk writes to the terms tables that exist."""
     conn.create_function(_STEMS, 1, _stems, deterministic=True)
-    if not exists(conn):
-        return
-    for name, definition in _triggers().items():
+    for name, definition in _triggers(_present(conn)).items():
         conn.execute(f"CREATE TEMP TRIGGER IF NOT EXISTS {name} {definition}")
 
 
 def suspend(conn: sqlite3.Connection) -> None:
-    """Stop this connection deriving terms, and mark the terms rows out of date.
+    """Stop this connection deriving terms, and empty every terms table.
 
-    Call it in a write transaction that rewrites every chunk row. Deriving each row's terms
-    there holds the write lock as long as stemming the whole corpus takes. Without coverage,
-    lexical ranking waits while the background backfill rebuilds the table in batches.
+    Call it in a write transaction that rewrites every chunk row. Deriving or erasing each
+    row's terms there holds the write lock as long as stemming the whole corpus takes.
+    Emptying the tables in that transaction keeps no stems of a row that it removes, and
+    without coverage lexical ranking waits while the background backfill refills them.
     """
-    for name in _triggers():
+    for name in _triggers({TABLE, NAMES, _LEGACY}):
         conn.execute(f"DROP TRIGGER IF EXISTS temp.{name}")
-    conn.execute("DELETE FROM meta WHERE key = ?", (COVERAGE,))
+    for table in _present(conn):
+        _empty(conn, table)
+    conn.execute("DELETE FROM meta WHERE key IN (?, ?)", (COVERAGE, _LEGACY_COVERAGE))
 
 
 def covered(conn: sqlite3.Connection, generation: int) -> bool:
@@ -149,31 +186,25 @@ def backfill(conn: sqlite3.Connection, log: sidecar_store.PathChangeLog) -> bool
     caught up from the generation at which the rebuild began. False means writes outran
     the log during the rebuild, and coverage stays unrecorded.
     """
-    from .lexstore import _FTS_TOKENIZE
-
-    create = (
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS {TABLE} USING fts5(terms, {_FTS_TOKENIZE})",
-        f"CREATE TABLE IF NOT EXISTS {NAMES} "
-        "(chunk_rowid INTEGER PRIMARY KEY, file_path TEXT NOT NULL, chunk_idx INTEGER NOT NULL)",
-    )
     conn.execute("BEGIN IMMEDIATE")
     try:
-        for statement in create:
-            conn.execute(statement)
+        for table in (TABLE, NAMES):
+            conn.execute(_create(table))
         conn.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS {_VOCABULARY} USING fts5vocab({TABLE}, 'row')"
         )
+        # This release takes the sidecar over: the earlier release's terms are emptied
+        # with its marker, so it rebuilds them if it runs again.
+        legacy = _LEGACY in _present(conn)
+        if legacy and conn.execute(f"SELECT 1 FROM {_LEGACY} LIMIT 1").fetchone():
+            _empty(conn, _LEGACY)
+        conn.execute("DELETE FROM meta WHERE key = ?", (_LEGACY_COVERAGE,))
         since, generation = _meta_int(conn, COVERAGE), _meta_int(conn, "generation") or 0
         changed = _changed_since(conn, log, since, generation)
         if changed is None or len(changed) > BACKFILL_ROWS:
-            # Dropping is one step where deleting every row is one per row.
-            conn.execute(f"DROP TABLE {TABLE}")
-            conn.execute(f"DROP TABLE {NAMES}")
-            for statement in create:
-                conn.execute(statement)
-            conn.execute(
-                "DELETE FROM meta WHERE key IN (?, ?)", (COVERAGE, _TERMS_ONLY_COVERAGE)
-            )
+            for table in (TABLE, NAMES):
+                _empty(conn, table)
+            conn.execute("DELETE FROM meta WHERE key = ?", (COVERAGE,))
             since = generation
         conn.commit()
     except BaseException:

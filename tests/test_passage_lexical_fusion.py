@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sqlite3
 
@@ -13,6 +14,7 @@ import pytest
 from test_passage_evidence import passage_tools, publish_reference  # noqa: F401
 
 from exomem import (
+    bm25,
     commands,
     embedding_index,
     embeddings,
@@ -204,8 +206,8 @@ def test_a_lexical_match_beyond_the_dense_ranking_has_no_similarity(
 def test_a_full_rebuild_publishes_without_deriving_terms_then_the_backfill_derives_them(
     vault, passage_tools, monkeypatch
 ):
-    """A rebuild rewrites every chunk row in one write transaction. Deriving their terms in it
-    held the write lock past the busy timeout of other writers on a large corpus."""
+    """A rebuild rewrites every chunk row in one write transaction. Deriving or erasing their
+    terms in it held the write lock past the busy timeout of other writers on a large corpus."""
     call, _encoder = passage_tools
     save(call, "Harbour survey", [
         {"key": "repeats-one-word", "text": "Lantern lantern oil"},
@@ -219,8 +221,12 @@ def test_a_full_rebuild_publishes_without_deriving_terms_then_the_backfill_deriv
     stems = passage_terms._stems
     monkeypatch.setattr(passage_terms, "_stems", lambda text: derived.append(text) or stems(text))
 
-    assert embeddings.get_embedding_index(vault).rebuild_all()
+    index = embeddings.get_embedding_index(vault)
+    assert index.rebuild_all()
     assert derived == []
+    with contextlib.closing(sqlite3.connect(index.path)) as conn:
+        # No stems outlive the rows that the rebuild replaced, whichever Sources it dropped.
+        assert conn.execute(f"SELECT count(*) FROM {passage_terms.TABLE}").fetchone() == (0,)
     publish_reference(vault)
     reply = search(call, mode="hybrid")
 
@@ -323,35 +329,95 @@ def test_a_word_that_a_write_made_common_no_longer_chooses_the_lexical_matches(
     assert matched_paths({lantern, whale, more}) == {whale}
 
 
-def test_terms_that_an_earlier_release_kept_without_names_are_rebuilt_before_they_rank(
+def test_an_erased_source_keeps_no_terms_in_the_table_of_the_release_before_names(
     vault, passage_tools
 ):
-    """The release before the names table kept the terms under its own coverage marker. Its
-    sidecar has no names to read, and triggers that wrote names to a missing table would fail
-    every chunk write."""
+    """The release before the names table kept its terms in a table of its own name. This
+    release ranks only from its own tables, but an erased Source must not stay matchable in
+    the earlier table, from before the first hybrid search until a rollback."""
+    call, _encoder = passage_tools
+    save(call, "Harbour survey", [{"key": "repeats-one-word", "text": "Lantern lantern oil"}])
+    erased = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Whaling log", source_kind="session",
+        passages=[{"key": "erased", "text": "The lanterns burned whale oil"}],
+    )["source"]["path"]
+    embeddings.index_incremental(vault)
+    index = embeddings.get_embedding_index(vault)
+    with contextlib.closing(sqlite3.connect(index.path)) as older, older:
+        # What the earlier release's backfill left: every chunk's stems under its rowid.
+        older.execute(
+            f"CREATE VIRTUAL TABLE chunk_terms USING fts5(terms, {lexstore._FTS_TOKENIZE})"
+        )
+        older.executemany(
+            "INSERT INTO chunk_terms(rowid, terms) VALUES (?, ?)",
+            [(rowid, " ".join(bm25.tokenize(text)))
+             for rowid, text in older.execute("SELECT rowid, chunk_text FROM chunks").fetchall()],
+        )
+        older.execute(
+            "INSERT INTO meta (key, value) SELECT 'chunk_terms_through', value FROM meta "
+            "WHERE key = 'generation'"
+        )
+        erased_rows = [rowid for (rowid,) in older.execute(
+            "SELECT rowid FROM chunks WHERE file_path = ?", (erased,)
+        )]
+    assert erased_rows
+
+    index.purge_paths_if_present([erased])
+
+    with contextlib.closing(sqlite3.connect(index.path)) as conn:
+        assert conn.execute(
+            "SELECT count(*) FROM chunk_terms WHERE rowid IN (SELECT value FROM json_each(?))",
+            (json.dumps(erased_rows),),
+        ).fetchone() == (0,)
+        # The surviving Source keeps its terms there until this release takes the sidecar over.
+        assert conn.execute("SELECT rowid FROM chunk_terms").fetchall() == conn.execute(
+            "SELECT rowid FROM chunks ORDER BY rowid"
+        ).fetchall()
+
+    publish_reference(vault)
+    reply = search(call, mode="hybrid")
+
+    assert keys(reply) == ["repeats-one-word"]
+    assert reply["diagnostics"] == {"lexical": "ready", "lexical_candidates": 1}
+    with contextlib.closing(sqlite3.connect(index.path)) as conn:
+        assert conn.execute(
+            f"SELECT count(*) FROM {passage_terms.NAMES} WHERE file_path = ?", (erased,)
+        ).fetchone() == (0,)
+        # This release took the sidecar over, so the earlier release rebuilds after a rollback.
+        assert conn.execute("SELECT count(*) FROM chunk_terms").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT 1 FROM meta WHERE key = 'chunk_terms_through'"
+        ).fetchone() is None
+
+
+def test_the_chunk_count_that_term_selection_reads_follows_each_write(vault, passage_tools):
+    """Term selection judges a word common by its share of the stored chunk count. After the
+    backfill records that count, only the triggers keep it level with the chunk rows."""
     call, _encoder = passage_tools
     save(call, "Harbour survey", [{"key": "repeats-one-word", "text": "Lantern lantern oil"}])
     embeddings.index_incremental(vault)
     publish_reference(vault)
     assert search(call, mode="hybrid")["ranking"] == "fused"
     index = embeddings.get_embedding_index(vault)
-    with contextlib.closing(sqlite3.connect(index.path)) as older, older:
-        older.execute(f"DROP TABLE {passage_terms.NAMES}")
-        older.execute(
-            "DELETE FROM meta WHERE key IN (?, ?)", (passage_terms.COVERAGE, passage_terms.ROWS)
-        )
-        older.execute(
-            "INSERT INTO meta (key, value) SELECT 'chunk_terms_through', value FROM meta "
-            "WHERE key = 'generation'"
-        )
 
-    save(call, "Lamp log", [{"key": "inflected", "text": "The lanterns burned whale oil"}])
+    def stored_and_held():
+        with contextlib.closing(sqlite3.connect(index.path)) as conn:
+            [(stored,)] = conn.execute(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key = ?", (passage_terms.ROWS,)
+            )
+            [(held,)] = conn.execute("SELECT count(*) FROM chunks")
+        return stored, held
+
+    before = stored_and_held()
+    added = commands.op_capture_source(
+        vault, schema.load_source_schema(vault), title="Lamp log", source_kind="session",
+        passages=[{"key": f"lamp-{n}", "text": text}
+                  for n, text in enumerate(["The wick burned.", "The lamp went dark."])],
+    )["source"]["path"]
     embeddings.index_incremental(vault)
-    publish_reference(vault)
-    reply = search(call, mode="hybrid")
+    after_insert = stored_and_held()
+    index.purge_paths_if_present([added])
 
-    assert keys(reply) == ["repeats-one-word", "inflected"]
-    assert reply["diagnostics"] == {"lexical": "ready", "lexical_candidates": 2}
-    with contextlib.closing(sqlite3.connect(index.path)) as conn:
-        # The earlier release must not trust the rebuilt terms after a rollback.
-        assert conn.execute("SELECT 1 FROM meta WHERE key = 'chunk_terms_through'").fetchone() is None
+    assert after_insert[1] > before[1]
+    assert after_insert[0] == after_insert[1]
+    assert stored_and_held() == before

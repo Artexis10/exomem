@@ -8,10 +8,11 @@
 - [x] 1.4 Prepare the lexical terms inline for a small sidecar, in the background for a large one, and at cell warm-up, with a retry delay after a failure on both paths.
 - [x] 1.5 Report each result's own dense similarity as `similarity`, null outside the dense ranking.
 - [x] 1.6 Report the lexical state under `diagnostics`, outside the summary.
-- [x] 1.7 Publish a whole-index rebuild without deriving terms in its transaction, and leave the terms to the background backfill.
+- [x] 1.7 Publish a whole-index rebuild without deriving terms in its transaction, empty the terms tables there, and leave the terms to the background backfill.
 - [x] 1.8 Read the dense and lexical rankings of a `hybrid` request at one sidecar token, on one connection.
 - [x] 1.9 Name lexical matches from a names table that the terms triggers keep, and keep the row count in `meta`.
 - [x] 1.10 Report the number of lexical candidates under `diagnostics`.
+- [x] 1.11 Keep this release's terms tables under their own names, erase deleted chunks from the earlier release's terms table, and empty that table when this release takes the sidecar over.
 
 ## 2. Proof
 
@@ -21,9 +22,10 @@
 - [x] 2.4 Prove that lexical candidates respect the request's tag filter, also when a reader passage has no lexical match.
 - [x] 2.5 Prove that a chunk rewritten without the terms triggers is matched on its new text.
 - [x] 2.6 Prove that `similarity` is null for a lexical match beyond the dense ranking.
-- [x] 2.7 Prove that a rebuild derives no terms in its transaction, and that the backfill derives the new rows' terms.
+- [x] 2.7 Prove that a rebuild derives no terms in its transaction, leaves no terms of the rows it replaced, and that the backfill derives the new rows' terms.
 - [x] 2.8 Prove that a failed backfill is reported under `diagnostics` and does not run again within the retry delay.
-- [x] 2.9 Prove that terms kept without names by an earlier release are rebuilt before they rank, and that chunk writes keep working.
+- [x] 2.9 Prove that an erased Source keeps no terms in the earlier release's table before the first `hybrid` search, and that the takeover empties that table and its marker.
+- [x] 2.10 Prove that the stored chunk count follows each chunk insert and delete.
 
 ## 3. Default change
 
