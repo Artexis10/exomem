@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.201.0](https://github.com/Artexis10/exomem/compare/v0.200.0...v0.201.0) (2026-11-23)
+
+
+### Features
+
+* **activation:** select user methods with a bounded judgment, carry their contract, report use ([#3056](https://github.com/Artexis10/exomem/issues/3056)) ([38af4dd](https://github.com/Artexis10/exomem/commit/38af4ddc14a0a67d7f8a2a4b00493223c8fe329f))
+
+
+### Bug Fixes
+
+* **sources:** page large reclassification previews and reuse verified receipt evidence ([#2997](https://github.com/Artexis10/exomem/issues/2997)) ([7b68513](https://github.com/Artexis10/exomem/commit/7b68513395f718f35d40f26f5ba7dea3df187f00))
+* **vault-store:** start a store-mode service before its writer migrates the store ([#3068](https://github.com/Artexis10/exomem/issues/3068)) ([6d1e7ba](https://github.com/Artexis10/exomem/commit/6d1e7ba79c1917985d6f05175ead5e796b805794))
+
+
+### Performance
+
+* **curation:** hold the vault boundary only at each step's canonical writes ([#3057](https://github.com/Artexis10/exomem/issues/3057)) ([59e5f56](https://github.com/Artexis10/exomem/commit/59e5f561d7447e7edc9b6d278fbd0a86be78fbfc))
+* **passages:** read lexical candidates in the dense snapshot and name them from a table ([#3073](https://github.com/Artexis10/exomem/issues/3073)) ([c4ac9e3](https://github.com/Artexis10/exomem/commit/c4ac9e3f5841b6c519c4ce5748bed36eda461830))
+
 ## [0.200.0](https://github.com/Artexis10/exomem/compare/v0.199.0...v0.200.0) (2026-11-22)
 
 
