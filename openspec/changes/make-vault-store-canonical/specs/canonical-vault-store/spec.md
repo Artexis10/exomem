@@ -137,7 +137,7 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 - **THEN** its reply carries the not-exact warning and the content stays tombstoned until reconcile
 
 ### Requirement: A read reflects the writes acknowledged before it, or says what lags
-While a store thread in its process derives rows, a store-mode read request SHALL wait at its door, holding no store connection, for at most one second and half its remaining budget, until no intent at or below the revision it first read is pending. If intents stay pending, a ranked read SHALL answer with the derived-behind notice, and a direct page read that finds no page SHALL refuse with `VAULT_STORE_DERIVED_BEHIND`.
+While a store thread in its process derives rows, a store-mode read request SHALL wait at its door, holding no store connection, for at most one second and half its remaining budget, until no intent at or below the revision it first read is pending. If intents stay pending, a ranked read SHALL answer with the derived-behind notice, and an unrestricted caller's direct page read that finds no page SHALL refuse with `VAULT_STORE_DERIVED_BEHIND`.
 
 #### Scenario: Search and graph see the write after acknowledgement
 - **WHEN** a governed write that adds a page and a link returns success and a lexical search for a term in the page starts after that
@@ -152,8 +152,12 @@ While a store thread in its process derives rows, a store-mode read request SHAL
 #### Scenario: A slow derivation is reported, not hidden
 - **WHEN** a governed write's derivation has not finished when a later search's wait ends
 - **THEN** the search answers with the derived-behind notice, its counts and its age, and with no path, title or content
-- **AND** a read of the new page's reference or short id returns the page from its stored bytes, not a missing page
-- **AND** a read of a moved page's old path refuses with `VAULT_STORE_DERIVED_BEHIND`, not as a missing page
+- **AND** a read of the new page's path, reference or short id returns the page from its stored bytes, with the page's own reference and short id, not a missing page
+- **AND** the owner's read of a moved page's old path refuses with `VAULT_STORE_DERIVED_BEHIND`, not as a missing page
+
+#### Scenario: The lag tells a restricted caller nothing about withheld pages
+- **WHEN** a restricted caller reads a withheld page and an absent one while derivation intents are pending
+- **THEN** both reads answer `NOT_FOUND` alike, as they do with no intent pending
 
 #### Scenario: A recall during the lag answers and says what lags
 - **WHEN** a recall's wait ends before a save's rows are derived, and its conversation cites the new page's short id or a ref that names no page

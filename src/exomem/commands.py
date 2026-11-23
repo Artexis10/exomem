@@ -3635,16 +3635,18 @@ def op_search(
 def _page_read_error(vault_root: Path, error: get_page_module.GetError) -> Exception:
     """A ``GetError`` from a direct page read, as the error that its caller sees.
 
-    A read that found no page answers ``NOT_FOUND``. While rows of the writes acknowledged before this request still lag, a moved path or a title
-    may name a page that those rows do not hold yet, so the read refuses with
-    ``VAULT_STORE_DERIVED_BEHIND`` instead (``vault_store.read.require_caught_up``). It decides on
-    the queue alone, so a withheld page and an absent one answer alike. Hints, refs, brief seeds
-    and anchors never come here: a name that resolves to nothing degrades there, and the read's
-    derived-behind notice says what lags.
+    A read that found no page answers ``NOT_FOUND``. While rows of the writes acknowledged before
+    this request still lag, a moved path or a title may name a page that those rows do not hold
+    yet, so the read refuses with ``VAULT_STORE_DERIVED_BEHIND`` instead
+    (``vault_store.read.require_caught_up``). Only a caller from whom nothing can be withheld gets
+    that refusal: a restricted caller's withheld pages answer ``NOT_FOUND`` on other exits, so its
+    absent ones answer ``NOT_FOUND`` too. The page seed of a graph context or a link ranking comes
+    here; a hint, a conversation ref, a topic brief's seed and an anchor do not, because a name
+    that resolves to nothing degrades there, and the read's derived-behind notice says what lags.
     """
     from .vault_store import read as store_read
 
-    if error.code == "NOT_FOUND":
+    if error.code == "NOT_FOUND" and not egress_module.caller_restricted(vault_root):
         store_read.require_caught_up(vault_root)
     return ValueError(f"{error.code}: {error.reason}")
 

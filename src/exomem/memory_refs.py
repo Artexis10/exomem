@@ -707,12 +707,37 @@ class ReferenceIndex:
         own. No sidecar is read or rebuilt and no file is read to fill a miss, and the duplicate
         check spans every row the store holds.
         """
-        found = _from_store_identities(
-            self.vault_root, lambda conn: self._refs_from_connection(conn, wanted)[0]
-        )
+        found = _from_store_identities(self.vault_root, lambda conn: self._store_refs(conn, wanted))
         if found is not None:
             return found
         return self._refs_for_paths_from_sidecar(wanted, recall_reader=recall_reader)
+
+    def _store_refs(self, conn: sqlite3.Connection, wanted: list[str]) -> dict[str, str | None]:
+        """The refs of ``wanted`` from the store's identity rows at ``conn``'s snapshot.
+
+        A page whose derivation trails its stored bytes takes its ref from those bytes, by the rule
+        of ``_store_identity_owners``, so a read of a page saved a moment ago carries the page's own
+        ref and id, not one that names nothing once its rows arrive.
+        """
+        from .vault_store import derivation
+
+        underived = derivation.underived(conn)
+        lagging = [path for path in wanted if path in underived]
+        derived = [path for path in wanted if path not in underived]
+        refs = self._refs_from_connection(conn, derived)[0] if derived else {}
+        if not lagging:
+            return refs
+        ids: dict[str, str] = {}
+        for path in lagging:
+            raw = underived[path]
+            row = None if raw is None else identity_row(self.vault_root, path, raw)
+            if row is not None and row[4] == "valid":
+                ids[path] = row[1]
+        owners = _owners_at(conn, self.vault_root, sorted(set(ids.values())), underived) if ids else {}
+        for path in lagging:
+            held = ids.get(path)
+            refs[path] = memory_ref(held) if held is not None and len(owners[held]) == 1 else None
+        return refs
 
     def _refs_for_paths_from_sidecar(
         self, wanted: list[str], *, recall_reader: bool = False
@@ -1718,26 +1743,31 @@ def _store_identity_owners(
 
     wanted = list(dict.fromkeys(ids))
     root = Path(vault_root)
+    return _from_store_identities(
+        vault_root, lambda conn: _owners_at(conn, root, wanted, derivation.underived(conn))
+    )
 
-    def owners(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
-        underived = derivation.underived(conn)
-        found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
-        for start in range(0, len(wanted), REFS_QUERY_CHUNK):
-            chunk = wanted[start : start + REFS_QUERY_CHUNK]
-            for exomem_id, path in conn.execute(
-                "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
-                f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
-                chunk,
-            ):
-                if path not in underived:
-                    found[str(exomem_id)].append(str(path))
-        for path, raw in underived.items():
-            row = None if raw is None else identity_row(root, path, raw)
-            if row is not None and row[4] == "valid" and row[1] in found:
-                found[row[1]].append(path)
-        return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
 
-    return _from_store_identities(vault_root, owners)
+def _owners_at(
+    conn: sqlite3.Connection, root: Path, wanted: list[str], underived: dict[str, bytes | None]
+) -> dict[str, tuple[str, ...]]:
+    """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
+    ``underived`` pages taken from their stored bytes (``_store_identity_owners``)."""
+    found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
+    for start in range(0, len(wanted), REFS_QUERY_CHUNK):
+        chunk = wanted[start : start + REFS_QUERY_CHUNK]
+        for exomem_id, path in conn.execute(
+            "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
+            f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
+            chunk,
+        ):
+            if path not in underived:
+                found[str(exomem_id)].append(str(path))
+    for path, raw in underived.items():
+        row = None if raw is None else identity_row(root, path, raw)
+        if row is not None and row[4] == "valid" and row[1] in found:
+            found[row[1]].append(path)
+    return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
 
 
 def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | None:

@@ -49,9 +49,7 @@ from exomem import (
     media_replicas,
     media_store,
     media_worker,
-    memory_refs,
     mutation_lock,
-    page_ids,
     relation_review,
     reserved_paths,
     scene_frames,
@@ -416,11 +414,8 @@ def test_a_recall_during_the_lag_answers_whatever_its_refs_name(stored, service,
     made one such ref fail the whole recall."""
     monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
     with derivation_held(monkeypatch):
-        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
-        page = call(stored, "read_memory", path=saved["ref"])
-        short = page_ids.page_id(
-            memory_refs.parse_memory_ref(saved["ref"]), page["path"], page["content_hash"]
-        )
+        saved = call(stored, "remember", **QUOKKA)
+        short = call(stored, "read_memory", path=saved["path"])["id"]
         cited = call(
             stored, "activate_context", turn="Summarise the census.", conversation={"refs": [short]}
         )
@@ -433,21 +428,23 @@ def test_a_recall_during_the_lag_answers_whatever_its_refs_name(stored, service,
     assert "not yet in the search" in unnamed["notice"]
 
 
-def test_a_saved_pages_short_id_names_it_before_and_after_its_rows(stored, service, monkeypatch):
-    """A page that only the store holds, read by its short id. The id lookup read the ids from the
-    cached corpus or the files, neither of which holds such a page."""
+def test_a_read_during_the_lag_gives_the_pages_own_id_and_that_id_names_it(
+    stored, service, monkeypatch
+):
+    """A save, a read of its page while its rows lag, and reads by the id that the read gave,
+    before and after the rows arrive. The compact save reply carries no id, so a read is how an
+    agent learns it. Taken from the rows, the read's id was one that named nothing once they
+    arrived, and the id lookup missed a page that only the store holds."""
     with derivation_held(monkeypatch) as release:
-        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
-        page = call(stored, "read_memory", path=saved["ref"])
-        short = page_ids.page_id(
-            memory_refs.parse_memory_ref(saved["ref"]), page["path"], page["content_hash"]
-        )
-        before = call(stored, "read_memory", path=short)
+        saved = call(stored, "remember", **QUOKKA)
+        read_back = call(stored, "read_memory", path=saved["path"])
+        before = call(stored, "read_memory", path=read_back["id"])
         release.set()
     derived(stored)
-    after = call(stored, "read_memory", path=short)
+    after = call(stored, "read_memory", path=read_back["id"])
 
     assert before["path"] == after["path"] == saved["path"]
+    assert read_back["ref"] == after["ref"]
 
 
 def test_a_write_and_a_drain_never_wait_for_rows(stored, service, monkeypatch):
