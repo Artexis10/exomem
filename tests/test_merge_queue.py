@@ -108,7 +108,7 @@ def test_a_failed_pull_request_waits_until_auto_merge_is_enabled_on_it_again():
 def test_a_finished_queue_run_sets_each_members_status(kind, members, result, attempt, expected, token):
     heads = [(number, chr(96 + number) * 40) for number in range(1, members + 1)]
 
-    outcome = queue.verdicts(kind, heads, result, attempt, tree="t" * 40, base="c" * 12)
+    outcome = queue.verdicts(kind, heads, result, attempt, tree="t" * 40, base="c" * 12, main="c" * 40)
 
     assert [head for head, _, _ in outcome] == [head for _, head in heads]
     assert {state for _, state, _ in outcome} == {expected}
@@ -120,6 +120,24 @@ def test_a_finished_queue_run_sets_each_members_status(kind, members, result, at
     if attempt == 1 and result == "failure":
         # The rerun keeps the queue busy until the second attempt reports.
         assert all(description.endswith(queue.RERUN) for _, _, description in outcome)
+
+
+def test_a_pass_is_withheld_when_main_moved_during_the_queue_run():
+    """Catches members landing on main plus something else, a tree no run tested."""
+    outcome = queue.verdicts("batch", [(1, "a" * 40)], "success", 1, tree="t" * 40, base="c" * 12, main="d" * 40)
+
+    assert [(state, description.split(":")[0]) for _, state, description in outcome] == [("pending", queue.QUEUED)]
+
+
+def test_a_pull_request_the_queue_cannot_build_fails_alone(monkeypatch):
+    """Catches one unbuildable pull request stopping every later controller run."""
+    posted = []
+    monkeypatch.setattr(queue, "set_status", lambda sha, state, description, url="": posted.append((sha, state, description)))
+    error = subprocess.CalledProcessError(128, ["git", "merge-base"], stderr="fatal: no merge base\n")
+
+    queue.unbuildable(_pull(1), error)
+
+    assert posted == [(_pull(1).head, "failure", "failed: the queue could not build it: fatal: no merge base")]
 
 
 def test_a_pass_that_did_not_land_is_withdrawn_and_a_reconcile_passes_without_a_run():

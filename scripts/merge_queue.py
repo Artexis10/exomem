@@ -316,6 +316,13 @@ def wake() -> None:
     run("gh", "workflow", "run", "merge-queue.yml", "--repo", repository(), "--ref", "main")
 
 
+def unbuildable(pull: PullRequest, error: subprocess.CalledProcessError) -> None:
+    """Fail one pull request the queue cannot build, so it never stops the others."""
+    reason = (error.stderr or "").strip().splitlines()[-1:] or [f"git exited {error.returncode}"]
+    set_status(pull.head, "failure", f"{FAILED}: the queue could not build it: {reason[0]}")
+    print(f"#{pull.number} could not be built: {reason[0]}", file=sys.stderr)
+
+
 def advance() -> int:
     now = datetime.now(timezone.utc)
     main, pulls = open_pulls()
@@ -340,19 +347,22 @@ def advance() -> int:
         return 0
 
     git("fetch", "--no-tags", "origin", main)
-    for pull in decision.members:
-        git("fetch", "--no-tags", "origin", f"+refs/pull/{pull.number}/head:refs/queue/{pull.number}")
     testable, bypassed = [], False
     for pull in decision.members:
-        head = git("rev-parse", f"refs/queue/{pull.number}")
-        if head != pull.head:
-            print(f"#{pull.number} moved while the queue read it; the next run takes it.")
+        try:
+            git("fetch", "--no-tags", "origin", f"+refs/pull/{pull.number}/head:refs/queue/{pull.number}")
+            head = git("rev-parse", f"refs/queue/{pull.number}")
+            if head != pull.head:
+                print(f"#{pull.number} moved while the queue read it; the next run takes it.")
+                continue
+            if squash(main, main, head, "conflict check") is None:
+                set_status(head, "failure", f"{FAILED}: conflicts with main; rebase onto main")
+                print(f"#{pull.number} conflicts with main.")
+                continue
+            paths = changed_paths(main, head)
+        except subprocess.CalledProcessError as error:
+            unbuildable(pull, error)
             continue
-        if squash(main, main, head, "conflict check") is None:
-            set_status(head, "failure", f"{FAILED}: conflicts with main; rebase onto main")
-            print(f"#{pull.number} conflicts with main.")
-            continue
-        paths = changed_paths(main, head)
         bypass = ""
         if docs_only(paths):
             # Only docs-marked tests read these paths, and the pull request's own CI ran them.
@@ -372,7 +382,11 @@ def advance() -> int:
     tip, members = main, []
     for pull in testable:
         message = f"Merge queue: #{pull.number} {pull.title}\n\nHead: {pull.head}"
-        commit = squash(tip, main, pull.head, message)
+        try:
+            commit = squash(tip, main, pull.head, message)
+        except subprocess.CalledProcessError as error:
+            unbuildable(pull, error)
+            continue
         if commit is None:
             print(f"#{pull.number} conflicts with a pull request ahead of it; the next batch takes it.")
             continue
@@ -407,14 +421,18 @@ def parse_queue(queue: str) -> tuple[str, list[tuple[int, str]]]:
 
 
 def verdicts(
-    kind: str, members: list[tuple[int, str]], result: str, attempt: int, tree: str, base: str
+    kind: str, members: list[tuple[int, str]], result: str, attempt: int, tree: str, base: str, main: str
 ) -> list[tuple[str, str, str]]:
     """The (head, state, description) each member gets from a finished queue run attempt.
 
-    A first failure reruns the failed jobs, so a flaky test fails nothing. A
-    batch that fails again sends every member to a retest alone, so one breaking
+    A pass holds only while main is still the base the run tested: otherwise the
+    members would land on a tree no run tested, so they are tested again. A
+    first failure reruns the failed jobs, so a flaky test fails nothing. A batch
+    that fails again sends every member to a retest alone, so one breaking
     change holds only itself. A pull request that fails again alone has failed.
     """
+    if result == "success" and not main.startswith(base):
+        return [(head, "pending", f"{QUEUED}: main moved during the queue run") for _, head in members]
     if result == "success":
         return [(head, "success", f"{PASSED} on main {base[:7]}; tree {tree}") for _, head in members]
     if result == "cancelled":
@@ -437,8 +455,15 @@ def verdict() -> int:
     base = branch.removeprefix(BRANCH_PREFIX).split("-", 1)[0]
     attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
     url = f"{os.environ['GITHUB_SERVER_URL']}/{repository()}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    outcome = verdicts(kind, members, os.environ["RESULT"], attempt, tree, base)
+    main = api("git/ref/heads/main")["object"]["sha"]
+    outcome = verdicts(kind, members, os.environ["RESULT"], attempt, tree, base, main)
     for head, state, description in outcome:
+        # Only a member the controller put into this kind of run can get its verdict.
+        statuses = api(f"commits/{head}/statuses")
+        latest = next((status for status in statuses if status["context"] == CONTEXT), None)
+        if not (latest and latest["state"] == "pending" and latest["description"].startswith(TESTING)):
+            print(f"{head} is not in a queue run; its status stays as it is.", file=sys.stderr)
+            continue
         set_status(head, state, description, url)
     wake()
     if all(not description.endswith(RERUN) for _, _, description in outcome):
