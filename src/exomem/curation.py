@@ -5320,6 +5320,7 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
     )
     next_item = _next_step(plan, reconstructed)
     refused = next_item is not None and next_item[3]
+    # nosemgrep: ep-word-membership -- the closed run phases this module defines, each decided by its own branch.
     if reconstructed["phase"] in {"completed", "partial", "failed", "blocked"} and not refused:
         return settled
     if next_item is not None:
