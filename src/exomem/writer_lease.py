@@ -9649,13 +9649,13 @@ def start_server_lifecycle(*, serve_collection_store: bool = True) -> LeaseManag
     return manager
 
 
-def serve_vault_collection_store(manager: LeaseManager | None = None) -> None:
+def serve_vault_collection_store(manager: LeaseManager) -> None:
     """Serve the vault's collection store, if its marker routes any collection to one (S1)."""
     try:
         from .collection_store import runtime as store_runtime
         from .vault import resolve_vault
 
-        store_runtime.serve(resolve_vault(), manager or get_manager())
+        store_runtime.serve(resolve_vault(), manager)
     except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
         logger.warning("collection store serving did not start", exc_info=True)
 

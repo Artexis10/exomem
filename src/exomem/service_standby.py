@@ -1089,10 +1089,10 @@ def _acquire_ownership() -> Callable[[], None] | None:
     """Take the writer lease this process deliberately refused while standby.
 
     Returns the start of the collection store it now owns, which promotion runs
-    only after its graph proof and identity check: the store's takeover holds
-    the canonical boundary and its view reconciliation advances the commit
-    generation, and inside the proof window either one declined the sample or
-    the seal on 2026-11-23, leaving writes refused as warming for minutes.
+    only after its graph proof: the store's takeover holds the canonical
+    boundary and its view reconciliation advances the commit generation, and
+    inside the proof window either one declined the sample or the seal on
+    2026-11-23, leaving writes refused as warming for minutes.
     """
     from .writer_lease import serve_vault_collection_store, start_server_lifecycle
 
@@ -1242,8 +1242,9 @@ def _promote_owned(
         record["identity_catalogue"] = "rebuild-after-promotion"
         record["identity_catalogue_cause"] = identity_cause
         reserved_paths.schedule_identity_catalogue_warm(Path(vault_root))
-    # Only now: the store's takeover and view reconciliation move the boundary
-    # and commit generation that the graph seal and the identity token compare.
+    # Only now, after the graph seal: the store's takeover holds the boundary
+    # and its view passes advance the commit generation, both of which the
+    # sample and the seal compare. Nothing above this point uses the store.
     if serve_collection_store is not None:
         serve_collection_store()
     carried = _carried_at_promotion(record)
