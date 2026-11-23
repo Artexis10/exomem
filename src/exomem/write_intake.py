@@ -490,8 +490,8 @@ class Drainer:
         self._indexed = False
         self._open_origins: dict[str, str] = {}
         self._applied_origins: dict[str, tuple[str, float]] = {}
-        #: Origins whose acceptance is between its durable insert and its index entry, with a count
-        #: of acceptances in flight; a resend with one of them waits instead of running.
+        #: Origins with a send in flight (waiting for the boundary or being queued), with a count;
+        #: a resend with one of them waits instead of running.
         self._accepting: dict[str, int] = {}
         #: Acceptances so far; a store read that an acceptance overlapped is read again.
         self._accepts = 0
@@ -541,32 +541,40 @@ class Drainer:
                 self._condition.wait(min(remaining, 1.0))
             return True
 
-    def lookup(self, origin: str) -> tuple[str, str] | None:
-        """The intake id and state (open or applied) of the save with this origin, while it is open
-        or its applied answer is still in the original identity's retry window.
+    def enter(self, origin: str) -> tuple[str, str] | None:
+        """Admit one send of the save with this origin, atomically.
 
-        While an acceptance of the same origin is in flight, wait for it, so a resend never runs
-        in the gap between the durable insert and the index entry.
+        While another send of the same save is in flight (waiting for the boundary or being
+        queued), wait for it. Then return the intake id and state (open or applied) when the save
+        is known, or mark this send in flight and return None; the caller ends that mark with
+        `end_accept`. So a resend never runs beside the send it repeats.
         """
         with self._condition:
             deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
             while origin in self._accepting and not self._stop.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"an acceptance of origin {origin[:12]} did not finish")
+                    raise TimeoutError(f"a send of origin {origin[:12]} did not finish")
                 self._condition.wait(min(remaining, 1.0))
-            intake_id = self._open_origins.get(origin)
-            if intake_id is not None:
-                return intake_id, QUEUED
-            applied = self._applied_origins.get(origin)
-            if applied is None:
-                return None
-            if applied[1] <= time.time():
-                del self._applied_origins[origin]
-                return None
-            return applied[0], APPLIED
+            known = self._known(origin)
+            if known is None:
+                self._accepting[origin] = self._accepting.get(origin, 0) + 1
+            return known
 
-    def begin_accept(self, origin: str) -> None:
+    def _known(self, origin: str) -> tuple[str, str] | None:
+        """The intake id and state of the open save, or of the applied save still in its retry window."""
+        intake_id = self._open_origins.get(origin)
+        if intake_id is not None:
+            return intake_id, QUEUED
+        applied = self._applied_origins.get(origin)
+        if applied is None:
+            return None
+        if applied[1] <= time.time():
+            del self._applied_origins[origin]
+            return None
+        return applied[0], APPLIED
+
+    def hold(self, origin: str) -> None:
         with self._condition:
             self._accepting[origin] = self._accepting.get(origin, 0) + 1
 
@@ -967,21 +975,35 @@ class Admission:
         """
         started = time.monotonic()
         deadline = started + intake_wait_seconds()
+        in_flight = False
         try:
-            answer = self._indexed_answer()
+            known = self.drainer.enter(self.origin)
+            in_flight = known is None
         except TimeoutError as error:
-            # The same save is still being accepted; running it now could land it twice.
+            # The same save is still in flight; running it now could land it twice.
             raise OpError(
                 "MUTATION_BUSY",
-                "the same save is still being queued",
+                "the same save is still being sent",
                 "Send it again in a moment with the same idempotency key.",
                 details={"status": "retryable", "committed": False},
             ) from error
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
             log.warning("write intake could not check a resend of a %s save", self.command.name, exc_info=True)
-            answer = None
-        if answer is not None:
-            return answer
+            known = None
+        if known is not None:
+            answer = self._known_answer(*known)
+            if answer is not None:
+                return answer
+            # Its row is gone or past its retry window: this is a new send of the save.
+            self.drainer.hold(self.origin)
+            in_flight = True
+        try:
+            return self._run_in_flight(call, started, deadline)
+        finally:
+            if in_flight:
+                self.drainer.end_accept(self.origin)
+
+    def _run_in_flight(self, call: Callable[[], Any], started: float, deadline: float) -> Any:
         try:
             behind = self.drainer.has_backlog() and not self.drainer.wait_for_empty_queue(deadline)
         except Exception:  # noqa: BLE001 - an intake fault must not stop an ordinary save
@@ -1008,11 +1030,7 @@ class Admission:
         finally:
             _WAIT_CAP.reset(token)
 
-    def _indexed_answer(self) -> dict[str, Any] | None:
-        known = self.drainer.lookup(self.origin)
-        if known is None:
-            return None
-        intake_id, state = known
+    def _known_answer(self, intake_id: str, state: str) -> dict[str, Any] | None:
         try:
             return _with_store_retry(lambda: self._stored_answer(intake_id))
         except Exception:  # noqa: BLE001 - a known save is answered from the index, never run again
@@ -1042,18 +1060,14 @@ class Admission:
         return _with_store_retry(lambda: self._accept_once(reason=reason, started=started))
 
     def _accept_once(self, *, reason: str, started: float) -> dict[str, Any]:
-        self.drainer.begin_accept(self.origin)
+        # `run` holds this send in flight, so no resend runs between the insert and the index entry.
         try:
-            try:
-                receipt, inserted = self._insert(reason, create=False)
-            except FileNotFoundError:
-                # The first acceptance on this vault creates the store.
-                receipt, inserted = self._insert(reason, create=True)
-            if inserted is not None:
-                self.drainer.note_accepted(self.origin, inserted)
-        finally:
-            self.drainer.end_accept(self.origin)
+            receipt, inserted = self._insert(reason, create=False)
+        except FileNotFoundError:
+            # The first acceptance on this vault creates the store.
+            receipt, inserted = self._insert(reason, create=True)
         if inserted is not None:
+            self.drainer.note_accepted(self.origin, inserted)
             _journal_queued(self, inserted, reason, started)
         return receipt
 

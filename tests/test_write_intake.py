@@ -589,19 +589,31 @@ def test_a_save_without_an_idempotency_identity_keeps_the_busy_refusal(
     assert write_intake.read(vault)["items"] == []
 
 
-def test_a_resend_waits_for_an_in_flight_acceptance_of_the_same_save(drainer) -> None:
-    # Between the durable insert and the index entry, a resend that found nothing would run the
-    # save a second time; it waits for the acceptance instead.
-    drainer.begin_accept("origin-1")
-    found: list = []
-    resend = threading.Thread(target=lambda: found.append(drainer.lookup("origin-1")))
-    resend.start()
-    resend.join(0.3)
-    assert resend.is_alive(), "the resend did not wait for the in-flight acceptance"
-    drainer.note_accepted("origin-1", "intake-1")
-    drainer.end_accept("origin-1")
-    resend.join(5)
-    assert found == [("intake-1", "queued")]
+def test_a_resend_sent_while_the_original_waits_for_the_boundary_lands_once(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The resend arrives while the original still waits for the boundary; the boundary frees
+    # just after the original is queued. Run beside it, the resend would commit the save itself
+    # and the queued copy would land it again.
+    monkeypatch.setenv("EXOMEM_BUSY_INTAKE_AFTER_SECONDS", "2")
+    _writer, holder = managers
+    remember = _command("remember")
+    kwargs = _remember_kwargs(vault, 28)
+    replies: dict[str, dict] = {}
+    hold = _Hold(holder, vault)
+    with hold:
+        original = threading.Thread(target=lambda: replies.update(original=_send(remember, vault, kwargs)))
+        original.start()
+        time.sleep(1.0)
+        resend = threading.Thread(target=lambda: replies.update(resend=_send(remember, vault, kwargs)))
+        resend.start()
+        original.join(_HOLD_SECONDS)
+        hold.release.set()
+        resend.join(_HOLD_SECONDS)
+    ref = replies["original"]["queued_write"]["ref"]
+    assert replies["resend"]["queued_write"]["ref"] == ref, replies["resend"]
+    _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 28")) == 1
 
 
 def test_a_stale_finish_never_overwrites_an_applied_save(vault: Path, managers, drainer) -> None:
