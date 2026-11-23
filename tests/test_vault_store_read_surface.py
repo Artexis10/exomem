@@ -22,6 +22,7 @@ from test_deferred_write_advisory import _prepare_custody as prepare_advisory_cu
 from test_episode_memory_command import KEY as EPISODE
 from test_episode_memory_command import _record as record_episode
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_name_drift import without_scan_time
 from test_vault_store_graph_readers import (
     CLAIM,
     LAMP,
@@ -464,8 +465,10 @@ def comparable(value, *, inbound_links=False):
     served_context_id, generation.freshness_key and generation.index_generation identify
     backend snapshots; budget.serialized_chars includes their variable-length encoding.
     Only minted_ns, thread, thread_ns and mac vary per call in the decoded continuity.
+    A reason's meta.scanned_at dates the scan behind it, and a store read after migration scans
+    again (`without_scan_time`).
     """
-    result = copy.deepcopy(value)
+    result = without_scan_time(copy.deepcopy(value))
     if not isinstance(result, dict):
         return result
     result.pop("observed_at", None)
@@ -504,6 +507,20 @@ def test_comparison_ignores_only_inbound_order_and_keeps_duplicate_links():
     reordered["links"]["inbound"].append(first)
     reordered["hits"].reverse()
     assert comparable(answer, inbound_links=True) != comparable(reordered, inbound_links=True)
+
+
+def test_comparison_ignores_only_when_a_reason_was_scanned():
+    """A later scan must not fail parity, and an answer that drops the time or the count must."""
+    def reason(scanned, detail):
+        return {"items": [{"reasons": [{"detail": detail, "meta": {"scanned_at": scanned}}]}]}
+
+    file_answer = reason("2026-01-01 10:00 UTC", "As of 2026-01-01 10:00 UTC, 2 pages drift.")
+    later = reason("2026-01-01 10:01 UTC", "As of 2026-01-01 10:01 UTC, 2 pages drift.")
+    undated = reason("2026-01-01 10:01 UTC", "2 pages drift.")
+    recounted = reason("2026-01-01 10:01 UTC", "As of 2026-01-01 10:01 UTC, 3 pages drift.")
+    assert comparable(file_answer) == comparable(later)
+    assert comparable(file_answer) != comparable(undated)
+    assert comparable(file_answer) != comparable(recounted)
 
 
 def prepare_sample(root, monkeypatch, request, sample):

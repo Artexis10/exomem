@@ -27,7 +27,7 @@ import datetime as dt
 import hashlib
 import json
 import threading
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -166,6 +166,9 @@ def scan(vault_root: Path, pages: Iterable[Any]) -> Scan:
             if held is None:
                 drifted.append(verdict)
             else:
+                # The batch leaves a held page where it is, so a later page may take its name.
+                planned = PurePosixPath(page.rel_path).with_name(verdict.planned).as_posix()
+                names.claimed.discard(vault.vault_name_key(planned))
                 held_code = str(held["code"])
                 refused.append(dataclasses.replace(verdict, verdict=REFUSED, code=held_code))
         elif verdict.verdict == NO_USABLE_TITLE:
@@ -216,29 +219,19 @@ def _held(
 ) -> dict[str, Any] | None:
     """The remembered refusal of `path` while it still applies, else None.
 
-    It applies while the page has the bytes it was refused with, and each page that linked to it
-    then and that this scan reads has its bytes then too. A referrer this scan does not read is
-    passed over, so a caller that sees fewer pages does not readmit the page on every scan.
+    It applies while the page has the bytes it was refused with, and each recorded referrer has
+    its bytes then too. The entry is this caller's and records only referrers that its scan read
+    (`record_refused`), so a recorded referrer that this scan does not hold was deleted or moved:
+    a change, which lets the page back in.
     """
     if entry is None or not entry.get("hash") or entry.get("hash") != hashes.get(path):
         return None
     referrers = entry.get("referrers")
     if not isinstance(referrers, dict):
         return None
-    if any(rel in hashes and hashes[rel] != held for rel, held in referrers.items()):
+    if any(hashes.get(rel) != held for rel, held in referrers.items()):
         return None
     return entry
-
-
-def _hash_of(root: Path, rel: str) -> str | None:
-    """The SHA-256 of the page's exact bytes, as the corpus records it (`snapshot_hash`)."""
-    from . import vault
-
-    try:
-        data, _guard = vault.read_guarded_bytes(root, root / rel)
-    except (OSError, vault.PathGuardError):
-        return None
-    return hashlib.sha256(data).hexdigest()
 
 
 def record_refused(
@@ -248,10 +241,13 @@ def record_refused(
 
     Each row names a `page` and its refusal `code`. The memory binds the page's exact bytes and
     those of each page that links to it, so the scan proposes the page again once it or one of
-    those referrers changes. It is kept under the caller's key (`relocate.reader_key`), and only a
-    scan under the same key reads it; a caller without a key records nothing. It keeps no reason
-    text: a reason can name pages that another audience may not see. The row is refreshed, so the
-    item closes when every remaining drifted page is refused.
+    those referrers changes. Both hashes come from the corpus read that the scan compares them
+    with (`_corpus`). A linking page outside it, such as one outside the managed root, is not
+    bound, because the scan could never tell its deletion from its absence. The memory is kept
+    under the caller's key (`relocate.reader_key`), and only a scan under the same key reads it;
+    a caller without a key records nothing. It keeps no reason text: a reason can name pages that
+    another audience may not see. The row is refreshed, so the item closes when every remaining
+    drifted page is refused.
     """
     from . import due_state, relocate, state_paths, vault
     from .governance import egress
@@ -266,19 +262,23 @@ def record_refused(
     inbound = vault.find_inbound_wikilinks_many(
         root, paths, visible=egress.visible_page_filter(root)
     )
+    wanted = {*paths, *(link.path for links in inbound.values() for link in links)}
+    hashes = {
+        page.rel_path: page.snapshot_hash
+        for page in _corpus(root, select=lambda rel, _content: rel in wanted)
+        if page.snapshot_hash
+    }
     entries: dict[str, dict[str, Any]] = {}
     for row in refused:
         path = str(row["page"])
-        own = _hash_of(root, path)
-        if own is None:
+        if path not in hashes:
             continue
-        referrers: dict[str, str] = {}
-        for link in inbound.get(path, ()):
-            if link.path != path and link.path not in referrers:
-                held = _hash_of(root, link.path)
-                if held is not None:
-                    referrers[link.path] = held
-        entries[path] = {"code": str(row["code"]), "hash": own, "referrers": referrers}
+        referrers = {
+            link.path: hashes[link.path]
+            for link in inbound.get(path, ())
+            if link.path != path and link.path in hashes
+        }
+        entries[path] = {"code": str(row["code"]), "hash": hashes[path], "referrers": referrers}
     if not entries:
         return True
     with _REFUSALS_LOCK:
@@ -295,13 +295,22 @@ def record_refused(
     return True
 
 
-def _corpus_scan(vault_root: Path) -> Scan:
-    """One scan of the admitted corpus, through the audit's own cached corpus read."""
+def _corpus(
+    vault_root: Path, *, select: Callable[[str, bytes | None], bool] | None = None
+) -> list[Any]:
+    """The admitted corpus that a scan reads, through the audit's own cached corpus read.
+
+    `select` keeps only the vault-relative paths it takes, admitted as the whole read admits them.
+    """
     from . import audit as audit_module
     from .vault import kb_root
 
-    pages = audit_module._parse_all(kb_root(vault_root), vault_root)  # noqa: SLF001 -- the audit's own corpus read
-    return scan(vault_root, pages)
+    return audit_module._parse_all(kb_root(vault_root), vault_root, select=select)  # noqa: SLF001 -- the audit's own corpus read
+
+
+def _corpus_scan(vault_root: Path) -> Scan:
+    """One scan of the admitted corpus."""
+    return scan(vault_root, _corpus(vault_root))
 
 
 def pages_for_review(vault_root: Path) -> list[str]:

@@ -74,11 +74,11 @@ For a `curation.relocate` by the item's `review_ref`, a page whose move or refer
 
 ### Requirement: A refused page waits until it changes
 
-The runtime SHALL remember a refused page with its code, bound to its exact bytes and those of the pages that link to it, outside the stored due-state row. It SHALL apply the memory only to callers with the refusing caller's audience, purpose and connector ceiling. The batch resolver SHALL NOT propose it again until one of those pages changes. No scan SHALL prepare a move to learn a refusal.
+The runtime SHALL remember a refused page with its code, bound to its exact bytes and those of the scanned pages that link to it, outside the stored due-state row. It SHALL apply the memory only to callers with the refusing caller's audience, purpose and connector ceiling. The batch resolver SHALL NOT propose it again until one of those pages changes. No scan SHALL prepare a move to learn a refusal.
 
 #### Scenario: An edit lets a refused page back in
 
-- **WHEN** a page was refused and the owner then edits it or a page that links to it
+- **WHEN** a page was refused and the owner then edits it, or edits or deletes a page that links to it
 - **THEN** the next batch can hold the page again
 
 ### Requirement: Refused pages stay visible

@@ -55,6 +55,25 @@ def _maintain(vault: Path, action: str, **arguments: object) -> dict:
     )
 
 
+def without_scan_time(value: object) -> object:
+    """`value` with each reason's scan time, in its meta and its detail, as one placeholder.
+
+    Two answers computed at different times state different scan times, both honest. A comparison
+    of their content still requires each to state one, at the same place.
+    """
+    if isinstance(value, list):
+        return [without_scan_time(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {key: without_scan_time(item) for key, item in value.items()}
+    meta = result.get("meta")
+    if isinstance(meta, dict) and isinstance(meta.get("scanned_at"), str):
+        result["meta"] = {**meta, "scanned_at": "<scan time>"}
+        if isinstance(result.get("detail"), str):
+            result["detail"] = result["detail"].replace(meta["scanned_at"], "<scan time>")
+    return result
+
+
 def _run_to_end(vault: Path, started: dict, *, run_id: str, plan_id: str, done: str) -> dict:
     result = started
     while result["phase"] in ("executing", "compensating"):
@@ -246,8 +265,9 @@ def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
     vault: Path,
 ) -> None:
     """Failure caught: a link rewrite that the contract refuses fails the whole batch, because its
-    step names no page; the page it would rename heads every later batch; or the page stays out
-    after its referrer is repaired."""
+    step names no page; the page it would rename heads every later batch, also when a page
+    outside the managed root links to it; or the page stays out after its referrer is repaired or
+    deleted."""
     from exomem import edit as edit_module
     from exomem import note as note_module
 
@@ -264,6 +284,8 @@ def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
         note_type="insight", title="Tide limits in use", today=day,
         relation_disposition="reviewed_none", relation_review_reason="Its link is enough",
     ).path
+    # A page outside the managed root links to it as well. The scan never reads that page.
+    _put(vault, "Journal/2026-08-16.md", f"# 2026-08-16\n\nRead {link}.\n")
     writer_lease.invoke_command(
         _command("edit_memory"), vault, path=target,
         operation={"kind": "patch_frontmatter", "field": "title", "value": "Tide limits revised"},
@@ -284,11 +306,17 @@ def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
         refused_batch = name_drift.pages_for_review(vault)
         page.write_text(page.read_text(encoding="utf-8").replace("Cap", "Hold"), encoding="utf-8")
         repaired_batch = name_drift.pages_for_review(vault)
+        page.write_text(page.read_text(encoding="utf-8").replace("Hold", "Cap"), encoding="utf-8")
+        refused_bytes_batch = name_drift.pages_for_review(vault)
+        page.unlink()
+        deleted_batch = name_drift.pages_for_review(vault)
 
     assert proposed["sealed"] is True
     assert left_out[target] == "LIFECYCLE_TRANSITION_STALE"
     assert target not in refused_batch
     assert target in repaired_batch
+    assert target not in refused_bytes_batch
+    assert target in deleted_batch
 
 
 def test_a_relocation_that_names_a_navigation_page_keeps_its_name(vault: Path) -> None:
