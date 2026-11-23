@@ -156,6 +156,9 @@
   - Verify: the share of recalls that exhaust the request budget, for the canary and for agents.
 - [ ] 3.24 After installation, compare whole-corpus lexical passes per day and the share of readiness samples that report lagging, before and after the catch-up re-queue (design decision 12).
   - Verify: each whole-corpus pass on the installed service names its cause or its catch-up decline, and none follows a catch-up that writes outran.
+- [ ] 3.25 After installation, compare the query-encode wait of page searches before and after the query lane (design decision 13).
+  - Verify: p50 and p90 of `execution_wait_us` on `embeddings.encode` in `search_memory`, with a bootstrap interval.
+  - Verify: `search_memory` wall p50 and p90 with at most one other call in flight, with a bootstrap interval.
 
 ## 4. Verify installed behavior and deliver
 

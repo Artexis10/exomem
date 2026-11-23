@@ -636,8 +636,7 @@ def _find_admitted(vault_root: Path, request: Mapping[str, Any], plan) -> dict:
     index = embeddings.get_embedding_index(vault_root)
     identity = index.identity
     try:
-        with embeddings.query_turn(cancel_event=_CallerDeparture()), recall_space.encoding_for(index):
-            query_vector = embeddings.embed_texts([query], is_query=True)[0]
+        query_vector = embeddings.encode_query(index, query, cancel_event=_CallerDeparture())
     except runtime_resources.ModelBusyError:
         # The turn wait also ends when the caller leaves; that search stops before its encode.
         _stop_if_caller_left("encode")
