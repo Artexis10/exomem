@@ -226,11 +226,11 @@ In cloud mode, the cell SHALL read the `x-exomem-service-notice` request header 
 - **WHEN** a call is answered with an error that the service returns as text, such as an unknown tool
 - **THEN** that error carries no `service_notice`
 
-#### Scenario: A credential issuance result carries no notice
+#### Scenario: A ready-built tool result carries no notice
 
-- **WHEN** `govern_memory` opens or rotates a session credential while the request carries a valid notice
-- **THEN** its sealed result carries no `service_notice`
-- **AND** its redacted text and structured content stay as the credential scrubber produced them
+- **WHEN** the cell returns a ready-built MCP tool result while the request carries a valid notice: a `govern_memory` session open or rotate credential result, or a `read_media` frame or preview result
+- **THEN** that result carries no `service_notice`
+- **AND** its text and structured content stay as the command produced them
 
 #### Scenario: The size report excludes the notice
 
