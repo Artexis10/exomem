@@ -111,10 +111,10 @@ def managed_manifest_path() -> Path:
     if sys.platform == "win32":
         root = os.environ.get("LOCALAPPDATA", "").strip()
         if root:
-            return Path(root) / "Evermatter" / "managed-install.json"
-        return Path.home() / "AppData" / "Local" / "Evermatter" / "managed-install.json"
+            return Path(root) / "Exomem" / "managed-install.json"
+        return Path.home() / "AppData" / "Local" / "Exomem" / "managed-install.json"
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Evermatter" / "managed-install.json"
+        return Path.home() / "Library" / "Application Support" / "Exomem" / "managed-install.json"
     root = os.environ.get("XDG_CONFIG_HOME", "").strip()
     return (Path(root) if root else Path.home() / ".config") / "exomem" / "managed-install.json"
 

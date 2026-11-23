@@ -613,7 +613,7 @@ transport ladder and never blocks on a slow path: REST first (one
 `POST /api/search_memory`, 4s timeout) — attempted when `EXOMEM_REST_API_KEY` is set
 in the client's environment **or** persisted in the managed install's
 `service.env` (`~/.config/exomem/service.env` on Linux,
-`~/Library/Application Support/Evermatter/service.env` on macOS; override the location
+`~/Library/Application Support/Exomem/service.env` on macOS; override the location
 with `EXOMEM_SERVICE_ENV`). A key read from that file is only ever sent to a
 loopback host: point `EXOMEM_HOST` elsewhere and the REST rung is skipped for it.
 Then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an

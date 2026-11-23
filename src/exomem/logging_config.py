@@ -105,7 +105,7 @@ def _user_log_dir() -> Path:
     could ever find them.
 
     macOS and Linux keep the per-user convention (services there commonly run
-    as the user, not a system account): `~/Library/Logs/Evermatter` on macOS,
+    as the user, not a system account): `~/Library/Logs/Exomem` on macOS,
     `$XDG_STATE_HOME/exomem/logs` (falling back to `~/.local/state`) on
     Linux — state, not configuration, per the XDG Base Directory spec.
     """
@@ -116,7 +116,7 @@ def _user_log_dir() -> Path:
     if sys.platform == "darwin":
         home = _safe_home()
         if home is not None:
-            return home / "Library" / "Logs" / "Evermatter"
+            return home / "Library" / "Logs" / "Exomem"
         return _homeless_fallback()
     root = os.environ.get("XDG_STATE_HOME", "").strip()
     if root:

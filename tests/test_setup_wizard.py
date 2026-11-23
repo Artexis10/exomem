@@ -192,7 +192,7 @@ def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     legacy = home / "skills" / "knowledge-base"
     legacy.mkdir(parents=True)
     (legacy / "SKILL.md").write_text(
-        "---\nname: knowledge-base\n---\n\nThis skill is the Evermatter contract.\n",
+        "---\nname: knowledge-base\n---\n\nThis skill is the Exomem contract.\n",
         encoding="utf-8",
     )
     code, out = _setup(vault, home, Recorder())

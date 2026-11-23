@@ -673,7 +673,7 @@ def test_service_env_path_on_macos_uses_application_support(monkeypatch: pytest.
     monkeypatch.setattr(hook_mod.sys, "platform", "darwin")
     monkeypatch.setattr(hook_mod.Path, "home", classmethod(lambda cls: tmp_path / "mac-home"))
     assert credentials.service_env_path() == (
-        tmp_path / "mac-home" / "Library" / "Application Support" / "Evermatter" / "service.env"
+        tmp_path / "mac-home" / "Library" / "Application Support" / "Exomem" / "service.env"
     )
 
 

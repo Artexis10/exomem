@@ -163,7 +163,7 @@ ARCH="$(uname -m)"
 CURRENT_USER="${USER:-$(id -un)}"
 case "$OS" in
     Darwin)
-        CONFIG_ROOT="$HOME/Library/Application Support/Evermatter"
+        CONFIG_ROOT="$HOME/Library/Application Support/Exomem"
         DEFAULT_SERVICE_ROOT="$CONFIG_ROOT/service"
         PLIST_SRC="$SCRIPT_DIR/com.exomem.plist"
         PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"

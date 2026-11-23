@@ -15,7 +15,7 @@ All under the resolved log directory (`logging_config.resolve_log_dir()`):
 per-platform location for a packaged (wheel) install with no override:
 `%ProgramData%\exomem\logs` on Windows (machine-wide, since the service
 commonly runs as `LocalSystem` while the `exomem` CLI runs as the logged-in
-user), `~/Library/Logs/Evermatter` on macOS, `$XDG_STATE_HOME/exomem/logs`
+user), `~/Library/Logs/Exomem` on macOS, `$XDG_STATE_HOME/exomem/logs`
 (falling back to `~/.local/state/exomem/logs`) on Linux. `exomem doctor`
 reports the resolved path under the `observability` check's `log_dir` detail
 (`--json`), so a misresolved directory is never silent. Every file below

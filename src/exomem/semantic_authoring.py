@@ -219,7 +219,7 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Evermatter writers use `-` under the canonical `## Observations` section."
+            "Exomem writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",

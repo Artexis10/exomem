@@ -121,7 +121,7 @@ def install_skills(
 # upgrade it loads as a stale duplicate, so `remove_legacy_skill` retires it — but
 # only when it is unmistakably ours (see that function).
 _LEGACY_MARKER = "name: knowledge-base"
-_LEGACY_FINGERPRINT = "Evermatter"
+_LEGACY_FINGERPRINT = "Exomem"
 
 
 def install_skill(
@@ -272,7 +272,7 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     Before the rename to ``exomem`` the skill installed at
     ``~/.claude/skills/knowledge-base``; left in place after an upgrade it loads as a
     stale, second skill with the old description. We remove it only when its SKILL.md
-    still carries the old ``name: knowledge-base`` marker *and* the ``Evermatter``
+    still carries the old ``name: knowledge-base`` marker *and* the ``Exomem``
     fingerprint — so a user's own, unrelated skill that merely shares that folder name
     is never touched. Best-effort for copy installs; a ``--link`` symlink (whose
     content already reflects the renamed scaffold) is left for the user to clear.

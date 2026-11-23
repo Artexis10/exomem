@@ -22,7 +22,7 @@ exomem_transition_receipt_path() {
     if [[ -n "${EXOMEM_TRANSITION_RECEIPT_ROOT:-}" ]]; then
         root="$EXOMEM_TRANSITION_RECEIPT_ROOT"
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        root="$HOME/Library/Application Support/Evermatter/transitions"
+        root="$HOME/Library/Application Support/Exomem/transitions"
     else
         root="${XDG_STATE_HOME:-$HOME/.local/state}/exomem/transitions"
     fi
@@ -739,7 +739,7 @@ exomem_managed_manifest_path() {
     if [[ -n "${EXOMEM_MANAGED_INSTALL_MANIFEST:-}" ]]; then
         printf '%s\n' "$EXOMEM_MANAGED_INSTALL_MANIFEST"
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        printf '%s\n' "$HOME/Library/Application Support/Evermatter/managed-install.json"
+        printf '%s\n' "$HOME/Library/Application Support/Exomem/managed-install.json"
     else
         printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/exomem/managed-install.json"
     fi
