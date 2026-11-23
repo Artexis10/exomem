@@ -230,6 +230,16 @@ def test_an_unpublished_census_redacts_a_withheld_path_that_ends_a_sentence(vaul
     assert artifact_census.published_view(vault) is None
 
 
+def test_a_published_census_redacts_a_withheld_name_with_an_inner_full_stop_at_a_sentence_end(vault: Path) -> None:
+    _withhold_from_external(vault, "Notes/Patterns/**")
+    _write(vault, f"{WITHHELD_DIR}/Mr. Orchid.md")
+    _publish(vault)
+
+    released = _gate(vault, "The memo is Mr. Orchid.md.")
+
+    assert released == f"The memo is {egress.WITHHELD_REFERENCE}."
+
+
 def test_a_burst_of_new_files_withdraws_the_census_to_the_walk(
     vault: Path, walks: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
