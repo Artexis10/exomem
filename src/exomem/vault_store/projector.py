@@ -29,7 +29,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -170,6 +170,7 @@ class Intent:
     operation: str
     from_path: str | None
     queued_at: str
+    media_allocation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,7 +553,10 @@ class Projector:
             if body is None:
                 return  # a commit changed the page meanwhile; its intent comes up next pass
             installed = self._with_authority(
-                lambda check: _publish(filesystem, facts.path, body, disk, check)
+                lambda check: _publish(
+                    filesystem, facts.path, body, disk, check,
+                    allocation_root=self._root if facts.intent and facts.intent.media_allocation else None,
+                )
             )
             self._record_projected(page, installed.size, installed.mtime_ns)
             report.projected += 1
@@ -1007,9 +1011,11 @@ def _facts_for(
         queued = {
             row[0]: Intent(*row)
             for row in database.execute(
-                "SELECT path, revision, operation, from_path, queued_at "
-                f"FROM store_projection_queue WHERE path {within}",
-                batch,
+                "SELECT q.path, q.revision, q.operation, q.from_path, q.queued_at, "
+                "EXISTS (SELECT 1 FROM store_audit a WHERE a.path = q.path AND a.revision = q.revision "
+                "AND a.reason = ?) "
+                f"FROM store_projection_queue q WHERE q.path {within}",
+                (write.MEDIA_PAYLOAD_WRITE_REASON, *batch),
             )
         }
         recorded = {
@@ -1346,6 +1352,8 @@ def _publish(
     body: bytes,
     existing: OnDisk | None,
     check: Callable[[], None],
+    *,
+    allocation_root: Path | None = None,
 ) -> OnDisk:
     """Write ``body`` to a new file, or replace ``existing`` only while it is still that exact file.
 
@@ -1363,20 +1371,33 @@ def _publish(
         published: list[held_fs.StableIdentity] = []
 
         def publish():
-            result = held_fs.publish_bytes(
-                filesystem,
-                parent,
-                leaf,
-                body,
-                expected_identity=None if existing is None else existing.identity,
-                expected_sha256=None if existing is None else existing.sha256,
-                validate_existing=None if existing is None else (lambda _held: check()),
-                prepare=(
-                    (lambda _staged: check())
-                    if existing is None
-                    else _keep_permissions(existing.permissions)
-                ),
-            )
+            from .. import media_capacity
+            from ..cli_ops import OpError
+
+            capacity = (nullcontext() if allocation_root is None else
+                        media_capacity.upload_room(allocation_root, device=parent.identity.device))
+            try:
+                with capacity as room:
+                    if room is not None:
+                        room.require(len(body))
+                    result = held_fs.publish_bytes(
+                        filesystem,
+                        parent,
+                        leaf,
+                        body,
+                        expected_identity=None if existing is None else existing.identity,
+                        expected_sha256=None if existing is None else existing.sha256,
+                        validate_existing=None if existing is None else (lambda _held: check()),
+                        prepare=(
+                            (lambda _staged: check())
+                            if existing is None
+                            else _keep_permissions(existing.permissions)
+                        ),
+                    )
+            except OpError as refused:
+                if refused.code == media_capacity.UPLOAD_SPACE_BUSY:
+                    raise Deferred(refused.code) from refused
+                raise
             if result.ok:
                 published.append(result.require())
             return result

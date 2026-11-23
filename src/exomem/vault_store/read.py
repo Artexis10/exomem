@@ -22,7 +22,7 @@ from sqlite3 import Connection
 from typing import TypeVar
 
 from .. import find_corpus, reserved_paths, vault
-from ..collection_store import connection, runtime
+from ..collection_store import connection, runtime, schema
 from ..kbdir import managed_root_rel
 from . import mode, ownership
 
@@ -654,7 +654,10 @@ def snapshot(vault_root: Path, *, join_request: bool = True) -> Iterator[StoreSn
         yield scope.view
         return
     path = connection.store_path(root)
-    with connection.store_reader(path, runtime.reader_pool(root, path)) as reader:
+    # A service reads its schema pages before its writer takes the lease and migrates the store, and a standby
+    # never takes the lease, so page reads also serve a store that its writer has not migrated yet.
+    oldest = schema.VAULT_STORE_READ_SCHEMA_VERSION
+    with connection.store_reader(path, runtime.reader_pool(root, path), oldest=oldest) as reader:
         reader.execute("BEGIN")
         try:
             row = reader.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()

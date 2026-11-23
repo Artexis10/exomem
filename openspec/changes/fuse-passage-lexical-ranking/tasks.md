@@ -25,6 +25,12 @@
 
 The release ships fusion on request and does not wait on this section.
 
-- [ ] 3.1 Measure top-15 key coverage of fused and dense ranking on the paired evaluation cases through the real implementation.
+- [x] 3.1 Measure top-15 key coverage of fused and dense ranking on the paired evaluation cases through the real implementation.
+  - Evidence: 49 real chat questions from one tenant, run on a copy of that tenant's cell through the real implementation. Top-15 key coverage was 20 for fused ranking and 13 for dense ranking (+7, 95% interval [0, 14]).
+  - At answer level, the key segment reached the answer context in 19 cases for the cell with fused ranking and in 18 cases for the calling service's own vectors.
+  - With the term budget in the design, top-15 key coverage was 21 for fused ranking and 13 for dense ranking. Top 5 was 9 and 6, and top 30 was 25 and 21. The answer-level counts above used the earlier budget.
 - [ ] 3.2 Pass the passage latency qualification on the declared reference with `mode: "hybrid"`.
+  - Not met on 22 November 2026. `benchmarks/passage-evidence/qualification-hybrid-2026-11-22.json` records 1,200 complete calls, 600 fused replies, and zero busy refusals.
+  - The lexical stage now ranks from the terms index alone. Hybrid p95 was 186.565 ms with one caller (bar 200 ms) and 524.911 ms with four callers (bar 500 ms). The four-caller bar fails by 24.911 ms.
+  - The dense default in the same run measured p95 195.063 ms and 496.876 ms. The hybrid mean was −2.9 ms (95% interval [−6.4, 0.6], no change) and +10.5 ms ([0.1, 20.5]) against dense.
 - [ ] 3.3 Make fused ranking the default after a held-out decision run shows that it is non-inferior to dense ranking or better.

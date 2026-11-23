@@ -633,9 +633,13 @@ jobs:
           OPENBLAS_NUM_THREADS: *native-math-threads
           PYTHONDONTWRITEBYTECODE: "1"
           FASTMCP_MCP_CAMELCASE_COMPAT: "false"
-        # Keep mandatory decoder proof in this serial job, outside lean worker environments.
+        # Keep mandatory decoder proof in this job, outside lean worker environments.
+        # Each test owns its temporary vault and ledger, so tests run on parallel workers.
+        # Work stealing splits the long preview-recovery module across workers.
+        # Preserve thread stacks before a worker timeout can discard them.
         run: >-
-          uv run --frozen --extra frame-codecs python -m pytest -q
+          uv run --frozen --extra frame-codecs python -m pytest -q -n 4 --dist worksteal
+          -o faulthandler_timeout=100
           tests/test_cloud_video_frames.py tests/test_image_view.py tests/test_media_previews.py tests/test_camera_raw.py
           tests/test_media_preview_recovery.py tests/test_capture_metadata.py
           tests/test_capture_backfill.py tests/test_capture_backfill_store.py
@@ -809,11 +813,11 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "22.20"
       - name: Validate all OpenSpec records
         run: |
           source infra/tool-versions.env
-          npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} -- validate --all --strict
+          node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@${OPENSPEC_VERSION} --
       - name: Refuse task-complete active changes
         run: python scripts/check_openspec_archive_discipline.py
 

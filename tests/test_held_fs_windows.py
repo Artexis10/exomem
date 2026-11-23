@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import errno
 import gc
+import hashlib
 import importlib
 import os
 import shutil
@@ -81,6 +82,28 @@ def test_windows_probe_and_relative_leaf_round_trip(tmp_path: Path) -> None:
                 assert filesystem.link(two, parent, "three.txt").ok
             with filesystem.file(parent, "three.txt", access="mutate").require() as three:
                 assert filesystem.unlink(three).ok
+
+
+def test_windows_held_root_can_publish_and_flush_owner_files_without_root_delete(tmp_path: Path) -> None:
+    held_fs = _held_fs()
+    with held_fs.acquire(tmp_path).require() as filesystem:
+        opened = filesystem.parent(".", access="flush")
+        assert opened.ok, opened.error.cause if opened.error else None
+        with opened.require() as root:
+            assert not filesystem.unlink_directory(root).ok
+            assert held_fs.publish_bytes(filesystem, root, "policy.json", b"first").ok
+            assert filesystem.flush_directory(root).ok
+            refused = held_fs.publish_bytes(filesystem, root, "policy.json", b"duplicate")
+            assert refused.error is not None and refused.error.code == "DESTINATION_EXISTS"
+            with filesystem.file(root, "policy.json").require() as current:
+                assert filesystem.read(current).require() == b"first"
+                identity = current.identity
+            assert held_fs.publish_bytes(
+                filesystem, root, "policy.json", b"second",
+                expected_identity=identity, expected_sha256=hashlib.sha256(b"first").hexdigest(),
+            ).ok
+            assert filesystem.flush_directory(root).ok
+    assert (tmp_path / "policy.json").read_bytes() == b"second"
 
 
 def test_windows_backend_declares_native_relative_ffi_contract() -> None:

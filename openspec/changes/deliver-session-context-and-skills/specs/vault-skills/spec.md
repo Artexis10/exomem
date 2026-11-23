@@ -84,6 +84,101 @@ Delivery SHALL grant no authority: the agent reads the skill and decides whether
 - **WHEN** a turn asks for work that a visible skill's description covers and task discovery admits that skill page
 - **THEN** `task_context.methods` contains the skill with its full description and the read reference
 
+### Requirement: A bounded judgment selects the methods a turn needs
+
+With a method-fit placement, task context SHALL offer a bounded model the visible skill pages and Records collection manifests, each labelled by name and described by its author's text: a skill's frontmatter `description`, a manifest's body.
+The model SHALL see the turn, recent excerpts and the focus, and SHALL answer only through a schema whose items are the supplied labels.
+The product SHALL hold no word list, threshold or list of methods for this selection.
+
+#### Scenario: An ordinary turn selects the matching skill without naming it
+
+- **WHEN** a turn asks for work that one visible skill covers without naming the skill, the product or any skill vocabulary, and the judgment selects it
+- **THEN** `task_context.methods` leads with that skill, with `selection: "method_fit"` and its contract
+
+#### Scenario: A judgment of none selects nothing
+
+- **WHEN** the judgment answers with no label
+- **THEN** no method item carries `selection: "method_fit"` and `method_fit.state` is `ready`
+
+### Requirement: The method judgment stays within its bounds
+
+The judgment SHALL select at most the vault's `method_fit_max_items` (shipped default 2, accepted 0..6; 0 turns selection off).
+Skills SHALL be offered before collections. Carriers that would exceed the placement's input allowance SHALL be counted as `omitted`, not sent.
+The judgment, reading its carriers and calling the model, SHALL take at most half of the request's time budget, so a door that its client abandons early still answers in time.
+
+#### Scenario: A slow carrier read stops at the deadline
+
+- **WHEN** reading the carriers would outlast half of the request's time budget
+- **THEN** the judgment stops at that deadline, calls no model and reports `unavailable`
+
+### Requirement: The method placement follows the interpretation rules
+
+The placement SHALL be deployment configuration outside the vault (`EXOMEM_METHOD_FIT_CONFIG`), separate from the lead-ordering placement.
+A local placement SHALL be a loopback Ollama endpoint. An API placement SHALL require explicit disclosure authorization and a provider audience.
+An API placement SHALL offer only pages its provider audience may see. It SHALL read each description from the caller/provider intersection, with withheld references redacted. A hidden page SHALL change no label.
+
+#### Scenario: A provider sees only what its audience may see
+
+- **WHEN** an API placement's provider audience may not see a page that a skill description or a collection manifest links to
+- **THEN** the provider input carries neither that page's path nor its text, and labels are unchanged by withheld pages
+
+#### Scenario: A provider never sees a withheld method's label
+
+- **WHEN** an API placement's provider audience may not see a skill page or a collection manifest
+- **THEN** the provider input carries neither that method's label nor its description
+
+### Requirement: Selected methods are served first and grant no authority
+
+Each selected page SHALL be served first in `task_context.methods`, whole, with `selection: "method_fit"`, `kind` `skill` or `collection`, its `name`, its description, a `read_ref` and its contract. A selected page SHALL NOT also be served as a plain lead.
+Selection SHALL grant no authority: the agent decides whether the method applies and acts only within its existing authority.
+
+#### Scenario: A selected skill is not repeated as a lead
+
+- **WHEN** the judgment selects a skill that general retrieval also ranked as a lead
+- **THEN** the skill appears once, as the selected method
+
+### Requirement: The method judgment reports its state
+
+`task_context.method_fit` SHALL report `disabled` without a placement, `empty` when nothing could be offered, `ready` with the model identity after a judgment, and `unavailable` when the call fails, times out or answers outside the schema.
+Every state except `ready` SHALL select nothing and leave the rest of the response unchanged.
+
+#### Scenario: A failed judgment keeps the turn
+
+- **WHEN** the model call times out or names a label it was not offered
+- **THEN** no method is selected, `method_fit.state` is `unavailable`, and the leads and other methods are served as without a placement
+
+#### Scenario: No placement, no judgment
+
+- **WHEN** no method-fit placement is configured
+- **THEN** no model is called and `method_fit.state` is `disabled`
+
+### Requirement: A selected method carries its contract
+
+A method the judgment selected SHALL carry `contract` with `text` and `complete`.
+The text SHALL be the page body as released to the caller, cut at a line boundary to at most the vault's `method_contract_max_chars` (shipped default 2400, accepted 0..8000; 0 omits the contract).
+`complete` SHALL be true only when the text is the whole released body.
+The contract SHALL grant no authority and SHALL be rendered as quoted page text.
+
+#### Scenario: A short skill arrives whole
+
+- **WHEN** a selected skill's released body fits within `method_contract_max_chars`
+- **THEN** its method item carries the whole body with `complete: true`
+
+#### Scenario: A long skill arrives cut with a read handle
+
+- **WHEN** a selected skill's released body exceeds `method_contract_max_chars`
+- **THEN** its method item carries the leading lines with `complete: false` and the `read_ref` to load the rest
+
+### Requirement: A method contract fits the turn allowance
+
+The rendered line SHALL tell the agent to follow the contract where it fits when `complete` is true, and to read the page for the rest when it is false.
+The contract SHALL count against the turn-context allowance. A contract that does not fit SHALL be cut further, never dropped with its method. A method that does not fit even with an empty contract SHALL be omitted and reported as `budget`.
+
+#### Scenario: Two selected methods share a tight allowance
+
+- **WHEN** two selected methods' contracts together exceed the turn-context allowance
+- **THEN** both methods are served and their contracts are cut, rather than the second method being dropped
+
 ### Requirement: Skills follow page admission and egress
 
 Every skills catalogue item and projected skill method SHALL pass the same admission and terminal egress checks as other served page material.

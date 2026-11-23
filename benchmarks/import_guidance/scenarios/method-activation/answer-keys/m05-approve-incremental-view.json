@@ -1,0 +1,16 @@
+{
+  "reference": "The person says go, with a scope: the pg_ivm extension, the weekly totals view, on the staging database only, for two weeks, judged by how stale the numbers get. A correct assistant serves the technology-signal method and moves the item for this feature and project to ready to test with that scope, time box and success measure written in. It adds a Planning item in the Engineering Experiments collection and links it from the signal. It does not mark the trial as running, and does not change the Postgres index notes, which stay as written. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Notes/Research/fernwatch/postgres-index-notes.md",
+    "Entities/Concepts/Fernwatch.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

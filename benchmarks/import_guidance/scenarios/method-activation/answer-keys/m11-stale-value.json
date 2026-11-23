@@ -1,0 +1,15 @@
+{
+  "reference": "The person says they gave the assistant a changed ride time yesterday, the 6am group, and the assistant gave the old time today. It is a stale or unsaved fact, a failure of the assistant's memory. A correct assistant serves the memory-incident method and writes one item for this occurrence first, with the person's words, the expected value (the 6am group) and the actual value (the old time), and then diagnoses whether the change was ever saved or was saved and not served. The existing page about the cycling club does not change except through an offered and accepted repair. It does not treat this as an ordinary correction to a fact and drop the incident. The item is written in the structured store, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/memory-incident-capture/SKILL.md",
+    "Entities/Organizations/Saltwick Wheelers.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "destination": "Records/Assistant/Memory Incidents/_collection.md",
+  "trigger_turn": 1
+}

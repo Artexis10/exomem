@@ -101,6 +101,7 @@ classes:
   scripts:
     - "scripts/ci-apt-install.sh"
     - "scripts/check_openspec_archive_discipline.py"
+    - "scripts/openspec_strict_gate.mjs"
     - "scripts/check_pr_title.py"
     - "scripts/codex_task.sh"
     - "scripts/generate-capabilities.py"

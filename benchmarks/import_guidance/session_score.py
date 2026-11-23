@@ -47,6 +47,9 @@ from .session_close import (
 from .store_report import paired_interval
 
 KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages"}
+#: Fields a method-activation key adds: the skill pages the trigger turn should be served, where the durable outcome
+#: belongs and which turn triggers it. The model-free method check reads them; this scorer only checks their shape.
+METHOD_KEY_FIELDS = {"methods", "destination", "trigger_turn"}
 RECAP_RULES = ("required", "forbidden", "optional")
 NEW_PAGE_RULES = ("none", "allowed")
 #: The criterion IDs and key rules are the fixed scoring contract, not vault vocabulary.
@@ -103,8 +106,15 @@ def refuse_unkeyed(cases: Sequence[Case]) -> dict[str, dict]:
 
 def key_problems(case: Case, key: object) -> list[str]:
     problems = []
-    if not isinstance(key, dict) or set(key) != KEY_FIELDS:
-        return [f"fields must be exactly {sorted(KEY_FIELDS)}"]
+    if not isinstance(key, dict) or not KEY_FIELDS <= set(key) <= KEY_FIELDS | METHOD_KEY_FIELDS:
+        return [f"fields must be exactly {sorted(KEY_FIELDS)}, optionally with {sorted(METHOD_KEY_FIELDS)}"]
+    if set(key) & METHOD_KEY_FIELDS:
+        if set(key) & METHOD_KEY_FIELDS != METHOD_KEY_FIELDS:
+            problems.append(f"a method key carries all of {sorted(METHOD_KEY_FIELDS)}")
+        elif not (isinstance(key["methods"], list) and all(isinstance(path, str) for path in key["methods"])):
+            problems.append("methods must be a list of page paths")
+        elif not (isinstance(key["trigger_turn"], int) and 0 <= key["trigger_turn"] < len(case.turns)):
+            problems.append("trigger_turn must index one of the case's turns")
     if not isinstance(key["reference"], str) or not key["reference"].strip():
         problems.append("reference must be a non-empty string")
     if key["recap"] not in RECAP_RULES:

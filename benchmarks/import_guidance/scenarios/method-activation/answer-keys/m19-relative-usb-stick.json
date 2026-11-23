@@ -1,0 +1,16 @@
+{
+  "reference": "The person asks for the contents of a relative's old USB stick, scanned photos and letters, to be archived, and says to give her a dedicated folder. The first turn only describes the stick; the second turn is the request. This is the user's own family-archive placement method: a relative's material goes in a per-person folder, Family/<her full name>, under the archive, and only the person's own papers go in Documents. A correct assistant serves that method, takes the full name from the relative's page (Ottilie Marsh), and proposes or records the placement Family/Ottilie Marsh with photos and letters sorted into their sub-folders, copying rather than moving, and says that the source stays untouched until the person agrees. It does not file the material under Documents, under a folder named after the stick or under the person's own papers. The seeded notes about the relative's chutney recipe and her knee recovery are about her but are not the placement method, and an assistant that recalls only those has missed it. It may add one line to her page about what was archived and where; that edit is acceptable but is not keyed as required. The folder is on the file archive, not in the vault, so no vault page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/family-archive-placement/SKILL.md",
+    "Notes/Procedures/ottilie-plum-chutney.md",
+    "Notes/Research/family/ottilie-knee-recovery.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/family-archive-placement/SKILL.md"
+  ],
+  "destination": null,
+  "trigger_turn": 1
+}

@@ -1627,6 +1627,7 @@ def read_generic_bytes(
     *,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -1647,12 +1648,14 @@ def read_generic_bytes(
 
     stored = _read_stored_generic(vault_root, value, physical=physical)
     if stored is not None:
+        if max_bytes is not None and len(stored.data) > max_bytes:
+            raise ReservedPathLeafError("INPUT_TOO_LARGE")
         return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
-            vault_root, value, identities=current, physical=physical
+            vault_root, value, identities=current, physical=physical, max_bytes=max_bytes,
         )
 
 
@@ -1681,6 +1684,7 @@ def _read_generic_bytes_held(
     *,
     identities: IdentityCatalogue,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
 
     parent_path, leaf = _leaf_spelling(value, physical=physical)
@@ -1703,7 +1707,7 @@ def _read_generic_bytes_held(
                 descriptor_id = identities.descriptor_for(file.identity) if identities else None
                 if descriptor_id is not None or file.identity.link_count != 1:
                     raise ReservedPathLeafError("RESERVED_PATH")
-                read_result = filesystem.read(file)
+                read_result = filesystem.read(file, max_bytes=max_bytes)
                 if not read_result.ok:
                     code = read_result.error.code if read_result.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
@@ -4639,6 +4643,7 @@ def _stage_owner_chunks(
     vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
     *, expected_sha256: str, expected_size: int, temporary_name: str | None = None,
     on_created: Callable[[held_fs.StableIdentity], None] | None = None,
+    meter_allocation: bool = False,
 ) -> Iterator[StagedOwnerFile]:
     """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
     root = Path(os.path.abspath(vault_root))
@@ -4682,7 +4687,17 @@ def _stage_owner_chunks(
                     digest.update(part)
                     yield part
 
-            filesystem.write(writable, held_fs.Chunks(chunks)).require()
+            parts = chunks()
+            if meter_allocation:
+                from . import media_capacity
+
+                parts = media_capacity.metered_chunks(
+                    root, os.fstat(writable.descriptor).st_dev, parts, upload_size=expected_size,
+                )
+            try:
+                filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
+            finally:
+                parts.close()
             if size != expected_size or digest.hexdigest() != expected_sha256:
                 raise ValueError("private original differs from its declared bytes")
             version = writable.version()
@@ -5051,6 +5066,7 @@ def _remove_owner_file(
     missing_ok: bool = False,
     expected_version: held_fs.FileVersion | None = None,
     expected_identity: held_fs.StableIdentity | None = None,
+    before_unlink: Callable[[], None] | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -5124,6 +5140,11 @@ def _remove_owner_file(
                             raise OSError("private remove target changed")
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private remove parent changed")
+                    if before_unlink is not None:
+                        before_unlink()
+                        if expected_version is not None and file.version() != expected_version:
+                            raise OSError("private remove target changed")
+                        _require_owner_parent(filesystem, route, parent)
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")

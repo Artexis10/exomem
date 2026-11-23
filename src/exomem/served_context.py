@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -13,6 +14,8 @@ from typing import Any
 
 from . import memory_refs, sidecar_store, state_paths
 from .governance import principal, raw_protection
+
+log = logging.getLogger(__name__)
 
 SIDECAR_NAME = ".served-context.sqlite"
 # Engineering bounds from the served-context-record contract, not vault vocabulary.
@@ -272,4 +275,16 @@ def read(root: Path, *, served_context_id: str | None = None) -> dict[str, Any]:
             "session_total": {"state": "unknown", "reason": f"{missing} retained rows lack usable conversation identity."}
             if missing or not row[0] else {"state": "known", "retained_distinct_keys": row[4]},
             "usage": _unknown_usage(),
+            "method_use": _method_use(root, path),
         }
+
+
+def _method_use(root: Path, path: Path) -> dict[str, Any]:
+    """Use evidence for each served method, joined only now that the owner asks; a failed join says so."""
+    from . import find, method_use
+
+    try:
+        return method_use.report(root, path, resolver_for=lambda: find.shared_resolver(root))
+    except Exception:  # noqa: BLE001 - the evidence is advisory: a failed join leaves the readout and says it failed
+        log.warning("method use evidence unavailable", exc_info=True)
+        return {"state": "unavailable", "reason": "The read or write logs or the retained rows could not be joined."}

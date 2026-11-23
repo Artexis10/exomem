@@ -2448,9 +2448,11 @@ def test_artifact_broker_admission_for_an_unlisted_cell_follows_the_fleet_switch
         if status.get("observedGeneration") != policy["metadata"]["generation"]:
             return False
         assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        # Type-check status can precede enforcement of an updated policy, so
-        # wait until the unlisted cell's exact edge gets the answer under test.
-        return (dry_run(exact[unlisted_id]).returncode == 0) == all_cells
+        # Type-check status can precede enforcement of an updated policy, and an earlier render on
+        # the shared cluster may refuse the unlisted cell too. Wait until both cells get this
+        # render's answers.
+        return (dry_run(exact[listed_id]).returncode == 0
+                and (dry_run(exact[unlisted_id]).returncode == 0) == all_cells)
 
     _wait_for(policy_settled, timeout=60, description="admission to follow the fleet switch")
     assert dry_run(exact[listed_id]).returncode == 0
@@ -3427,11 +3429,15 @@ def test_local_storage_admission_confines_backup_clones_and_retains_before_a_cla
             if status.get("observedGeneration") != policy["metadata"]["generation"]:
                 return False
             assert not status.get("typeChecking", {}).get("expressionWarnings"), status
-        return create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name, clone_class=local.clone_class)).returncode == 0
-
-    _wait_for(policies_ready, timeout=60, description="local storage admission")
+        # Type-check status can precede enforcement of this render's image repository, which an
+        # earlier test on the shared cluster may have applied differently, so a Job must pass too.
+        return (create(render_clone_claim(spec, snapshot_name=snapshot_name, clone_name=clone_name,
+                                          clone_class=local.clone_class)).returncode == 0
+                and create(prepare).returncode == 0)
 
     prepare = render_prepare_job(spec, node="selected-agent", image=spec.image)
+    _wait_for(policies_ready, timeout=60, description="local storage admission")
+
     result = create(prepare)
     assert result.returncode == 0, result.stderr
     for secret_field in (

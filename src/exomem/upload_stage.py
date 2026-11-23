@@ -30,7 +30,7 @@ from typing import BinaryIO
 
 from filelock import FileLock, Timeout
 
-from . import reserved_paths
+from . import media_capacity, reserved_paths
 from .kbdir import managed_root
 
 log = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ def _remove(path: Path) -> None:
 
 
 def _copy(
-    vault_root: Path, part: Path, stream: BinaryIO, *, limit: int, too_large: Callable[[], BaseException]
+    vault_root: Path, part: Path, stream: BinaryIO, *, limit: int, too_large: Callable[[], BaseException],
 ) -> StagedUpload:
     """Copy `stream` into `part` once, hashing as it goes, and fsync it."""
     try:
@@ -123,6 +123,7 @@ def _copy(
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(part, flags, 0o600)
     try:
+        device = os.fstat(descriptor).st_dev
         digest = hashlib.sha256()
         written = 0
         while chunk := stream.read(_CHUNK):
@@ -131,8 +132,11 @@ def _copy(
                 raise too_large()
             digest.update(chunk)
             view = memoryview(chunk)
-            while view:
-                view = view[os.write(descriptor, view):]
+            with media_capacity.upload_room(vault_root, device=device) as room:
+                if room is not None:
+                    room.require(len(chunk), offset=written - len(chunk), upload_size=written)
+                while view:
+                    view = view[os.write(descriptor, view):]
         os.fsync(descriptor)
         info = os.fstat(descriptor)
     except BaseException:
@@ -181,9 +185,10 @@ def stage(
                         while chunk := source.read(_CHUNK):
                             yield chunk
 
-                staged.pool = held.enter_context(
-                    original_pool.prepare(vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks))
-                )
+                staged.pool = held.enter_context(original_pool.prepare(
+                    vault_root, staged.sha256, staged.size, held_fs.Chunks(chunks),
+                    meter_allocation=media_capacity.managed_allocations(vault_root),
+                ))
             yield staged
     finally:
         try:

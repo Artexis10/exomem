@@ -32,6 +32,7 @@ from exomem import (
     lexstore,
     memory_refs,
     recover_from_trash,
+    request_budget,
     reserved_paths,
     state_paths,
 )
@@ -261,6 +262,52 @@ def test_append_canonical_record_and_verify_chain(vault: Path) -> None:
 
     assert record["seq"] == 1
     assert record["prev"] == "0" * 64
+    assert receipts.verify_chain(vault)["valid"] is True
+
+
+def test_receipt_readers_join_legacy_month_and_numbered_part(vault: Path) -> None:
+    for second in ("00", "01"):
+        receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []},
+            timestamp=f"2000-01-01T00:00:{second}Z",
+        )
+    month = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    first, second = month.read_bytes().splitlines(keepends=True)
+    month.write_bytes(first)
+    part = month.with_name("2000-01.0000000000000000002.jsonl")
+    part.write_bytes(second)
+
+    assert [entry["seq"] for entry in receipts.event_records(vault)] == [1, 2]
+    assert receipts.verify_chain(vault)["valid"] is True
+    assert receipts._read_tail_record(month.parent)["seq"] == 2
+    receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2000-01-01T00:00:02Z",
+    )
+    assert month.read_bytes() == first
+    assert part.read_bytes().startswith(second)
+    assert receipts.verify_chain(vault)["valid"] is True
+
+
+def test_receipt_append_bounds_parts_and_retries_an_empty_new_part(vault: Path, monkeypatch) -> None:
+    def append(second):
+        return receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []},
+            timestamp=f"2000-01-01T00:00:{second:02d}Z",
+        )
+
+    append(0)
+    month = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    original = month.read_bytes()
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", len(original) + 1, raising=False)
+    assert append(1)["seq"] == 2
+    part = month.with_name("2000-01.0000000000000000002.jsonl")
+    assert len(part.read_bytes()) <= len(original) + 1
+    assert month.read_bytes() == original
+
+    interrupted = month.with_name("2000-01.0000000000000000003.jsonl")
+    interrupted.touch()
+    assert append(2)["seq"] == 3
+    assert interrupted.stat().st_size > 0
     assert receipts.verify_chain(vault)["valid"] is True
 
 
@@ -540,6 +587,71 @@ def test_receipt_connection_uses_normal_for_buffered_append_and_full_for_critica
     )
 
     assert connection.execute("PRAGMA synchronous").fetchone() == (2,)
+
+
+@pytest.mark.parametrize("cached", [False, True], ids=["fresh-handle", "cached-handle"])
+def test_bounded_disclosure_busy_writer_leaves_receipt_untouched_and_can_retry(
+    vault: Path, cached: bool,
+) -> None:
+    first = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    path = receipts._month_path(vault, first["instance_id"], first["timestamp"])
+    before = path.read_bytes()
+    if not cached:
+        receipts._close_receipt_connections()
+    with contextlib.closing(sqlite3.connect(store.sidecar_path(vault))) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        budget = request_budget.RequestBudget(seconds=0.5)
+        check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+        started = time.monotonic()
+        with request_budget.checking(check), pytest.raises(
+            (request_budget.ReadBudgetExhausted, sqlite3.Error)
+        ) as refused:
+            receipts.append_event(
+                vault, event_type="disclosure", payload={"outcomes": []}, timestamp=first["timestamp"],
+            )
+        assert path.read_bytes() == before
+        assert isinstance(refused.value, request_budget.ReadBudgetExhausted)
+        assert time.monotonic() - started < 1.0
+        holder.rollback()
+
+    retry_check = request_budget.ReadCheckpoint(
+        request_budget.RequestBudget(seconds=5), bound_disclosure=True,
+    )
+    with request_budget.checking(retry_check):
+        second = receipts.append_event(
+            vault, event_type="disclosure", payload={"outcomes": []}, timestamp=first["timestamp"],
+        )
+    assert (second["seq"], second["prev"]) == (2, first["hash"])
+    assert receipts.verify_chain(vault)["valid"]
+    cached_conn = receipts._RECEIPT_CONNECTIONS[store.sidecar_path(vault).resolve()].connection
+    assert cached_conn.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+
+
+def test_audit_checkpoint_does_not_cancel_receipt_append_or_verification(vault: Path) -> None:
+    check = request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0))
+    with request_budget.checking(check):
+        record = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+        assert record["seq"] == 1
+        assert receipts.verify_chain(vault)["valid"]
+
+
+def test_bounded_disclosure_settles_the_anchor_after_append_starts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    budget = request_budget.RequestBudget(seconds=5)
+    check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+
+    def expire_after_flush(point: str) -> None:
+        if point == "after_jsonl_flush":
+            budget.deadline = time.monotonic()
+
+    monkeypatch.setattr(receipts, "_crash_point", expire_after_flush)
+    with request_budget.checking(check):
+        record = receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert check.remaining() == 0
+    tail = receipts._read_sidecar_head(vault, record["instance_id"])
+    assert tail is not None and (tail[2], tail[3]) == (record["seq"], record["hash"])
+    assert receipts.verify_chain(vault)["valid"]
 
 
 def test_warmed_receipt_connection_preserves_an_in_place_future_schema(
@@ -3139,10 +3251,10 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     original = receipts.event_records
     calls = 0
 
-    def counted(root: Path) -> list[dict]:
+    def counted(root: Path, **kwargs) -> list[dict]:
         nonlocal calls
         calls += 1
-        return original(root)
+        return original(root, **kwargs)
 
     monkeypatch.setattr(receipts, "event_records", counted)
     hits = [
@@ -3156,6 +3268,118 @@ def test_tombstone_projection_validates_receipt_binding_once_per_snapshot(
     assert calls == 1
     assert lifecycle.is_tombstoned(vault, rel) is True
     assert calls == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX change time for closed receipt reuse")
+def test_lifecycle_reuses_closed_receipt_evidence_after_an_append(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import lifecycle
+
+    receipts.append_event(
+        vault, event_type="disclosure", payload={"outcomes": []}, timestamp="2000-01-01T00:00:00Z",
+    )
+    rel = "Knowledge Base/Notes/Insights/settled-evidence.md"
+    (vault / rel).write_text("# Settled evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/settled-evidence.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    assert rel in lifecycle.tombstoned_paths(vault)
+
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    closed = next(receipts._events_root(vault).glob("*/2000-01.jsonl"))
+    opened = []
+    open_month = receipts._open_month_fd
+
+    def count_open(directory, name, **kwargs):
+        opened.append(directory / name)
+        return open_month(directory, name, **kwargs)
+
+    monkeypatch.setattr(receipts, "_open_month_fd", count_open)
+    assert rel in lifecycle.tombstoned_paths(vault)
+    assert closed not in opened
+
+    original = closed.read_bytes()
+    old_stat = closed.stat()
+    corrupted = original.replace(b'"durable":false', b'"durable":true ', 1)
+    assert original != corrupted and len(original) == len(corrupted)
+    closed.write_bytes(corrupted)
+    os.utime(closed, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstoned_paths(vault)
+
+
+def test_marker_revision_tracks_pending_edits_but_skips_ordinary_disclosure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem.governance import lifecycle
+
+    empty = lifecycle.tombstone_snapshot(vault)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert empty.marker_revision is not None
+    assert lifecycle.tombstone_marker_revision(vault) == empty.marker_revision
+
+    rel = "Knowledge Base/Notes/Insights/pending-marker.md"
+    (vault / rel).write_text("# Pending deletion\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/pending-marker.md")
+
+    def leave_pending(point: str) -> None:
+        if point == "deletion_tombstone":
+            raise RuntimeError("stop after pending marker")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lifecycle, "_checkpoint", leave_pending)
+        with library_scope(), pytest.raises(RuntimeError, match="stop after pending marker"):
+            delete_file.delete_file(vault, path=rel, confirm=True)
+    pending = lifecycle.tombstone_snapshot(vault)
+    assert rel in pending.paths
+    assert pending.marker_revision != empty.marker_revision
+
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    with monkeypatch.context() as patch:
+        def replay(*args, **kwargs):
+            pytest.fail("the marker witness must not replay the receipt chain")
+
+        patch.setattr(receipts, "event_records", replay)
+        assert lifecycle.tombstone_marker_revision(vault) == pending.marker_revision
+
+    marker = next(lifecycle._tombstone_root(vault).glob("*.json"))
+    previous = marker.stat()
+    raw = marker.read_bytes()
+    modified = raw.replace(b'"pending"', b'"damaged"', 1)
+    assert modified != raw and len(modified) == len(raw)
+    marker.write_bytes(modified)
+    os.utime(marker, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+    assert lifecycle.tombstone_marker_revision(vault) != pending.marker_revision
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstone_snapshot(vault).paths
+
+
+def test_tombstone_replay_honors_a_background_stop_without_a_read_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import foreground_priority
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Insights/stopped-replay.md"
+    (vault / rel).write_text("# Retired\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/stopped-replay.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+
+    stop = threading.Event()
+    read_chain = receipts.event_records
+
+    def stop_before_replay(*args, **kwargs):
+        stop.set()
+        return read_chain(*args, **kwargs)
+
+    def opened_evidence(*args, **kwargs):
+        pytest.fail("a stopped proof opened a receipt")
+
+    monkeypatch.setattr(receipts, "event_records", stop_before_replay)
+    monkeypatch.setattr(receipts, "_open_month_fd", opened_evidence)
+    with foreground_priority.cancellable(stop), pytest.raises(foreground_priority.BulkCancelled):
+        lifecycle.tombstone_snapshot(vault)
 
 
 def test_reconcile_refuses_marker_redirected_away_from_original_source(
@@ -3323,3 +3547,285 @@ def test_a_trashed_video_folder_with_scene_frames_recovers_in_a_governed_vault(
 
     assert recovered.restored_path == rel
     assert (frames / "scene-001.jpg.md").exists()
+
+
+def _lifecycle_vault_with_deletion(vault: Path) -> str:
+    rel = "Knowledge Base/Notes/Insights/settled-evidence.md"
+    (vault / rel).write_text("# Settled evidence\n", encoding="utf-8")
+    _write_restricting_policy(vault, "Notes/Insights/settled-evidence.md")
+    with library_scope():
+        delete_file.delete_file(vault, path=rel, confirm=True)
+    return rel
+
+
+def _active_receipt_part(vault: Path) -> Path:
+    return sorted(receipts._events_root(vault).rglob("????-??*.jsonl"))[-1]
+
+
+def test_lifecycle_read_survives_concurrent_ordinary_appends(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = _lifecycle_vault_with_deletion(vault)
+    assert rel in lifecycle.tombstoned_paths(vault)
+    expected = receipts.event_records(vault, lifecycle_only=True)
+    assert any(
+        record["event_type"] == "critical" and record["phase"] == "intent"
+        for record in expected
+    )
+
+    stop = threading.Event()
+    failures: list[Exception] = []
+
+    def writer() -> None:
+        # Capped well under _RECEIPT_PART_BYTES so no new part file appears.
+        for _ in range(500):
+            if stop.is_set():
+                return
+            try:
+                receipts.append_event(
+                    vault, event_type="disclosure", payload={"outcomes": []}
+                )
+            except Exception as exc:  # noqa: BLE001 - thread reports failures to the main thread
+                failures.append(exc)
+                return
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    results: list[list[dict[str, object]]] = []
+    errors: list[receipts.ReceiptError] = []
+    try:
+        for _ in range(20):
+            armed = True
+
+            def widen_one_window() -> None:
+                nonlocal armed
+                if armed:
+                    armed = False
+                    time.sleep(0.02)
+
+            try:
+                results.append(
+                    receipts.event_records(
+                        vault,
+                        lifecycle_only=True,
+                        checkpoint=widen_one_window,
+                    )
+                )
+            except receipts.ReceiptError as exc:
+                errors.append(exc)
+    finally:
+        stop.set()
+        thread.join(timeout=_STUCK_SECONDS)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert errors == []
+    assert results == [expected] * 20
+
+
+def test_active_part_in_place_tamper_fails_lifecycle_reads_closed(vault: Path) -> None:
+    from exomem.governance import lifecycle
+
+    rel = _lifecycle_vault_with_deletion(vault)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    assert rel in lifecycle.tombstoned_paths(vault)
+
+    active = _active_receipt_part(vault)
+    original = active.read_bytes()
+    old_stat = active.stat()
+    first_line = original.splitlines(keepends=True)[0]
+    pos = next(i for i, byte in enumerate(first_line) if chr(byte) in "0123456789abcdef")
+    replacement = b"0" if first_line[pos : pos + 1] != b"0" else b"1"
+    corrupted = original[:pos] + replacement + original[pos + 1 :]
+    assert corrupted != original and len(corrupted) == len(original)
+    active.write_bytes(corrupted)
+    os.utime(active, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True)
+    assert lifecycle.FAIL_CLOSED_TOMBSTONE in lifecycle.tombstoned_paths(vault)
+
+
+def test_active_part_growth_past_the_cap_fails_closed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    active = _active_receipt_part(vault)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", active.stat().st_size)
+
+    calls = 0
+
+    def grow_during_read() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            with active.open("ab") as handle:
+                handle.write(b"x" * 64)
+
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True, checkpoint=grow_during_read)
+
+
+def test_lifecycle_read_lock_contention_respects_the_disclosure_budget(vault: Path) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    held = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with receipts._receipt_lock(vault):
+            held.set()
+            release.wait(timeout=_STUCK_SECONDS)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert held.wait(timeout=10)
+    try:
+        check = request_budget.ReadCheckpoint(
+            request_budget.RequestBudget(seconds=0.5), bound_disclosure=True
+        )
+        started = time.monotonic()
+        with request_budget.checking(check), pytest.raises(
+            (receipts.ReceiptError, request_budget.ReadBudgetExhausted)
+        ):
+            receipts.event_records(vault, lifecycle_only=True)
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        thread.join(timeout=_STUCK_SECONDS)
+    assert not thread.is_alive()
+
+
+def test_oversized_legacy_active_part_verifies_without_the_writer_lock(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    expected = receipts.event_records(vault, lifecycle_only=True)
+
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 1)
+
+    def forbidden(vault_root: Path):
+        raise AssertionError("oversized active part took the writer lock")
+
+    monkeypatch.setattr(receipts, "_receipt_lock", forbidden)
+    assert receipts.event_records(vault, lifecycle_only=True) == expected
+
+
+def test_lifecycle_read_retries_once_under_the_lock_after_a_racing_append(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lifecycle_vault_with_deletion(vault)
+    instance_dir = next(receipts._events_root(vault).glob("*"))
+    # Force every append into a fresh numbered part: the fixture's single month part
+    # gains a closed sibling now, and the racing append below gains another mid-read.
+    monkeypatch.setattr(
+        receipts,
+        "_receipt_append_target",
+        lambda path, *, sequence, bytes_to_append: path.with_name(
+            f"{path.name[:7]}.{sequence:019}.jsonl"
+        ),
+    )
+    receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+    names = [path.name for path in instance_dir.glob("*.jsonl")]
+    assert len(names) >= 2
+
+    # The listing pass checkpoints once per directory entry; the first closed-part
+    # verification checkpoints right after, still outside the writer lock.
+    fire_at = len(list(instance_dir.iterdir())) + 1
+    appended: dict = {}
+    calls = 0
+
+    def racing_append() -> None:
+        nonlocal calls
+        calls += 1
+        if calls != fire_at:
+            return
+        done = threading.Event()
+
+        def writer() -> None:
+            appended.update(
+                receipts.begin_event(vault, operation="delete", prior=_PRIOR, target="c" * 64)
+            )
+            done.set()
+
+        thread = threading.Thread(target=writer)
+        thread.start()
+        assert done.wait(timeout=_STUCK_SECONDS)
+        thread.join()
+
+    records = receipts.event_records(vault, lifecycle_only=True, checkpoint=racing_append)
+    assert calls >= fire_at and appended
+    assert any(
+        record.get("event_id") == appended["event_id"] for record in records
+    ), records
+
+
+def test_a_transient_failure_on_an_oversized_active_part_gets_no_retry(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 1)
+
+    real_names = receipts._monthly_evidence_names
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise receipts.ReceiptError("simulated transient")
+        return real_names(*args, **kwargs)
+
+    def forbidden(vault_root: Path):
+        raise AssertionError("an oversized active part entered the writer lock")
+
+    monkeypatch.setattr(receipts, "_monthly_evidence_names", fail_once)
+    monkeypatch.setattr(receipts, "_receipt_lock", forbidden)
+    with pytest.raises(receipts.ReceiptError):
+        receipts.event_records(vault, lifecycle_only=True)
+    assert calls == 2  # the pre-retry bound check, never a locked pass
+
+
+def test_the_locked_retry_respects_the_bound_disclosure_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import request_budget
+
+    receipts.begin_event(vault, operation="delete", prior=_PRIOR, target=_TARGET)
+
+    real_names = receipts._monthly_evidence_names
+    calls = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise receipts.ReceiptError("simulated transient")
+        return real_names(*args, **kwargs)
+
+    monkeypatch.setattr(receipts, "_monthly_evidence_names", fail_once)
+
+    release = threading.Event()
+    ready = threading.Event()
+
+    def holder() -> None:
+        with receipts._receipt_lock(vault):
+            ready.set()
+            release.wait(timeout=_STUCK_SECONDS)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        ready.wait(timeout=_STUCK_SECONDS)
+        budget = request_budget.RequestBudget(seconds=0.5)
+        check = request_budget.ReadCheckpoint(budget, bound_disclosure=True)
+        started = time.monotonic()
+        with pytest.raises(request_budget.ReadBudgetExhausted):
+            with request_budget.checking(check):
+                receipts.event_records(vault, lifecycle_only=True)
+        assert time.monotonic() - started < 5
+    finally:
+        release.set()
+        thread.join(timeout=_STUCK_SECONDS)
+    assert not thread.is_alive()

@@ -9,6 +9,7 @@ import importlib.util
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -167,17 +168,61 @@ def test_windows_extended_rename_payload_binds_posix_replacement_flags() -> None
     )
 
 
-def test_windows_root_elevated_parent_access_is_explicitly_refused() -> None:
+def test_windows_root_mutation_access_is_explicitly_refused() -> None:
     backend = importlib.import_module("exomem._held_fs_windows")
     filesystem = object.__new__(backend.WindowsHeldFilesystem)
     filesystem.descriptor = 7
     filesystem.closed = False
 
-    for access in ("flush", "mutate"):
-        result = filesystem.parent(".", access=access)
-        assert result.ok is False
-        assert result.error is not None
-        assert result.error.code == "INVALID_INPUT"
+    result = filesystem.parent(".", access="mutate")
+    assert result.ok is False
+    assert result.error is not None
+    assert result.error.code == "INVALID_INPUT"
+
+
+def test_windows_root_flush_reopens_only_the_held_directory(monkeypatch) -> None:
+    backend = importlib.import_module("exomem._held_fs_windows")
+    filesystem = object.__new__(backend.WindowsHeldFilesystem)
+    filesystem.descriptor = 7
+    filesystem._root = Path("root")
+    filesystem.root_identity = _module().StableIdentity(11, 13, "directory", 1)
+    filesystem.closed = False
+    identities = {7: filesystem.root_identity, 9: filesystem.root_identity}
+    opened = []
+    flushed = []
+    closed = []
+
+    def open_directory(path, access, share, _security, disposition, flags, _template):
+        opened.append((path, access, share, disposition, flags))
+        return 9
+
+    monkeypatch.setattr(backend, "CreateFileW", open_directory)
+    monkeypatch.setattr(backend, "_native", lambda descriptor: descriptor)
+    monkeypatch.setattr(backend, "_fd", lambda handle: handle)
+    monkeypatch.setattr(backend, "_identity", identities.__getitem__)
+    monkeypatch.setattr(backend, "FlushFileBuffers", lambda handle: flushed.append(handle.value) or True)
+    monkeypatch.setattr(backend, "CloseHandle", lambda handle: closed.append(handle.value))
+    monkeypatch.setattr(backend, "os", SimpleNamespace(close=closed.append))
+
+    with filesystem.parent(".", access="flush").require() as root:
+        assert root.identity == filesystem.root_identity
+        assert filesystem.flush_directory(root).ok
+    assert flushed == [9]
+    assert closed == [9]
+    source, access, sharing, disposition, flags = opened[0]
+    assert source == str(filesystem._root)
+    assert access & backend.GENERIC_WRITE
+    assert access & backend.FILE_ADD_FILE
+    assert not access & backend.DELETE
+    assert sharing == backend.FILE_SHARE_ALL
+    assert disposition == backend.OPEN_EXISTING
+    assert flags & backend.FILE_FLAG_BACKUP_SEMANTICS
+    assert flags & backend.FILE_OPEN_REPARSE_POINT
+
+    identities[9] = _module().StableIdentity(11, 17, "directory", 1)
+    refused = filesystem.parent(".", access="flush")
+    assert refused.error is not None and refused.error.code == "IDENTITY_CHANGED"
+    assert closed == [9, 9]
 
 
 @_requires_native_route
