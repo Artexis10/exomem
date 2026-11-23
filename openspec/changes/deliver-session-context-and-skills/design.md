@@ -72,7 +72,7 @@ So pushing turn leads on every prompt would add a second of hook time for little
 In native activation mode the start-of-turn hook does two things:
 
 1. It fetches session context: a `recall_context` call with an empty turn and the held continuity token. An empty turn runs no turn stage, so the response carries only the map, stance and skills blocks, each `unchanged` when the caller already holds its generation. Measured on the installed service, this takes about 50 ms of server time warm and 360 ms cold. The hook injects only the blocks that changed, under a session-context data header that does not claim the turn was activated, and then the activation text.
-2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks.
+2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks, through `recall_context` and `conversation.focus` only, because their 900-character bound leaves no room for the `search_memory` alternative.
 
 The fetch has its own wall budget, separate from the turn packet's. The budget covers credential discovery as well as the request, because reading the service's environment file can block. The fetch sends one request to the first credentialed lane and never retries. A timeout, a transport failure, an HTTP error or a host with no credentialed REST lane injects the activation text alone, as today, and logs the outcome. Clients without a lane still receive session context from their first `recall_context` call.
 
@@ -143,10 +143,11 @@ Text a person or agent reads says skill and collection. The packet keeps its exi
 
 A client without hooks sends Exomem nothing until the agent calls a tool. In the scale run, both misses were conversations that opened with a general question and then turned to the user's own life: the agent made no Exomem call in the whole session. The server therefore has no signal from which to detect the switch, and no word list over the turn may stand in for one. The lever is the text the agent already holds.
 
-The server instructions now ask for recall before answering, per subject, even mid-conversation, and say that the balanced and maximal levels recall on any subject of the user's life or work; before, they defined only the off and light levels. The text stays within its 900-character bound by trimming wording that no test or ruling protects.
+The server instructions now ask for recall before answering, per subject, even mid-conversation, and say that the balanced and maximal levels recall on any subject of the user's life or work; before, they defined only the off and light levels. The text stays within its 900-character bound by trimming other wording; every phrase an earlier ruling protects is kept, and the drop of `search_memory` from this text is recorded in the requirement.
 
-Evidence, 2026-11-23, tool-only Sonnet client, one draw, run record `subject-switch-s1`:
+Evidence, 2026-11-23, tool-only Sonnet client, one draw, at the balanced level, run record `subject-switch-s1`:
 
-- 12 fresh cases (8 positive, 4 negative): 9/12 exact against 7/12 on main, +0.17 [0.00, +0.42]. Both wins were sessions in which main made no Exomem call. No negative made a call on either arm.
-- The 24 scale cases: exact unchanged (12/24 each), positives fully delivered 16/16 against 14/16, no record written to a wrong collection on either arm.
+- 12 fresh cases (8 positive, 4 negative) against main: 9/12 exact against 7/12, 2 won and 0 lost, +0.17 [0.00, +0.42]. The interval includes zero, so by itself this is no change. The text ships on the rule written before the run: no fresh case lost and no general-only case gains a write. Both wins were sessions in which main made no Exomem call. No fresh negative made a call on either arm.
+- The 24 scale cases, against the earlier shipped run (an older base, before the recall tool description was trimmed): exact unchanged at 12/24. Positives fully delivered rose from 14/16 to 16/16, but the gain is the two cases the text was tuned on; on the other 22, exact went up on 2 and down on 3. No write was attempted to a wrong collection on either arm.
+- Precision: 7 of 8 scale negatives made an Exomem call, against 6 of 8. The new text also recalled once on a general first turn of a fresh case. The cost is one recall's latency on some general turns, with no writes.
 - One fresh case still makes no call after a general first turn on either arm.

@@ -894,7 +894,7 @@ SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
 #: Kept short, because some clients cut server instructions off.
 SERVER_INSTRUCTIONS = (
     "This server is the user's long-term governed memory. Named tools belong to this server. "
-    'Reuse live policy; read_instructions if absent/stale. Connection grants no recall/save. off: '
+    'Reuse live policy; read_instructions first if absent/stale. Connection grants no recall/save. off: '
     'explicit-only; light: clear relevance or advice on their own case; balanced+: any subject of '
     'their life/work. When recall is warranted, recall_context before answering, turn verbatim, '
     "per subject even mid-chat; skip if a hook injected this turn's working set. Echo continuity "
