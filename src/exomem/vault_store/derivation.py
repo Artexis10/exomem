@@ -257,25 +257,55 @@ def outcome(conn: Connection, paths: list[str]) -> tuple[str, str]:
     return "deferred", "store_derivation_queue"
 
 
-def lag(conn: Connection) -> tuple[int, int]:
-    """The pending and the failed intents at ``conn``'s snapshot, for a reader's notice.
+def _queue_rows(conn: Connection, sql: str, parameters: tuple = ()) -> list[tuple] | None:
+    """The rows of ``sql`` on the queue, or None on a store that an earlier release wrote.
 
-    A store that an earlier release wrote has no queue: that release derived every page's rows in
-    the page's own transaction, so nothing lags.
+    That store has no queue: its release derived every page's rows in the page's own transaction, so
+    nothing lags.
     """
     try:
-        pending, failed = conn.execute(
-            "SELECT COUNT(*) FILTER (WHERE attempts < ?), COUNT(*) FILTER (WHERE attempts >= ?) "
-            "FROM store_derivation_queue",
-            (ATTEMPTS, ATTEMPTS),
-        ).fetchone()
+        return conn.execute(sql, parameters).fetchall()
     except OperationalError:
         if conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'store_derivation_queue'"
         ).fetchone() is not None:
             raise
-        return 0, 0
-    return pending, failed
+        return None
+
+
+def lag(conn: Connection) -> tuple[int, int]:
+    """The pending and the failed intents at ``conn``'s snapshot, for a reader's notice."""
+    rows = _queue_rows(
+        conn,
+        "SELECT COUNT(*) FILTER (WHERE attempts < ?), COUNT(*) FILTER (WHERE attempts >= ?) "
+        "FROM store_derivation_queue",
+        (ATTEMPTS, ATTEMPTS),
+    )
+    return (0, 0) if rows is None else rows[0]
+
+
+def underived(conn: Connection) -> dict[str, bytes | None]:
+    """The pages whose derived rows trail their stored bytes at ``conn``'s snapshot, with those bytes.
+
+    Each ``derive`` intent, pending or failed, maps its path to the page that the store holds there,
+    or to None when it holds none (a delete, or the source of a move). A check that reads link or
+    identity rows derives these pages' rows from these bytes in their place, by the rule that the
+    drain applies, so a derivation that failed or waits for room never lets a write trust rows that
+    its page no longer gives. A ``refresh`` intent stays out: it names a file that the store does not
+    own, whose rows trail the file until its drain succeeds, as an outside edit's rows trail it until
+    a commit sees the edit. The cost follows the lag.
+    """
+    rows = _queue_rows(conn, "SELECT path FROM store_derivation_queue WHERE operation = ?", (DERIVE,))
+    if not rows:
+        return {}
+    paths = [path for path, in rows]
+    found: dict[str, bytes | None] = dict.fromkeys(paths)
+    for start in range(0, len(paths), read.KEYS_PER_QUERY):
+        batch = paths[start : start + read.KEYS_PER_QUERY]
+        found.update((path, bytes(body)) for path, body in conn.execute(
+            f"SELECT path, body FROM store_pages WHERE path IN ({', '.join('?' * len(batch))})", batch,
+        ))
+    return found
 
 
 def figures(conn: Connection) -> dict:

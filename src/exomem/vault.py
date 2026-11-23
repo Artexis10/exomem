@@ -9259,7 +9259,8 @@ def store_inbound_wikilinks(
     """`find_inbound_wikilinks` for each target, from the inbound rows that ``conn`` sees.
 
     Two keyed reads per chunk of targets: the link rows of the targets' three forms, and the pages
-    that share their basenames. The selection rule is the file index's own. The links come in
+    that share their basenames. The selection rule is the file index's own. A page whose rows trail
+    its stored bytes gives its links from those bytes (``_underived_inbound``). The links come in
     path order, then scan order, which is deterministic across runs. A store that an older build
     set up raises ``VAULT_STORE_DERIVED_BEHIND`` until its pass has derived every page's rows: a
     partial or empty answer would say that fewer pages, or none, link to the page.
@@ -9270,24 +9271,33 @@ def store_inbound_wikilinks(
     if not wanted:
         return {}
     store_read.require_link_rows(conn)
+    underived = _underived_inbound(conn)
     forms = {target: _inbound_target_forms(target) for target in wanted}
     keys = list(dict.fromkeys(key for form in forms.values() for key in form[1:]))
     stems = list(dict.fromkeys(form[3] for form in forms.values()))
     rows: list[tuple] = []
     for start in range(0, len(keys), store_read.KEYS_PER_QUERY):
         chunk = keys[start : start + store_read.KEYS_PER_QUERY]
-        rows.extend(conn.execute(
+        rows.extend(row for row in conn.execute(
             "SELECT source_path, seq, line, context, raw_target, bucket_key FROM inbound_links "
             f"WHERE bucket_key IN ({', '.join('?' * len(chunk))})",
             chunk,
-        ))
+        ) if row[0] not in underived)
     sources: dict[str, str] = {}
     for start in range(0, len(stems), store_read.KEYS_PER_QUERY):
         chunk = stems[start : start + store_read.KEYS_PER_QUERY]
         sources.update((path, "") for path, in conn.execute(
             f"SELECT path FROM inbound_sources WHERE stem IN ({', '.join('?' * len(chunk))})",
             chunk,
-        ))
+        ) if path not in underived)
+    wanted_keys, wanted_stems = set(keys), set(stems)
+    for path, given in underived.items():
+        if given is None:
+            continue
+        stem, links = given
+        rows.extend((path, seq, *link) for seq, link in enumerate(links) if link[3] in wanted_keys)
+        if stem in wanted_stems:
+            sources[path] = ""
     buckets: dict[str, list[_InboundEntry]] = {}
     for order, (path, _seq, line, context, raw, key) in enumerate(
         sorted(rows, key=lambda row: (row[0], row[1]))
@@ -9329,18 +9339,46 @@ def store_inbound_wikilinks(
 
 
 def store_inbound_sources(conn, rels: Iterable[str]) -> frozenset[str]:
-    """The paths among ``rels`` that the store holds inbound rows for, read in a few keyed queries."""
+    """The paths among ``rels`` that the store holds inbound rows for, read in a few keyed queries.
+
+    A page whose rows trail its stored bytes counts as its bytes give (``_underived_inbound``).
+    """
     from .vault_store import read as store_read
 
     wanted = list(dict.fromkeys(rels))
+    underived = _underived_inbound(conn)
     found: set[str] = set()
     for start in range(0, len(wanted), store_read.KEYS_PER_QUERY):
         chunk = wanted[start : start + store_read.KEYS_PER_QUERY]
         found.update(path for path, in conn.execute(
             f"SELECT path FROM inbound_sources WHERE path IN ({', '.join('?' * len(chunk))})",
             chunk,
-        ))
+        ) if path not in underived)
+    found.update(path for path, given in underived.items() if given is not None and path in wanted)
     return frozenset(found)
+
+
+def _underived_inbound(conn) -> dict[str, tuple[str, list[tuple[int, str, str, str]]] | None]:
+    """The rows that each page whose derivation trails its stored bytes will hold, from those bytes.
+
+    A failed or waiting derivation leaves a page's inbound rows describing bytes that the store no
+    longer holds, so every read of the rows takes these in their place: ``inbound_rows`` of the
+    bytes, or None for a page that gives no rows (the store holds none there, the walk does not
+    reach it, or its bytes are not UTF-8), as the drain writes them once it succeeds. No link guard
+    or link rewrite then trusts a row that its page no longer gives. The work follows the queue's
+    lag, which is empty once the drain keeps up.
+    """
+    from .vault_store import derivation
+    from .vault_store import read as store_read
+
+    given: dict[str, tuple[str, list[tuple[int, str, str, str]]] | None] = {}
+    for rel, raw in derivation.underived(conn).items():
+        try:
+            given[rel] = (None if raw is None or not store_read.walk_member(rel)
+                          else inbound_rows(rel, raw.decode("utf-8")))
+        except UnicodeDecodeError:
+            given[rel] = None
+    return given
 
 
 def _store_inbound(
@@ -9360,9 +9398,13 @@ def store_pages_named(vault_root: Path, stem: str) -> list[str] | None:
         from .vault_store import read as store_read
 
         store_read.require_link_rows(conn)
-        return [path for path, in conn.execute(
-            "SELECT path FROM inbound_sources WHERE stem = ? ORDER BY path", (stem,)
-        )]
+        underived = _underived_inbound(conn)
+        return sorted({
+            *(path for path, in conn.execute(
+                "SELECT path FROM inbound_sources WHERE stem = ?", (stem,)
+            ) if path not in underived),
+            *(path for path, given in underived.items() if given is not None and given[0] == stem),
+        })
 
     return _at_store_snapshot(vault_root, named)
 

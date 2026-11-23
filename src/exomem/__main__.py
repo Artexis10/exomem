@@ -4939,7 +4939,9 @@ def _print_human(result, *, op: str | None = None) -> None:
             and operational.get("status") == "committed"
             and operational.get("mutated") is True
         ):
-            result = diagnostics
+            from .mutation_terminal import reply_leaf
+
+            result = dict(reply_leaf(diagnostics))
         elif "user_summary" in result:
             print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
             return

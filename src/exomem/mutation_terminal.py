@@ -2889,6 +2889,18 @@ def project_terminal(
     return reply
 
 
+def reply_leaf(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The leaf result in a full reply's ``diagnostics``, as ``project_terminal`` places it.
+
+    A reply that acknowledges derived components nests the leaf under ``leaf_result``; any other
+    reply spreads a mapping leaf beside ``operational``.
+    """
+    leaf = diagnostics.get("leaf_result")
+    if "derived_components" in diagnostics and isinstance(leaf, Mapping):
+        return leaf
+    return diagnostics
+
+
 def _agent_reply(
     wide: Mapping[str, Any],
     result: Mapping[str, Any],

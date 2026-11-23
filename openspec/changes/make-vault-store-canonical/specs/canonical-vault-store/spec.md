@@ -29,7 +29,7 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
-A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. The writing request SHALL derive its own intents after it releases the boundary and before it acknowledges; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`.
+A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. The writing request SHALL derive its own intents after it releases the boundary and before it acknowledges; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
 
 #### Scenario: Search and graph see the write when it returns
 - **WHEN** a governed write that adds a page and a link returns success
@@ -41,6 +41,11 @@ A governed write in store mode SHALL commit every file it changes, one audit row
 - **WHEN** a governed write runs once with an instant derivation and once with a derivation slowed by seconds
 - **THEN** the two boundary holds differ by less than half the added derivation time
 - **AND** the slow write still returns with its rows derived
+
+#### Scenario: A full reply says where the derived rows stand
+- **WHEN** a store-mode delete returns at full detail
+- **THEN** its trash path is under `diagnostics.leaf_result`
+- **AND** `diagnostics.derived_components` names the lexical, identity and graph rows with their state
 
 #### Scenario: A page's size reaches the commit only through its bytes
 - **WHEN** one governed write stores a page with one unit and another stores a page with 400 units and 400 links
@@ -80,6 +85,18 @@ In store mode, the store thread SHALL derive the rows of each path that a deriva
 - **WHEN** the store's write-ahead log passes the size at which SQLite would copy it into the store
 - **THEN** the store thread copies it between its work
 - **AND** no governed write's commit runs that copy
+
+### Requirement: Link and identity reads do not trust rows that lag their page
+While a page's derivation intent is pending or failed, every store-mode read of inbound-link or identity rows SHALL take that page's rows from its stored bytes by the rule that its derivation applies, in place of the rows that the store holds for it. No link check, link rewrite or reference resolution then trusts a row that the page no longer gives.
+
+#### Scenario: A link from a page whose derivation did not land blocks a delete
+- **WHEN** a committed page links to another page and its derivation failed or waits with `no_room`
+- **AND** a delete of the other page runs without `force_orphan`
+- **THEN** the delete refuses with `INBOUND_LINKS` and names the linking page, as when the page's rows are derived
+
+#### Scenario: A reference names where a moved page is while its rows lag
+- **WHEN** a page is moved and the derivation of that move failed
+- **THEN** a memory reference to the page resolves to its new path
 
 ### Requirement: Derivation lag is visible and bounded
 One intent SHALL stand for each path, keeping its oldest queue time. A failed derivation SHALL keep its intent and retry with backoff, then be marked failed with a reason code, and SHALL NOT hold back other intents. Status SHALL report the derived state as `current`, `behind`, `failed` or `unknown`, with counts and the oldest age. A reader whose snapshot holds unfinished intents SHALL say so, naming no path. A clean stop SHALL derive pending intents within its bound.
@@ -323,7 +340,7 @@ In store mode, a commit that changes a source of the schema overlay (a page unde
 - **AND** after the job finishes, status reports `current`, the tables equal a fresh derivation, and a rollback drops them
 
 ### Requirement: Store-mode graph and link reads answer at the request's snapshot
-In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each commit SHALL write the inbound-link rows of the pages it gives bytes to or removes by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL give the answer that file mode gives, for the owner and for a restricted caller; an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
+In store mode, every reader of graph rows SHALL read the store's rows through the request's one snapshot, and SHALL NOT open the file-built graph sidecar, prove its readiness or schedule a rebuild. The snapshot revision and the registry state SHALL be the whole readiness model. Each derivation SHALL write the inbound-link rows of the pages its commit gave bytes to or removed by the scan rule of file mode's inbound-link index, so `list_inbound_links`, the inbound check of a move or delete, and the commit's guard on the linking pages answer by one rule. A page that only the store holds SHALL count as a linking page and as a link target, whether or not its file exists. While the registry job runs or its state is unknown, a graph or link reader SHALL serve its snapshot's rows with the registry notice, except that a link reader SHALL refuse with `VAULT_STORE_DERIVED_BEHIND` while the store's owner-object version is behind this build's. For the same page bytes, a store-mode graph or link reader SHALL give the answer that file mode gives, for the owner and for a restricted caller; an inbound list SHALL hold the same links, which store mode lists in path order and file mode in the order of its walk. A typed link to a page path that the store holds no page at SHALL derive as unresolved, even while a removed page's file waits for the projector.
 
 #### Scenario: A graph read never touches the sidecar or a projected file
 - **WHEN** a store-mode vault's graph sidecar is replaced by unreadable bytes and every projected page is damaged

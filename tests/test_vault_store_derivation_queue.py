@@ -20,10 +20,11 @@ from test_vault_store_migration import ALPHA, vault  # noqa: F401
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_vault_store_write_path import bm25_paths, planned, served, store_rows  # noqa: F401
 
-from exomem import lexstore, mutation_lock, writer_lease
+from exomem import delete_file, lexstore, media_capacity, memory_refs, mutation_lock, writer_lease
 from exomem import vault as vault_module
+from exomem.cli_ops import OpError
 from exomem.collection_store import connection
-from exomem.vault_store import derivation, projection, read, verify
+from exomem.vault_store import derivation, derive, projection, read, verify, write
 
 SMALL = "Knowledge Base/Notes/Small.md"
 LARGE = "Knowledge Base/Notes/Large.md"
@@ -245,3 +246,67 @@ def test_a_reader_whose_snapshot_holds_underived_pages_is_told_so(served, writer
 
     derivation.drain(served.resolve(), writer)
     assert read.request_registry_notice(served) is None
+
+
+HARBOUR = "Knowledge Base/Notes/Harbour.md"
+LINKER = "Knowledge Base/Notes/Linker.md"
+
+
+def fail_derivations(served, writer, monkeypatch, error, attempts):  # noqa: F811
+    """Run the drain ``attempts`` times while every derivation raises ``error``."""
+
+    def refuse(*_arguments, **_keywords):
+        raise error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(derive, "derive_paths", refuse)
+        for _ in range(attempts):
+            derivation.started(served.resolve(), writer)
+            derivation.drain(served.resolve(), writer)
+
+
+@pytest.mark.parametrize(
+    ("error", "attempts", "code"),
+    [
+        (RuntimeError("the derivation broke"), derivation.ATTEMPTS, derivation.FAILED),
+        (OpError(media_capacity.UPLOAD_SPACE_BUSY, "no room"), 1, derivation.NO_ROOM),
+    ],
+    ids=["failed", "no_room"],
+)
+def test_a_delete_counts_the_link_of_a_page_whose_derivation_did_not_land(
+    served, writer, monkeypatch, error, attempts, code  # noqa: F811
+):
+    """A page that links to the target and whose rows failed, or wait for room: its link has no row,
+    so a check that trusts the rows alone would trash the target and orphan the link."""
+    save(served, HARBOUR, SMALL_TEXT.replace("Small", "Harbour"))
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        save(served, LINKER, SMALL_TEXT.replace("dawn", "dawn from [[Harbour]]"))
+    fail_derivations(served, writer, monkeypatch, error, attempts)
+    assert store_rows(served, "SELECT path, failed_code FROM store_derivation_queue") == [(LINKER, code)]
+
+    with pytest.raises(delete_file.DeleteFileError) as refused:
+        delete_file.delete_file(served, path=HARBOUR, confirm=True)
+
+    assert refused.value.code == "INBOUND_LINKS"
+    assert f"{LINKER}:" in refused.value.reason
+    assert read.page_exists(served, HARBOUR)
+
+
+def test_a_reference_names_where_a_moved_page_is_when_its_rows_failed_to_follow(
+    served, writer, monkeypatch  # noqa: F811
+):
+    """A page moved by a commit whose derivation failed: its identity row still names the old path,
+    so a citation that trusts it would resolve to a path where the store holds no page."""
+    identifier = "6f1c8e9a-2b4d-4c3e-9a7f-1d2e3f4a5b6c"
+    before, after = "Knowledge Base/Notes/Tide table.md", "Knowledge Base/Notes/Archive/Tide table.md"
+    body = f"---\ntitle: Tide table\nexomem_id: {identifier}\n---\n# Tide table\n".encode()
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file note", puts=(write.PagePut(before, body),)))
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "move note",
+                                               moves=(write.PageMove(before, after),)))
+    fail_derivations(served, writer, monkeypatch, RuntimeError("the derivation broke"), derivation.ATTEMPTS)
+    assert store_rows(served, "SELECT path FROM identities WHERE exomem_id = ?", identifier) == [(before,)]
+
+    assert memory_refs.resolve_identifier_read_only(served, memory_refs.memory_ref(identifier)) == after
