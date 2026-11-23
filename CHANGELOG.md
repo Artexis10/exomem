@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.201.0](https://github.com/Artexis10/exomem/compare/v0.200.0...v0.201.0) (2026-11-23)
+
+
+### Features
+
+* **activation:** select user methods with a bounded judgment, carry their contract, report use ([#3056](https://github.com/Artexis10/exomem/issues/3056)) ([38af4dd](https://github.com/Artexis10/exomem/commit/38af4ddc14a0a67d7f8a2a4b00493223c8fe329f))
+* **activation:** show the agent its skills and collections, and let it decide ([#3098](https://github.com/Artexis10/exomem/issues/3098)) ([ec08c68](https://github.com/Artexis10/exomem/commit/ec08c68f8e70055e266f4f8e1eb2b05f31fad69a))
+* **cloud:** route cell discovery on the Cloud host to the gateway ([#3113](https://github.com/Artexis10/exomem/issues/3113)) ([bde442e](https://github.com/Artexis10/exomem/commit/bde442eb504aadd15af4dce54dc06b9325f9e0f3))
+* **curation:** relocate a set of pages with one approval ([#3086](https://github.com/Artexis10/exomem/issues/3086)) ([c0debc7](https://github.com/Artexis10/exomem/commit/c0debc7aed2b3082e69327b8cf1a1d4845523cc3))
+* **media:** reconcile owner storage protection ([#3082](https://github.com/Artexis10/exomem/issues/3082)) ([a8fa776](https://github.com/Artexis10/exomem/commit/a8fa7768a1a22888adc4559988ff7d00bdf07660))
+* **media:** store encrypted original replicas in Backblaze B2 ([#3094](https://github.com/Artexis10/exomem/issues/3094)) ([d1837b8](https://github.com/Artexis10/exomem/commit/d1837b839b888d07618b3d47e36e12474a2a6047))
+* **records:** capture recurring structured work automatically, within server bounds ([#3072](https://github.com/Artexis10/exomem/issues/3072)) ([12111f8](https://github.com/Artexis10/exomem/commit/12111f8c18727d2ac78cd185955dd8ee106ecb81))
+* **store:** derive a governed write's rows after it releases the vault boundary ([#3084](https://github.com/Artexis10/exomem/issues/3084)) ([e85d208](https://github.com/Artexis10/exomem/commit/e85d208bf41c6ed38de9ba28291023ca567d85a3))
+* **upload:** resume large personal Source handoffs ([#3026](https://github.com/Artexis10/exomem/issues/3026)) ([b8b26d8](https://github.com/Artexis10/exomem/commit/b8b26d8aa711d935be0d4c0fff40c25f398ded44))
+* **writes:** name failed queued saves in the owner's next save reply ([#3092](https://github.com/Artexis10/exomem/issues/3092)) ([6c1eb84](https://github.com/Artexis10/exomem/commit/6c1eb84b37763c448c3d852c9b3dc85d29190953))
+* **writes:** queue a busy save durably and apply it once instead of refusing it ([#3054](https://github.com/Artexis10/exomem/issues/3054)) ([fae7aee](https://github.com/Artexis10/exomem/commit/fae7aeee4ec6aaf8f27cdb44d8cd052590853a52))
+
+
+### Bug Fixes
+
+* **activation:** keep the recall_context description under its ceiling ([#3110](https://github.com/Artexis10/exomem/issues/3110)) ([31cb851](https://github.com/Artexis10/exomem/commit/31cb851bae985fc954b54b06752ed0ab59cc08ea))
+* **egress:** redact a withheld path that ends a sentence when the census is unpublished ([#3088](https://github.com/Artexis10/exomem/issues/3088)) ([e10e610](https://github.com/Artexis10/exomem/commit/e10e610daf281ba0162d38cc5431f633efcbecfd))
+* **egress:** restore one store request per command after [#2997](https://github.com/Artexis10/exomem/issues/2997) ([#3087](https://github.com/Artexis10/exomem/issues/3087)) ([972ae70](https://github.com/Artexis10/exomem/commit/972ae70cd3e204703d47b43a3e906e35d697e029))
+* **hooks:** tell the user when Exomem is disconnected instead of skipping capture ([#3109](https://github.com/Artexis10/exomem/issues/3109)) ([ece86ca](https://github.com/Artexis10/exomem/commit/ece86caabb8156303e01886aef02407547fd48e8))
+* **inventory:** read again a raw input that a commit replaced during its read ([#3107](https://github.com/Artexis10/exomem/issues/3107)) ([f08b1d8](https://github.com/Artexis10/exomem/commit/f08b1d88882808cb347e96593acd14004ec412d5))
+* **media:** keep file writes working when the media ledger is corrupt ([#3090](https://github.com/Artexis10/exomem/issues/3090)) ([a8d0792](https://github.com/Artexis10/exomem/commit/a8d079229ebdfafdc0dde59a9cbb71c5ee7f70d4))
+* **service:** start a promoted worker's collection store after its graph proof ([#3093](https://github.com/Artexis10/exomem/issues/3093)) ([3412d8c](https://github.com/Artexis10/exomem/commit/3412d8c59aa839bafd93aff7791ea30e6b54ff64))
+* **sources:** keep a missing custody target out of the repair refusal text ([#3096](https://github.com/Artexis10/exomem/issues/3096)) ([5f4f2a9](https://github.com/Artexis10/exomem/commit/5f4f2a9bc784e4c35e8796ce6eebdd1fa1d51779))
+* **sources:** page large reclassification previews and reuse verified receipt evidence ([#2997](https://github.com/Artexis10/exomem/issues/2997)) ([7b68513](https://github.com/Artexis10/exomem/commit/7b68513395f718f35d40f26f5ba7dea3df187f00))
+* **store:** catch up queued graph work before a migration stages ([#3106](https://github.com/Artexis10/exomem/issues/3106)) ([3300d17](https://github.com/Artexis10/exomem/commit/3300d1763189c2a34abc6205b4acb7218b6573dd))
+* **store:** make the recall projection live before a migration drains graph work ([#3112](https://github.com/Artexis10/exomem/issues/3112)) ([55a799e](https://github.com/Artexis10/exomem/commit/55a799ea3ab4559f8266652cf321f6bdcdd16fa7))
+* **store:** restore main CI after the derivation queue ([#3099](https://github.com/Artexis10/exomem/issues/3099)) ([5e0c579](https://github.com/Artexis10/exomem/commit/5e0c5796ad7558a5df014807a98b831b67f10686))
+* **upload:** release a parked session whose expiry falls between two clock reads ([#3104](https://github.com/Artexis10/exomem/issues/3104)) ([00d471d](https://github.com/Artexis10/exomem/commit/00d471d3290e279d1731af300b9fe944c0744283))
+* **vault-store:** start a store-mode service before its writer migrates the store ([#3068](https://github.com/Artexis10/exomem/issues/3068)) ([6d1e7ba](https://github.com/Artexis10/exomem/commit/6d1e7ba79c1917985d6f05175ead5e796b805794))
+* **vault:** reread a guarded file that a concurrent commit replaced during the read ([#3102](https://github.com/Artexis10/exomem/issues/3102)) ([b94b137](https://github.com/Artexis10/exomem/commit/b94b1370a7c896d429ffa9065fefdc689973ace0))
+* **writes:** keep the busy refusal for protocol steps of a queueable command ([#3089](https://github.com/Artexis10/exomem/issues/3089)) ([fd3eb4b](https://github.com/Artexis10/exomem/commit/fd3eb4b2d3787be448cf063da34d80e7f759261a))
+
+
+### Performance
+
+* **admission:** keep store-mode corpus verdicts from one save to the next ([#3080](https://github.com/Artexis10/exomem/issues/3080)) ([977a3d5](https://github.com/Artexis10/exomem/commit/977a3d5055e3694e5f5d0f301d9d99e68a64d36c))
+* **curation:** hold the vault boundary only at each step's canonical writes ([#3057](https://github.com/Artexis10/exomem/issues/3057)) ([59e5f56](https://github.com/Artexis10/exomem/commit/59e5f561d7447e7edc9b6d278fbd0a86be78fbfc))
+* **egress:** end literal spans anywhere in trailing full stops, and scan without tail copies ([#3091](https://github.com/Artexis10/exomem/issues/3091)) ([a9a0fed](https://github.com/Artexis10/exomem/commit/a9a0fed4432be52c4fa9409e7c7f6f6f954b8d0d))
+* **passages:** read lexical candidates in the dense snapshot and name them from a table ([#3073](https://github.com/Artexis10/exomem/issues/3073)) ([c4ac9e3](https://github.com/Artexis10/exomem/commit/c4ac9e3f5841b6c519c4ce5748bed36eda461830))
+* **search:** encode a page query on its own lane, not behind bulk encodes or model loads ([#3066](https://github.com/Artexis10/exomem/issues/3066)) ([86951c6](https://github.com/Artexis10/exomem/commit/86951c6dd5f6002c31299f07f56131f8f9b3559d))
+* **writes:** shorten a queued save's commit-marker hold, keep an uncertain replay's identity, and cap a resend's wait ([#3078](https://github.com/Artexis10/exomem/issues/3078)) ([f45180a](https://github.com/Artexis10/exomem/commit/f45180ae44fee6556804e0c23c634283bbf03d04))
+
 ## [0.200.0](https://github.com/Artexis10/exomem/compare/v0.199.0...v0.200.0) (2026-11-22)
 
 
