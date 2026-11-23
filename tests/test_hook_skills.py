@@ -79,12 +79,26 @@ def test_a_projected_skill_is_quoted_page_text_with_its_read_route():
     assert "Skills/zeta/SKILL.md" in text and "load it with read_page" in text
 
 
-@pytest.mark.parametrize("summary", ["Use when reviewing a pull request.", ""])
-def test_the_hook_spends_exactly_what_the_service_counted_for_each_skill(summary):
+def test_a_collection_is_listed_under_its_kind_beside_the_skills():
+    collection = {"kind": "collection", "name": "Depot stock", "summary": "Observations of depot stock.", "ref": "Records/Depot Stock/_collection.md"}
+    skills = _skills()
+    skills["items"].append(collection)
+
+    lines = _render({"map": MAP, "skills": skills}).splitlines()
+
+    assert "- skill alpha: Use when rating lines. [Skills/alpha/SKILL.md]" in lines
+    assert "- collection Depot stock: Observations of depot stock. [Records/Depot Stock/_collection.md]" in lines
+    assert "skills and collections" in hook._SKILLS_HEADER
+
+
+@pytest.mark.parametrize(("kind", "summary"), [
+    ("skill", "Use when reviewing a pull request."), ("skill", ""), ("collection", "Observations of depot stock."), ("collection", ""),
+])
+def test_the_hook_spends_exactly_what_the_service_counted_for_each_item(kind, summary):
     """The service marks every admitted item delivered; a hook line longer than its count drops an item for good."""
     from exomem import vault_skills
 
-    item = {"name": "review", "summary": summary, "ref": "exomem://memory/00000000-0000-0000-0000-000000000001"}
+    item = {"kind": kind, "name": "review", "summary": summary, "ref": "exomem://memory/00000000-0000-0000-0000-000000000001"}
 
     assert hook._skill_line(item) == vault_skills.item_line(item)
 

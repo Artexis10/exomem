@@ -46,8 +46,8 @@
 
 ## 6. Catalogue-first activation
 
-- [ ] 6.1 List visible Records collections in the catalogue beside skills, with `kind`, and prove that reading an item's ref returns the whole page.
-- [ ] 6.2 Order an overflowing catalogue by the turn's touched domains, then the items the task context reached; verify fit, overflow and no-domain cases.
+- [x] 6.1 List visible Records collections in the catalogue beside skills, with `kind`, and prove that reading an item's ref returns the whole page.
+- [x] 6.2 Order an overflowing catalogue by the turn's touched domains, then the items the task context reached; verify fit, overflow and no-domain cases.
 - [ ] 6.3 Serve `advice` in the catalogue and apply the no-hook lever the tool-only dev run supports (next action, task projection or server instructions); name skills and collections in agent-facing text.
 - [ ] 6.4 Seed the session-close bench warm (catalogue built before the actor's first recall), count warming abstentions, and let an arm carry a selector placement.
 - [ ] 6.5 Decide the catalogue shape on a fresh held-out set with a tool-only real client: catalogue alone against catalogue plus the selector, per-case exact with intervals; keep the selector off by default.

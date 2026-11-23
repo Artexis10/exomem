@@ -1,26 +1,33 @@
-"""Vault skills served as session context: what each caller is told, when, and what it may see."""
+"""Vault skills and Records collections served as session context: what each caller is told, when, and what it may see."""
 
 from __future__ import annotations
 
 import base64
 import json
 import sqlite3
+import uuid
 from pathlib import Path
 
 import pytest
 import yaml
 from conftest import initialize_vault_state_offline
 from test_context_catalogue import _built, _seed, _write
+from test_domain_profiles import GAMES_TURN, GENERAL_TURN, _seed_profiles
+from test_domain_profiles import _activate as _activate_profiles
+from test_domain_profiles import _set_budgets as _set_profile_budgets
 from test_governance_egress import _external, _reset_caches
+from test_working_set_index import _seed_planning
 from test_working_set_withheld_twins import _withhold
 
 from exomem import (
     activation_conventions,
     commands,
     context_catalogue,
+    context_views,
     lexstore,
     skills_context,
     state_migration,
+    vault_skills,
     working_set_runtime,
 )
 from exomem.governance import principal
@@ -270,3 +277,222 @@ def test_an_invalid_skill_bound_keeps_the_shipped_one_and_is_reported(skills_vau
     assert _names(packet["skills"]) == ["alpha", "mid", "zeta"]
     findings = packet["generation"]["conventions_findings"]
     assert [(finding["code"], finding["field"]) for finding in findings] == [("invalid_budget", "budgets.skills_max_chars")]
+
+
+# --------------------------------------------------------------------------- #
+# Records collections beside the skills
+# --------------------------------------------------------------------------- #
+
+DEPOT_BODY = "Observations of depot stock. Never edit a past row.\n\n## States\n\nA closed row needs evidence."
+
+
+def _collection(root: Path, folder: str, title: str, body: str, topics: tuple[str, ...] = ()) -> str:
+    """A Records collection manifest at `Records/<folder>`; `topics` is the field a domain registry resolves."""
+    declared = f"topics: [{', '.join(topics)}]\n" if topics else ""
+    (root / KB / "Records" / folder / "Items").mkdir(parents=True, exist_ok=True)
+    return _write(
+        root, f"{KB}/Records/{folder}/_collection.md",
+        f"---\ntype: collection\nexomem_id: {uuid.uuid5(uuid.NAMESPACE_URL, title)}\ntitle: {title}\n"
+        "semantic_profile: records\ncollection_version: 1\nschema_version: 1\nlifecycle: active\n"
+        "storage:\n  strategy: markdown-items\n  source: Items\n  format_version: 1\n"
+        "item_schema:\n  natural_key: [observed_on]\n  fields:\n    observed_on: {type: date, required: true}\n"
+        f"{declared}---\n\n{body}\n",
+    )
+
+
+def _read(root: Path, ref: str) -> dict:
+    command = next(command for command in commands.PRODUCT_COMMANDS if command.name == "read_memory")
+    with principal.request_scope(principal.owner_principal(surface="library")):
+        return invoke_command(command, root, path=ref)
+
+
+def test_a_records_collection_is_listed_after_the_skills_with_its_kind_name_summary_and_ref(skills_vault):
+    manifest = _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _refresh(skills_vault)
+
+    block = _activate(skills_vault)["skills"]
+
+    assert [(item["kind"], item["name"]) for item in block["items"]] == [
+        ("skill", "alpha"), ("skill", "mid"), ("skill", "zeta"), ("collection", "Depot stock"),
+    ]
+    collection = block["items"][-1]
+    assert collection["summary"] == "Observations of depot stock."
+    assert _read(skills_vault, collection["ref"])["path"] == manifest
+
+
+def test_reading_an_items_ref_returns_the_whole_skill_page_or_collection_manifest(skills_vault):
+    _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _refresh(skills_vault)
+    items = {item["name"]: item for item in _activate(skills_vault)["skills"]["items"]}
+
+    assert "A closed row needs evidence." in _read(skills_vault, items["Depot stock"]["ref"])["body"]
+    assert "Steps for the zeta engine tuning." in _read(skills_vault, items["zeta"]["ref"])["body"]
+
+
+def test_a_planning_collection_is_not_listed_because_only_records_collections_are_methods(skills_vault):
+    _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _write(skills_vault, f"{KB}/log.md", "# Log\n")  # Planning writes need the activity log.
+    _seed_planning(skills_vault)
+    _refresh(skills_vault)
+
+    names = _names(_activate(skills_vault)["skills"])
+
+    assert "Depot stock" in names and len(names) == 4
+
+
+def test_a_collection_the_caller_cannot_see_changes_no_item_count_or_generation(skills_vault):
+    hidden = _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _withhold(skills_vault, hidden, ceiling=0)
+    _refresh(skills_vault)
+    restricted = _activate(skills_vault, caller=_external())["skills"]
+
+    (skills_vault / hidden).unlink()
+    _refresh(skills_vault)
+    without_collection = _activate(skills_vault, caller=_external())["skills"]
+
+    assert _names(restricted) == ["alpha", "mid", "zeta"] and restricted["omitted"] == 0
+    assert restricted["generation"] == without_collection["generation"]
+
+
+def test_native_skills_omit_only_skills_so_a_collection_with_a_native_name_stays(skills_vault):
+    _collection(skills_vault, "Depot Stock", "zeta", DEPOT_BODY)
+    _refresh(skills_vault)
+
+    block = _activate(skills_vault, native_skills=["zeta"])["skills"]
+
+    assert [(item["kind"], item["name"]) for item in block["items"]] == [
+        ("skill", "alpha"), ("skill", "mid"), ("collection", "zeta"),
+    ]
+
+
+def test_advice_tells_the_agent_to_open_a_covering_item_and_is_sent_only_with_items(skills_vault):
+    first = _activate(skills_vault)
+    later = _activate(skills_vault, continuity=first["continuity"])
+    for skill in (ZETA, ALPHA, MID):
+        (skills_vault / skill).unlink()
+    _refresh(skills_vault)
+    emptied = _activate(skills_vault)
+
+    advice = first["skills"]["advice"]
+    assert "skills and collections" in advice and "read_memory" in advice and "existing authority" in advice
+    assert "advice" not in later["skills"] and later["skills"]["state"] == "unchanged"
+    assert emptied["skills"]["state"] == "empty" and "advice" not in emptied["skills"]
+
+
+# --------------------------------------------------------------------------- #
+# A catalogue that overflows its bound reads the turn
+# --------------------------------------------------------------------------- #
+
+
+def _one_item_bound(root: Path, items: list[dict]) -> None:
+    """Set the vault's bound to its longest line, so exactly one item is listed and `omitted` counts the others.
+
+    The profile budgets stay, or the profile floor would fall back to the shipped one and touch no domain.
+    """
+    _set_profile_budgets(root, skills_max_chars=max(vault_skills.chars({"items": [item]}) for item in items))
+
+
+def _topic_skill(root: Path, name: str, *topics: str) -> str:
+    rel = f"{KB}/Skills/{name}/SKILL.md"
+    declared = f"topics: [{', '.join(topics)}]\n" if topics else ""
+    _write(root, rel, f"---\nname: {name}\ndescription: Use when {name} applies.\n{declared}---\n\n# {name}\n\nSteps.\n")
+    return rel
+
+
+@pytest.fixture
+def domain_vault(tmp_path, monkeypatch):
+    """A registry with media > games, music and cooking, a profile page for each, and no skill or collection yet."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _seed_profiles(tmp_path)
+    _set_profile_budgets(tmp_path)
+    initialize_vault_state_offline(tmp_path, source="catalogue overflow fixture")
+    with principal.library_scope():
+        yield tmp_path
+
+
+def _listed(root: Path, turn: str, items: list[tuple[str, str]], touched: list[str]) -> dict:
+    """The catalogue for `turn` when only one of `items` (kind, name) fits.
+
+    Asserts that the whole catalogue held every item first, and that the turn touched exactly `touched` (the domain
+    profiles served, nearest first), so the order under test comes from the reading and not from a stray match.
+    """
+    _refresh(root)
+    whole = _activate_profiles(root, turn)["skills"]
+    assert sorted((item["kind"], item["name"]) for item in whole["items"]) == sorted(items) and whole["omitted"] == 0
+    _one_item_bound(root, whole["items"])
+    packet = _activate_profiles(root, turn)
+    assert [entry["domain"] for entry in packet["domain_profiles"]["profiles"]] == touched
+    return packet["skills"]
+
+
+# The names share no word with the turns, so a lexical match of the turn never reaches a skill page on its own.
+def test_an_overflowing_catalogue_lists_the_item_of_the_touched_domain_first(domain_vault):
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _topic_skill(domain_vault, "zulu-lantern", "games")
+
+    block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-lantern")], ["games", "media"])
+
+    assert _names(block) == ["zulu-lantern"] and block["omitted"] == 1
+
+
+def test_an_overflowing_catalogue_lists_a_collection_of_the_touched_domain_before_skills_of_others(domain_vault):
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _collection(domain_vault, "Game Nights", "Zulu evenings", "Tabletop evenings and who won.", topics=("games",))
+
+    block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("collection", "Zulu evenings")], ["games", "media"])
+
+    assert _names(block) == ["Zulu evenings"] and block["omitted"] == 1
+
+
+def test_an_overflowing_catalogue_lists_an_item_of_the_ancestor_domain_of_the_touched_one(domain_vault):
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _topic_skill(domain_vault, "zulu-shelves", "media")
+
+    block = _listed(domain_vault, GAMES_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-shelves")], ["games", "media"])
+
+    assert _names(block) == ["zulu-shelves"] and block["omitted"] == 1
+
+
+def test_an_overflowing_catalogue_with_no_touched_domain_lists_in_fit_order(domain_vault):
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _topic_skill(domain_vault, "zulu-lantern", "games")
+
+    block = _listed(domain_vault, GENERAL_TURN, [("skill", "alpha-pantry"), ("skill", "zulu-lantern")], [])
+
+    assert _names(block) == ["alpha-pantry"] and block["omitted"] == 1
+
+
+def test_a_catalogue_that_fits_ignores_the_turn_and_stays_unchanged_across_turns(domain_vault):
+    _topic_skill(domain_vault, "alpha-pantry", "cooking")
+    _topic_skill(domain_vault, "zulu-lantern", "games")
+    _refresh(domain_vault)
+
+    games = _activate_profiles(domain_vault, GAMES_TURN)
+    general = _activate_profiles(domain_vault, GENERAL_TURN)
+    next_turn = _activate_profiles(domain_vault, GENERAL_TURN, continuity=games["continuity"])
+
+    assert _names(games["skills"]) == _names(general["skills"]) == ["alpha-pantry", "zulu-lantern"]
+    assert games["skills"]["generation"] == general["skills"]["generation"]
+    assert next_turn["skills"]["state"] == "unchanged"
+
+
+def test_an_overflowing_catalogue_lists_the_page_the_task_context_reached_when_no_domain_is_touched(skills_vault):
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"])
+
+    block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+
+    assert _names(whole) == ["alpha", "mid", "zeta"]
+    assert _names(block) == ["zeta"] and block["omitted"] == 2
+
+
+def test_an_item_of_the_touched_domain_outranks_an_item_the_task_context_reached(skills_vault):
+    _write(skills_vault, ZETA, "---\nname: zeta\ndescription: Use when tuning.\ntopics: [fleet]\n---\n\n# zeta\n")
+    _refresh(skills_vault)
+    whole = _activate(skills_vault)["skills"]
+    _one_item_bound(skills_vault, whole["items"])
+    caller = context_views.CallerView.current(skills_vault)
+
+    block = skills_context.compile_block(skills_vault, caller, domains=["fleet"], reached=[MID])
+
+    assert _names(block) == ["zeta"] and block["omitted"] == 2

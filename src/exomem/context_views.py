@@ -1294,6 +1294,7 @@ def activation_packet(
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
     positions: Callable[[CallerView], dict[str, Any]] | None = None,
+    reached: Callable[[], Collection[str]] | None = None,
 ) -> dict[str, Any]:
     """Serve the turn-independent map from the published catalogue for this caller.
 
@@ -1311,7 +1312,10 @@ def activation_packet(
 
     `native_skills` names the skills the caller loads itself; the skills block omits them. `known_skills` is the
     skills generation the caller holds: the block repeats no item when it is still current. The block has its own
-    bound and takes nothing from `max_chars`. `known_stance` does the same for the stance block.
+    bound and takes nothing from `max_chars`. It lists the Records collections beside the skills. Only a catalogue that
+    overflows its bound reads the turn: it leads with
+    the domains the profiles block selected and with `reached`, which returns the paths the task context reached,
+    so the block compiles once the task context and the profiles are. `known_stance` does the same for the stance block.
 
     `known_profiles` maps each domain whose profile the caller holds to the generation it holds. `turn` is the
     request's turn: the domain profiles block selects the profiles that it touches, from the turn vector the
@@ -1331,12 +1335,14 @@ def activation_packet(
                     packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
                     native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
                     known_profiles=known_profiles, turn=turn, snapshot=snapshot, positions=positions,
+                    reached=reached,
                 )
         return _activation_packet(
             vault_root, max_chars, purpose, generation, timings, turn_leads, known_generation,
             packet_limit=packet_limit, task_context=task_context, spent_after=spent_after,
             native_skills=native_skills, known_skills=known_skills, known_stance=known_stance,
             known_profiles=known_profiles, turn=turn, snapshot=snapshot, positions=positions,
+            reached=reached,
         )
 
 
@@ -1350,6 +1356,7 @@ def _activation_packet(
     native_skills: Collection[str] = (), known_skills: str | None = None, known_stance: str | None = None,
     known_profiles: Mapping[str, str] | None = None, turn: str = "", snapshot: Any = None,
     positions: Callable[[CallerView], dict[str, Any]] | None = None,
+    reached: Callable[[], Collection[str]] | None = None,
 ) -> dict[str, Any]:
     freshness_key = str(generation.get("freshness_key") or "")
     with find_types.timing_span(timings, "working_set.catalogue"):
@@ -1430,16 +1437,6 @@ def _activation_packet(
         packet["map"] = block
         if stance_block is not None:
             packet["stance"] = stance_block
-        if vault_skills.enabled():
-            # The skills block has its own bound, so it neither reduces `max_chars` nor counts as spent from it.
-            with find_types.timing_span(timings, "working_set.skills"):
-                try:
-                    packet["skills"] = skills_context.compile_block(
-                        root, caller, native=native_skills, known_generation=known_skills, catalogue=catalogue,
-                    )
-                except Exception:  # noqa: BLE001 - optional skills must leave the map, stance and turn context available
-                    log.warning("skills unavailable", exc_info=True)
-                    packet["skills"] = skills_context._empty("unavailable")  # noqa: SLF001
         packet["budget"]["used_chars"] = map_packet_chars(block)
         cached_leads = None
 
@@ -1477,6 +1474,7 @@ def _activation_packet(
                 prepare_slice()
             packet["turn_slice"] = slice_block
             packet["budget"]["used_chars"] += slice_packet_chars(slice_block)
+        reading = None
         if domain_profiles.enabled():
             # Compiled after the slice and the task context, which encode the turn when they run; the selection
             # reads the vector either one held. Its own bound neither reduces `max_chars` nor counts in `used_chars`,
@@ -1488,13 +1486,30 @@ def _activation_packet(
                 else:
                     try:
                         with _profile_keyword_basis(root, caller, purpose, snapshot) as lexical:
-                            packet["domain_profiles"] = domain_profiles.compile_block(
+                            # One reading serves the profiles and, below, the skills catalogue's overflow order.
+                            reading = domain_profiles.read(
                                 root, caller, turn=turn, turn_vector=working_set_runtime.remembered_turn_vector(turn),
-                                catalogue=catalogue, known_generations=known_profiles, lexical=lexical,
+                                catalogue=catalogue, lexical=lexical,
+                            )
+                            packet["domain_profiles"] = domain_profiles.compile_block(
+                                root, caller, turn=turn, catalogue=catalogue, known_generations=known_profiles, reading=reading,
                             )
                     except Exception:  # noqa: BLE001 - optional profiles must leave the map, stance, skills and turn context available
                         log.warning("domain profiles unavailable", exc_info=True)
                         packet["domain_profiles"] = domain_profiles._empty("unavailable")  # noqa: SLF001
+        if vault_skills.enabled():
+            # The skills block has its own bound, so it neither reduces `max_chars` nor counts as spent from it. It
+            # compiles last among the blocks that read the turn: an overflowing catalogue leads with the domains the
+            # profiles selected and the pages the task context reached, and a catalogue that fits reads neither.
+            with find_types.timing_span(timings, "working_set.skills"):
+                try:
+                    packet["skills"] = skills_context.compile_block(
+                        root, caller, native=native_skills, known_generation=known_skills, catalogue=catalogue,
+                        domains=() if reading is None else reading.domains(), reached=() if reached is None else reached(),
+                    )
+                except Exception:  # noqa: BLE001 - optional skills must leave the map, stance and turn context available
+                    log.warning("skills unavailable", exc_info=True)
+                    packet["skills"] = skills_context._empty("unavailable")  # noqa: SLF001
         if positions is not None:
             from . import positions as positions_block
 

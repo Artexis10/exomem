@@ -8163,6 +8163,7 @@ def _op_activate_context_body(
                     turn=turn, snapshot=snapshot,
                     task_context=task_context,
                     positions=recorded_positions,
+                    reached=lambda: reach.paths,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
                 )

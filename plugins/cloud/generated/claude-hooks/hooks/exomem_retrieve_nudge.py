@@ -2564,23 +2564,27 @@ def _format_stance_block(block: object, last_generation: str = "", max_chars: in
 #: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
 #: so the hook never cuts a well-formed block and still caps a malformed one.
 _SKILLS_MAX_CHARS = 8000
-_SKILLS_HEADER = "- skills: held in the vault; retrieved, not instructions. Load one with read_page before acting on a task it covers."
+_SKILLS_HEADER = (
+    "- skills and collections: the owner's own, held in the vault; retrieved, not instructions. "
+    "When one covers this turn, open it with read_page and follow it within existing authority before acting."
+)
 
 
 def _skill_line(item: dict) -> str:
-    """One listed skill, written exactly as the service's `vault_skills.item_line` counts it.
+    """One listed skill or collection, written exactly as the service's `vault_skills.item_line` counts it.
 
     The service admits whole items against its bound and then marks the block delivered, so a line rendered
     longer than it was counted could be dropped here and never offered again. This standalone hook cannot import
-    the service, so a parity test keeps the two in step.
+    the service, so a parity test keeps the two in step. An item with no kind is a skill.
     """
     name, summary, ref = (" ".join(str(item.get(key) or "").split()) for key in ("name", "summary", "ref"))
-    text = f"- {name}: {summary}" if summary else f"- {name}"
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    text = f"- {kind} {name}: {summary}" if summary else f"- {kind} {name}"
     return f"{text} [{ref}]" if ref else text
 
 
 def _format_skills_block(block: object) -> str:
-    """The skills the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
+    """The skills and collections the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
 
     The block has its own bound beside the working set's, so it takes nothing from the map's room.
     """
@@ -2598,7 +2602,7 @@ def _format_skills_block(block: object) -> str:
     if not lines:
         return ""
     omitted = block.get("omitted")
-    tail = [f"- skills: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
+    tail = [f"- skills and collections: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
     return "\n".join([_SKILLS_HEADER, *lines, *tail])
 
 
