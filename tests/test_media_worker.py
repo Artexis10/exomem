@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
+from _identity_pdf import make_pdf
 from test_media_processing import _handle_stat
 
 from exomem import (
@@ -26,6 +27,7 @@ from exomem import (
     graph_sync,
     image_codecs,
     index_sync,
+    media_brakes,
     media_jobs,
     media_processing,
     media_worker,
@@ -3782,6 +3784,59 @@ def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monke
     assert (crashes["signal"], crashes["count"], crashes["head_job"]) == ("SIGSEGV", len(launches), result.path)
 
 
+@pytest.mark.parametrize(
+    ("filename", "media_type", "ends_over_budget"),
+    [("lease.pdf", "pdf", True), ("clip.m4a", "audio", False)],
+    ids=["pdf-abort-is-a-memory-stop", "audio-abort-stays-a-crash"],
+)
+def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
+    vault, monkeypatch: pytest.MonkeyPatch, filename: str, media_type: str, ends_over_budget: bool
+) -> None:
+    # PDFium aborts the process when its own allocation fails; every other engine raises MemoryError.
+    # Read as a crash, a hostile PDF would restart a child for ever at the head of the queue.
+    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    result = _preserve_media_stub(vault, filename=filename)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type=media_type)
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _AbortedChild:
+        returncode = -6  # SIGABRT
+
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        worker._store.claim_next()  # the child had taken the job when it died
+        return _AbortedChild(2_147_483_000)  # every child reuses one pid, as a busy host does
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:
+            now[0] += 5
+            if now[0] >= 1100.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    [row] = media_jobs.status(vault)["jobs"]
+    if ends_over_budget:
+        assert (row["state"], row["next_action"]) == (media_jobs.BLOCKED, media_jobs.OVER_BUDGET_ACTION)
+        assert len(launches) == media_brakes.settings().stop_limit
+    else:
+        assert media_jobs.status(vault)["child_crashes"]["signal"] == "SIGABRT"
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -5652,7 +5707,7 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
     store.mark(
         claimed,
         media_jobs.BLOCKED,
-        "ExtractionUnavailable: pymupdf not installed",
+        "ExtractionUnavailable: pypdfium2 not installed",
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
     installed = {"pdf": False}
@@ -5903,7 +5958,7 @@ def test_supervisor_start_drops_work_whose_engine_is_switched_off(
     store.mark(
         claimed,
         media_jobs.BLOCKED,
-        "ExtractionUnavailable: pymupdf not installed",
+        "ExtractionUnavailable: pypdfium2 not installed",
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
 
@@ -5930,13 +5985,13 @@ def test_a_sidecar_blocked_by_the_previous_release_shows_pending_once_its_engine
     )
     claimed = store.claim_next()
     assert claimed is not None
-    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pypdfium2 not installed")
     preserve.update_sidecar_processing_failure(
         vault,
         sidecar,
         state=media_jobs.BLOCKED,
         attempts=1,
-        error="ExtractionUnavailable: pymupdf not installed",
+        error="ExtractionUnavailable: pypdfium2 not installed",
         retryable=True,
         next_action="install the required media dependency, then retry",
     )
@@ -6198,16 +6253,20 @@ def test_memory_blocked_work_returns_soon_after_pressure_clears(vault, monkeypat
     assert returned, "the backed-off retry ignored that pressure had cleared"
 
 
-def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    fitz = pytest.importorskip("fitz")
+def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents")
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
-    document = fitz.open()
-    document.new_page()
     result = preserve.preserve_bytes(
-        vault, scope="Rental", category="documents", filename="scan.pdf", data=document.tobytes()
+        vault,
+        scope="Rental",
+        category="documents",
+        filename="scan.pdf",
+        data=make_pdf(tmp_path / "scan.pdf", [""]).read_bytes(),
     )
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)
@@ -6230,3 +6289,39 @@ def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypat
         assert _wait_until(lambda: store.next_pending() is not None)
     finally:
         worker.stop()
+
+
+def test_a_pdf_whose_scanned_page_cannot_be_rendered_fails_and_is_not_stored_without_the_page(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdfium = pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents,ocr")
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    # A text page, then a scanned page: the render fails on the second, after the first was read.
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Rental",
+        category="documents",
+        filename="lease.pdf",
+        data=make_pdf(tmp_path / "lease.pdf", ["The lease starts on the first of March.", ""]).read_bytes(),
+    )
+    sidecar = vault / result.sidecar_path
+
+    def refuse(_page, *_args, **_kwargs):
+        # The renderer's own errors cannot be told apart from a resource running out.
+        raise pdfium.PdfiumError("Failed to fill bitmap rectangle.")
+
+    monkeypatch.setattr(pdfium.PdfPage, "render", refuse)
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=sidecar, media_type="pdf")
+    )
+
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05)
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.FAILED
+    assert "PdfiumError" in job["error"]
+    assert "The lease starts" not in sidecar.read_text(encoding="utf-8")

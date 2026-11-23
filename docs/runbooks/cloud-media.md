@@ -264,9 +264,12 @@ The smallest VmData limit under which one small sample still extracts:
 |---|---|
 | OCR (English, Estonian) | 266-267 MiB |
 | OCR (Japanese, horizontal and vertical) | 204 MiB |
-| PDF text layer (PyMuPDF) | 236 MiB |
+| PDF text layer (PyMuPDF, before the move to PDFium) | 236 MiB |
 | Word, Excel, PowerPoint, HTML, EPUB (MarkItDown) | 327-329 MiB |
 | OpenDocument, RTF | 111-112 MiB |
+
+The PDF row predates the move to PDFium and has not been re-measured in the Cloud image.
+On 2026-11-23, on a developer host and without the media worker's own imports, the same sample extracted under 50 MiB with PyMuPDF and under 16 MiB with PDFium.
 
 A local cell container with 2 CPUs and 3 GiB ran with the default budgets in this table:
 
@@ -353,12 +356,38 @@ That measurement excludes the speech runtime and the speech and image query arti
 Record their image growth during qualification instead of reusing the earlier total.
 `scripts/make-media-samples.py` regenerates the document and OCR samples; preserve the attributed speech fixtures separately.
 
+## Audio and video decoder
+
+The Cloud image decodes audio and video through PyAV, built in the `av-lgpl` stage of the `Dockerfile` against an FFmpeg that carries no GPL code.
+The PyPI `av` wheel bundles an FFmpeg linked with libx264 and libx265, which are GPL, so the Cloud image does not install it.
+No Exomem module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
+AV1 decoding uses libdav1d from the Debian package `libdav1d7`.
+The PyAV release is the one `uv.lock` pins, built from its hash-checked source distribution with pinned build tools.
+The build gate decodes only PCM audio and MPEG-4 Part 2 video.
+Parity with the wheel for H.264, HEVC, VP9 and AV1 was shown once on a local amd64 build on 2026-11-23, by comparing the two decoders.
+No build step checks it again.
+The image keeps the FFmpeg libraries as separate files in `/opt/ffmpeg-lgpl/lib`.
+Their licence, source address, checksum and configure line are in `/usr/share/doc/ffmpeg-lgpl/`.
+Pip installs keep the PyPI wheel.
+
+To move to a new FFmpeg release:
+
+1. Download the `.tar.xz` and its `.asc` from `https://ffmpeg.org/releases/`.
+2. Verify the signature against the FFmpeg release signing key, fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`.
+3. Set `FFMPEG_VERSION` and `FFMPEG_SHA256` together in the `av-lgpl` stage.
+4. Build `--target cloud`; the build gate decodes its PCM audio and MPEG-4 Part 2 video samples.
+5. Compare the new build's H.264, HEVC, VP9 and AV1 decoders against the old wheel; the gate does not.
+
+The build fails if the tarball differs from `FFMPEG_SHA256`.
+A PyAV release that needs a newer FFmpeg major version moves both pins in one change.
+
 ## HEIC photos
 
-The `media-cpu` and `embeddings` extras share the pinned `pillow-heif` decoder through `image-codecs`.
+The `media-cpu` and `embeddings` extras share the pinned `pi-heif` decoder through `image-codecs`.
+Its wheels bundle only the LGPL libheif and libde265 libraries and carry no encoder.
 The decoder registers only when a HEIC image opens, with one decoding thread.
 OCR still requires the selected OCR engine; image embeddings keep their existing switch.
-Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pillow-heif-1.8.1/`.
+Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pi-heif-1.4.0/`.
 Those software licence terms do not establish patent clearance.
 
 
@@ -379,5 +408,6 @@ The capture time comes from LibRaw's reading of the raw file's EXIF.
 - A pressure or watchdog stop kills the media child's whole session and then reaps the tools that were reparented to the server. In a Cloud cell the server is PID 1, so a killed tool would otherwise stay a zombie.
 - An engine that fails an allocation must raise a Python `MemoryError` at its boundary, or the child records an artifact failure. The existing engines show the ways to recognise one without reading a file name:
   - MarkItDown wraps every converter's exception; the extractor reads the wrapped exception types.
-  - PyMuPDF raises `FzErrorSystem` with MuPDF's own allocator message, such as `malloc (N bytes) failed`.
+  - PDFium aborts the process when its own allocator fails, and the exit shows only the signal. The supervisor reads the abort of a child that ran a PDF job under the brakes as a hard-limit memory stop, so the job ends over budget after the stop limit. An abort from another cause reads the same. The bounded identity read treats an abort the same way and reports `too_large`.
+  - A page raster too large for the child's limit fails in Python's buffer allocation and raises `MemoryError`.
   - Tesseract reports a failed allocation only on standard error, and can still exit 0 with partial text. OCR checks standard error for the allocator names. Tesseract echoes only its own temporary file names there.

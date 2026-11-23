@@ -10678,8 +10678,6 @@
   "tests/test_edit_operations.py::test_surface_normalization_is_a_fixed_point_for_every_modifier_form[nested-only]": 0.002,
   "tests/test_edit_operations.py::test_surface_normalization_is_a_fixed_point_for_every_modifier_form[top-level-only]": 0.002,
   "tests/test_edit_operations.py::test_surface_normalization_keeps_primary_shape_for_adapter_validation": 0.002,
-  "tests/test_edit_outside_governed_root.py::test_edit_genuinely_missing_page_still_not_found": 0.104,
-  "tests/test_edit_outside_governed_root.py::test_edit_outside_kb_refuses_honestly_not_as_missing": 0.103,
   "tests/test_edit_surgical_replace.py::test_surgical_absent_string_errors": 0.129,
   "tests/test_edit_surgical_replace.py::test_surgical_ambiguous_match_errors": 0.133,
   "tests/test_edit_surgical_replace.py::test_surgical_append_to_section": 0.392,

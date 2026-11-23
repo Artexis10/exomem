@@ -544,6 +544,8 @@ class MediaWorker:
         self._suspects: list[tuple[int, int]] = []
         #: A stop of the dead child that the ledger has not recorded yet: its kind, cell and settings.
         self._unrecorded_stop: tuple[str, media_brakes.CellMemory, media_brakes.Settings] | None = None
+        #: The child whose abort `_record_allocation_abort` counted as a memory stop, so a replayed exit counts once.
+        self._allocation_abort_of: int | None = None
         self._memory_hold_until = 0.0
         self._memory_recovery_at = 0.0
         self._memory_recovery_interval = _MEMORY_RECOVERY_SECONDS
@@ -1444,6 +1446,40 @@ class MediaWorker:
             _reap_group(child.pid)
         self._record_stop()
 
+    def _record_allocation_abort(self, child_pid: int, returncode: int | None) -> bool:
+        """Count the abort of a child that ran a PDF as a hard-limit memory stop; say whether it was one.
+
+        PDFium answers an allocation that fails under the child's data limit by aborting the process,
+        where every other engine raises `MemoryError`. The exit shows only the signal, so the abort of a
+        child that ran a PDF job under the brakes is read as that stop. Without it the job would start
+        a child again for ever instead of ending over budget. An abort of another cause reads the same;
+        the stop limit then ends the job, and the log names the signal.
+        """
+        assert self._store is not None
+        if self._allocation_abort_of == child_pid:
+            return True
+        if returncode != -signal.SIGABRT or self._child_stopped:
+            return False
+        jobs = [job for job in self._store.running_jobs() if job.media_type == "pdf"]
+        if not jobs:
+            return False
+        cell = media_brakes.read_cell()
+        config = media_brakes.settings(cell=cell)
+        context = self._context_for(cell, config)
+        for job in jobs:
+            verdict = self._store.record_memory_stop(
+                job, kind=media_brakes.HARD_LIMIT, stop_limit=config.stop_limit, context=context(job)
+            )
+            log.warning(
+                "media worker: the child that ran %s died by SIGABRT under its data limit; job now %s",
+                job.binary_path.name,
+                verdict,
+            )
+            if verdict == media_jobs.OVER_BUDGET:
+                self.publish_over_budget(job, context(job))
+        self._allocation_abort_of = child_pid
+        return True
+
     def _record_stop(self) -> None:
         """Record the stop that `_stop_child` made for each job its child ran, once.
 
@@ -2319,14 +2355,17 @@ class MediaWorker:
                         # replays this exit whole. Each of these writes holds when it runs twice. A stop
                         # is recorded first, so the recovery below does not return its job uncounted.
                         self._record_stop()
+                        aborted = brakes and self._record_allocation_abort(child_pid, returncode)
                         owns_runtime = self._store.worker_pid() == child_pid
                         recovered = self._store.recover_interrupted() if owns_runtime else 0
                         if owns_runtime:
                             self._store.clear_worker(child_pid)
                         self._child = None
+                        # The exit is handled whole and cannot replay; a later child that reuses the pid is another exit.
+                        self._allocation_abort_of = None
                         idle_signature = None
                         gpu_hold = False
-                        crashed = returncode is not None and returncode < 0 and not self._child_stopped
+                        crashed = returncode is not None and returncode < 0 and not self._child_stopped and not aborted
                         crashes_before, crashes = crashes, crashes + 1 if crashed else 0
                         if crashed:
                             # After the recovery, so the record names the job that the next child claims.
@@ -2335,7 +2374,7 @@ class MediaWorker:
                             )
                         elif crashes_before:
                             self._record_status(MediaJobStore.clear_child_crashes)
-                        if returncode == _MEMORY_RECYCLE_EXIT_CODE:
+                        if returncode == _MEMORY_RECYCLE_EXIT_CODE or aborted:
                             delay = 0.5
                         elif returncode == _MEMORY_WAIT_EXIT_CODE:
                             delay = _MEMORY_WAIT_SECONDS

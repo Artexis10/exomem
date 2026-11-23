@@ -22,6 +22,8 @@ from membench.outcome.incidents.fixtures import build_files
 from membench.outcome.incidents.server import lay_exomem_command, loopback_mcp
 from membench.outcome.isolation import REPO_ROOT, child_env, fresh_vault
 
+from exomem import document_identity
+
 ARM = Path(os.environ.get("INCIDENT_TEST_ARM", REPO_ROOT)).resolve()
 SPECS = {
     "paper.pdf": {
@@ -57,7 +59,8 @@ assert original_pool.enabled(vault)
 
 def test_fixtures_have_one_set_of_bytes_and_say_what_the_spec_says(tmp_path: Path) -> None:
     """A clock or version in the bytes would give every unit its own digest; a lost DOI would blind the case."""
-    pymupdf = pytest.importorskip("pymupdf")  # the media extra builds the fixtures
+    pdfium = pytest.importorskip("pypdfium2")  # the media extra reads the PDF back
+    pytest.importorskip("PIL")  # and draws the PNG fixtures
     first, second = tmp_path / "first", tmp_path / "second"
     first.mkdir(), second.mkdir()
     digests = build_files(SPECS, first)
@@ -65,9 +68,10 @@ def test_fixtures_have_one_set_of_bytes_and_say_what_the_spec_says(tmp_path: Pat
     assert {
         name: hashlib.sha256((first / name).read_bytes()).hexdigest() for name in SPECS
     } == digests
-    pdf = pymupdf.open(first / "paper.pdf")
-    assert "10.5555/page.1" in pdf[0].get_text()
-    assert pdf.metadata["title"] == "Doc title" and "10.5555/xmp.1" in pdf.get_xml_metadata()
+    pdf = pdfium.PdfDocument(first / "paper.pdf")
+    assert "10.5555/page.1" in pdf[0].get_textpage().get_text_bounded()
+    assert pdf.get_metadata_dict()["Title"] == "Doc title"
+    assert "10.5555/xmp.1" in " ".join(document_identity.read_pdf(first / "paper.pdf").metadata_values)
     assert (first / "shot.png").read_bytes().startswith(b"\x89PNG")
 
 
@@ -222,7 +226,6 @@ def test_seeded_sources_and_a_citing_page_are_read_back_through_the_arms_own_cod
     tmp_path: Path,
 ) -> None:
     """The check reads the fields the arm writes, so a renamed original or backlink field fails here, not after a paid session."""
-    pytest.importorskip("pymupdf")  # the media extra builds the fixtures
     root, work = tmp_path / "unit", tmp_path / "unit" / "work"
     fresh_vault(root, ARM)
     work.mkdir()
@@ -266,7 +269,6 @@ def test_sources_reports_a_stored_originals_digest_in_either_storage(
     Shared original storage keeps the bytes in the content-addressed pool and no file at the
     frontmatter's ``evidence_file`` path; a logical-path read would crash the whole listing.
     """
-    pytest.importorskip("pymupdf")  # the media extra builds the fixtures
     root, work = tmp_path / "unit", tmp_path / "unit" / "work"
     fresh_vault(root, ARM)
     work.mkdir()
@@ -308,7 +310,6 @@ def test_an_http_unit_sends_a_files_bytes_and_the_stored_original_has_its_digest
 
     A product change to sign-in or the handoff would otherwise leave every http case unknown, after the sessions are paid for.
     """
-    pytest.importorskip("pymupdf")  # the media extra builds the fixtures
     root, work = tmp_path / "unit", tmp_path / "unit" / "work"
     fresh_vault(root, ARM)
     work.mkdir()

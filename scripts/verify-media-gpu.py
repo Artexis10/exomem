@@ -4,7 +4,7 @@ Confirms the GPU path works for the media engines on this box:
 - torch sees CUDA and lists the GPU's compute arch (sm_120 for Blackwell RTX 50-series)
 - faster-whisper (ctranslate2) loads on cuda and transcribes a generated silent clip
   — this is the real test of whether CTranslate2 has sm_120 kernels
-- pymupdf import; the Tesseract binary that OCR runs is reported separately
+- PDF reader imports; the Tesseract binary that OCR runs is reported separately
 
 Run: uv run python scripts/verify-media-gpu.py
 Exit 0 = gate PASS only when faster-whisper/CTranslate2 executes on the GPU.
@@ -267,12 +267,15 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"per-keyframe video CLIP diagnostic unavailable: {e}")
 
-    # --- pymupdf import + the Tesseract binary OCR runs ---
-    try:
-        __import__("fitz")
-        print("fitz import OK")
-    except Exception as e:  # noqa: BLE001
-        print(f"fitz diagnostic unavailable: {e}")
+    # --- PDF reader imports + the Tesseract binary OCR runs ---
+    from exomem.media_types import PDF_READERS
+
+    for reader in PDF_READERS:
+        try:
+            __import__(reader)
+            print(f"{reader} import OK")
+        except Exception as e:  # noqa: BLE001
+            print(f"{reader} diagnostic unavailable: {e}")
     try:
         import subprocess
 
