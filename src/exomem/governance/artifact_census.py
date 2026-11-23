@@ -116,6 +116,12 @@ class LiteralAliases:
         return cls(frozenset(keys), frozenset(prefixes), longest)
 
 
+def _before_full_stops(text: str, end: int) -> int:
+    while end and text[end - 1] == ".":
+        end -= 1
+    return end
+
+
 def literal_alias_spans(
     text: str, aliases: Sequence[LiteralAliases]
 ) -> list[tuple[int, int]]:
@@ -125,7 +131,9 @@ def literal_alias_spans(
     `(?<![\w./-])(?:alias|...)(?![\w./-])` under `re.IGNORECASE`, with its
     alternatives ordered longest first: a span starts where no path character
     precedes it and ends where none follows, the longest alias wins at each
-    start, and the scan resumes after a match.
+    start, and the scan resumes after a match. Full stops that end a run are
+    sentence punctuation, as `with_path_spans` reads them, so a span may also
+    end where they begin.
     """
     longest = max((index.longest for index in aliases), default=0)
     if not longest:
@@ -133,7 +141,10 @@ def literal_alias_spans(
     key = _case_key(text)
     breaks = [match.start() for match in _NOT_PATH_CHARACTER.finditer(text)]
     starts = [0, *(position + 1 for position in breaks)]
-    ends = [*breaks, len(text)]
+    run_ends = [*breaks, len(text)]
+    # A sentence end is a span end only for a match; it never stops the scan, so a longer alias still wins.
+    sentence_ends = {_before_full_stops(text, end) for end in run_ends} - set(run_ends)
+    ends = sorted({*run_ends, *sentence_ends})
     spans: list[tuple[int, int]] = []
     resume = 0
     for start in starts:
@@ -146,7 +157,7 @@ def literal_alias_spans(
             candidate = key[start:end]
             if any(candidate in index.keys for index in aliases):
                 best = end
-            if not any(candidate in index.prefixes for index in aliases):
+            if end not in sentence_ends and not any(candidate in index.prefixes for index in aliases):
                 break
         if best is not None:
             spans.append((start, best))
