@@ -11,15 +11,21 @@ The requirements that this record serves:
 
 Every count in this file comes from the collected records. No count is typed by hand.
 
+## Status: regenerate at the first FSL release
+
+This record covers the released v0.200.0 images and images built from the current tree. Both predate the first FSL release. The v0.200.0 rows still show the third-party strong-copyleft libraries that the licence work removed. The tree rows show the result of that removal.
+
+Regenerate this record from the published images of the first FSL release. Cover every platform of `lean`, `ml`, `cuda`, `cloud` and `cellctl`. Unmapped and Strong copyleft must be 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` tracks this, and it must finish before the release statement.
+
 ## How to read this record
 
 Each scanned image has three parts.
 
-- Part A lists the shared libraries that Python wheels bundle (`*.libs/` directories and vendored `.so` files). No off-the-shelf scanner sees these. The generator finds them in the image layers and maps each to its upstream project and licence in `scripts/image-licences/library-upstreams.yaml`. An unmapped library shows as `UNMAPPED` and counts in the Unmapped column, so a new bundled library cannot enter an image unrecorded.
+- Part A lists the shared libraries that Python wheels bundle (`*.libs/` directories and vendored `.so` files). No off-the-shelf scanner reports their licences. The generator finds them in the image layers and maps each to its upstream project and licence in `scripts/image-licences/library-upstreams.yaml`. An unmapped library shows as `UNMAPPED` and counts in the Unmapped column, so a new bundled library cannot enter an image unrecorded.
 - Part B lists shared libraries that neither a package manager nor a wheel owns.
 - Part C lists the operating-system layer: the dpkg packages of the Debian base, in two groups. System libraries are dpkg section `libs`. Programs and data are every other section. The operating system is aggregated with the product in one image. The product does not combine with it.
 
-The Evidence column of Part A names the licence file that the wheel ships and that states the library's licence. `none shipped` means the wheel carries no licence text for that library. The licence is then the upstream project's published licence, taken from `scripts/image-licences/library-upstreams.yaml`, and it is not checked against the binary. Where a licence is offered as a choice, the table names the licence elected. Elections for whole Python distributions live in `scripts/image-licences/elections.yaml`.
+The Evidence column of Part A names the licence file that the wheel ships and that states the library's licence. `none shipped` means that no file in the wheel's `.dist-info` directory, and none at the top of a package directory that its RECORD lists, states that library's licence. The licence is then the upstream project's published licence, taken from `scripts/image-licences/library-upstreams.yaml`, and it is not checked against the binary. Where a licence is offered as a choice, the table names the licence elected. Elections for whole Python distributions live in `scripts/image-licences/elections.yaml`.
 
 Classes:
 
@@ -37,9 +43,9 @@ In Part C the class is the one that trivy assigns from the lists in `scripts/ima
 
 - The product starts these programs as separate processes with an argument list, and it never imports or links them: `tesseract` (OCR), `age` and `age-keygen` (encryption), and `restic` (backup). The `cloud` image installs them.
 - The image holds no `ffmpeg` command. PyAV decodes audio and video through FFmpeg shared libraries. The `cloud` image builds those from the FFmpeg source release with no `--enable-gpl`, `--enable-version3` or `--enable-nonfree`. They stay separate files in `/opt/ffmpeg-lgpl/lib`, and Part B lists them.
-- CPython links system libraries, such as the C library. Three CPython standard-library modules link GPL or other copyleft libraries: `readline` (libreadline, GPL-3.0-or-later), `_gdbm` (libgdbm, GPL-3.0-or-later) and `_dbm` (Berkeley DB, Sleepycat). The product does not import them. Importing every module of the `exomem` package in the tree's `lean` image loads none of the three (checked on the scan date).
+- CPython links system libraries, such as the C library. Three CPython standard-library modules link GPL or other copyleft libraries: `readline` (libreadline, GPL-3.0-or-later), `_gdbm` (libgdbm, GPL-3.0-or-later) and `_dbm` (Berkeley DB, Sleepycat). The product does not import them. Regeneration step 8 checks this: it imports every module of the `exomem` package and reports which of the three loaded.
 - The GCC runtime libraries (`libgcc_s`, `libstdc++`, `libgomp`, `libatomic`) carry the GCC Runtime Library Exception 3.1.
-- Trivy reads no licence for some Debian packages, because their copyright file states the licence as free text. Part C shows `none read` for each. For the packages that `scripts/image-licences/library-upstreams.yaml` lists, it also shows the licence and the copyright file in the image that states it, such as `/usr/share/doc/gcc-14-base/copyright` for the GCC exception text. The copyright files of the other packages name no GPL or LGPL licence (checked on the scan date in the tree's `cloud` image).
+- Trivy reads no licence for some Debian packages, because their copyright file states the licence as free text. Part C shows `none read` for each. For the packages that `scripts/image-licences/library-upstreams.yaml` lists, it also shows the licence and the copyright file in the image that states it, such as `/usr/share/doc/gcc-14-base/copyright` for the GCC exception text. Regeneration step 9 reads the copyright files of the other system libraries and checks that none names a GPL or LGPL licence.
 
 ## What this record does not cover
 
@@ -60,20 +66,41 @@ In Part C the class is the one that trivy assigns from the lists in `scripts/ima
 
 The expected result is a record file with the `UNMAPPED` count at zero in every row of the Counts table. Add the missing entry to `scripts/image-licences/library-upstreams.yaml` for each library that shows as `UNMAPPED`, and render again.
 
+Steps 7 to 9 are manual checks that the generator does not run. Run them in the `cloud` image, which has the largest dependency set.
+
+7. Save the import probe below as `probe.py`.
+
+   ```python
+   import importlib, pkgutil, sys
+   import exomem
+
+   for module in pkgutil.walk_packages(exomem.__path__, "exomem."):
+       try:
+           importlib.import_module(module.name)
+       except Exception as error:  # a module whose extra the image lacks cannot import
+           print("not imported:", module.name, type(error).__name__)
+   print("loaded:", [m for m in ("readline", "_gdbm", "_dbm") if m in sys.modules])
+   ```
+
+8. Run `docker run --rm -i --entrypoint python IMAGE - < probe.py`. The last line must read `loaded: []`.
+9. For each system library that Part C shows as plain `none read`, run `docker run --rm --entrypoint cat IMAGE /usr/share/doc/PACKAGE/copyright | grep -i gpl`. It must print nothing.
+
+Results on 2026-11-23, in the image of `cloud-tree-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
+
 ## Images scanned
 
 | Record | Source | Platform | Tag | Manifest digest | Scanned |
 | --- | --- | --- | --- | --- | --- |
 | `cellctl-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0` | `sha256:800c51f3e7f0280f624ec7b25b817f2ac892e3782c5fb6fe806dfa5be0067d87` | 2026-11-23 (trivy 0.72.0) |
 | `cellctl-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0` | `sha256:373f9343770b9a9930778dba1dccc3f60e49ef608da3f23ffa51798dbbadc13a` | 2026-11-23 (trivy 0.72.0) |
-| `cloud-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `cloud` | `local build, image config digest sha256:1265f6dc96110ea3b67b543fa7d2a74e5ae41d8d7d507069465b4fea1e46458c` | 2026-11-23 (trivy 0.72.0) |
+| `cloud-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `cloud` | `local build, image config digest sha256:a3582f92ec58f1abe3e64e5ea91963253eca474b7c5f2fdd96d8aae8bb1c903c` | 2026-11-23 (trivy 0.72.0) |
 | `cloud-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-cloud` | `sha256:3eb850491e482dba17e1412158861c75b9b25fb579c306600510355644cc090c` | 2026-11-23 (trivy 0.72.0) |
 | `cloud-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0-cloud` | `sha256:e27790e065802c6593d3df6c8e2ada4dc6579a23d60a4d1493d329bde0150e6d` | 2026-11-23 (trivy 0.72.0) |
 | `cuda-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-cuda` | `sha256:779f2285a0eaab35054a02ad3c16340141e51a79aee90850a6778129520876ab` | 2026-11-23 (trivy 0.72.0) |
-| `lean-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `lean` | `local build, image config digest sha256:ace46b8f2a400867914b47a70e885a83e25b541a7152f7fa2dc05cbd62326be0` | 2026-11-23 (trivy 0.72.0) |
+| `lean-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `lean` | `local build, image config digest sha256:2611e886c8b97a2b70f70145a18da35a03569ef2024188ec9f7dc52a18305775` | 2026-11-23 (trivy 0.72.0) |
 | `lean-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0` | `sha256:5fe3d53afae3af269ebaedb236932a5f8b5ca9f4d374b1ca343883209dcef9e7` | 2026-11-23 (trivy 0.72.0) |
 | `lean-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0` | `sha256:13c8d7e785dba5c230ce93e9b34308e3bd8eff8c303823ea46558a1b71ee9e80` | 2026-11-23 (trivy 0.72.0) |
-| `ml-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `ml` | `local build, image config digest sha256:eccfdb9cbfe66816d7b1892aed363097ee4181be1b8606b16f3e5a9bae279d3a` | 2026-11-23 (trivy 0.72.0) |
+| `ml-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `ml` | `local build, image config digest sha256:d86dcb1445f49fc379bb56c996333b5d1c6ed6fc2d69fe8490f25f6d671ef3e3` | 2026-11-23 (trivy 0.72.0) |
 | `ml-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-ml` | `sha256:6463558b3329a6498348b836f45ac951682f7ce5c3dd151cbd45c81d37cb04b7` | 2026-11-23 (trivy 0.72.0) |
 | `ml-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0-ml` | `sha256:11ba0d2d7285a9d036727756d0a3dbae374c26fbbf07839b339010db3118f67d` | 2026-11-23 (trivy 0.72.0) |
 
@@ -84,8 +111,8 @@ The expected result is a record file with the `UNMAPPED` count at zero in every 
 | `cellctl-v0.200.0-amd64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
 | `cellctl-v0.200.0-arm64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
 | `cloud-tree-amd64` | 199 | 110 | 35 | 9 | 0 | 0 | 13 | 2 | 0 |
-| `cloud-v0.200.0-amd64` | 198 | 109 | 71 | 2 | 0 | 14 | 13 | 2 | 0 |
-| `cloud-v0.200.0-arm64` | 198 | 109 | 69 | 2 | 0 | 14 | 12 | 2 | 0 |
+| `cloud-v0.200.0-amd64` | 198 | 109 | 71 | 2 | 0 | 8 | 19 | 2 | 0 |
+| `cloud-v0.200.0-arm64` | 198 | 109 | 69 | 2 | 0 | 8 | 18 | 2 | 0 |
 | `cuda-v0.200.0-amd64` | 87 | 47 | 119 | 2 | 0 | 1 | 8 | 7 | 59 |
 | `lean-tree-amd64` | 87 | 47 | 4 | 2 | 0 | 0 | 1 | 1 | 0 |
 | `lean-v0.200.0-amd64` | 87 | 47 | 4 | 2 | 0 | 0 | 1 | 1 | 0 |
@@ -99,8 +126,8 @@ The expected result is a record file with the `UNMAPPED` count at zero in every 
 - `cellctl-v0.200.0-amd64` bundles no library of class strong-copyleft.
 - `cellctl-v0.200.0-arm64` bundles no library of class strong-copyleft.
 - `cloud-tree-amd64` bundles no library of class strong-copyleft.
-- `cloud-v0.200.0-amd64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-5e6b81c2.so.62.28.102, libavdevice-d91b4e17.so.62.3.102, libavfilter-b5da520e.so.11.14.102, libavformat-4639def2.so.62.12.102, libavutil-5809ad29.so.60.26.102, libswresample-f0bc92fc.so.6.3.102, libswscale-88e9f973.so.9.5.102, libx264-d6533a8d.so.165, libx265-f5385bb8.so.216; pillow_heif 1.8.1: libx265-4883ecb5.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
-- `cloud-v0.200.0-arm64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-4b81d6e7.so.62.28.102, libavdevice-53515e87.so.62.3.102, libavfilter-2e359d35.so.11.14.102, libavformat-9df08f27.so.62.12.102, libavutil-ccca8ed8.so.60.26.102, libswresample-946ca3e6.so.6.3.102, libswscale-0dceead9.so.9.5.102, libx264-fd5179c6.so.165, libx265-9fab7229.so.216; pillow_heif 1.8.1: libx265-f7a03873.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
+- `cloud-v0.200.0-amd64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-5e6b81c2.so.62.28.102, libx264-d6533a8d.so.165, libx265-f5385bb8.so.216; pillow_heif 1.8.1: libx265-4883ecb5.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
+- `cloud-v0.200.0-arm64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-4b81d6e7.so.62.28.102, libx264-fd5179c6.so.165, libx265-9fab7229.so.216; pillow_heif 1.8.1: libx265-f7a03873.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
 - `cuda-v0.200.0-amd64` bundles strong-copyleft libraries: pillow_heif 1.8.1: libx265-4883ecb5.so.217.
 - `lean-tree-amd64` bundles no library of class strong-copyleft.
 - `lean-v0.200.0-amd64` bundles no library of class strong-copyleft.
@@ -114,7 +141,7 @@ The expected result is a record file with the `UNMAPPED` count at zero in every 
 - Reference: `ghcr.io/artexis10/exomem-cellctl`; tag `0.200.0`; source: released v0.200.0.
 - Digests: index `sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961`, platform manifest `sha256:800c51f3e7f0280f624ec7b25b817f2ac892e3782c5fb6fe806dfa5be0067d87`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.200.0-amd64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem-cellctl@sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:19:28.860783211Z; layers: 5; Python distributions: 29.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:19:28.860783211Z; layers: 5; Python distributions: 29.
 
 ### Part A: shared libraries inside Python wheels (`cellctl-v0.200.0-amd64`)
 
@@ -249,7 +276,7 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 - Reference: `ghcr.io/artexis10/exomem-cellctl`; tag `0.200.0`; source: released v0.200.0.
 - Digests: index `sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961`, platform manifest `sha256:373f9343770b9a9930778dba1dccc3f60e49ef608da3f23ffa51798dbbadc13a`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.200.0-arm64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem-cellctl@sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:12:03.562407451Z; layers: 5; Python distributions: 29.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:12:03.562407451Z; layers: 5; Python distributions: 29.
 
 ### Part A: shared libraries inside Python wheels (`cellctl-v0.200.0-arm64`)
 
@@ -276,115 +303,14 @@ No Python wheel in this image bundles a shared library.
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.3 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.3 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026c | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cellctl-v0.200.0-amd64`.
 
 ## `cloud-tree-amd64`
 
 - Reference: `local build`; tag `cloud`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:1265f6dc96110ea3b67b543fa7d2a74e5ae41d8d7d507069465b4fea1e46458c`.
+- Digests: local build, image config digest `sha256:a3582f92ec58f1abe3e64e5ea91963253eca474b7c5f2fdd96d8aae8bb1c903c`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-tree-amd64 --tag cloud --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T19:13:54.416846389Z; layers: 19; Python distributions: 132.
+- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:16:30.11682063Z; layers: 19; Python distributions: 132.
 
 ### Part A: shared libraries inside Python wheels (`cloud-tree-amd64`)
 
@@ -429,11 +355,11 @@ Wheels that carry shared objects:
 | `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pi_heif.libs/libde265-90fb0ce1.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pi_heif.libs/libheif-7a3e919c.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pi_heif.libs/libde265-90fb0ce1.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pi_heif.libs/libheif-7a3e919c.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-a883386a.so.16.4.1` | pillow 12.2.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-785b7a00.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-08d35d18.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
@@ -449,7 +375,7 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-67ee3789.so.7.2.0` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-eeb71312.so.2.0.17` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-20a90b09.so.3.1.2` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-bac6ebc8.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-bac6ebc8.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-6ea785c0.so.1.5.7` | pillow 12.2.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
 | `pypdfium2_raw/libpdfium.so` | pypdfium2 5.15.2 | PDFium (binary build by pdfium-binaries) | BSD-3-Clause AND Apache-2.0 with the dependency licences that the wheel lists in BUILD_LICENSES | permissive | pdfium.txt |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
@@ -459,7 +385,7 @@ Wheels that carry shared objects:
 | `rawpy/libraw_r.so` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 
 ### Part B: other shared libraries, outside any package manager (`cloud-tree-amd64`)
 
@@ -699,7 +625,7 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cloud`; source: released v0.200.0.
 - Digests: index `sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f`, platform manifest `sha256:3eb850491e482dba17e1412158861c75b9b25fb579c306600510355644cc090c`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.200.0-amd64 --tag 0.200.0-cloud --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:05:44.411560829Z; layers: 17; Python distributions: 131.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:05:44.411560829Z; layers: 17; Python distributions: 131.
 
 ### Part A: shared libraries inside Python wheels (`cloud-v0.200.0-amd64`)
 
@@ -743,25 +669,25 @@ Wheels that carry shared objects:
 | `av.libs/libSvtAv1Enc-9393c086.so.4.1.0` | av 18.1.0 | SVT-AV1 | BSD-3-Clause-Clear | permissive | none shipped |
 | `av.libs/libXau-154567c4.so.6.0.0` | av 18.1.0 | libXau (X.Org) | MIT | permissive | none shipped |
 | `av.libs/libasound-c7818c60.so.2.0.0` | av 18.1.0 | ALSA library | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libavcodec-5e6b81c2.so.62.28.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavdevice-d91b4e17.so.62.3.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavfilter-b5da520e.so.11.14.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavformat-4639def2.so.62.12.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavutil-5809ad29.so.60.26.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
+| `av.libs/libavcodec-5e6b81c2.so.62.28.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libx264 and libx265 (GPL-2.0-or-later) | strong-copyleft | none shipped |
+| `av.libs/libavdevice-d91b4e17.so.62.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavfilter-b5da520e.so.11.14.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavformat-4639def2.so.62.12.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavutil-5809ad29.so.60.26.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
 | `av.libs/libdav1d-f4b27961.so.7.0.0` | av 18.1.0 | dav1d | BSD-2-Clause | permissive | none shipped |
 | `av.libs/libdrm-b0291a67.so.2.4.0` | av 18.1.0 | libdrm | MIT | permissive | none shipped |
-| `av.libs/libgmp-8c6c054f.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libgmp-8c6c054f.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libgnutls-71454fd1.so.30.42.0` | av 18.1.0 | GnuTLS | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libhogweed-006f41d4.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libhogweed-006f41d4.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libmp3lame-8f9e436f.so.0.0.0` | av 18.1.0 | LAME | LGPL-2.0-or-later | weak-copyleft | none shipped |
-| `av.libs/libnettle-71a806b4.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libnettle-71a806b4.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libopencore-amrnb-d72c52e2.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
 | `av.libs/libopencore-amrwb-1b0ca122.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
 | `av.libs/libopus-114e2b1a.so.0.11.1` | av 18.1.0 | Opus | BSD-3-Clause | permissive | none shipped |
 | `av.libs/libsharpyuv-48a062bd.so.0.1.2` | av 18.1.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libswresample-f0bc92fc.so.6.3.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libswscale-88e9f973.so.9.5.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libunistring-09f6121d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libswresample-f0bc92fc.so.6.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
+| `av.libs/libswscale-88e9f973.so.9.5.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
+| `av.libs/libunistring-09f6121d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libvpl-e4e9cae8.so.2.16` | av 18.1.0 | oneVPL | MIT | permissive | none shipped |
 | `av.libs/libvpx-edb6de90.so.12.0.0` | av 18.1.0 | libvpx | BSD-3-Clause | permissive | none shipped |
 | `av.libs/libwebp-0c5118d0.so.7.2.0` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
@@ -776,9 +702,9 @@ Wheels that carry shared objects:
 | `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-a883386a.so.16.4.1` | pillow 12.2.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-785b7a00.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-08d35d18.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
@@ -794,15 +720,15 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-67ee3789.so.7.2.0` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-eeb71312.so.2.0.17` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-20a90b09.so.3.1.2` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-bac6ebc8.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-bac6ebc8.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-6ea785c0.so.1.5.7` | pillow 12.2.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
-| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
+| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
 | `rawpy.libs/libjpeg-8995ad9f.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
@@ -810,7 +736,7 @@ Wheels that carry shared objects:
 | `rawpy/libraw_r.so` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 
 ### Part B: other shared libraries, outside any package manager (`cloud-v0.200.0-amd64`)
 
@@ -1042,7 +968,7 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cloud`; source: released v0.200.0.
 - Digests: index `sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f`, platform manifest `sha256:e27790e065802c6593d3df6c8e2ada4dc6579a23d60a4d1493d329bde0150e6d`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.200.0-arm64 --tag 0.200.0-cloud --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:06:06.689037297Z; layers: 17; Python distributions: 131.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:06:06.689037297Z; layers: 17; Python distributions: 131.
 
 ### Part A: shared libraries inside Python wheels (`cloud-v0.200.0-arm64`)
 
@@ -1086,25 +1012,25 @@ Wheels that carry shared objects:
 | `av.libs/libSvtAv1Enc-58030e1d.so.4.1.0` | av 18.1.0 | SVT-AV1 | BSD-3-Clause-Clear | permissive | none shipped |
 | `av.libs/libXau-7926f62a.so.6.0.0` | av 18.1.0 | libXau (X.Org) | MIT | permissive | none shipped |
 | `av.libs/libasound-612e92e2.so.2.0.0` | av 18.1.0 | ALSA library | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libavcodec-4b81d6e7.so.62.28.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavdevice-53515e87.so.62.3.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavfilter-2e359d35.so.11.14.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavformat-9df08f27.so.62.12.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libavutil-ccca8ed8.so.60.26.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
+| `av.libs/libavcodec-4b81d6e7.so.62.28.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libx264 and libx265 (GPL-2.0-or-later) | strong-copyleft | none shipped |
+| `av.libs/libavdevice-53515e87.so.62.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavfilter-2e359d35.so.11.14.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavformat-9df08f27.so.62.12.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
+| `av.libs/libavutil-ccca8ed8.so.60.26.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
 | `av.libs/libdav1d-32aec4a5.so.7.0.0` | av 18.1.0 | dav1d | BSD-2-Clause | permissive | none shipped |
 | `av.libs/libdrm-7ea97f77.so.2.4.0` | av 18.1.0 | libdrm | MIT | permissive | none shipped |
-| `av.libs/libgmp-23e3f84b.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libgmp-23e3f84b.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libgnutls-aa1c0a85.so.30.42.0` | av 18.1.0 | GnuTLS | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libhogweed-272d0244.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libhogweed-272d0244.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libmp3lame-ee237334.so.0.0.0` | av 18.1.0 | LAME | LGPL-2.0-or-later | weak-copyleft | none shipped |
-| `av.libs/libnettle-3fe2eda7.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libnettle-3fe2eda7.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libopencore-amrnb-41f6423c.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
 | `av.libs/libopencore-amrwb-6136252c.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
 | `av.libs/libopus-4a9173fa.so.0.11.1` | av 18.1.0 | Opus | BSD-3-Clause | permissive | none shipped |
 | `av.libs/libsharpyuv-67a1cf20.so.0.1.2` | av 18.1.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libswresample-946ca3e6.so.6.3.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libswscale-0dceead9.so.9.5.102` | av 18.1.0 | FFmpeg | GPL-2.0-or-later (built with --enable-gpl) | strong-copyleft | none shipped |
-| `av.libs/libunistring-0999715d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later | weak-copyleft | none shipped |
+| `av.libs/libswresample-946ca3e6.so.6.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
+| `av.libs/libswscale-0dceead9.so.9.5.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
+| `av.libs/libunistring-0999715d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
 | `av.libs/libvpx-db4bc8c1.so.12.0.0` | av 18.1.0 | libvpx | BSD-3-Clause | permissive | none shipped |
 | `av.libs/libwebp-df30dee3.so.7.2.0` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
 | `av.libs/libwebpmux-6542e8dd.so.3.1.2` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
@@ -1117,9 +1043,9 @@ Wheels that carry shared objects:
 | `ijson.libs/libyajl-bc332733.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
 | `numpy.libs/libgfortran-daac5196-038a5e3c.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-7220728c.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-ac9db8e8.so.16.4.1` | pillow 12.2.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-832abbb5.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-e7b3f852.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
@@ -1135,15 +1061,15 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-ddf57472.so.7.2.0` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-e8a298f4.so.2.0.17` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-123137bf.so.3.1.2` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-7f570eb0.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-7f570eb0.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-ad98d567.so.1.5.7` | pillow 12.2.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow_heif.libs/libx265-f7a03873.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
-| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
-| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License | strong-copyleft | COPYING |
+| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
 | `rawpy.libs/libgomp-82b933f3.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-f280bfb6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
 | `rawpy.libs/libjpeg-af58d765.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
@@ -1151,7 +1077,7 @@ Wheels that carry shared objects:
 | `rawpy/libraw_r.so` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 
 ### Part B: other shared libraries, outside any package manager (`cloud-v0.200.0-arm64`)
 
@@ -1164,226 +1090,14 @@ Wheels that carry shared objects:
 
 198 packages own 459 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 109</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libarchive13t64 | 3.7.4 | BSD-2-Clause (notice), Apache-2.0 (notice), BSD-4-clause-UCB (unknown), BSD-1-clause-UCB (unknown), MIT (notice), CC0-1.0 (unencumbered), OpenSSL+SSLeay (unknown), BSD-124-clause-UCB (unknown), PD (unknown), BSD-3-clause-UCB (unknown) |
-| libatomic1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbrotli1 | 1.1.0 | MIT (notice) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcairo2 | 1.18.4 | LGPL-2.1-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcom-err2 | 1.47.2 | GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden), 0BSD (unencumbered), MIT (notice), BSD-3-Clause-Variant (unknown), BSD-3-Clause (notice), BSD-4-Clause-CMU (unknown), LGPL-2.0-only (restricted), Apache-2.0 (notice), ISC (notice), MIT-US-export (unknown), Kazlib (unknown), Latex2e (unknown), GPL-2+ with Texinfo exception (unknown) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libcurl4t64 | 8.14.1 | curl (unknown), OLDAP-2.8 (unknown), ISC (notice), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), GPL-2+ with Libtool exception (unknown), BSD-3-Clause (notice), BSD-4-Clause-UC (notice), FSFULLR (unknown), X11 (notice), GPL-2.0-only (forbidden) |
-| libdatrie1 | 0.2.13 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libdeflate0 | 1.23 | MIT (notice) |
-| libexpat1 | 2.9.0 | MIT (notice) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libfontconfig1 | 2.15.0 | none read |
-| libfreetype6 | 2.13.3+dfsg | FTL (notice), MIT (notice), BSD-3-Clause (notice), FSFAP (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), Public-Domain (unknown), MIT-SMC (unknown), BSL-1.0 (notice), MIT-Modern-Variant (unknown), Zlib (notice), OpenGroup-MIT (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libfribidi0 | 1.0.16 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgif7 | 5.2.2 | MIT (notice), ISC (notice) |
-| libglib2.0-0t64 | 2.84.4 | LGPL-2.1-or-later (restricted), old-glib-tests (unknown), AFL-2.0 (notice), Janik-permissive (unknown), LGPL-2.0-or-later (restricted), CC0-1.0 (unencumbered), FSFULLR (unknown), Iconv-PD (unknown), Mingw-PD (unknown), Unicode-DFS-2016 (notice), MIT (notice), GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), Apache-2.0 with LLVM exception (unknown), Kuchling-PD (unknown), Plumb-PD (unknown), bzip2-1.0.6 (unknown), CC-BY-SA-3.0 (unknown), cmph (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), MPL-1.1 (reciprocal), Apache-2.0 (notice), GPL-2.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libgnutls30t64 | 3.8.9 | LGPL-2.1-only (restricted), LGPL-2.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.3-only (unknown), CC0-1.0 (unencumbered), MIT (notice), Apache-2.0 (notice), LGPL-3.0-or-later (restricted), LGPL-2.1-or-later (restricted), GPL-3.0-or-later (forbidden), BSD-3-Clause (notice), FSFAP (unknown) |
-| libgomp1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgraphite2-3 | 1.3.14 | LGPL-2.1-or-later (restricted), MPL-1.1 (reciprocal), GPL-2.0-or-later (forbidden), public-domain (unknown), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), custom-sil-open-font-license (unknown), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libgssapi-krb5-2 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libharfbuzz0b | 10.2.0 | MIT (notice), Unicode (unknown), ISC (notice), Apache-2.0 (notice), OFL-1.1 (unknown), Monotype (unknown), CC0-1.0 (unencumbered), GPL-3.0-or-later (forbidden), GPL-2+ with Font exception (unknown), UFL-1.0 (unknown), FSFULLR (unknown), GPL-2.0-with-autoconf-exception+ (unknown), GPL-3.0-with-autoconf-exception+ (unknown), FSFAP (unknown), LGPL-2.1-or-later (restricted), GPL-2+ with LibTool exception (unknown), FSFUL (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libicu76 | 76.1 | MIT (notice), GPL-3.0-only (forbidden) |
-| libidn2-0 | 2.3.8 | GPL-3.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), MIT (notice), Unicode (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libjbig0 | 2.1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libjpeg62-turbo | 2.1.5 | BSD-BY-LC-NE (unknown), Zlib (notice), BSD-3-Clause (notice), MIT (notice), NTP (unknown) |
-| libk5crypto3 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libkeyutils1 | 1.6.3 | GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), GPL-2.0-only (forbidden), LGPL-2.0-only (restricted) |
-| libkrb5-3 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libkrb5support0 | 1.21.3 | GPL-2.0-only (forbidden) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libldap2 | 2.6.10+dfsg | OpenLDAP-2.8 (unknown), FSF-unlimited (unknown), GPL-2.0-with-autoconf-exception+ (unknown), GPL-3.0-with-autoconf-exception+ (unknown), GPL-2+ with Libtool exception (unknown), GPL-3+ with Libtool exception (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), UMich (unknown), F5 (unknown), JCG (unknown), MIT-XC (unknown), NeoSoft-permissive (unknown), BSD-3-Clause (notice), Beerware (unknown), public-domain (unknown), BSD-4-clause-California (unknown), BSD-3-clause-variant (unknown), Expat-ISC (unknown), Expat-UNM (unknown), MIT (notice), BSD-3-clause-California (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libleptonica6 | 1.84.1 | none read; recorded as BSD-style redistribution notice (permissive), evidence /usr/share/doc/libleptonica6/copyright |
-| liblerc4 | 4.0.0+ds | Apache-2.0 (notice) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libnghttp2-14 | 1.64.0 | MIT (notice), all-permissive (unknown), GPL-3.0-with-autoconf-exception+ (unknown), BSD-2-Clause (notice), GPL-3.0-only (forbidden) |
-| libnghttp3-9 | 1.8.0 | MIT (notice), FSFULLR (unknown), GPL-3+ with Autoconf generic exception (unknown), FSFUL (unknown), GPL-2+ with Autoconf generic exception (unknown), FSFAP (unknown), GPL-2+ with Libtool Exception (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libopenjp2-7 | 2.5.3 | BSD-2-Clause (notice), MIT (notice), BSD-3-Clause (notice), Libpng (notice), Zlib (notice), libtiff (unknown), LIBTIFF-PIXAR (unknown), LIBTIFF-GLARSON (unknown) |
-| libp11-kit0 | 0.25.5 | BSD-3-Clause (notice), FSFULLR (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), X11 (notice), ISC (notice), customFSFULLRWD (unknown), LGPL-2.1-or-later (restricted), Apache-2.0 (notice), customFSFUL (unknown), FSFAP (unknown), LGPL-2.1-only (restricted) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpango-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpangocairo-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpangoft2-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libpixman-1-0 | 0.44.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libpixman-1-0/copyright |
-| libpng16-16t64 | 1.6.48 | Libpng (notice), MIT (notice), GPL-2.0-or-later (forbidden), BSD-like-with-advertising-clause (unknown), libpng OR Apache-2.0 OR BSD-3-clause (notice), Apache-2.0 (notice), GPL-2.0-only (forbidden), BSD-3-Clause (notice) |
-| libpsl5t64 | 0.21.2 | MIT (notice), gnulib (unknown), Chromium (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| librtmp1 | 2.4+20151223.gitfa8646d.1 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libsasl2-2 | 2.1.28+dfsg1 | BSD-3-Clause-Attribution (notice), BSD-3-Clause (notice), BSD-2-Clause (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), BSD-4-Clause-UC (notice), RSA-MD (unknown), text://BSD-3-Clause-Attribution and IBM-as-is (unknown), BSD-3-clause-JANET (unknown), BSD-3-clause-PADL (unknown), MIT-OpenVision (unknown), OpenLDAP (unknown), FSFULLR (unknown), MIT-CMU (unknown), MIT-Export (unknown), BSD-2.2-clause (unknown), text://IBM-as-is (unknown) |
-| libsasl2-modules-db | 2.1.28+dfsg1 | BSD-3-Clause-Attribution (notice), BSD-3-Clause (notice), BSD-2-Clause (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), BSD-4-Clause-UC (notice), RSA-MD (unknown), text://BSD-3-Clause-Attribution and IBM-as-is (unknown), BSD-3-clause-JANET (unknown), BSD-3-clause-PADL (unknown), MIT-OpenVision (unknown), OpenLDAP (unknown), FSFULLR (unknown), MIT-CMU (unknown), MIT-Export (unknown), BSD-2.2-clause (unknown), text://IBM-as-is (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsharpyuv0 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssh2-1t64 | 1.11.1 | BSD-3-Clause (notice), ISC (notice) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtasn1-6 | 4.20.0 | LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted), GPL-3.0-only (forbidden), GFDL-1.3-only (unknown) |
-| libtesseract5 | 5.5.0 | Apache-2.0 (notice), MIT (notice) |
-| libthai-data | 0.1.29 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libthai0 | 0.1.29 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libtiff6 | 4.7.0 | Hylafax (unknown) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libunistring5 | 1.3 | GPL-3.0-or-later (forbidden), LGPL-3.0-or-later (restricted), LGPL-2.0-or-later (restricted), GFDL-1.3-or-later (unknown), GFDL-1.2-or-later (unknown), LGPL-3.0-only (restricted), LGPL-2.1-or-later (restricted), BSD-3-Clause (notice), ISC (notice), Unicode-DFS-2016 (notice), public-domain (unknown), FreeSoftware (unknown), GPL-2.0-or-later (forbidden), GPL-2+ with distribution exception (unknown), MIT (notice), X11 (notice), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libwebp7 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libwebpmux3 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libx11-6 | 1.8.12 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libx11-6/copyright |
-| libxau6 | 1.0.11 | none read |
-| libxcb-render0 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb-render0/copyright |
-| libxcb-shm0 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb-shm0/copyright |
-| libxcb1 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb1/copyright |
-| libxdmcp6 | 1.1.5 | none read |
-| libxext6 | 1.3.4 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxext6/copyright |
-| libxml2 | 2.12.7+dfsg+really2.9.14 | MIT-1 (unknown), ISC (notice) |
-| libxrender1 | 0.9.12 | none read |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 89</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| age | 1.2.1 | BSD-3-Clause (notice), MIT (notice), ISC (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| fontconfig | 2.15.0 | none read |
-| fontconfig-config | 2.15.0 | none read |
-| fonts-dejavu-core | 2.37 | Bitstream-Vera (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| fonts-dejavu-mono | 2.37 | Bitstream-Vera (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libx11-data | 1.8.12 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libx11-data/copyright |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tesseract-ocr | 5.5.0 | Apache-2.0 (notice), MIT (notice) |
-| tesseract-ocr-eng | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-est | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-jpn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-jpn-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-osd | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-arab | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-armn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-beng | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cans | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cher | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cyrl | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-deva | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-ethi | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-frak | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-geor | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-grek | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-gujr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-guru | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hang | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hang-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hans | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hans-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hant | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hant-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hebr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-jpan | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-jpan-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-khmr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-knda | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-laoo | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-latn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-mlym | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-mymr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-orya | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-sinh | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-syrc | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-taml | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-telu | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-thaa | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-thai | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-tibt | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-viet | 4.1.0 | Apache-2.0 (notice) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cloud-v0.200.0-amd64`.
 
 ## `cuda-v0.200.0-amd64`
 
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cuda`; source: released v0.200.0.
 - Digests: index `sha256:1b540e53f70172ec54b245eaabd3f5cbf471e9aa77ed47394219b416c4a04b2e`, platform manifest `sha256:779f2285a0eaab35054a02ad3c16340141e51a79aee90850a6778129520876ab`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cuda-v0.200.0-amd64 --tag 0.200.0-cuda --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:1b540e53f70172ec54b245eaabd3f5cbf471e9aa77ed47394219b416c4a04b2e --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:34:27.687876491Z; layers: 6; Python distributions: 148.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:34:27.687876491Z; layers: 6; Python distributions: 148.
 
 ### Part A: shared libraries inside Python wheels (`cuda-v0.200.0-amd64`)
 
@@ -1492,9 +1206,9 @@ Wheels that carry shared objects:
 | `nvidia/nvshmem/lib/nvshmem_transport_libfabric.so.6` | nvidia-nvshmem-cu13 3.7.2 | NVIDIA NVSHMEM | LicenseRef-NVIDIA-Proprietary | proprietary | License.txt |
 | `nvidia/nvshmem/lib/nvshmem_transport_ucx.so.6` | nvidia-nvshmem-cu13 3.7.2 | NVIDIA NVSHMEM | LicenseRef-NVIDIA-Proprietary | proprietary | License.txt |
 | `nvidia/cu13/lib/libnvtx3interop.so.1` | nvidia-nvtx 13.2.86 | NVIDIA NVTX | LicenseRef-NVIDIA-Proprietary | proprietary | License.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-c6062d5f.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-53534446.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-7e5462ba.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -1510,10 +1224,10 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-51b0b3f7.so.7.2.0` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-9fe2abcc.so.2.0.17` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-8fb1c9f6.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-40ad5e7e.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
@@ -1528,7 +1242,7 @@ Wheels that carry shared objects:
 | `scipy.libs/libquadmath-2284e583.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libscipy_openblas-5f890258.so` | scipy 1.18.1 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 | `torch/lib/libc10.so` | torch 2.15.0+cu132 | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libc10_cuda.so` | torch 2.15.0+cu132 | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libcaffe2_nvrtc.so` | torch 2.15.0+cu132 | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
@@ -1680,9 +1394,9 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 ## `lean-tree-amd64`
 
 - Reference: `local build`; tag `lean`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:ace46b8f2a400867914b47a70e885a83e25b541a7152f7fa2dc05cbd62326be0`.
+- Digests: local build, image config digest `sha256:2611e886c8b97a2b70f70145a18da35a03569ef2024188ec9f7dc52a18305775`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-tree-amd64 --tag lean --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T18:59:32.063675578Z; layers: 6; Python distributions: 97.
+- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:10:07.110724617Z; layers: 6; Python distributions: 97.
 
 ### Part A: shared libraries inside Python wheels (`lean-tree-amd64`)
 
@@ -1727,115 +1441,14 @@ Wheels that carry shared objects:
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 
 ## `lean-v0.200.0-amd64`
 
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0`; source: released v0.200.0.
 - Digests: index `sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60`, platform manifest `sha256:5fe3d53afae3af269ebaedb236932a5f8b5ca9f4d374b1ca343883209dcef9e7`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.200.0-amd64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:22:00.13469878Z; layers: 6; Python distributions: 97.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:22:00.13469878Z; layers: 6; Python distributions: 97.
 
 ### Part A: shared libraries inside Python wheels (`lean-v0.200.0-amd64`)
 
@@ -1880,115 +1493,14 @@ Wheels that carry shared objects:
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 
 ## `lean-v0.200.0-arm64`
 
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0`; source: released v0.200.0.
 - Digests: index `sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60`, platform manifest `sha256:13c8d7e785dba5c230ce93e9b34308e3bd8eff8c303823ea46558a1b71ee9e80`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.200.0-arm64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:22:23.401348869Z; layers: 6; Python distributions: 97.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:22:23.401348869Z; layers: 6; Python distributions: 97.
 
 ### Part A: shared libraries inside Python wheels (`lean-v0.200.0-arm64`)
 
@@ -2032,115 +1544,14 @@ Wheels that carry shared objects:
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 
 ## `ml-tree-amd64`
 
 - Reference: `local build`; tag `ml`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:eccfdb9cbfe66816d7b1892aed363097ee4181be1b8606b16f3e5a9bae279d3a`.
+- Digests: local build, image config digest `sha256:d86dcb1445f49fc379bb56c996333b5d1c6ed6fc2d69fe8490f25f6d671ef3e3`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-tree-amd64 --tag ml --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T19:03:30.088608285Z; layers: 6; Python distributions: 129.
+- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:10:52.353712125Z; layers: 6; Python distributions: 129.
 
 ### Part A: shared libraries inside Python wheels (`ml-tree-amd64`)
 
@@ -2188,11 +1599,11 @@ Wheels that carry shared objects:
 | `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pi_heif.libs/libde265-90fb0ce1.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pi_heif.libs/libheif-7a3e919c.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pi_heif.libs/libde265-90fb0ce1.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pi_heif.libs/libheif-7a3e919c.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-c6062d5f.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-53534446.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-7e5462ba.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -2208,7 +1619,7 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-51b0b3f7.so.7.2.0` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-9fe2abcc.so.2.0.17` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-8fb1c9f6.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-40ad5e7e.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
@@ -2223,7 +1634,7 @@ Wheels that carry shared objects:
 | `scipy.libs/libquadmath-2284e583.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libscipy_openblas-5f890258.so` | scipy 1.18.1 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 | `torch/lib/libaoti_custom_ops.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libbackend_with_compiler.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libc10.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
@@ -2248,115 +1659,14 @@ Wheels that carry shared objects:
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 
 ## `ml-v0.200.0-amd64`
 
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-ml`; source: released v0.200.0.
 - Digests: index `sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c`, platform manifest `sha256:6463558b3329a6498348b836f45ac951682f7ce5c3dd151cbd45c81d37cb04b7`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.200.0-amd64 --tag 0.200.0-ml --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:24:26.312026558Z; layers: 6; Python distributions: 129.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:24:26.312026558Z; layers: 6; Python distributions: 129.
 
 ### Part A: shared libraries inside Python wheels (`ml-v0.200.0-amd64`)
 
@@ -2404,9 +1714,9 @@ Wheels that carry shared objects:
 | `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-c6062d5f.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-53534446.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-7e5462ba.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -2422,10 +1732,10 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-51b0b3f7.so.7.2.0` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-9fe2abcc.so.2.0.17` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-8fb1c9f6.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-40ad5e7e.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
@@ -2440,7 +1750,7 @@ Wheels that carry shared objects:
 | `scipy.libs/libquadmath-2284e583.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `scipy.libs/libscipy_openblas-5f890258.so` | scipy 1.18.1 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 | `torch/lib/libaoti_custom_ops.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libbackend_with_compiler.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libc10.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
@@ -2465,115 +1775,14 @@ Wheels that carry shared objects:
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 
 ## `ml-v0.200.0-arm64`
 
 - Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-ml`; source: released v0.200.0.
 - Digests: index `sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c`, platform manifest `sha256:11ba0d2d7285a9d036727756d0a3dbae374c26fbbf07839b339010db3118f67d`.
 - Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.200.0-arm64 --tag 0.200.0-ml --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.0; image built 2026-11-23T01:25:07.43600684Z; layers: 6; Python distributions: 129.
+- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:25:07.43600684Z; layers: 6; Python distributions: 129.
 
 ### Part A: shared libraries inside Python wheels (`ml-v0.200.0-arm64`)
 
@@ -2620,9 +1829,9 @@ Wheels that carry shared objects:
 | `ijson.libs/libyajl-bc332733.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
 | `numpy.libs/libgfortran-daac5196-038a5e3c.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-7220728c.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | none shipped |
-| `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | none shipped |
+| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-ba04b566.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-f79e5820.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
 | `pillow.libs/libbrotlidec-53ab751a.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -2638,10 +1847,10 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebp-bac0fc6b.so.7.2.0` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpdemux-b0a60f8c.so.2.0.17` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libwebpmux-fec2c160.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-cbbede0a.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | none shipped |
+| `pillow.libs/libxcb-cbbede0a.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-79fd2b21.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0-or-later | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow_heif.libs/libx265-f7a03873.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
 | `rawpy.libs/libgomp-82b933f3.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-f280bfb6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
@@ -2654,7 +1863,7 @@ Wheels that carry shared objects:
 | `scipy.libs/libgfortran-daac5196-038a5e3c.so.5.0.0` | scipy 1.18.1 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `scipy.libs/libgfortran-e1b7dfc8.so.5.0.0` | scipy 1.18.1 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `scipy.libs/libscipy_openblas-b7e2810b.so` | scipy 1.18.1 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: either) | permissive | none shipped |
+| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 | `torch/lib/libaoti_custom_ops.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libarm_compute.so` | torch 2.15.0+cpu | Arm Compute Library | MIT | permissive | none shipped |
 | `torch/lib/libarm_compute_graph.so` | torch 2.15.0+cpu | Arm Compute Library | MIT | permissive | none shipped |
@@ -2682,106 +1891,5 @@ Wheels that carry shared objects:
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-System libraries under a linking exception: libgcc-s1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 47</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 40</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
+The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
 

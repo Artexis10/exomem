@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import csv
 import datetime
+import io
 import json
 import posixpath
 import re
@@ -44,8 +46,9 @@ EXTENSION_MODULE = re.compile(r"\.(cpython-\d+[a-z]*-[a-z0-9_-]+|abi3)\.so$")
 VENDOR_HASH = re.compile(r"(-[0-9a-f]{8})+$")
 # `<site-packages>/<name>-<version>.dist-info/<file>`: the wheel installation layout.
 DIST_INFO = re.compile(r"^(?P<root>.*site-packages)/(?P<dir>[^/]+\.dist-info)/(?P<rest>.+)$")
-# The files that the wheel format itself defines in a `.dist-info` directory. Every other
-# file there, apart from the SBOM directory, is a licence or notice file the wheel ships.
+# The files that the wheel format itself defines in a `.dist-info` directory. The build
+# tool puts every other file there, apart from the SBOM directory: licence and notice
+# files, and sometimes its own files such as `zip-safe`.
 WHEEL_FORMAT_FILES = {
     "METADATA", "RECORD", "WHEEL", "INSTALLER", "REQUESTED",
     "entry_points.txt", "top_level.txt", "direct_url.json",
@@ -129,19 +132,26 @@ class Overlay:
     """
 
     def __init__(self) -> None:
-        self.shared_objects: dict[str, int] = {}
-        self.dist_info_files: dict[str, int] = {}  # path -> size
+        self.shared_objects: set[str] = set()
+        self.dist_info_files: set[str] = set()
         self.metadata: dict[str, str] = {}  # `<dist-info dir>` -> METADATA text
-        self.records: dict[str, set[str]] = {}  # `<dist-info dir>` -> shared objects it lists
+        # `<dist-info dir>` -> the shared objects its RECORD lists, and the files it lists
+        # at the top of each package directory (`<package>/LICENSE`)
+        self.records: dict[str, tuple[set[str], set[str]]] = {}
         self.dpkg_lists: dict[str, set[str]] = {}  # list file -> shared objects it lists
         self.dpkg_status: str | None = None
 
-    def drop(self, path: str, *, tree: bool = True) -> None:
+    def forget(self, path: str, *, contents_only: bool = False) -> None:
+        """Remove what the tracked tables hold at `path` and below it."""
         for table in (self.shared_objects, self.dist_info_files, self.metadata,
                       self.records, self.dpkg_lists):
-            for key in [k for k in table if k == path or (tree and k.startswith(path + "/"))]:
-                del table[key]
-        if self.dpkg_status is not None and path == "var/lib/dpkg/status":
+            for key in [k for k in table if k.startswith(path + "/") or (k == path and not contents_only)]:
+                if isinstance(table, set):
+                    table.discard(key)
+                else:
+                    del table[key]
+        if self.dpkg_status is not None and (
+                path == "var/lib/dpkg/status" or "var/lib/dpkg/status".startswith(path + "/")):
             self.dpkg_status = None
 
     def apply(self, layer: tarfile.TarFile) -> None:
@@ -149,28 +159,27 @@ class Overlay:
             name = posixpath.normpath(member.name)
             parent, base = posixpath.split(name)
             if base == ".wh..wh..opq":  # the directory's earlier content is gone
-                for table in (self.shared_objects, self.dist_info_files, self.metadata,
-                              self.records, self.dpkg_lists):
-                    for key in [k for k in table if k.startswith(parent + "/")]:
-                        del table[key]
+                self.forget(parent, contents_only=True)
                 continue
             if base.startswith(".wh."):
-                self.drop(posixpath.join(parent, base[4:]))
+                self.forget(posixpath.join(parent, base[4:]))
                 continue
             if not member.isdir():  # a file or link replaces whatever the path held
-                self.drop(name)
-            if not member.isfile():
+                self.forget(name)
+            if not (member.isfile() or member.islnk()):
                 continue
+            # A hard link is another name for a file, so a hard-linked library counts. Its
+            # content is not in the layer stream: the files whose text is read must be plain.
             if SHARED_OBJECT.search(base):
-                self.shared_objects[name] = member.size
+                self.shared_objects.add(name)
             match = DIST_INFO.match(name)
             if match:
                 directory = f"{match['root']}/{match['dir']}"
-                self.dist_info_files[name] = member.size
+                self.dist_info_files.add(name)
                 if match["rest"] == "METADATA":
                     self.metadata[directory] = self.text(layer, member)
                 elif match["rest"] == "RECORD":
-                    self.records[directory] = self.record_objects(match["root"], layer, member)
+                    self.records[directory] = self.record_files(match["root"], self.text(layer, member))
             elif name == "var/lib/dpkg/status":
                 self.dpkg_status = self.text(layer, member)
             elif name.startswith("var/lib/dpkg/info/") and name.endswith(".list"):
@@ -179,11 +188,25 @@ class Overlay:
 
     @staticmethod
     def text(layer: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+        if member.islnk():
+            raise SystemExit(f"{member.name} is a hard link to {member.linkname}: its text is not in the layer")
         return layer.extractfile(member).read().decode("utf-8", "replace")
 
-    def record_objects(self, root: str, layer: tarfile.TarFile, member: tarfile.TarInfo) -> set[str]:
-        paths = (line.split(",")[0] for line in self.text(layer, member).splitlines())
-        return {posixpath.normpath(f"{root}/{p}") for p in paths if SHARED_OBJECT.search(p)}
+    @staticmethod
+    def record_files(root: str, record: str) -> tuple[set[str], set[str]]:
+        """The shared objects and the package-top files that a wheel's RECORD lists."""
+        objects, package_files = set(), set()
+        for row in csv.reader(io.StringIO(record)):  # RECORD is CSV: `path,hash,size`
+            if not row:
+                continue
+            path = posixpath.normpath(row[0])
+            if SHARED_OBJECT.search(path):
+                objects.add(posixpath.normpath(f"{root}/{path}"))
+            parts = path.split("/")
+            # `<package>/<file>`: not a `../` script path, `.dist-info` (read separately) or `.libs`
+            if len(parts) == 2 and not parts[0].startswith("..") and not parts[0].endswith((".dist-info", ".libs")):
+                package_files.add(path)
+        return objects, package_files
 
 
 def dpkg_packages(status: str | None) -> list[dict]:
@@ -215,13 +238,13 @@ def inventory(source: Source) -> dict:
         with source.open_layer(layer_name) as stream, tarfile.open(fileobj=stream, mode="r|*") as layer:
             overlay.apply(layer)
 
-    owner = {path: directory for directory, paths in overlay.records.items() for path in paths}
+    owner = {path: directory for directory, (objects, _) in overlay.records.items() for path in objects}
     dpkg_owned = {path for paths in overlay.dpkg_lists.values() for path in paths}
     wheels: dict[str, dict] = {}
     unowned, other_libraries = [], []
     other_modules: dict[str, int] = defaultdict(int)
     operating_system_objects = 0
-    for path, size in sorted(overlay.shared_objects.items()):
+    for path in sorted(overlay.shared_objects):
         base = posixpath.basename(path)
         directory = owner.get(path)
         if directory:
@@ -229,15 +252,15 @@ def inventory(source: Source) -> dict:
             if EXTENSION_MODULE.search(base):
                 wheel["modules"] += 1
             else:
-                wheel["libraries"].append({"path": path, "size": size, "stem": stem(base)})
+                wheel["libraries"].append({"path": path, "stem": stem(base)})
         elif "/site-packages/" in path:
-            unowned.append({"path": path, "size": size})
+            unowned.append({"path": path})
         elif dpkg_path(path) in dpkg_owned:
             operating_system_objects += 1
         elif EXTENSION_MODULE.search(base):
             other_modules[posixpath.dirname(path)] += 1
         else:
-            other_libraries.append({"path": path, "size": size, "stem": stem(base)})
+            other_libraries.append({"path": path, "stem": stem(base)})
 
     records = []
     for directory, wheel in sorted(wheels.items()):
@@ -248,7 +271,8 @@ def inventory(source: Source) -> dict:
             for relative in [path[len(prefix):]]
             if relative not in WHEEL_FORMAT_FILES and not relative.startswith("sboms/")
         )
-        records.append({**fields, "licence_files": files, **wheel})
+        records.append({**fields, "licence_files": files,
+                        "package_files": sorted(overlay.records[directory][1]), **wheel})
 
     env = dict(e.split("=", 1) for e in source.config["config"].get("Env", []))
     return {
@@ -332,6 +356,9 @@ def load_upstreams(path: Path) -> tuple[dict, dict, dict]:
     for entry in [*entries, *data["other_libraries"], *data["operating_system"]]:
         if entry["class"] not in CLASSES:
             raise SystemExit(f"{path}: {entry}: class must be one of {CLASSES}")
+        # `OR` is the SPDX operator for a choice, and the record names the licence elected.
+        if " OR " in entry["licence"] and "elected" not in entry:
+            raise SystemExit(f"{path}: {entry}: a licence offered as a choice needs `elected`")
     return (
         {normal_distribution(name): wheel for name, wheel in data["wheels"].items()},
         {e["stem"]: e for e in data["other_libraries"]},
@@ -379,7 +406,7 @@ def shared_library_rows(record: dict, wheels: dict) -> tuple[list[str], list[dic
                 rows.append(f"| `{location}` | {who} | UNMAPPED | | | |")
                 findings.append({"kind": "unmapped", "library": location, "wheel": who})
                 continue
-            known = {f.rsplit("/", 1)[-1] for f in wheel["licence_files"]}
+            known = {f.rsplit("/", 1)[-1] for f in [*wheel["licence_files"], *wheel["package_files"]]}
             evidence = entry["evidence"]
             if evidence == "none":
                 shown = "none shipped"
@@ -430,6 +457,7 @@ def render(args: argparse.Namespace) -> None:
               "| Proprietary (A, B) |", "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     findings_text: list[str] = []
     sections: list[str] = []
+    shown_tables: dict[str, str] = {}  # Part C tables -> the record that shows them in full
     for record in records:
         meta = record["meta"]
         rows, findings, classes = shared_library_rows(record, wheels)
@@ -461,14 +489,34 @@ def render(args: argparse.Namespace) -> None:
         for f in findings:
             if f["kind"] in ("unmapped", "evidence"):
                 findings_text.append(f"- `{meta['id']}`: {f['kind']}: {f['library']} ({f['wheel']}).")
-        sections.append(render_image(record, rows, others, system))
+        sections.append(render_image(record, rows, others, system, groups, shown_tables))
     header = args.header.read_text(encoding="utf-8").rstrip()
     out = [header, "", "## Images scanned", "", *identity, "", "## Counts, derived from the records", "",
            *counts, "", "## Findings, derived from the records", "", *findings_text, ""] + sections
     sys.stdout.write("\n".join(out) + "\n")
 
 
-def render_image(record: dict, rows: list[str], others: list, system: dict) -> str:
+def os_tables(groups: dict[str, list[dict]], system: dict) -> str:
+    """Part C's tables: the system libraries under a linking exception, then each dpkg group."""
+    exempt = [p["name"] for group in groups.values() for p in group
+              if system.get(p["name"], {}).get("class") == "linking-exception"]
+    lines = ["System libraries under a linking exception: " + (", ".join(exempt) or "none") + ".", ""]
+    for heading, group in (("System libraries (dpkg section `libs`)", groups["libs"]),
+                           ("Programs and data (every other dpkg section)", groups["programs"])):
+        lines += [f"<details><summary>{heading}: {len(group)}</summary>", "",
+                  "| Package | Version | Licences read by trivy (class) |", "| --- | --- | --- |"]
+        for package in group:
+            note = system.get(package["name"])
+            licences = ", ".join(f"{x['name']} ({x['category']})" for x in package["licences"]) or (
+                f"none read; recorded as {note['licence']} ({note['class']}), evidence {note['evidence']}"
+                if note else "none read")
+            lines.append(f"| {package['name']} | {cell(package['version'])} | {cell(licences)} |")
+        lines += ["", "</details>", ""]
+    return "\n".join(lines)
+
+
+def render_image(record: dict, rows: list[str], others: list, system: dict,
+                 groups: dict[str, list[dict]], shown_tables: dict[str, str]) -> str:
     meta, inv, operating_system = record["meta"], record["inventory"], record["os"]
     oras = f" and oras {meta['oras']}" if "oras" in meta else ""
     lines = [f"## `{meta['id']}`", "",
@@ -515,20 +563,12 @@ def render_image(record: dict, rows: list[str], others: list, system: dict) -> s
               "aggregated with the product and not combined with it. Licence class is trivy's, "
               "from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, "
               "`restricted` is LGPL.", ""]
-    exempt = [p["name"] for p in operating_system["packages"]
-              if system.get(p["name"], {}).get("class") == "linking-exception"]
-    lines += ["System libraries under a linking exception: " + (", ".join(exempt) or "none") + ".", ""]
-    for heading, group in (("System libraries (dpkg section `libs`)", os_groups(record)["libs"]),
-                           ("Programs and data (every other dpkg section)", os_groups(record)["programs"])):
-        lines += [f"<details><summary>{heading}: {len(group)}</summary>", "",
-                  "| Package | Version | Licences read by trivy (class) |", "| --- | --- | --- |"]
-        for package in group:
-            note = system.get(package["name"])
-            licences = ", ".join(f"{x['name']} ({x['category']})" for x in package["licences"]) or (
-                f"none read; recorded as {note['licence']} ({note['class']}), evidence {note['evidence']}"
-                if note else "none read")
-            lines.append(f"| {package['name']} | {cell(package['version'])} | {cell(licences)} |")
-        lines += ["", "</details>", ""]
+    tables = os_tables(groups, system)
+    first = shown_tables.setdefault(tables, meta["id"])
+    if first == meta["id"]:
+        lines += [tables]
+    else:
+        lines += [f"The tables are the same as in Part C of `{first}`.", ""]
     return "\n".join(lines)
 
 
