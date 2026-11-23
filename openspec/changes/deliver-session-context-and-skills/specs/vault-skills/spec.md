@@ -26,21 +26,33 @@ Other files in a skill's directory SHALL remain ordinary pages.
 - **WHEN** a Source page named `SKILL.md` carries a name and a description
 - **THEN** it is not a skill
 
-### Requirement: Maps responses carry a turn-independent skills catalogue
+### Requirement: Maps responses carry a catalogue of skills and collections
 
-Unless `EXOMEM_ACTIVATION_SKILLS=off`, each maps response SHALL carry `skills` with `state`, `generation`, `items` and `omitted`.
-Each item SHALL carry the skill's `name`, a `summary` and a `ref` that opens the skill page.
-The summary SHALL be the first sentence of the description, cut at a whole word to at most the vault's `skill_summary_max_chars`.
-Items SHALL follow skill name order. Whole items SHALL fit within the vault's `skills_max_chars`; `omitted` SHALL count visible skills that did not fit.
-Both bounds SHALL be vault-owned `budgets` in the activation conventions, with shipped defaults of 3500 and 200, accepted as whole numbers in 0..8000 and 40..1000.
-The catalogue SHALL be session context: it SHALL count against its own bound and SHALL NOT reduce the response's `max_chars` allowance for turn context.
-State SHALL be `ready` for at least one item, `empty` for no visible skill, `unchanged` when the caller already holds this generation, and `unavailable` when compilation fails.
-A compilation failure SHALL leave the map, stance and turn context available.
+Unless `EXOMEM_ACTIVATION_SKILLS=off`, each maps response SHALL carry `skills` with `state`, `generation`, `items`, `omitted` and `advice`.
+Each item SHALL carry `kind` (`skill` or `collection`), `name`, a `summary` and a `ref` that opens its page.
+Skill items SHALL list visible skill pages; collection items SHALL list visible Records collections by manifest title.
+A summary SHALL be the first sentence of the description or manifest body, cut at a whole word to `skill_summary_max_chars`.
 
-#### Scenario: A vault sets its own skills bounds
+#### Scenario: A collection is listed beside the skills
+
+- **WHEN** a vault holds two visible skills and one visible Records collection
+- **THEN** the catalogue lists the two skills and then the collection, each with its kind, name, summary and ref
+
+#### Scenario: Opening an item gives its full text
+
+- **WHEN** the agent reads an item's `ref`
+- **THEN** it receives the whole skill page or collection manifest, as a native skill load would
+
+### Requirement: The catalogue is session context with vault-owned bounds
+
+The catalogue SHALL count against its own bound, `skills_max_chars`, and SHALL NOT reduce the response's `max_chars` allowance.
+`skills_max_chars` and `skill_summary_max_chars` SHALL be vault-owned `budgets`, defaults 3500 and 200, whole numbers in 0..8000 and 40..1000.
+State SHALL be `ready` for at least one item, `empty` for none, `unchanged` when the caller holds this generation, and `unavailable` when compilation fails, which SHALL leave the map, stance and turn context available.
+
+#### Scenario: A vault sets its own catalogue bounds
 
 - **WHEN** a vault's activation-conventions override sets `budgets.skills_max_chars` and `budgets.skill_summary_max_chars`
-- **THEN** the skills block fits within that block size and cuts each summary at that length, and a vault with no override keeps 3500 and 200
+- **THEN** the catalogue fits within that size and cuts each summary at that length, and a vault with no override keeps 3500 and 200
 
 #### Scenario: An invalid bound keeps the shipped value
 
@@ -54,13 +66,40 @@ A compilation failure SHALL leave the map, stance and turn context available.
 
 #### Scenario: A later turn does not repeat an unchanged catalogue
 
-- **WHEN** the caller's continuity token records the current skills generation
+- **WHEN** the caller's continuity token records the current catalogue generation
 - **THEN** `skills.state` is `unchanged`, the block carries the generation and no items, and it spends no catalogue allowance
 
 #### Scenario: An edited skill reaches the next turn
 
 - **WHEN** a skill's description changes after the caller received the catalogue
 - **THEN** the next response carries a new generation and the full current catalogue
+
+### Requirement: An overflowing catalogue lists the turn's domains first
+
+Whole items SHALL fit within `skills_max_chars`: skills before collections, each in name order.
+When not every item fits, items whose topics resolve through the domain registry to a domain the turn touches, or its ancestor, SHALL come first, then items the turn's task context reached, then the rest in fit order.
+`omitted` SHALL count the visible items left out. Without touched domains the first tier is empty.
+
+#### Scenario: A catalogue that fits ignores the turn
+
+- **WHEN** every visible item fits within `skills_max_chars`
+- **THEN** the catalogue lists them all in fit order, whatever the turn touches
+
+#### Scenario: An overflowing catalogue leads with the touched domain
+
+- **WHEN** the items do not all fit and the turn touches one registered domain
+- **THEN** the items of that domain are listed first, and `omitted` counts the items that did not fit
+
+### Requirement: The catalogue tells the agent how to use it
+
+When the catalogue lists items, `advice` SHALL say in one sentence that an item covering the turn is opened with the read tool and followed within existing authority.
+The advice and every agent-facing sentence about the catalogue SHALL call a skill page a skill and a Records collection a collection.
+Delivery SHALL grant no authority: the agent decides whether an item applies.
+
+#### Scenario: A client without hooks learns to open a covering skill
+
+- **WHEN** a tool-only client receives a catalogue that lists items
+- **THEN** the block's `advice` tells it to open a covering item with the read tool before acting
 
 ### Requirement: A caller can omit the skills it loads natively
 
