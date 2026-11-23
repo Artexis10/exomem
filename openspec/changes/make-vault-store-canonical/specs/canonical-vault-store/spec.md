@@ -324,6 +324,15 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **THEN** the revert moves that file into the vault trash by one rename, never a copy and a removal, and the export names where it went
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
 
+### Requirement: Migration catches up queued file-mode index work
+Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the sidecar it copies matches the files. It SHALL refuse before staging, and name the reconcile command, when the graph index is not current after a bounded catch-up; receipts left while the graph is current do not refuse. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
+
+#### Scenario: Migrate catches up queued file-mode index work before it stages
+- **WHEN** an operator migrates a file-mode vault whose stopped service left graph repair queued
+- **THEN** the migration drains that queue into the graph index before it copies any sidecar, and the derived rows then equal the files
+- **AND** a graph index that is still not current after the catch-up refuses before staging and names the reconcile command
+- **AND** a dry run reports the queue's depth and age and drains nothing
+
 ### Requirement: Knowledge writes share the store's availability
 In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical, graph or derivation-intent tables; the Markdown projection is the in-vault copy of pages.
 

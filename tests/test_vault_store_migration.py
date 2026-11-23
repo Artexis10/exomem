@@ -33,9 +33,11 @@ from test_managed_collections_migration import OPERATOR_SECRET, coordinator_url 
 
 from exomem import __main__ as cli
 from exomem import (
+    deferred_index,
     epistemic_graph,
     find,
     graph_sync,
+    index_sync,
     lexstore,
     memory_refs,
     records,
@@ -43,6 +45,7 @@ from exomem import (
     state_paths,
     writer_lease,
 )
+from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
@@ -784,3 +787,88 @@ def test_a_migration_and_a_rollback_each_remove_the_staging_directory_that_a_kil
         (leftover / "staged.sqlite").write_bytes(b"half a database")
         assert command() == 0
         assert not leftover.exists()
+
+
+def _leave_graph_repair_queued(root):
+    """A cold-started service that saved a page and stopped before its startup proof cleared.
+
+    The service queues the page's graph repair instead of publishing it, so the sidecar stays behind
+    the files with the work owed. The service's gate dies with its process; the offline owner holds none.
+    """
+    epistemic_graph.require_startup_source_proof(root)
+    page = (
+        "---\ntitle: Gamma\ntype: note\nexomem_id: 01JGAMMA00000000000000000A\n---\n# Gamma\n\n"
+        "A new page that links [[Alpha]].\n"
+    )
+    pages.batch_atomic_write([pages.PlannedWrite(root / GAMMA, page)], vault_root=root)
+    epistemic_graph._admit_startup_source(root)  # the registry has no public release
+    assert deferred_index.graph_queue_pending(root), "the save must leave graph repair queued"
+
+
+def test_a_migration_catches_up_graph_work_that_a_stopped_service_left_queued(vault, capsys):
+    """A migration that refuses on parity because the service stopped before it published a saved page's graph rows."""
+    _leave_graph_repair_queued(vault)
+    queued = deferred_index.graph_queue_age(vault)[0]
+    capsys.readouterr()
+
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    assert applied["graph_catch_up"]["receipts"] == queued
+    assert applied["graph_catch_up"]["left"] == 0
+    assert not deferred_index.graph_queue_pending(vault)
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        assert store.execute(
+            "SELECT count(*) FROM graph_nodes WHERE node_key = ?", (f"file:{GAMMA}",)
+        ).fetchone() == (1,)
+
+
+def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vault, capsys):
+    """A dry run that stays silent about work that the apply will catch up, or that drains it itself."""
+    _leave_graph_repair_queued(vault)
+    queued = deferred_index.graph_queue_age(vault)[0]
+    capsys.readouterr()
+
+    assert store_mode(vault, "migrate", "--dry-run", operator=False) == 0
+
+    report = printed(capsys)
+    assert report["status"] == "dry-run"
+    assert report["queued_graph_work"]["receipts"] == queued
+    assert report["queued_graph_work"]["oldest_age_seconds"] >= 0
+    assert "catches the graph index up" in report["queued_graph_work"]["apply"]
+    assert deferred_index.graph_queue_age(vault)[0] == queued
+
+
+@pytest.mark.parametrize("drain", ["clears nothing", "raises", "outlasts the ceiling"])
+def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
+    vault, capsys, monkeypatch, drain
+):
+    """A migration that stages and proves a whole vault, or reports a traceback, when its catch-up cannot converge."""
+    _leave_graph_repair_queued(vault)
+    if drain == "clears nothing":
+        monkeypatch.setattr(index_sync, "drain_graph_work", lambda *args, **keywords: 0)
+    elif drain == "raises":
+
+        def failing(*args, **keywords):
+            raise RuntimeError("the graph sidecar is busy")
+
+        monkeypatch.setattr(index_sync, "drain_graph_work", failing)
+    else:
+        monkeypatch.setattr(migrate, "CATCH_UP_SECONDS", 0)
+    staged = []
+    stage = migrate.stage
+    monkeypatch.setattr(
+        migrate, "stage", lambda *args, **keywords: staged.append(1) or stage(*args, **keywords)
+    )
+    objects = store_objects(vault)
+    capsys.readouterr()
+
+    assert migrate_apply(vault) == 1
+
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_GRAPH_NOT_CAUGHT_UP" in error
+    assert "exomem maintain --reconcile --rebuild-graph" in error
+    assert staged == []
+    assert store_objects(vault) == objects
+    assert not mode.store_mode_active(vault)
