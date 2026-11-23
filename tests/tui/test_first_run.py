@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("textual")
@@ -315,3 +317,20 @@ async def test_connecting_to_an_existing_vault_is_not_pinned(make_app):
             "a connect performed no write and must rewind like any other answer"
         )
         assert "pinned" not in _text(app, "#note")
+
+
+async def test_connecting_an_existing_vault_offers_the_folder_setup_made_before_the_rename(make_app):
+    """Setup created ~/Exomem before the rename; an existing user must not be steered past it."""
+    backend = FakeBackend(initialized=False)
+    legacy = Path.home() / "Exomem"
+    backend.existing_vaults.update({str(legacy), str(Path.home() / "Evermatter")})
+    app = make_app(backend)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await _settle(app, pilot)
+        await pilot.press("down", "enter")  # 'Use an existing vault'
+        await pilot.pause()
+        assert app.screen.query_one("#path-input").value == "~/Exomem"
+        await pilot.press("enter")
+        await _settle(app, pilot)
+        assert ("adopt_vault_root", {"root": str(legacy)}) in backend.calls
+        assert "~/Exomem" in _text(app, "#ledger")

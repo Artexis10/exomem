@@ -592,6 +592,13 @@ class ExomemBackend:
         return install_hook.check_hooks(clients=install_hook.SUPPORTED_CLIENTS)
 
     @staticmethod
+    def holds_vault(folder: Path) -> bool:
+        """Whether a folder already holds a Knowledge Base, by the check `resolve_vault` uses."""
+        from .. import vault as vault_module
+
+        return folder.is_dir() and vault_module._is_vault(folder)
+
+    @staticmethod
     def scaffold_file_count() -> int:
         """How many files `init` writes — the preview must not guess.
 

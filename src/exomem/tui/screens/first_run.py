@@ -190,6 +190,17 @@ class FirstRunScreen(ExomemScreen):
     def _default_path(self) -> Path:
         return Path.home() / "Evermatter"
 
+    def _found_vault(self) -> Path | None:
+        """A vault already in a folder that setup creates by default, else None.
+
+        Setup created ~/Exomem before the product was renamed, so that folder
+        comes first: an existing user connects the vault they already have.
+        """
+        for folder in (Path.home() / "Exomem", self._default_path()):
+            if self.app.backend.holds_vault(folder):
+                return folder
+        return None
+
     def _display_path(self, path: Path) -> str:
         try:
             return "~/" + str(path.relative_to(Path.home()))
@@ -303,7 +314,8 @@ class FirstRunScreen(ExomemScreen):
                 [("enter", "create"), ("tab", "complete"), ("esc", "back, typing kept")]
             )
         else:
-            path_input.value = self._path_draft
+            found = self._found_vault()
+            path_input.value = self._path_draft or (self._display_path(found) if found else "")
             path_input.placeholder = "folder that already holds a Knowledge Base"
             self._prose("note", "Nothing is written — the folder is opened as it stands.")
             self.set_footer(
