@@ -913,6 +913,65 @@ def test_a_refused_guarded_read_names_the_condition_and_logs_the_file(
     assert "linked.md" not in oversized.value.reason
 
 
+def test_a_guarded_read_rereads_a_file_another_writer_grew_after_it_was_measured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A capture plans its index and log updates before the boundary, beside another write's
+    # commit. A file that grew between its measurement and its open was refused, so one of
+    # several concurrent captures failed with LOG_PLAN_CONFLICT. A file that never stops
+    # moving is still refused.
+    target = tmp_path / "index.md"
+    target.write_text("# Index\n", encoding="utf-8")
+    real_read = vault.read_bounded_guarded_bytes
+    grown: list[int] = []
+
+    def another_write_commits_once(root, rel, *, limit, **kwargs):
+        if not grown:
+            grown.append(limit)
+            target.write_text("# Index\n- a newer entry\n", encoding="utf-8")
+        return real_read(root, rel, limit=limit, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", another_write_commits_once)
+    text, _guard = vault.read_guarded_text(tmp_path, target)
+    assert text == "# Index\n- a newer entry\n"
+
+    def a_writer_never_stops(root, rel, *, limit, **kwargs):
+        target.write_text(target.read_text(encoding="utf-8") + "- one more\n", encoding="utf-8")
+        return real_read(root, rel, limit=limit, **kwargs)
+
+    monkeypatch.setattr(vault, "read_bounded_guarded_bytes", a_writer_never_stops)
+    with pytest.raises(vault.PathGuardError) as refused:
+        vault.read_guarded_text(tmp_path, target)
+    assert refused.value.code == "PATH_GUARD_UNSAFE"
+
+
+def test_a_guarded_read_rereads_a_file_a_commit_replaced_during_the_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A commit installs the index with os.replace. When that lands between the read's snapshot
+    # and its own recheck, the recheck sees a new file and refused the read as changed.
+    target = tmp_path / "index.md"
+    target.write_text("# Index\n", encoding="utf-8")
+    real_snapshot = vault._read_bounded_guarded_snapshot_tolerating_transient_sharing
+    replaced: list[bool] = []
+
+    def a_commit_replaces_the_file_after_the_snapshot(root, rel, limit):
+        snapshot = real_snapshot(root, rel, limit)
+        if not replaced:
+            replaced.append(True)
+            staged = tmp_path / "index.md.tmp"
+            staged.write_text("# Index\n- a newer entry\n", encoding="utf-8")
+            os.replace(staged, target)
+        return snapshot
+
+    monkeypatch.setattr(
+        vault, "_read_bounded_guarded_snapshot_tolerating_transient_sharing",
+        a_commit_replaces_the_file_after_the_snapshot,
+    )
+    text, _guard = vault.read_guarded_text(tmp_path, target)
+    assert text == "# Index\n- a newer entry\n"
+
+
 def test_guarded_reader_retries_a_transient_windows_sharing_refusal_from_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

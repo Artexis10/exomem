@@ -1551,6 +1551,15 @@ class PathGuardError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
+class GuardedLeafMoved(PathGuardError):
+    """A fresh bounded read found its regular file replaced since the caller measured it.
+
+    A commit installs a new file with `os.replace`: the open sees a larger file, or the
+    file it opened has no link left. `_read_guarded_path` measures again and retries.
+    Every other unsafe leaf stays a plain `PathGuardError`.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class PathIdentity:
     relative_path: str
@@ -4975,14 +4984,29 @@ def _over_limit_reason(size: int, limit: int) -> str:
     return f"is {size} bytes, over the {limit}-byte read limit"
 
 
-def _refuse_unbounded_leaf(target: str, reason: str) -> PathGuardError:
+def _refuse_unbounded_leaf(target: str, reason: str, *, moved: bool = False) -> PathGuardError:
     """The refusal for a guarded leaf that is not a bounded regular file.
 
     The error text names the failed condition and not the path: this read also covers pages
     that are withheld from a restricted caller, so the path would name one. The server log has it.
+    `moved` marks a regular file that a concurrent replace made larger or unlinked.
     """
+    if moved:
+        log.debug("guarded read saw a replaced file: %s %s", target, reason)
+        return GuardedLeafMoved("PATH_GUARD_UNSAFE", f"guarded content {reason}")
     log.warning("guarded read refused: %s %s", target, reason)
     return PathGuardError("PATH_GUARD_UNSAFE", f"guarded content {reason}")
+
+
+def _replaced_during_read(info: os.stat_result, limit: int) -> bool:
+    """Whether a leaf fails the bounded-regular-file conditions only as a replaced file does.
+
+    A replace either unlinks the file the read opened (no link left) or puts a larger file in
+    its place; a larger file must pass every other condition at its own size.
+    """
+    if stat.S_ISREG(info.st_mode) and info.st_nlink == 0:
+        return True
+    return info.st_size > limit and _unbounded_leaf_reason(info, info.st_size) is None
 
 
 def _read_bounded_guarded_snapshot(
@@ -5026,7 +5050,7 @@ def _read_bounded_guarded_snapshot(
         before = os.fstat(leaf)
         unbounded = _unbounded_leaf_reason(before, limit)
         if unbounded is not None:
-            raise _refuse_unbounded_leaf(target, unbounded)
+            raise _refuse_unbounded_leaf(target, unbounded, moved=_replaced_during_read(before, limit))
         chunks: list[bytes] = []
         remaining = limit + 1
         while remaining:
@@ -5142,7 +5166,10 @@ def _read_bounded_windows_snapshot(
             else _unbounded_leaf_reason(before, limit)
         )
         if unbounded is not None:
-            raise _refuse_unbounded_leaf(target, unbounded)
+            raise _refuse_unbounded_leaf(
+                target, unbounded,
+                moved=not _is_reparse(before) and _replaced_during_read(before, limit),
+            )
         leaf = _open_windows_path_descriptor(
             leaf_path,
             desired_access=0x80000000,
@@ -5329,6 +5356,14 @@ def read_guarded_text_for_cache(vault_root: Path, path: Path) -> tuple[str, Path
     return data.decode("utf-8"), guard
 
 
+#: Reads of one file that a concurrent commit may replace between its measurement and its open.
+#: A bound, not a tuning value: a file that keeps moving is refused rather than chased.
+_GROWN_READ_ATTEMPTS = 3
+#: Guard codes that the read's own fresh snapshot and self-recheck raise when the file moved
+#: under them; closed protocol codes of this module.
+_FRESH_READ_RACE_CODES = frozenset({"PATH_GUARD_CHANGED", "PATH_GUARD_CONTENT"})
+
+
 def _read_guarded_path(
     vault_root: Path, path: Path, *, with_generation: bool
 ) -> tuple[bytes, PathGuard, PathGuard | None]:
@@ -5356,18 +5391,28 @@ def _read_guarded_path(
         _require_read_limit(stored.meta.size)
         guard = _store_guard("/".join(_safe_guard_target(target)), stored.meta.sha256)
         return stored.body, guard, None
-    try:
-        limit = absolute.lstat().st_size
-    except FileNotFoundError:
-        raise
-    except OSError as error:
-        raise PathGuardError(
-            "PATH_GUARD_IO", "guarded content could not be opened"
-        ) from error
-    if with_generation:
-        return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
-    data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
-    return data, guard, None
+    for attempt in range(_GROWN_READ_ATTEMPTS):
+        try:
+            limit = absolute.lstat().st_size
+        except FileNotFoundError:
+            raise
+        except OSError as error:
+            raise PathGuardError(
+                "PATH_GUARD_IO", "guarded content could not be opened"
+            ) from error
+        try:
+            if with_generation:
+                return read_bounded_guarded_bytes_with_generation(root, target, limit=limit)
+            data, guard = read_bounded_guarded_bytes(root, target, limit=limit)
+            return data, guard, None
+        except PathGuardError as error:
+            # A commit replaced the file during this fresh read (a pre-boundary plan reading an
+            # index or log beside another write's commit): measure it again. Each attempt
+            # rechecks the root, the folders and the file from scratch, so unsafe files stay refused.
+            moved = isinstance(error, GuardedLeafMoved) or error.code in _FRESH_READ_RACE_CODES
+            if not moved or attempt + 1 == _GROWN_READ_ATTEMPTS:
+                raise
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
 
 
 @dataclass
