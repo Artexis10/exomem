@@ -186,6 +186,65 @@ def test_rollback_marker_rejects_boolean_numeric_fields(tmp_path: Path, field: s
         state_migration._validate_manifest(tmp_path / "manifest.json", manifest, vault_root=vault)
 
 
+@pytest.mark.parametrize(
+    ("leaf", "valid"),
+    [
+        ("2026-08.jsonl", True),
+        ("2026-08.0000000000000000002.jsonl", True),
+        ("2026-08.002.jsonl", False),
+        ("2026-08.00000000000000000020.jsonl", False),
+        ("2026-13.0000000000000000002.jsonl", False),
+        ("2026-00.jsonl", False),
+        ("2026-08.0000000000000000000.jsonl", False),
+        ("2026-08.0000000000000000002.jsonl.tmp", False),
+        ("2026-08.0000000000000000002.extra.jsonl", False),
+    ],
+)
+def test_rollback_endpoint_path_accepts_numbered_receipt_parts(
+    tmp_path: Path, leaf: str, valid: bool
+) -> None:
+    from exomem import state_migration
+
+    vault = tmp_path / "vault"
+    manifest = state_migration._new_manifest(vault, state_migration._descriptor_ids())
+    manifest["families"] = {
+        descriptor: {"status": "complete"} for descriptor in manifest["descriptors"]
+    }
+    manifest["state"] = "complete"
+    event_id = "e" * 64
+    instance_id = "f" * 32
+    manifest["version"] = 2
+    manifest["governance_rollback"] = {
+        "operation": "governance_schema_v4_downmigration",
+        "event_id": event_id,
+        "phase": "complete",
+        "plan_digest": "a" * 64,
+        "target_digest": "b" * 64,
+        "timestamp": 1,
+        "d0": "c" * 64,
+        "legacy_path": "Knowledge Base/.governance.sqlite",
+        "stage_leaf": f".governance-v3-rollback-{event_id}.sqlite",
+        "backup_reference": None,
+        "backup_plan_digest": None,
+        "source_store_digest": None,
+        "schema_fence_generation": None,
+        "d1": "d" * 64,
+        "terminal": {
+            "instance_id": instance_id,
+            "seq": 2,
+            "hash": "1" * 64,
+            "path": f"Knowledge Base/_Governance/events/{instance_id}/{leaf}",
+            "byte_offset": 7,
+        },
+    }
+
+    if valid:
+        state_migration._validate_manifest(tmp_path / "manifest.json", manifest, vault_root=vault)
+    else:
+        with pytest.raises(state_migration.StateMigrationManifestError):
+            state_migration._validate_manifest(tmp_path / "manifest.json", manifest, vault_root=vault)
+
+
 def test_marker_free_v2_manifest_remains_ready_after_adoption(tmp_path: Path) -> None:
     from exomem import state_migration, state_paths
 

@@ -976,7 +976,13 @@ collections:
   Start the service once to migrate the store. `exomem collections create` holds
   the writer lease itself, so it migrates the store before it creates.
 
-File collections and knowledge writes are not affected.
+File collections are not affected, and neither are knowledge writes in file mode.
+
+In store mode the store also holds the vault's pages. The service still starts
+when its writer has not migrated the store yet, and it serves page reads from
+that store. This needs a store at schema 16 or later. Page writes go through the
+writer, so they refuse until the writer holds the lease and has migrated the
+store.
 
 If the migration fails, it rolls back and leaves the store at its earlier
 schema. The service status then reports the store as `schema_pending`, with the

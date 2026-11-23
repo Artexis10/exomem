@@ -1,0 +1,16 @@
+{
+  "reference": "The person is weighing a concrete database feature, SQLite's binary JSON storage, against a named project, Pebble Ledger, with a stated use: the importer re-parses stored raw rows on every rebuild. This is the first stage of the user's own technology-signal method. A correct assistant serves that method, checks the Technology Signals collection for an earlier item on the same feature and project, and creates one item for this feature and project in state observed or assessed, with the project, the use case and the person's reason. The original release notes belong in Sources if the person shared them, and no compiled insight is owed yet because nothing has been tested. It does not create a Planning item, does not mark anything ready to test, does not change the decision to keep the data in one SQLite file, and does not pick a research or reading method. It tells the person in one sentence what was saved and in which state. The method also fits the earlier turns of the conversation, because the same technology idea is under discussion; the keyed turn is the one that defines the stage this case tests. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Entities/Decisions/Keep Pebble Ledger data in one SQLite file.md",
+    "Notes/Research/pebble-ledger/sqlite-schema-choices.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 0
+}

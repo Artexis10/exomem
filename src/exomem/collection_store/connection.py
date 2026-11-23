@@ -573,10 +573,12 @@ def open_writer(
         raise
 
 
-def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-    """Open an existing store read-only at the current schema version."""
+def open_reader(
+    path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS, oldest: int | None = None,
+) -> sqlite3.Connection:
+    """Open an existing store read-only at schema ``oldest`` or later, by default the current schema version."""
     conn, found = _open_read_only(path, busy_timeout_ms)
-    if found < schema.SCHEMA_VERSION:
+    if found < (schema.SCHEMA_VERSION if oldest is None else oldest):
         conn.close()
         raise CollectionStoreError(
             "COLLECTION_STORE_SCHEMA_PENDING",
@@ -784,15 +786,15 @@ class ReaderPool:
         self._idle: dict[bool, list[_Idle]] = {True: [], False: []}
 
     @contextmanager
-    def lend(self, *, head: bool, current: bool) -> Iterator[sqlite3.Connection]:
-        """Lend a head or plain reader; ``current`` also refuses a store that awaits its writer's migration."""
+    def lend(self, *, head: bool, oldest: int = 0) -> Iterator[sqlite3.Connection]:
+        """Lend a head or plain reader that refuses a store whose recorded schema is below ``oldest``."""
         conn, version, identity = self._take(head)
         healthy = False
         try:
             if version > schema.SCHEMA_VERSION:
                 raise CollectionStoreError(
                     "COLLECTION_STORE_SCHEMA_NEWER", str(schema.SchemaVersionError(version, schema.SCHEMA_VERSION)))
-            if current and version < schema.SCHEMA_VERSION:
+            if version < oldest:
                 raise CollectionStoreError(
                     "COLLECTION_STORE_SCHEMA_PENDING", "the collection store has not been migrated by its writer yet")
             yield conn
@@ -866,17 +868,19 @@ def _quiet(conn: sqlite3.Connection) -> bool:
 
 def head_reader(path: Path, pool: ReaderPool | None = None):
     """A head reader for one ``with`` block: lent by ``pool`` when given, else freshly opened and closed."""
-    return closing(open_head_reader(path)) if pool is None else pool.lend(head=True, current=False)
+    return closing(open_head_reader(path)) if pool is None else pool.lend(head=True)
 
 
 def ownership_reader(path: Path, pool: ReaderPool | None = None):
     """A plain reader at any supported schema (ownership declarations ride the unchanged metadata wire)."""
-    return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False, current=False)
+    return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False)
 
 
-def store_reader(path: Path, pool: ReaderPool | None = None):
-    """A plain reader at the current schema, as ``open_reader`` opens it."""
-    return closing(open_reader(path)) if pool is None else pool.lend(head=False, current=True)
+def store_reader(path: Path, pool: ReaderPool | None = None, *, oldest: int | None = None):
+    """A plain reader at schema ``oldest`` or later, by default the current schema, as ``open_reader`` opens it."""
+    if pool is None:
+        return closing(open_reader(path, oldest=oldest))
+    return pool.lend(head=False, oldest=schema.SCHEMA_VERSION if oldest is None else oldest)
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

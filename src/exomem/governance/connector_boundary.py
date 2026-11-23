@@ -419,12 +419,35 @@ def permits_filter(root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
     return admit
 
 
-def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
-                    *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def _ceiling_gate(root: Path, path: str, denied: frozenset[str]) -> bool | None:
+    """The ceiling's fast answers: an empty ceiling admits, the activation manifest refuses."""
     if not denied:
         return True
     if root / path == activation_manifest.manifest_path(root):
         return False
+    return None
+
+
+def permits_scope_sets(root: Path, path: str, who: RequestPrincipal,
+                       scope_sets: tuple[frozenset[str], ...]) -> bool:
+    """`permits` for a caller that already holds the subject scope sets: no bytes, no parse."""
+    try:
+        root = Path(root)
+        current = snapshot(root)
+        denied = current.denied_scopes(who) if current is not None else frozenset()
+    except _ADMISSION_REFUSALS:
+        return False
+    gated = _ceiling_gate(root, path, denied)
+    if gated is not None:
+        return gated
+    return bool(scope_sets) and all(permits_scopes(denied, scopes) for scopes in scope_sets)
+
+
+def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
+                    *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    gated = _ceiling_gate(root, path, denied)
+    if gated is not None:
+        return gated
     compiled = policy.load(root)
     return _permits_membership(root, path, denied, compiled, content=content, who=who, artifact_copy=artifact_copy)
 

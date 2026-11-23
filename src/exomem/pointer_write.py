@@ -225,7 +225,8 @@ def identity_at(vault_root: Path, rel: str) -> str | None:
 
 
 def page_matcher(
-    vault_root: Path, moves: Mapping[str, str], *, settled: bool = False
+    vault_root: Path, moves: Mapping[str, str], *, settled: bool = False,
+    resolver_factory: Callable[[], vault.WikilinkResolver] | None = None,
 ) -> Callable[[str, str], bool]:
     """Whether an old and a new link target name one page with an `exomem_id`, across `moves`.
 
@@ -247,9 +248,12 @@ def page_matcher(
     def resolver() -> vault.WikilinkResolver:
         # One resolver per matcher: a resolver per link reads every page of the vault again.
         if not held_resolver:
-            from .find import shared_resolver
+            if resolver_factory is None:
+                from .find import shared_resolver
 
-            held_resolver.append(shared_resolver(root))
+                held_resolver.append(shared_resolver(root))
+            else:
+                held_resolver.append(resolver_factory())
         return held_resolver[0]
 
     def page_of(target: str) -> str | None:
@@ -429,9 +433,14 @@ def preview_digest(moves: Mapping[str, str], writes: Iterable[PointerWrite]) -> 
     It covers each move and each write's page with its before and after hash, so a commit whose
     writes differ from the listed ones, or whose pages changed since, has another digest.
     """
+    return preview_digest_from_hashes(moves, ((write.path, write.before_hash, write.after_hash) for write in writes))
+
+
+def preview_digest_from_hashes(moves: Mapping[str, str], writes: Iterable[tuple[str, str, str]]) -> str:
+    """Bind the same approval without keeping the full before and after texts."""
     payload = {
         "moves": sorted(moves.items()),
-        "writes": sorted((write.path, write.before_hash, write.after_hash) for write in writes),
+        "writes": sorted(writes),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 

@@ -351,10 +351,15 @@ class ChunkRef(NamedTuple):
 
 
 class ChunkSelection(NamedTuple):
-    """Passage hits and the scoring backend that actually supplied them."""
+    """Passage hits and the scoring backend that actually supplied them.
+
+    `lexical` holds the lexical hits of a fused selection, read in the same snapshot as the
+    dense hits, or None when the selection asked for none or the terms do not cover it.
+    """
 
     hits: list[tuple[str, int, str | ChunkRef, float]]
     scoring_mode: str
+    lexical: list[tuple[str, int, ChunkRef, float]] | None = None
 
 
 def _cache_covers_publication(
@@ -1084,11 +1089,9 @@ class EmbeddingIndex:
         self._terms_lock = threading.Lock()
         self._terms_backfill: threading.Thread | None = None
         self._terms_failed_at: float | None = None
-        # The chunk rows' names and counts at the token a search last read; replaced, never
-        # edited. The lock makes one build per token, so concurrent searches after a write
-        # do not each read every row's name (a leaf lock).
-        self._terms_rows: passage_terms.Rows | None = None
-        self._terms_rows_lock = threading.Lock()
+        # The row counts at the token a search last read; replaced at the next token. It is
+        # cheap to build, so concurrent searches may each build one and keep the last.
+        self._terms_counts: passage_terms.Counts | None = None
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -2192,30 +2195,35 @@ class EmbeddingIndex:
                 return loaded
 
     def _resident_current(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it is the current publication, read without the lock.
 
-        Counts no use: the idle reaper must not read a publisher's check as a
+        `token` is the sidecar token the caller already read; without it, the token is
+        peeked. Counts no use: the idle reaper must not read a publisher's check as a
         reader.
         """
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
-        served = (
-            sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
-            if c is not None and c.recall_policy_identity == policy_identity
-            else None
-        )
+        if c is None or c.recall_policy_identity != policy_identity:
+            served = None
+        elif token is None:
+            served = sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
+        else:
+            # The caller read the token in its own snapshot, so no second connection peeks it.
+            served = c if sidecar_store.cache_is_fresh(c, self.path, *token[:3]) else None
         if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
             return served
         return None
 
     def _serve_resident(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it serves the current publication, read without the lock."""
-        served = self._resident_current(policy_identity, nonblocking=nonblocking)
+        served = self._resident_current(policy_identity, nonblocking=nonblocking, token=token)
         if served is not None:
             self._hits += 1
         return served
@@ -2913,23 +2921,48 @@ class EmbeddingIndex:
 
     def select_passage_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
-        encoded_for: Any = _UNSPECIFIED_SPACE,
+        encoded_for: Any = _UNSPECIFIED_SPACE, lexical_query: str | None = None,
     ) -> ChunkSelection:
-        """Prefer a current admitted matrix; otherwise use disk without waiting."""
+        """Prefer a current admitted matrix; otherwise use disk without waiting.
+
+        With `lexical_query`, the top `k` lexical hits of `allowed_paths` are read on the
+        connection and in the snapshot whose token the dense hits carry, and are returned
+        as `lexical`. When the terms do not cover that snapshot, `select_passage_terms`
+        decides whether this request can make them whole.
+        """
         from . import recall_policy
 
-        resident = None
-        if passage_matrix.ceiling():
-            resident = self._serve_resident(
-                recall_policy.recall_policy_identity(self.vault_root), nonblocking=True
-            )
-            if resident is not None and not resident.passage_admitted:
-                resident = None
+        fusing = lexical_query is not None and self.path.exists()
+        if fusing and allowed_paths is None:
+            raise ValueError("a lexical passage selection needs its allowed paths")
+        policy = (
+            recall_policy.recall_policy_identity(self.vault_root) if passage_matrix.ceiling() else None
+        )
         withheld = self._withheld()
+        eligible = set(allowed_paths) - withheld.paths if fusing else set()
+        lexical: list[tuple[str, int, ChunkRef, float]] | None = None
+        resident = None
+        if fusing and policy is not None and not withheld.everything:
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. The one
+            # token it reads proves the matrix current and the lexical hits.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                resident = self._admitted_resident(policy, token)
+                if resident is not None:
+                    lexical = self._passage_terms_at(
+                        conn, token, resident.space, lexical_query, k, eligible
+                    )
+            finally:
+                conn.rollback()
+                conn.close()
+        else:
+            resident = self._admitted_resident(policy)
         # These are the scoring backend's fixed protocol names, not content categories.
         mode = "resident" if resident is not None else "disk"
         if withheld.everything:
-            return ChunkSelection([], mode)
+            return ChunkSelection([], mode, [] if fusing else None)
         if resident is not None:
             hits = self._score_chunks(
                 query_vec, k, resident.metadata, resident.matrix, resident=resident,
@@ -2937,6 +2970,10 @@ class EmbeddingIndex:
                 defer_text=True,
             )
         else:
+            def lexical_stage(conn: sqlite3.Connection, token: tuple[int, ...], space: Any) -> None:
+                nonlocal lexical
+                lexical = self._passage_terms_at(conn, token, space, lexical_query, k, eligible)
+
             self.prepare_passage_matrix()
             with foreground_priority.foreground():
                 hits = self._disk_score(
@@ -2945,8 +2982,37 @@ class EmbeddingIndex:
                         allowed_paths is None or path in allowed_paths
                     ),
                     encoded_for=encoded_for, hydrate=True, defer_text=True,
+                    in_snapshot=lexical_stage if fusing else None,
                 )[0]
-        return ChunkSelection(hits, mode)
+        if fusing and lexical is None:
+            lexical = self.select_passage_terms(lexical_query, k, allowed_paths=allowed_paths)
+        return ChunkSelection(hits, mode, lexical)
+
+    def _admitted_resident(
+        self, policy: tuple[str, str] | None, token: tuple[int, ...] | None = None,
+    ) -> _EmbCache | None:
+        """The current matrix when passage search may score it, else None."""
+        if policy is None:
+            return None
+        resident = self._serve_resident(policy, nonblocking=True, token=token)
+        return resident if resident is not None and resident.passage_admitted else None
+
+    def _passage_terms_at(
+        self, conn: sqlite3.Connection, token: tuple[int, ...], space: Any,
+        query: str, k: int, eligible: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical hits under a proof of the caller's snapshot at `token`, or None when the
+        terms do not cover that snapshot."""
+        if token[1] <= 0 or not passage_terms.covered(conn, token[1]):
+            return None
+        proof = ChunkProof(self, token[:3], space)
+        counts = self._terms_counts
+        if counts is None or counts.token != proof.token:
+            counts = passage_terms.Counts(conn, proof.token)
+            self._terms_counts = counts
+        with foreground_priority.foreground():
+            rows = passage_terms.select(conn, query, k, eligible, counts)
+        return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
 
     def select_passage_terms(
         self, query: str, k: int, *, allowed_paths: AbstractSet[str],
@@ -2970,18 +3036,12 @@ class EmbeddingIndex:
             try:
                 conn.execute("BEGIN")
                 token = self._build_token(conn)
-                if token[1] > 0 and passage_terms.covered(conn, token[1]):
-                    proof = ChunkProof(
-                        self, token[:3], recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-                    )
-                    with foreground_priority.foreground():
-                        with self._terms_rows_lock:
-                            terms_rows = self._terms_rows
-                            if terms_rows is None or terms_rows.token != proof.token:
-                                terms_rows = passage_terms.Rows(conn, proof.token, complete=False)
-                                self._terms_rows = terms_rows
-                        rows = passage_terms.select(conn, query, k, eligible, terms_rows)
-                    return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
+                hits = self._passage_terms_at(
+                    conn, token, recall_space.read_identity(conn, tables=_VECTOR_TABLES),
+                    query, k, eligible,
+                )
+                if hits is not None:
+                    return hits
                 rows_held = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
             finally:
                 conn.rollback()
@@ -3022,15 +3082,7 @@ class EmbeddingIndex:
         try:
             conn = self._connect()
             try:
-                if passage_terms.backfill(conn, CHUNK_PATH_LOG):
-                    # Read every name and count now, so no search waits on their first read.
-                    conn.execute("BEGIN")
-                    try:
-                        token = self._build_token(conn)
-                        if passage_terms.covered(conn, token[1]):
-                            self._terms_rows = passage_terms.Rows(conn, token[:3], complete=True)
-                    finally:
-                        conn.rollback()
+                passage_terms.backfill(conn, CHUNK_PATH_LOG)
             finally:
                 conn.close()
         except (sqlite3.Error, OSError, OpError) as error:
@@ -3285,8 +3337,12 @@ class EmbeddingIndex:
         self, query_vecs, k: int, *, admits: Callable[[str], bool],
         encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
         defer_text: bool = False,
+        in_snapshot: Callable[[sqlite3.Connection, tuple[int, ...], Any], None] | None = None,
     ) -> list[list[tuple[str, int, str | ChunkRef, float]]]:
-        """Exact eligible top-k with bounded vectors and one scoring snapshot."""
+        """Exact eligible top-k with bounded vectors and one scoring snapshot.
+
+        `in_snapshot` runs once in that snapshot, with its connection, token and space.
+        """
         if not self.path.exists():
             return [[] for _ in query_vecs]
         # Fixed phase names form the disk-scoring instrumentation protocol.
@@ -3303,6 +3359,8 @@ class EmbeddingIndex:
                     recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
                 self._observe_identity(identity, token)
                 proof = ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
+            if in_snapshot is not None:
+                in_snapshot(conn, token, identity)
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]

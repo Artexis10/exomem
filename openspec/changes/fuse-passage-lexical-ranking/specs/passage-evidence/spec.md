@@ -9,8 +9,10 @@ No `mode` and `mode: "vector"` SHALL both rank by dense similarity alone.
 Lexical matching SHALL use the lexical store's analyser over the stored text of the same chunk rows that dense ranking scores.
 The lexical terms SHALL match those rows at the generation that the request reads, or a `hybrid` request SHALL rank by dense similarity alone.
 A `hybrid` reply SHALL report the lexical state, `ready`, `preparing` or `failed`, as `diagnostics.lexical`, and its summary SHALL NOT mention it.
+It SHALL report the number of lexical candidates that entered fusion as `diagnostics.lexical_candidates`, or null when the lexical stage took no part.
 Both rankings SHALL receive the same eligible chunks before ranking, and a lexical candidate SHALL pass the same byte verification as a dense candidate.
-A rebuild that replaces every chunk row SHALL NOT derive lexical terms inside its publication transaction. It SHALL mark the terms out of date, and the background backfill SHALL derive them again in batches.
+A rebuild that replaces every chunk row SHALL NOT derive lexical terms inside its publication transaction. It SHALL empty the lexical terms and mark them out of date in that transaction, and the background backfill SHALL derive them again in batches.
+Deleting a chunk row SHALL delete its lexical terms and name in the same statement, also from a terms table that an earlier release kept.
 After a failed backfill, no request SHALL start another backfill, inline or in the background, before the retry delay has passed.
 More than one passage of one Source MAY appear.
 The passage level SHALL honour `limit` up to 200 and SHALL refuse a larger value with an error that names the bound.
@@ -124,7 +126,13 @@ When the served encoder runs inferences concurrently, a passage request's query 
 
 - **WHEN** a rebuild publishes a whole new set of chunk rows
 - **THEN** its publication transaction derives no lexical terms
+- **AND** no lexical terms of the replaced rows remain after it
 - **AND** `hybrid` requests rank by dense similarity until the backfill has derived the terms of the new rows
+
+#### Scenario: An erased Source leaves no lexical terms
+
+- **WHEN** a Source's chunk rows are deleted through a sidecar connection that maintains lexical terms, on a sidecar whose terms that release or an earlier release kept
+- **THEN** no lexical terms or names of those rows remain after the deleting transaction
 
 #### Scenario: A writer without lexical terms rewrites a chunk
 

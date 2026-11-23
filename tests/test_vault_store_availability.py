@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -37,6 +38,11 @@ def store_mode_vault(vault, monkeypatch):
     """The fixture vault with both store-mode records and its pages in the store, as activation leaves them."""
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
+    return _enter_store_mode(vault)
+
+
+def _enter_store_mode(vault, stored_only=None):
+    """Move ``vault`` into store mode; ``stored_only`` maps a page to bytes that only its store copy holds."""
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
         with handle.transaction() as tx:
             # A store-mode store holds the owners' tables, and every commit derives rows into them.
@@ -45,7 +51,8 @@ def store_mode_vault(vault, monkeypatch):
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
         # In store mode a page read answers from the store, so the pages must be there.
         pages = tuple(
-            write.PagePut(owned.rel, (vault / owned.rel).read_bytes(), owned.stat.st_mtime_ns)
+            write.PagePut(owned.rel, (stored_only or {}).get(owned.rel, (vault / owned.rel).read_bytes()),
+                          owned.stat.st_mtime_ns)
             for owned in ownership.iter_owned(vault)
             if owned.ownership is ownership.Ownership.PAGE
         )
@@ -132,6 +139,41 @@ def test_the_cli_and_the_terminal_ui_refuse_the_vault_that_the_service_refuses(
     with pytest.raises(CollectionStoreError) as refused:
         backend.start_runtime()
     assert refused.value.code == availability.NOT_SERVED
+
+
+@pytest.mark.parametrize("earlier", [schema.SCHEMA_VERSION - 1, schema.VAULT_STORE_READ_SCHEMA_VERSION],
+                         ids=["previous schema", "oldest schema the page reader admits"])
+def test_a_store_mode_vault_that_an_earlier_store_schema_wrote_starts_and_serves_its_stored_pages(
+        vault, monkeypatch, earlier):
+    """Defect: a release that changes the store schema cannot start on a store-mode vault an earlier release wrote.
+
+    The start reads the schema pages from the store before the writer takes the lease and migrates the store,
+    and the page reader refused every store below the current schema with COLLECTION_STORE_SCHEMA_PENDING.
+    """
+    for name in LEASE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    note = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
+    stored = b"---\ntitle: Retry\ntype: note\n---\n# Retry\n\nAn edit that only the store holds.\n"
+    with monkeypatch.context() as earlier_release:
+        # The earlier release built its store through the same migrations, up to its own schema.
+        earlier_release.setattr(schema, "SCHEMA_VERSION", earlier)
+        _enter_store_mode(vault, stored_only={note: stored})
+    store = connection.store_path(vault)
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
+
+    started = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert "session" in started.source_schema.source_types
+    assert "An edit that only the store holds." in commands.op_read_memory(vault, path=note)["body"]
+    # Only the writer migrates, under the lease: a start leaves the store for a rollback to the earlier release.
+    with closing(sqlite3.connect(store)) as raw:
+        assert schema.schema_version(raw) == earlier
+    # The store thread opens this writer once it holds the lease; its migration leaves the pages as they read.
+    with connection.open_writer(store, lease_check=lambda: True):
+        pass
+    with closing(sqlite3.connect(store)) as raw:
+        assert schema.schema_version(raw) == schema.SCHEMA_VERSION
+    assert "An edit that only the store holds." in commands.op_read_memory(vault, path=note)["body"]
 
 
 def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):

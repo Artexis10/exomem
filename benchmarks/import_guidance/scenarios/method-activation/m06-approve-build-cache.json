@@ -1,0 +1,11 @@
+{
+  "id": "m06-approve-build-cache",
+  "title": "A short trial of a shared compile cache is approved",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "For Pebble Ledger releases the three binaries take forever to build on the hosted runners. sccache can share compiled artifacts between CI runs. I'd like to know if it's real or hype.",
+    "Sure, give it a go. Just the release job, on a branch, for a week or two. I'll compare the build times with the last five releases."
+  ]
+}

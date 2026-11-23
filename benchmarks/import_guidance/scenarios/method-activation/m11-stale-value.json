@@ -1,0 +1,11 @@
+{
+  "id": "m11-stale-value",
+  "title": "The assistant gives back an old value after a change was given",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "What time am I riding on Thursday?",
+    "That's not what I asked you to remember yesterday. I told you I'd moved to the 6am group and you're giving me the old time. It just didn't stick."
+  ]
+}

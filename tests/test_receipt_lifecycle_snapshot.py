@@ -58,15 +58,14 @@ def test_receipt_namespace_validates_off_request_then_reuses_a_complete_deny_set
     calls = []
     read_events = receipts.event_records
 
-    def held_history(root, *, checkpoint=None):
+    def held_history(root, **options):
         calls.append(threading.current_thread())
         assert calls[-1] is not incoming
         entered.set()
         if not release.wait(5):
             raise receipts.ReceiptError("history did not finish")
-        rows = read_events(root, checkpoint=checkpoint)
-        assert len(rows) >= 4096
-        return rows
+        # The refresh reads only the lifecycle intents of this long history, off the request thread.
+        return read_events(root, **options)
 
     monkeypatch.setattr(receipts, "event_records", held_history)
     view = lifecycle.ReceiptLifecycle(vault)
@@ -118,11 +117,11 @@ def test_receipt_namespace_retries_unavailable_event_evidence(vault, marker, mon
     unavailable = threading.Event()
     available = threading.Event()
 
-    def interrupted(root, *, checkpoint=None):
+    def interrupted(root, **options):
         if not available.is_set():
             unavailable.set()
             raise receipts.ReceiptError("evidence cannot be read")
-        return real_events(root, checkpoint=checkpoint)
+        return real_events(root, **options)
 
     monkeypatch.setattr(receipts, "event_records", interrupted)
     view = lifecycle.ReceiptLifecycle(vault)

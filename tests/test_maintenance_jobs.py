@@ -36,6 +36,7 @@ from exomem import (
     memory_refs,
     mutation_lock,
     query_data,
+    request_budget,
     writer_lease,
 )
 from exomem import server as server_module
@@ -56,6 +57,221 @@ def server(vault, monkeypatch, tmp_path):
     monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(tmp_path / "ledger"))
     yield server_module.build_server(require_auth=False)
     writer_lease.reset_managers_for_tests()
+
+
+def test_a_source_preview_only_releases_its_complete_result_to_its_request(server, vault):
+    started, release = threading.Event(), threading.Event()
+    outcomes = [("rewritten", f"Notes/page-{i:03}.md", None) for i in range(225)]
+    outcomes[0] = ("refused", outcomes[0][1], "é" * 13_000)
+    outcomes[1] = ("refused", outcomes[1][1], "é" * 8_000)
+    digest = "preview-digest"
+
+    def build(_stop):
+        started.set()
+        assert release.wait(_DEADLINE_SECONDS)
+        return {"preview_digest": digest}, outcomes
+
+    other = {"binding": "other-owner", "request_key": "other-source", "snapshot_key": "previous-snapshot"}
+    previous = maintenance_jobs.start_source_preview(
+        vault, **other, build=lambda _stop: ({}, [("rewritten", "Notes/other.md", None)]),
+    )
+    assert _source_preview_terminal(vault, **other, run_id=previous["run_id"])["state"] == "completed"
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot-one"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert started.wait(_DEADLINE_SECONDS)
+    run_id = handle["run_id"]
+    status_args = {**identity, "run_id": run_id}
+    try:
+        assert handle == {"run_id": run_id, "state": "running"}
+        assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == handle
+        with pytest.raises(OpError) as refusal:
+            maintenance_jobs.start_source_preview(vault, **{**identity, "snapshot_key": "snapshot-two"}, build=build)
+        assert refusal.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+        assert maintenance_jobs.source_preview_status(vault, **status_args, cursor="0") == handle
+        for different in ({"binding": "other-owner"}, {"request_key": "other-source"}):
+            with pytest.raises(OpError, match="No Source preview matches this request") as refusal:
+                maintenance_jobs.source_preview_status(vault, **{**status_args, **different})
+            assert refusal.value.code == "NOT_FOUND"
+        with principal_module.library_scope():
+            assert maintenance_jobs.job_list(vault) == {"jobs": []}
+            with pytest.raises(OpError) as refusal:
+                maintenance_jobs.job_status(vault, run_id)
+            assert refusal.value.code == "NOT_FOUND"
+            with pytest.raises(OpError) as refusal:
+                maintenance_jobs.request_cancel(vault, run_id, "Stop this job")
+            assert refusal.value.code == "NOT_FOUND"
+            ordinary = maintenance_jobs.start_leaf(
+                SimpleNamespace(name="maintain_memory"), (vault,), {"mode": "backfill-ids"},
+            )
+            with pytest.raises(OpError) as refusal:
+                ordinary()
+            assert refusal.value.code == "MAINTENANCE_JOB_ACTIVE"
+            assert run_id not in str(refusal.value.details)
+    finally:
+        release.set()
+
+    status = _source_preview_terminal(vault, **status_args)
+    assert status == {
+        "run_id": run_id, "state": "completed", "result": {"preview_digest": digest}, "next_cursor": "0",
+        "snapshot_current": True,
+    }
+    assert maintenance_jobs.start_source_preview(vault, **identity, build=build) == {
+        "run_id": run_id, "state": "completed",
+    }
+    stale_args = {**status_args, "snapshot_key": "snapshot-two"}
+    assert maintenance_jobs.source_preview_status(vault, **stale_args) == {**status, "snapshot_current": False}
+    with principal_module.library_scope(), pytest.raises(OpError) as hidden:
+        maintenance_jobs.job_status(vault, run_id, cursor="0")
+    assert hidden.value.code == "NOT_FOUND"
+    unknown_args = {**status_args, "snapshot_key": None}
+    assert maintenance_jobs.source_preview_status(vault, **unknown_args) == {**status, "snapshot_current": None}
+    received = []
+    cursor = status["next_cursor"]
+    while cursor is not None:
+        page = maintenance_jobs.source_preview_status(vault, **stale_args, cursor=cursor)
+        assert page.keys() == {"run_id", "state", "entries", "next_cursor", "snapshot_current"}
+        assert page["snapshot_current"] is False
+        assert len(page["entries"]) <= 128
+        encoded = json.dumps(page["entries"], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        assert len(encoded) <= query_data.MAX_RESPONSE_BYTES // 2 + 1
+        received.extend((entry["kind"], entry["path"], entry.get("value")) for entry in page["entries"])
+        cursor = page["next_cursor"]
+        assert cursor is None or cursor == str(len(received))
+    assert received == outcomes
+    past_end = maintenance_jobs.source_preview_status(vault, **stale_args, cursor=str((1 << 63) - 1))
+    assert past_end["entries"] == [] and past_end["next_cursor"] is None
+    current = {**identity, "snapshot_key": "snapshot-two"}
+    newer = maintenance_jobs.start_source_preview(vault, **current, build=build)
+    assert newer["run_id"] != run_id
+    assert _source_preview_terminal(vault, **current, run_id=newer["run_id"])["snapshot_current"] is True
+
+
+def _source_preview_terminal(vault, **status_args):
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    while (status := maintenance_jobs.source_preview_status(vault, **status_args))["state"] == "running":
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    return status
+
+
+def test_an_interrupted_source_preview_never_publishes_its_staged_result(server, vault):
+    staging = threading.Event()
+
+    def build(stop):
+        def entries():
+            yield "rewritten", "Notes/later.md", None
+            staging.set()
+            assert stop.wait(_DEADLINE_SECONDS)
+            yield "rewritten", "Notes/last.md", None
+
+        return {"preview_digest": "unpublished"}, entries()
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert staging.wait(_DEADLINE_SECONDS)
+    maintenance_jobs.stop_all(vault, wait=_DEADLINE_SECONDS)
+    assert maintenance_jobs.source_preview_status(vault, **identity, run_id=handle["run_id"], cursor="0") == {
+        "run_id": handle["run_id"], "state": "interrupted",
+    }
+
+
+def test_a_source_preview_claim_does_not_wait_for_a_busy_job_store(server, vault):
+    def unexpected_build(_stop):
+        pytest.fail("the busy store must leave the worker unstarted")
+
+    with maintenance_jobs._store(vault, create=True) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        with request_budget.checking(request_budget.ReadCheckpoint(request_budget.RequestBudget(seconds=0.5))):
+            with pytest.raises(request_budget.ReadBudgetExhausted):
+                maintenance_jobs.start_source_preview(
+                    vault, binding="owner-binding", request_key="source-request", snapshot_key="snapshot",
+                    build=unexpected_build,
+                )
+
+
+@pytest.mark.parametrize(("error", "code"), [
+    (OpError("RECLASSIFICATION_PREVIEW_WARMING", "private worker detail"), "RECLASSIFICATION_PREVIEW_WARMING"),
+    (OpError("RECLASSIFICATION_PREVIEW_UNAVAILABLE", "private worker detail"), "RECLASSIFICATION_PREVIEW_UNAVAILABLE"),
+    (OpError("INTERNAL_WORKER_ROUTE", "private worker detail"), "RECLASSIFICATION_PREVIEW_FAILED"),
+    (RuntimeError("private worker detail"), "RECLASSIFICATION_PREVIEW_FAILED"),
+])
+def test_a_source_preview_failure_releases_only_a_safe_reason(server, vault, error, code):
+    def build(_stop):
+        def entries():
+            yield "rewritten", "Notes/staged.md", None
+            raise error
+
+        return {"preview_digest": "unpublished"}, entries()
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert _source_preview_terminal(vault, **identity, run_id=handle["run_id"], cursor="0") == {
+        "run_id": handle["run_id"], "state": "failed", "error_code": code,
+    }
+
+
+def test_held_evidence_stays_private_and_dies_with_the_job(server, vault, monkeypatch):
+    sha = "ab" * 32
+    record = {
+        "path": "Notes/held.md", "sha256": sha, "size": 42,
+        "witness": [1, 2, 42, 3, 4], "scopes": [["scope-a"]], "identity": '["release"]',
+    }
+    held = {"Notes/held.md": record}
+    identity = {"binding": "owner-binding", "request_key": "req", "snapshot_key": "snap"}
+
+    def build(_stop):
+        return ({"preview_digest": "d"}, [("rewritten", "Notes/held.md", None)], held)
+
+    handle = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    status = _source_preview_terminal(vault, **identity, run_id=handle["run_id"])
+    assert status["state"] == "completed"
+    evidence = maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/held.md"])
+    assert evidence == {
+        "Notes/held.md": maintenance_jobs.HeldEvidence(
+            path="Notes/held.md", sha256=sha, size=42, witness=(1, 2, 42, 3, 4),
+            scopes=(frozenset({"scope-a"}),), identity='["release"]',
+        ),
+    }
+    assert maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/other.md"]) == {}
+
+    pages = [status]
+    cursor = status.get("next_cursor")
+    while cursor is not None:
+        page = maintenance_jobs.source_preview_status(
+            vault, **identity, run_id=handle["run_id"], cursor=cursor,
+        )
+        pages.append(page)
+        cursor = page["next_cursor"]
+    wire = json.dumps(pages, ensure_ascii=False)
+    assert sha not in wire and "witness" not in wire and "scope-a" not in wire
+
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_SECONDS", 0)
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_NEWEST", 0)
+    newer = maintenance_jobs.start_source_preview(
+        vault, **{**identity, "snapshot_key": "snap-two"}, build=build,
+    )
+    assert _source_preview_terminal(
+        vault, **{**identity, "snapshot_key": "snap-two"}, run_id=newer["run_id"],
+    )["state"] == "completed"
+    assert maintenance_jobs.source_preview_held_evidence(vault, handle["run_id"], ["Notes/held.md"]) == {}
+
+
+def test_a_failed_source_preview_prunes_expired_terminal_jobs(server, vault, monkeypatch):
+    def build(_stop):
+        raise RuntimeError("preview failed")
+
+    identity = {"binding": "owner-binding", "request_key": "source-request", "snapshot_key": "snapshot"}
+    old = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert _source_preview_terminal(vault, **identity, run_id=old["run_id"])["state"] == "failed"
+
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_SECONDS", 0)
+    monkeypatch.setattr(maintenance_jobs, "RETAIN_NEWEST", 1)
+    current = maintenance_jobs.start_source_preview(vault, **identity, build=build)
+    assert _source_preview_terminal(vault, **identity, run_id=current["run_id"])["state"] == "failed"
+    with pytest.raises(OpError) as expired:
+        maintenance_jobs.source_preview_status(vault, **identity, run_id=old["run_id"])
+    assert expired.value.code == "NOT_FOUND"
 
 
 def _session(server, scenario):

@@ -7122,16 +7122,13 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal, forward or compensating, prepares read-only, then
-        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
-        # mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and applying a
-        # compensation write step by step and keep the wide boundary. The two
-        # actions are members of the closed curation action enum.
-        narrow_curation_proposal = (
+        # A curation proposal seals, and an apply or resume writes, under short holds that
+        # curation takes itself and re-checks its bindings under (`curation._step_boundary`).
+        # Preparation, probes and a self-guarded step's leaf run without curation's hold, so
+        # other writers commit between a step's seams.
+        narrow_curation = (
             command.name == "maintain_memory"
-            and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") in ("propose", "propose-compensation")
+            and curation_module.guards_own_boundary(kwargs)
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -7151,7 +7148,7 @@ class LeaseManager:
             or narrow_maintenance_job_cancel
             or narrow_maintenance_job
             or narrow_reconcile
-            or narrow_curation_proposal
+            or narrow_curation
             or narrow_episode_record
             # Issuance writes no vault-owned file: upload and download mint a token over a private
             # copy or store, and a session open or rotate writes only its own SQLite transaction.
@@ -9169,6 +9166,8 @@ def invoke_command(
         SelectorCoverageError,
         disclosure_boundary,
         emit_boundary_receipt,
+        exact_report_paths,
+        held_report_evidence,
         is_vault_root,
         postfilter,
         postfilter_error,
@@ -9386,11 +9385,18 @@ def invoke_command(
             published_admission.deciding(), companions.request_byte_proofs():
         from .cli_ops import _AuditBudgetExhausted
 
+        preview_checkpoint = None
+        if command.name == "manage_memory_file":
+            from .reclassify_source import is_preview_call
+
+            if is_preview_call(command.name, kwargs):
+                preview_checkpoint = request_budget.current_checkpoint()
         budget = request_budget.current()
-        checkpoint = (
+        audit_checkpoint = (
             request_budget.ReadCheckpoint(budget)
             if budget is not None and invocation_is_audit(command, kwargs) else None
         )
+        checkpoint = audit_checkpoint or preview_checkpoint
 
         def finish_ownership(check: request_budget.ReadCheckpoint | None) -> None:
             with request_budget.checking(check), call_spans.span("command.ownership_finish"):
@@ -9409,11 +9415,24 @@ def invoke_command(
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()
+                retained_report = None
+                if preview_checkpoint is not None:
+                    from .reclassification_preview import RetainedReport
+
+                    if isinstance(result, RetainedReport):
+                        retained_report = result
                 # The terminal filter asks the store live rather than replaying the body's verdict.
-                with call_spans.span("command.terminal_filter"), published_admission.deciding(own=True):
+                with (
+                    call_spans.span("command.terminal_filter"), published_admission.deciding(own=True),
+                    exact_report_paths(retained_report.exact_paths) if retained_report is not None else nullcontext(),
+                    held_report_evidence(retained_report.held_evidence)
+                    if retained_report is not None else nullcontext(),
+                ):
                     result = postfilter(command.name, result, injected[0], request_kwargs=kwargs,
-                                        checkpoint=checkpoint)
+                                        checkpoint=checkpoint, reprove_aggregate=audit_checkpoint is not None)
                     result = store_preview.note_withheld_pages(command.name, result, injected[0])
+                    if retained_report is not None:
+                        retained_report.require_complete_projection(result)
                 finish_ownership(checkpoint)
             except BaseException as error:
                 # This exact internal terminal contains no content to scan or prove again.
@@ -9440,6 +9459,10 @@ def invoke_command(
                             raise
                         finish_ownership(error_checkpoint)
                 except request_budget.ReadBudgetExhausted:
+                    if preview_checkpoint is not None:
+                        from .reclassify_source import preview_warming
+
+                        raise preview_warming() from None
                     if budget is not None:
                         budget.note_truncated("audit.release")
                     raise _AuditBudgetExhausted() from None

@@ -1,0 +1,12 @@
+{
+  "reference": "Negative twin of the memory-failure cases. The word memory here means the person's own memory, and the person forgot a date; the assistant's memory did nothing wrong. The memory-incident method does not apply and nothing belongs in Memory Incidents. No other method in the vault covers it. A correct assistant selects no method, may notice from the friend's page that the birthday is the ninth of March, and suggests a simple habit such as a yearly reminder set up in advance. It does not log an incident.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/memory-incident-capture/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [],
+  "destination": null,
+  "trigger_turn": 0
+}

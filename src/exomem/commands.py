@@ -7062,7 +7062,7 @@ def op_ask_memory(
 def op_served_context(vault_root: Path, *, served_context_id: str | None = None) -> dict:
     """Inspect retained composed response metadata with verified owner authority.
 
-    Omit served_context_id for retained-row counts and unknown usage.
+    Omit served_context_id for retained-row counts, unknown usage and each served method's use evidence.
     Args:
         served_context_id: Exact row id from a maps response; grants no authority.
     """
@@ -14376,6 +14376,8 @@ def op_propose_reclassification(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Report what correcting one source would do, without writing anything.
 
@@ -14392,13 +14394,14 @@ def op_propose_reclassification(
     IS means reading it — a plausible guess presented for approval is how a
     fallback becomes permanent.
     """
-    from . import reclassify_source as reclassify_module
+    from . import reclassification_preview, reclassify_source
 
     try:
-        return reclassify_module.propose(
-            vault_root, path, source_kind=source_kind, domain=domain
-        ).as_dict()
-    except reclassify_module.ReclassifyError as error:
+        return reclassification_preview.report(
+            vault_root, path, source_kind=source_kind, domain=domain,
+            preview_run_id=preview_run_id, cursor=cursor,
+        )
+    except reclassify_source.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
 
 
@@ -14461,6 +14464,8 @@ def op_manage_memory_file(
     relation_review_reason: str | None = None,
     promotion_reason: str | None = None,
     preview_digest: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
@@ -14489,6 +14494,8 @@ def op_manage_memory_file(
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
         preview_digest: A move or reclassify that repoints Source or Evidence pages passes
             its preview's `preview_digest`.
+        preview_run_id: Follow a background reclassification preview for the same Source.
+        cursor: Read the next page of that preview's completed reference report.
     """
     creation_review_requested = any(
         value is not None
@@ -14586,7 +14593,8 @@ def op_manage_memory_file(
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
         if operation == "propose-reclassification":
             return op_propose_reclassification(
-                vault_root, path=target, source_kind=source_kind, domain=domain
+                vault_root, path=target, source_kind=source_kind, domain=domain,
+                preview_run_id=preview_run_id, cursor=cursor,
             )
         if operation == "revert-reclassification":
             return op_revert_reclassification(vault_root, path=target, reason=reason)
@@ -14702,7 +14710,7 @@ def op_record_memory(
         query: v1 query object; grammar via describe.
         item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
     """
-    return record_memory_module.record_memory(
+    result = record_memory_module.record_memory(
         vault_root,
         action=action,
         collection=collection,
@@ -14744,6 +14752,35 @@ def op_record_memory(
         query=query,
         item_id=item_id,
     )
+    # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
+    # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
+    committed = isinstance(result, dict) and (result.get("outcome") == "committed" or result.get("committed") is True)
+    if action in _record_writes() and committed:
+        _log_record_write(vault_root, collection)
+    return result
+
+
+def _record_writes() -> frozenset[str]:
+    """The record_memory actions whose operation entry declares a write effect, read from the one operation table."""
+    from . import operation_entries
+
+    return frozenset(entry.action for entry in operation_entries.RECORDS.entries if entry.effect == "write")
+
+
+def _log_record_write(vault_root: Path, collection: str | None) -> None:
+    """Log a committed item write under its collection's manifest path, as a page write logs its page. Best effort."""
+    from . import structured_collections
+
+    try:
+        # The write was authorized and committed; naming its manifest for the local log discloses nothing new, so
+        # this lookup issues no disclosure receipt of its own.
+        path = structured_collections.resolve_collection(
+            vault_root, collection, authorize_path=lambda _relative: True,
+        ).path if collection else None
+    except Exception:  # noqa: BLE001 - the log is best effort and never touches the committed write
+        path = None
+    if path:
+        query_log.log_write_call(tool="record_memory", written_path=path, cited_sources=[])
 
 
 def op_query_dataset(

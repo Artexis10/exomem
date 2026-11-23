@@ -51,6 +51,11 @@ if TYPE_CHECKING:
 SCHEMA_VERSION = 19
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
+#: The last schema that changed a table that a store-mode page read reads: 16 gave pages their mtime. A store
+#: from this schema on serves its pages before its writer migrates it, so a service starts without the lease.
+#: A migration that changes such a table keeps it readable at the earlier schema, or raises this to its own
+#: version; a store below this then refuses page reads, and so the start, until its writer migrates it.
+VAULT_STORE_READ_SCHEMA_VERSION = 16
 #: The first schema that the vault state manifest guards with an ID. Every release since the
 #: manifest's optional IDs (0.114.0) treats an unknown ID the same way, so an ID for schema 11
 #: would refuse 0.119.0 and 0.120.0, which read it; the launcher's schema check covers 11.

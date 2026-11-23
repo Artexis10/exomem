@@ -43,6 +43,8 @@ class Lookup:
     pages: tuple[str, ...]
     #: False when no maintained index could answer; `pages` then holds only what it did know.
     complete: bool
+    unsupported: bool = False
+    overflow: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,19 +76,29 @@ def renames(vault_root: Path, moves: Sequence[tuple[str, str]]) -> tuple[Rename,
     return tuple(found)
 
 
-def find_pages(vault_root: Path, paths: Sequence[str]) -> Lookup:
+def find_pages(
+    vault_root: Path, paths: Sequence[str], *, current_published: bool = False,
+    candidate_limit: int | None = None,
+) -> Lookup:
     """Pages whose body may name any of `paths`; each is verified against its bytes at rewrite.
 
     The query is the path without the knowledge-base folder, a substring of both spellings a
-    page may use. The catalogue answers from its rows only: a write never rebuilds it. When it
-    is not current the lookup says so, and the catalogue's own background repair catches up.
+    page may use. A managed preview uses a current publication on its request budget.
+    A candidate limit also selects the published reader and can return overflow.
     """
     from . import lexstore
 
     queries = [managed_relative(rel).lower() for rel in paths]
-    answer = lexstore.search_substrings_result(vault_root, queries, scope="kb")
+    answer = (
+        lexstore.search_current_published_substrings(vault_root, queries, candidate_limit=candidate_limit)
+        if current_published or candidate_limit is not None
+        else lexstore.search_substrings_result(vault_root, queries, scope="kb")
+    )
     if not answer.readiness.complete or answer.value is None:
-        return Lookup((), False)
+        return Lookup(
+            (), False, unsupported=answer.readiness.status == "unsupported",
+            overflow=answer.readiness.status == "overflow",
+        )
     return Lookup(tuple(sorted({rel for found in answer.value.values() for rel in found})), True)
 
 
