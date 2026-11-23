@@ -37,7 +37,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -73,6 +73,9 @@ RETRY_REFUSALS = ACCEPTED_REFUSALS | {  # nosemgrep: ep-word-set -- closed publi
     # Committed, terminal not persisted: its own remediation is a same-identity retry.
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
 }
+#: Retry outcomes whose work may still commit after the replay ends; their requeue marks the
+#: identity as reaching its commit, so a reclaim reuses it instead of replaying under a fresh one.
+UNCERTAIN_REFUSALS = frozenset(RETRY_REFUSALS - ACCEPTED_REFUSALS)
 #: The login behind a save no longer vouches for it: the save fails, with its arguments.
 LOGIN_REVOKED = "INTAKE_LOGIN_REVOKED"
 #: The session store could not say whether the login still holds: the save waits and is retried.
@@ -181,12 +184,16 @@ def _write(vault_root: Path, *, create: bool = False) -> Iterator[sqlite3.Connec
 def _open(root: Path, path: Path, retained: Path, mode: StoreMode) -> sqlite3.Connection:
     if mode == "create":
         retained.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(retained, timeout=5.0)
+        conn = sqlite3.connect(retained, timeout=5.0, check_same_thread=False)
     else:
         if not retained.exists():
             raise FileNotFoundError(retained)
         # `mode=rw` opens the existing file and never creates one.
-        conn = sqlite3.connect(f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=5.0)
+        # A replay's connection is used by the commit gate on the store thread, under the replay's lock.
+        conn = sqlite3.connect(
+            f"{retained.as_uri()}?mode={'rw' if mode == 'write' else 'ro'}", uri=True, timeout=5.0,
+            check_same_thread=False,
+        )
     try:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=5000")
@@ -355,6 +362,9 @@ class _Replay:
     commit_reached: bool = False
     closed: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+    #: Opened before the dispatcher runs, so the commit gate's marker is one commit on an open
+    #: connection, not an open, a coordination and a close under the vault boundary.
+    conn: sqlite3.Connection | None = None
 
 
 _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem_intake_replay", default=None)
@@ -379,15 +389,12 @@ def mark_replay_reached_commit() -> None:
     if replay is None:
         return
     with replay.lock:
-        # A thread that inherited the replay's context and outlived it writes under its own name.
+        # Work that outlived its replay commits as designed: the requeue of an uncertain
+        # outcome already marked its identity, so no reclaim replays it under a fresh one.
         if replay.commit_reached or replay.closed:
             return
         try:
-            # A fresh context: the commit gate may already hold another private-state domain,
-            # and this write takes only the intake's own.
-            contextvars.Context().run(
-                _with_store_retry, lambda: _mark_commit_reached(replay.vault_root, replay.claim)
-            )
+            _mark_commit_reached(replay)
         except Exception as error:
             log.warning("write intake could not mark %s as reaching its commit", replay.claim.id, exc_info=True)
             raise OpError(
@@ -399,14 +406,35 @@ def mark_replay_reached_commit() -> None:
         replay.commit_reached = True
 
 
-def _mark_commit_reached(vault_root: Path, claim: _Claim) -> None:
-    with _write(vault_root) as conn:
+def _mark_uncertain(replay: _Replay) -> None:
+    """Mark an identity whose work may still commit; the requeue marks it again if this fails."""
+    with replay.lock:
+        if replay.commit_reached:
+            return
+        try:
+            _mark_commit_reached(replay)
+        except Exception:  # noqa: BLE001 - the requeue's own mark is the fallback
+            log.warning("write intake could not mark %s before its requeue", replay.claim.id, exc_info=True)
+            return
+        replay.commit_reached = True
+
+
+def _mark_commit_reached(replay: _Replay) -> None:
+    conn, claim = replay.conn, replay.claim
+    if conn is None:
+        raise RuntimeError("the replay has no open intake connection")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
         cursor = conn.execute(
             "UPDATE intake SET commit_reached = 1 WHERE id = ? AND generation = ? AND state = ?",
             (claim.id, claim.generation, APPLYING),
         )
         if cursor.rowcount != 1:
             raise RuntimeError("the queued save is no longer claimed by this replay")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 # --------------------------------------------------------------------------- drainers
@@ -555,8 +583,14 @@ class Drainer:
         is known, or mark this send in flight and return None; the caller ends that mark with
         `end_accept`. So a resend never runs beside the send it repeats.
         """
+        from . import request_budget
+
+        deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
+        budget = request_budget.current()
+        if budget is not None:
+            # Never wait past the time the caller can still receive a reply.
+            deadline = min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
         with self._condition:
-            deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
             while origin in self._accepting and not self._stop.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -844,6 +878,7 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
 
     replay = _Replay(vault_root, claim)
     token = _REPLAY.set(replay)
+    stack = ExitStack()
     try:
         command = _command_named(claim.command)
         if command is None:
@@ -866,6 +901,11 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
             injected: tuple[Any, ...] = (vault_root, schema_module.load_source_schema(vault_root))
         else:
             injected = (vault_root,)
+        try:
+            replay.conn = stack.enter_context(_store(vault_root, mode="write"))
+        except Exception:  # noqa: BLE001 - without its marker connection the replay waits for the next pass
+            log.warning("write intake could not open its store for the replay of %s", claim.id, exc_info=True)
+            return (QUEUED, "MUTATION_BUSY")
         with (
             principal_module.request_scope(principal),
             capabilities.active_surface(descriptor) if descriptor is not None else _nothing(),
@@ -885,6 +925,9 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
         refusal = cli_ops.public_refusal(error)
         code = str(refusal.get("code")) if refusal else "INTERNAL"
         if code in RETRY_REFUSALS:
+            if code in UNCERTAIN_REFUSALS:
+                # Before the replay closes: its work may still commit late, and must find the mark.
+                _mark_uncertain(replay)
             return (QUEUED, code)
         if refusal is None:
             log.warning("write intake replay of %s failed", claim.command, exc_info=True)
@@ -893,6 +936,7 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
     finally:
         with replay.lock:
             replay.closed = True
+            stack.close()
         _REPLAY.reset(token)
     return (APPLIED, result)
 
@@ -907,9 +951,10 @@ def _requeue(vault_root: Path, claim: _Claim, code: str) -> None:
     now = time.time()
     with _write(vault_root) as conn:
         conn.execute(
-            "UPDATE intake SET state = ?, owner = NULL, updated_at = ?, next_attempt_at = ?, error_code = ? "
+            "UPDATE intake SET state = ?, owner = NULL, updated_at = ?, next_attempt_at = ?, error_code = ?, "
+            "commit_reached = CASE WHEN ? THEN 1 ELSE commit_reached END "
             "WHERE id = ? AND state = ? AND generation = ?",
-            (QUEUED, now, now + delay, code, claim.id, APPLYING, claim.generation),
+            (QUEUED, now, now + delay, code, code in UNCERTAIN_REFUSALS, claim.id, APPLYING, claim.generation),
         )
 
 

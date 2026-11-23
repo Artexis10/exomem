@@ -9,6 +9,7 @@ holds, with the serving process's drainer running.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import threading
 import time
 from dataclasses import replace
@@ -414,11 +415,11 @@ def test_a_commit_marker_that_cannot_be_written_commits_nothing_and_the_save_lan
     real_mark = write_intake._mark_commit_reached
     pages_when_refused: list[int] = []
 
-    def fail_once(root, claim):
+    def fail_once(replay):
         if not pages_when_refused:
             pages_when_refused.append(len(_pages_titled(vault, "Queued save 13")))
             raise OSError("disk full while marking the commit")
-        return real_mark(root, claim)
+        return real_mark(replay)
 
     monkeypatch.setattr(write_intake, "_mark_commit_reached", fail_once)
     (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 13)))
@@ -658,3 +659,116 @@ def test_an_acceptance_that_meets_a_busy_store_is_retried_and_queues_the_save(
     assert len(calls) >= 2
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
     assert len(_pages_titled(vault, "Queued save 29")) == 1
+
+
+def test_a_resend_waits_for_its_original_only_within_its_own_request_budget(drainer) -> None:
+    # A resend whose client has stopped waiting must not hold a request thread for the full wait.
+    from exomem import request_budget
+
+    assert drainer.enter("origin-2") is None  # the original is in flight
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.5))
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            drainer.enter("origin-2")
+    finally:
+        request_budget.reset_current(token)
+        drainer.end_accept("origin-2")
+    assert time.monotonic() - started < 5
+
+
+def test_the_commit_marker_is_written_from_the_store_thread(
+    vault: Path, managers, drainer
+) -> None:
+    # Store-routed saves reach the commit gate on the collection store's thread, not the drainer's.
+    _writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 30)))
+    intake_id = receipt["queued_write"]["ref"].removeprefix(write_intake.REF_PREFIX)
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    write_intake.stop(vault)  # nothing may reclaim the hand-edited row below
+    with write_intake._write(vault) as conn:  # stand the row back up as a claimed replay
+        conn.execute("UPDATE intake SET state = 'applying', commit_reached = 0 WHERE id = ?", (intake_id,))
+    claim = write_intake._Claim(
+        id=intake_id, command="remember", arguments={}, principal={}, surface=None,
+        attempts=1, generation=0, origin=None, origin_ttl=None,
+    )
+    with write_intake._store(vault, mode="write") as conn:
+        replay = write_intake._Replay(vault, claim, conn=conn)
+        token = write_intake._REPLAY.set(replay)
+        try:
+            errors: list[BaseException] = []
+
+            def gate() -> None:
+                try:
+                    write_intake.mark_replay_reached_commit()
+                except BaseException as error:  # noqa: BLE001 - the test inspects it
+                    errors.append(error)
+
+            other = threading.Thread(target=contextvars.copy_context().run, args=(gate,))
+            other.start()
+            other.join(10)
+            assert errors == []
+            with write_intake._store(vault, mode="read") as reader:
+                marked = reader.execute("SELECT commit_reached FROM intake WHERE id = ?", (intake_id,)).fetchone()[0]
+            assert marked == 1
+            # Work that outlives its replay may still commit; its requeue already marked the identity.
+            replay.commit_reached = False
+            replay.closed = True
+            write_intake.mark_replay_reached_commit()
+        finally:
+            write_intake._REPLAY.reset(token)
+
+
+def test_a_requeue_whose_work_may_still_commit_keeps_its_identity_marked(vault: Path, managers, drainer) -> None:
+    # Store work can outlive its replay and commit later; a reclaim must then reuse the identity,
+    # which answers with the stored outcome, instead of replaying the save under a fresh one.
+    _writer, holder = managers
+    (receipt,) = _hold_and_queue(holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 31)))
+    intake_id = receipt["queued_write"]["ref"].removeprefix(write_intake.REF_PREFIX)
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    write_intake.stop(vault)  # nothing may reclaim the hand-edited row below
+    with write_intake._write(vault) as conn:
+        conn.execute("UPDATE intake SET state = 'applying', commit_reached = 0 WHERE id = ?", (intake_id,))
+    claim = write_intake._Claim(
+        id=intake_id, command="remember", arguments={}, principal={}, surface=None,
+        attempts=1, generation=0, origin=None, origin_ttl=None,
+    )
+    write_intake._requeue(vault, claim, "MUTATION_ACKNOWLEDGEMENT_PENDING")
+    with write_intake._store(vault, mode="read") as reader:
+        state, marked = reader.execute("SELECT state, commit_reached FROM intake WHERE id = ?", (intake_id,)).fetchone()
+    assert (state, marked) == ("queued", 1)
+
+
+def test_an_uncertain_replay_marks_its_identity_before_it_ends(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The store may still commit the replay's work after the replay ends; the mark must already be
+    # durable then, not only once the requeue lands.
+    _writer, holder = managers
+    real_invoke, real_requeue = writer_lease.invoke_command, write_intake._requeue
+    marked_at_requeue: list[int] = []
+
+    def acknowledgement_pending_once(*args, **kwargs):
+        if not marked_at_requeue:
+            raise OpError("MUTATION_ACKNOWLEDGEMENT_PENDING", "still running", "retry",
+                          details={"committed": None})
+        return real_invoke(*args, **kwargs)
+
+    def observing_requeue(root, claim, code):
+        with write_intake._store(root, mode="read") as reader:
+            marked_at_requeue.append(
+                reader.execute("SELECT commit_reached FROM intake WHERE id = ?", (claim.id,)).fetchone()[0]
+            )
+        return real_requeue(root, claim, code)
+
+    def install() -> None:
+        monkeypatch.setattr(writer_lease, "invoke_command", acknowledgement_pending_once)
+        monkeypatch.setattr(write_intake, "_requeue", observing_requeue)
+
+    (receipt,) = _hold_and_queue(
+        holder, vault, lambda: _send(_command("remember"), vault, _remember_kwargs(vault, 32)),
+        monkeypatch=monkeypatch, then=install,
+    )
+    _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
+    assert marked_at_requeue[0] == 1
+    assert len(_pages_titled(vault, "Queued save 32")) == 1
