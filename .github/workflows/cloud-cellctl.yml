@@ -267,8 +267,7 @@ jobs:
       - name: Build the source Cloud image for encrypted import
         if: matrix.suite == 'protected-import'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        # A cold cache also compiles the LGPL-only FFmpeg and PyAV (about 6 minutes).
-        timeout-minutes: 35
+        timeout-minutes: 25
         with:
           context: .
           target: cloud
