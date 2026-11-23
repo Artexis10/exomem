@@ -1102,7 +1102,10 @@ def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waite
     EpistemicGraphIndex(vault).suspend_reads()
     real_clock = time.time
     waited = 0.0
-    monkeypatch.setattr(deferred_index, "time", SimpleNamespace(time=lambda: real_clock() + waited))
+    monkeypatch.setattr(
+        deferred_index, "time",
+        SimpleNamespace(time=lambda: real_clock() + waited, monotonic=time.monotonic),
+    )
 
     def drainable_write(name: str) -> str:
         page = notes / "b.md"
@@ -1210,7 +1213,8 @@ def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
     started = time.time()
     monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(
-        deferred_index, "time", SimpleNamespace(time=lambda: started + now[0] - 1000.0)
+        deferred_index, "time",
+        SimpleNamespace(time=lambda: started + now[0] - 1000.0, monotonic=time.monotonic),
     )
     monkeypatch.setattr(graph_drain._DEBT, "wait", wait)
     monkeypatch.setattr(graph_drain, "_stop", stop)
