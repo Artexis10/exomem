@@ -1,7 +1,7 @@
 ## 1. Establish the policy baseline
 
 - [x] 1.1 Measure served reads and saves with a queued speech workload on an isolated fixture. Record each limiting resource and the existing controls that already meet the contract.
-- [ ] 1.2 Reconcile active intake changes and confirm the direct upload, held upload, resumable upload and reprocess paths that carry the same choice.
+- [x] 1.2 Reconcile active intake changes and confirm the direct upload, held upload, resumable upload and reprocess paths that carry the same choice.
 
 ## 2. Add a per-item speaker-label choice
 
@@ -17,5 +17,5 @@
 
 ## 4. Deliver and verify
 
-- [ ] 4.1 Run scoped regression and completion checks. Finish one independent review of the batch and recheck any corrections.
-- [ ] 4.2 Merge through the ordinary release. Verify the installed pipeline with isolated inputs and record the evidence for OpenSpec closure.
+- [x] 4.1 Run scoped regression and completion checks. Finish one independent review of the batch and recheck any corrections.
+- [x] 4.2 Merge through the ordinary release. Verify the installed pipeline with isolated inputs and record the evidence for OpenSpec closure.
