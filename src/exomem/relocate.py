@@ -362,9 +362,11 @@ def _preparation_key(root: Path, request: Mapping[str, Any]) -> str | None:
 def reader_key(root: Path) -> str | None:
     """Who asks, as one key for relocation state kept between calls; None when it cannot be read.
 
-    The audience, the purpose and the connector ceiling decide which pages and referrers a caller
-    sees and writes. The ceiling is `connector_boundary.admission_identity`: the denied scopes,
-    the configuration revision and the registry assignment. The writable scopes need no part of
+    The audience, the authorization session, the purpose and the connector ceiling decide which
+    pages and referrers a caller sees and writes; a session's grants can raise its audience's
+    policy ceiling, as the served due-state cache also keys. The ceiling is
+    `connector_boundary.admission_identity`: the denied scopes, the configuration revision and
+    the registry assignment. The writable scopes need no part of
     their own: the host configuration makes each writable scope exclusive to one client, so
     callers denied the same scopes write the same ones. A preparation or a refusal kept under one
     key is read only under the same key, and a caller whose ceiling cannot be read keeps nothing.
@@ -379,6 +381,7 @@ def reader_key(root: Path) -> str | None:
         return None
     identity = {
         "audience": who.audience_id,
+        "session": getattr(who, "authorization_session_id", None),
         "purpose": who.purpose,
         "denied": sorted(denied),
         "revision": revision,
