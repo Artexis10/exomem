@@ -3529,17 +3529,22 @@ def _reconcile_markdown_delta(
     if inventory is not None:
         inventory = inventory.with_delta(raw_changes)
         if inventory.store_identity is not None:
-            from .collection_store.views import store_identity
-            from .vault_store import read
-
-            with read.snapshot(root) as view:
-                identity = store_identity(view.connection)
-                inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
+            inventory = _inventory_at_store_snapshot(root, inventory)
     return replace(
         candidate,
         capture_inventory=inventory,
         unparsed_titles=None if unparsed is None else MappingProxyType(unparsed),
     )
+
+
+def _inventory_at_store_snapshot(root: Path, inventory):
+    """``inventory`` with its store witness at the store state that this request reads."""
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    with read.snapshot(root) as view:
+        identity = store_identity(view.connection)
+        return replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
 
 
 def on_corpus_files_changed(
@@ -3892,14 +3897,20 @@ def advance_corpus_for_store_commit(
                 != _without_store_revision(_stored_config_census(entry[0]))
             ):
                 return False
-            context = (
-                entry[1]
-                if not changed
-                else _reconcile_markdown_delta(
+            if changed:
+                context = _reconcile_markdown_delta(
                     root, entry[1], changed,
                     relation_definitions=relation_definitions, language=language, patch_only=True,
                 )
-            )
+            else:
+                # A commit that names no Markdown page, such as the derivation that follows each
+                # governed write, changes no capture input. The inventory's witness moves with the
+                # census, or every inventory read after the commit would answer "pending".
+                context = entry[1]
+                inventory = context.capture_inventory
+                if (inventory is not None and inventory.store_identity is not None
+                        and inventory.store_identity[2] == before_revision):
+                    context = replace(context, capture_inventory=_inventory_at_store_snapshot(root, inventory))
             if context is None:
                 return False
             patched = _patch_markdown_census(
