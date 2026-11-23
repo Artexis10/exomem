@@ -57,21 +57,39 @@ if (Test-Command "uv") {
     if (-not (Test-Command "uv")) {
         Write-Host ""
         Write-Host "uv installed but is not on PATH yet." -ForegroundColor Yellow
-        Write-Host "Open a NEW terminal, then run:  uv tool install exomem; exomem setup"
+        Write-Host "Open a NEW terminal, then run:  uv tool install evermatter; exomem setup"
         exit 0
     }
     Write-Ok "uv installed."
 }
 
 # --- 2. exomem ------------------------------------------------------------------
-Write-Step "Installing exomem from PyPI..."
-& uv tool install exomem --upgrade --compile-bytecode
+# The package is published as `evermatter`; installs made before the rename
+# carry the same releases under `exomem`. An existing uv tool upgrades under its
+# own name, because installing the other name beside it would collide on the
+# shared `exomem` and `kb` commands. A new install uses `evermatter`.
+Write-Step "Installing Evermatter from PyPI..."
+$uvTools = & uv tool list 2>$null
+$tool = $null
+foreach ($candidate in @("evermatter", "exomem")) {
+    if ($uvTools | Where-Object { $_ -match "^$candidate(?:\s|$)" } | Select-Object -First 1) {
+        $tool = $candidate
+        break
+    }
+}
+if ($tool) {
+    & uv tool upgrade $tool --compile-bytecode
+    $failed = "uv tool upgrade $tool"
+} else {
+    & uv tool install evermatter --compile-bytecode
+    $failed = "uv tool install evermatter"
+}
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "uv tool install exomem failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    Write-Host "$failed failed (exit $LASTEXITCODE)." -ForegroundColor Red
     exit 1
 }
 Add-LocalBinToPath
-Write-Ok "exomem installed."
+Write-Ok "Evermatter installed."
 
 if (-not (Test-Command "exomem")) {
     Write-Host ""

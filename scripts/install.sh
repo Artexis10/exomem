@@ -7,7 +7,8 @@
 # What this does, in order:
 #   1. Installs uv (the Python tool manager exomem is published through) if
 #      it isn't already on PATH.
-#   2. Installs exomem itself with `uv tool install exomem`.
+#   2. Installs Evermatter with `uv tool install evermatter`, or upgrades an
+#      existing `evermatter` or `exomem` uv tool under its own name.
 #   3. Runs the interactive `exomem setup` wizard — or, if this shell has no
 #      real terminal attached to prompt on, prints the exact command to run
 #      next instead of guessing.
@@ -108,19 +109,31 @@ fi
 # ---------------------------------------------------------------------------
 # 2. exomem
 # ---------------------------------------------------------------------------
-info "Installing exomem (first time may take a minute)..."
-if uv tool list 2>/dev/null | grep -Eq '^exomem([[:space:]]|$)'; then
-    if ! uv tool upgrade exomem --compile-bytecode; then
-        die "'uv tool upgrade exomem' failed." \
+# The package is published as `evermatter`; installs made before the rename
+# carry the same releases under `exomem`.  An existing uv tool upgrades under its
+# own name, because installing the other name beside it would collide on the
+# shared `exomem` and `kb` commands.  A new install uses `evermatter`.
+info "Installing Evermatter (first time may take a minute)..."
+uv_tools=$(uv tool list 2>/dev/null || true)
+tool=""
+for candidate in evermatter exomem; do
+    if printf '%s\n' "$uv_tools" | grep -Eq "^${candidate}([[:space:]]|\$)"; then
+        tool=$candidate
+        break
+    fi
+done
+if [ -n "$tool" ]; then
+    if ! uv tool upgrade "$tool" --compile-bytecode; then
+        die "'uv tool upgrade $tool' failed." \
             "Check your internet connection, then try running that command by hand to see the full error."
     fi
 else
-    if ! uv tool install exomem --compile-bytecode; then
-        die "'uv tool install exomem' failed." \
+    if ! uv tool install evermatter --compile-bytecode; then
+        die "'uv tool install evermatter' failed." \
             "Check your internet connection, then try running that command by hand to see the full error."
     fi
 fi
-ok "exomem is installed."
+ok "Evermatter is installed."
 
 add_local_bin_to_path
 export PATH
