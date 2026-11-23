@@ -25,7 +25,7 @@ Each hold advances the commit generation once. A scoped step therefore advances 
 
 ### D3. A scoped step
 
-1. Probe outside the boundary: load the plan, reconstruct the run, pick the next step, and look for a committed witness, a rename intent or a blocker. The next step includes one that a receipt refused: the refusal stands only while that step has no committed witness. When a probe finds any of these, run the step again under one hold, as before.
+1. Probe outside the boundary: load the plan, reconstruct the run, pick the next step, and look for a committed witness, a rename intent or a blocker. The next step includes one that a receipt refused: the refusal stands only while that step has no committed witness and no rename intent. When a probe finds any of these, run the step again under one hold, as before.
 2. Write the prepared state under its own short hold.
 3. Run the leaf with no curation hold. The leaf takes the boundary for its commit.
 4. Take one short hold, the settle hold. Check the witness and the live postcondition, then write the receipt and the state. A leaf failure records its failed attempt under the same hold.
@@ -40,7 +40,7 @@ Two calls on one run would otherwise both pass the probes and both run the leaf.
 
 The claim is per process. Writers in two processes that share a vault serialise at the boundary. The settle hold therefore checks whether another process recorded this step as committed since the step's probe. Such a receipt settles the step: either its create-only witness kept this leaf's batch out, or it recovered this leaf's witness. The call then reports `CURATION_RUN_BUSY`, and that receipt accounts for the step. Its `committed` field is true when the call saw its own leaf's batch commit, and null when the call cannot tell.
 
-A refusal that another process recorded does not settle the step. That process can refuse the step for a blocker on a later binding while this leaf is still before its commit. The call then settles its own step: a committed leaf gets its receipt after the refusal, and the run continues from it. A leaf that failed records its own failed attempt. When the call stops before its settle hold, the next resume records the step from its witness (D3).
+A refusal that another process recorded does not settle the step. That process can refuse the step for a blocker on a later binding while this leaf is still before its commit. The call then settles its own step: a committed leaf gets its receipt after the refusal, and the run continues from it. A leaf that failed records its own failed attempt. When the call stops before its settle hold, the next resume records the step from its witness (D3). A move that stopped between its rename and its batch resumes from its rename intent, as it does without a refusal.
 
 ### D5. The dispatcher asks curation
 

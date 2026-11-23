@@ -18,6 +18,7 @@
 - [x] 2.8 A witness that a failed batch's rollback could not remove is not taken as a commit: the run blocks as uncertain and holds no receipt.
 - [x] 2.9 Another process refuses a step while its leaf is in flight, and the leaf then commits. The step gets its committed receipt after the refusal, and the run completes.
 - [x] 2.10 When that call stops before its settle hold, `status` reports the step as `receipt-required`, and the next resume records it as `recovered-committed`.
+- [x] 2.11 Another process refuses a move while its leaf is in flight, and the call stops between its rename and its batch. The next resume adopts the rename and records `recovered-committed`.
 
 ## 3. Closure
 

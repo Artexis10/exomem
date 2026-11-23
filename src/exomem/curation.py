@@ -4309,8 +4309,9 @@ def _next_step(
     """The first uncommitted step, and whether a receipt refused it for good.
 
     A refused step is still returned: its refusal stands only while the step has no committed
-    witness. Another process can record that refusal before the step's leaf commits, and the call
-    that ran the leaf can stop before it records the receipt. Each caller probes the witness first.
+    witness and, for a move, no rename intent. Another process can record that refusal before the
+    step's leaf commits, and the call that ran the leaf can stop before it records the receipt.
+    Each caller probes that evidence first.
     """
     committed = _committed_step_ids(state)
     for ordinal, step in enumerate(plan["steps"]):
@@ -4852,16 +4853,6 @@ def _execute_step(
             effect=recovered_effect,
             compensation=compensation,
         )
-    if refused:
-        # The run stopped on a refusal that committed nothing: a retry hears that refusal
-        # again, never a replay of a run that did not complete.
-        codes = [
-            receipt["error_code"]
-            for receipt in reconstructed["receipts"]
-            if receipt.get("step_id") == step["step_id"] and receipt.get("outcome") == "failed"
-        ]
-        raise _error(codes[-1], f"curation step {step['step_id']!r} was refused and did not commit")
-
     if step["kind"] in _RENAME_STEP_KINDS and writer is None:
         try:
             intent = store.rename_intent(run_identity, operation_identity)
@@ -4886,6 +4877,15 @@ def _execute_step(
                 operation_identity=operation_identity,
                 compensation=compensation,
             )
+    if refused:
+        # The run stopped on a refusal that left neither a witness nor a rename intent: a retry
+        # hears that refusal again, never a replay of a run that did not complete.
+        codes = [
+            receipt["error_code"]
+            for receipt in reconstructed["receipts"]
+            if receipt.get("step_id") == step["step_id"] and receipt.get("outcome") == "failed"
+        ]
+        raise _error(codes[-1], f"curation step {step['step_id']!r} was refused and did not commit")
 
     committed = _committed_step_ids(reconstructed)
     blockers = _blockers_for_uncommitted(vault_root, plan, committed)

@@ -544,3 +544,42 @@ def test_a_move_with_a_fields_patch_keeps_another_writers_change_to_that_field(
         _run(vault, proposed)
     assert "project: project-beta" in page.read_text(encoding="utf-8")
     assert not (vault / _moved(NOTES[0])).exists()
+
+
+def test_a_move_refused_elsewhere_that_renamed_before_its_batch_is_adopted_by_the_next_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another process can refuse a move for good while its leaf runs, and the call can stop between
+    its rename and its batch. Every resume then repeated the refusal with the page at its new path,
+    and the undo left the move out."""
+    _with_identity(vault, NOTES[0])
+    proposed = _propose(vault, _move_step(NOTES[0]))
+    sealed = _hash(vault, NOTES[0])
+    real_dispatch = curation._dispatch_step
+
+    def another_process_refuses_the_step_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        return real_dispatch(*args, **kwargs)
+
+    def cut(name: str) -> None:
+        if name == "move-after-rename":
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_process_refuses_the_step_first)
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        _run(vault, proposed)
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    assert _hash(vault, _moved(NOTES[0])) == sealed
+
+    result = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert result["phase"] == "completed"
+    assert not (vault / NOTES[0]).exists()
+    assert _lineage(vault, _moved(NOTES[0])) == [NOTES[0]]
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    # The undo derives the steps to reverse from these receipts.
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "recovered-committed"]
