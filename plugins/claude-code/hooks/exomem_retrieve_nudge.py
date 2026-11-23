@@ -304,9 +304,12 @@ SESSION_CONTEXT_BUDGET_SECONDS = 0.8
 # duplicated rather than shared.
 _FALSY_ENV = {"", "0", "false", "no", "off"}
 
+# This word list is existing C6 debt; the rename only adds the product's new name beside its old
+# one, so a short prompt naming either name keeps the same treatment.
 _KB_BEARING_RE = re.compile(
     r"\b("
-    r"kb|knowledge\s+base|exomem|note|notes|remember|save|capture|"
+    # nosemgrep: ep-word-search, ep-lexical-intent -- the closed set of this product's own names.
+    r"kb|knowledge\s+base|exomem|evermatter|note|notes|remember|save|capture|"
     r"conclud(?:e|ed|ion|ions)?|decision|decisions|"
     r"prior|previous|earlier|history|looked\s+at|have\s+i|did\s+i"
     r")\b",
