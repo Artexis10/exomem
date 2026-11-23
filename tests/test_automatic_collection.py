@@ -487,6 +487,18 @@ def test_a_title_with_a_line_break_is_refused_and_creates_nothing(file_vault):
     assert commands.op_record_memory(file_vault, "inspect")["collections"] == []
 
 
+def test_a_title_with_a_pasted_no_break_space_creates_its_collection(file_vault):
+    # Only a character that ends a line is refused; a no-break space pasted from a document is ordinary text.
+    created = commands.op_record_memory(
+        file_vault, "append", collection="Espresso\u00a0trials", item=ROW, why=WHY, new_collection=NEW
+    )
+
+    assert created["operation"] == "append"
+    assert [entry["title"] for entry in commands.op_record_memory(file_vault, "inspect")["collections"]] == [
+        "Espresso\u00a0trials"
+    ]
+
+
 def test_new_collection_for_a_title_that_names_a_collection_is_a_plain_append(file_vault):
     existing = file_create(file_vault, "Ledger")
 

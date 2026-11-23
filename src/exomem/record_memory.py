@@ -586,8 +586,8 @@ def _with_new_fields(
     """`add_record` or `edit_record` with `new_fields`: add the fields the call names, typed from its values, then run the write.
 
     The addition is the ordinary `revise` (its guards, its audit event, the store's own writer for a store
-    collection), under the bounds of `automatic_collection`. A field the collection already declares with the value's
-    type adds nothing, so a replay of the call, or a second call with the same row, writes only the row. The fields
+    collection), under the bounds of `automatic_collection`. A field the collection already declares adds nothing, and
+    the row's own validation judges its value, so a replay of the call, or a second call with the same row, writes only the row. The fields
     commit before the row, and a failure of the row leaves them declared; the retry adds nothing twice.
     """
     carried_key = "item" if action == "append" else "changes"
@@ -644,6 +644,8 @@ def _unknown_field_route(
         added = automatic_collection.fields_to_add(manifest, {name: carried[name] for name in names})
         try:
             automatic_collection.require_field_bounds(vault_root, manifest, added, store_created=store_created)
+            # A layout that `new_fields` cannot extend in place refuses that retry too, so it is not offered.
+            automatic_collection.with_added_fields(text, added)
         except CollectionError as refusal:
             kept = {key: value for key, value in details.items() if key != "retry_with"}
             fields = _field_refusal_details(vault_root, manifest, text, added, values["why"], refusal)

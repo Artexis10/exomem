@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import textwrap
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,14 +58,11 @@ _STAMP = "%Y-%m-%dT%H:%M:%SZ"
 #: and a file collection it cannot place reports unknown rather than "not automatic".
 INVENTORY_ARCHIVES = 4
 
-#: The manifest keys, and the `item_schema` keys, that `minimal_manifest` emits and an automatic create may declare.
-_MANIFEST_KEYS = frozenset({
-    "type", "exomem_id", "title", "semantic_profile", "collection_version", "schema_version", "lifecycle",
-    "storage", "item_schema",
-})
-_ITEM_SCHEMA_KEYS = frozenset({"natural_key", "fields"})
 _CREATE_ACT = "create it without `automatic`"
 _FIELD_ACT = "add it with a confirmed `revise` of the collection"
+#: The Unicode general categories that can end a line in a title: control characters and the line and paragraph
+#: separators. A closed set that the Unicode standard fixes.
+_LINE_BREAKING = frozenset({"Cc", "Zl", "Zp"})
 #: The one directory under the collection folder where a minimal collection keeps its rows.
 _ROWS_SOURCE = "Items"
 
@@ -158,6 +156,36 @@ def _field_type(value: Any) -> str | None:
     return None
 
 
+def _minimal_front(
+    title: str, collection_id: str, storage: str, natural_key: Sequence[str], fields: Mapping[str, str]
+) -> dict[str, Any]:
+    """The frontmatter of a minimal collection: the only structure an automatic create may declare."""
+    return {
+        "type": "collection",
+        "exomem_id": collection_id,
+        "title": title,
+        "semantic_profile": "records",
+        "collection_version": collections.COLLECTION_VERSION,
+        "schema_version": 1,
+        "lifecycle": "active",
+        "storage": {"strategy": storage, "source": _ROWS_SOURCE, "format_version": collections.STORAGE_FORMAT_VERSION},
+        "item_schema": {
+            "natural_key": list(natural_key),
+            "fields": {
+                name: {"type": field_type, **({"required": True} if name in natural_key else {})}
+                for name, field_type in fields.items()
+            },
+        },
+    }
+
+
+#: The manifest keys, and the `item_schema` keys, that an automatic create may declare: read from the draft itself,
+#: so the allowlist and what `minimal_manifest` writes cannot drift apart.
+_DRAFT_SHAPE = _minimal_front("", "", "", (), {})
+_MANIFEST_KEYS = frozenset(_DRAFT_SHAPE)
+_ITEM_SCHEMA_KEYS = frozenset(_DRAFT_SHAPE["item_schema"])
+
+
 def creates_from_row(action: Any, collection: Any, new_collection: Any) -> bool:
     """Whether this call starts the collection that `collection` names from its row: an append that carries
     `new_collection` and names a bare title, not a manifest path. The call's dispatch and the store route decide
@@ -185,8 +213,9 @@ def minimal_manifest(
     from .collection_store import ownership
 
     folder = vault.sanitize_title_filename(title)
-    # The title is kept verbatim in the manifest: a line break or another control character would start a second line.
-    if not folder or not title.isprintable():
+    # The title is kept verbatim in the manifest: a control character or a line or paragraph separator would start a
+    # second line. Other spaces and format characters (a no-break space, a right-to-left mark) are ordinary text.
+    if not folder or any(unicodedata.category(character) in _LINE_BREAKING for character in title):
         raise collections.CollectionError(
             "INVALID_COLLECTION_REFERENCE", "`collection` is not a usable collection title: name it in plain words"
         )
@@ -203,23 +232,7 @@ def minimal_manifest(
     for name in natural_key:
         fields.setdefault(name, "string")
     storage = "markdown-items" if ownership.file_only(vault_root) else collections.SQLITE_STORAGE
-    manifest = {
-        "type": "collection",
-        "exomem_id": memory_refs.new_id(),
-        "title": title,
-        "semantic_profile": "records",
-        "collection_version": collections.COLLECTION_VERSION,
-        "schema_version": 1,
-        "lifecycle": "active",
-        "storage": {"strategy": storage, "source": _ROWS_SOURCE, "format_version": collections.STORAGE_FORMAT_VERSION},
-        "item_schema": {
-            "natural_key": list(natural_key),
-            "fields": {
-                name: {"type": field_type, **({"required": True} if name in natural_key else {})}
-                for name, field_type in fields.items()
-            },
-        },
-    }
+    manifest = _minimal_front(title, memory_refs.new_id(), storage, natural_key, fields)
     text = "---\n" + yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True) + "---\n"
     return MinimalCollection(
         kbdir.managed_join(f"Records/{folder}/_collection.md"), text, tuple(natural_key), fields

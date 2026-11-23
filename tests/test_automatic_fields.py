@@ -386,6 +386,24 @@ def test_a_refused_field_of_a_collection_whose_fields_cannot_be_extended_in_plac
     assert "retry_call" not in error and "one per line" in error["retry_unavailable"]
 
 
+def test_under_silent_capture_a_collection_whose_fields_cannot_be_extended_offers_no_new_fields_retry(file_vault):
+    # Offering `new_fields` here would send the agent into a second refusal with no way forward.
+    flow = records_manifest("Ledger").replace(
+        "  fields:\n    title: {type: string}\n    f1: {type: string}\n", "  fields: {title: {type: string}}\n"
+    )
+    commands.op_record_memory(
+        file_vault, "create", manifest_path=manifest_path().replace("Work", "Ledger"), manifest_text=flow, why=WHY
+    )
+
+    with pytest.raises(OpError) as refused:
+        append(file_vault)
+
+    error = refused.value.as_public_dict()
+    assert error["code"] == "SCHEMA_UNKNOWN_FIELD" and "retry_with" not in error
+    assert error["proposal"]["add_fields"] == {"outside_claim": "string", "checked_on": "date"}
+    assert "one per line" in error["retry_unavailable"]
+
+
 def test_a_new_field_on_a_planning_collection_is_refused_and_nothing_changes(file_vault):
     plan_memory(
         file_vault, "create", manifest_path="Knowledge Base/Planning/Roadmap/_collection.md",

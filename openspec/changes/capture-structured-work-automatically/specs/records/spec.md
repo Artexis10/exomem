@@ -123,9 +123,13 @@ The agent-facing Records contract SHALL route durable observed events and state,
 - **WHEN** the call commits
 - **THEN** the receipt names the created collection and the row and records `automatic: true`
 
-#### Scenario: A title with a control character is refused
-- **WHEN** `collection` holds a control character, a line break included
+#### Scenario: A title with a character that ends a line is refused
+- **WHEN** `collection` holds a control character, a line break included, or a Unicode line or paragraph separator
 - **THEN** the call is refused with `INVALID_COLLECTION_REFERENCE` and creates nothing
+
+#### Scenario: A title with other spacing or format characters creates its collection
+- **WHEN** `collection` holds a no-break space, an ideographic space or a format character such as a right-to-left mark
+- **THEN** the collection is created with that title verbatim
 
 #### Scenario: A row that the drafted collection would refuse creates nothing
 - **WHEN** the row lacks a natural-key field or holds a null key, or fails the drafted schema
@@ -250,6 +254,10 @@ The agent-facing Records contract SHALL route durable observed events and state,
 #### Scenario: A refused field keeps its proposal when the revise cannot be drafted
 - **WHEN** a collection's fields are written in flow style and an agent writes an undeclared field under `advisory`
 - **THEN** the refusal carries the proposal and names why no revise is ready in `retry_unavailable`
+
+#### Scenario: No new_fields retry is offered that cannot succeed
+- **WHEN** a collection's fields are written in flow style and an agent writes an undeclared field under `silent`
+- **THEN** the refusal carries no `new_fields` retry, and it carries the proposal and names why in `retry_unavailable`
 
 #### Scenario: A Planning collection is refused
 - **WHEN** `new_fields` names a field for a Planning collection
