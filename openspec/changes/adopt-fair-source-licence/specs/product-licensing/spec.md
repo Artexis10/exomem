@@ -90,7 +90,7 @@ Replacing a dependency to meet the licence constraint SHALL NOT change what user
 
 #### Scenario: A page that cannot be rendered
 
-- **WHEN** rendering or reading a page fails because memory runs out or the renderer errors
+- **WHEN** rendering or reading a page fails because memory or another resource runs out, including a renderer error that cannot be told apart from one
 - **THEN** the job ends as a memory stop where that can be told apart, and otherwise as a named failure
 - **AND** it never completes as an extraction with that page's text missing
 
