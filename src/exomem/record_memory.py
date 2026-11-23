@@ -567,12 +567,17 @@ def _field_refusal_details(
     vault_root: Path, manifest: structured_collections.CollectionManifest, text: str, added: Mapping[str, str],
     why: str, refusal: CollectionError,
 ) -> dict[str, Any]:
-    """The details of a refused automatic addition: the failed bound, the proposal, and the confirmed `revise` for it."""
-    return {
-        **refusal.details,
-        "proposal": {"collection": manifest.title, "add_fields": added},
-        "retry_call": {"action": "revise", **_field_revision(vault_root, manifest, text, added, why)},
-    }
+    """The details of a refused automatic addition: the failed bound, the proposal, and the confirmed `revise` for it.
+
+    A revise that cannot be drafted leaves the proposal standing and names why in `retry_unavailable`.
+    """
+    details = {**refusal.details, "proposal": {"collection": manifest.title, "add_fields": added}}
+    try:
+        return {**details, "retry_call": {"action": "revise", **_field_revision(vault_root, manifest, text, added, why)}}
+    except CollectionError as unavailable:
+        return {**details, "retry_unavailable": unavailable.reason}
+    except OpError as unavailable:
+        return {**details, "retry_unavailable": unavailable.message}
 
 
 def _with_new_fields(

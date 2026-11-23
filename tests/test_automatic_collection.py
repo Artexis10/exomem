@@ -101,6 +101,34 @@ def test_a_minimal_automatic_creation_commits_and_the_inventory_reports_it(store
     assert listed["Notebook"]["created_automatically"] is False
 
 
+def test_the_inventory_reads_the_create_records_once_however_many_store_collections_it_lists(store):
+    def create_record_reads() -> int:
+        statements: list[str] = []
+        store.connection.set_trace_callback(statements.append)
+        try:
+            inventory(store)
+        finally:
+            store.connection.set_trace_callback(None)
+        return sum("$.automatic" in statement for statement in statements)
+
+    def make(title, index, **flags):
+        store.create_collection(
+            manifest_path().replace("Work", title), records_manifest(title, index), why=WHY, scaffold=False, **flags
+        )
+
+    make("Ledger", 0, automatic=True)
+    one_collection = create_record_reads()
+    make("Notebook", 1)
+    make("Roster", 2, automatic=True)
+    make("Journal", 3)
+
+    listed = inventory(store)
+    assert create_record_reads() == one_collection == 1
+    assert {title: row["created_automatically"] for title, row in listed.items()} == {
+        "Ledger": True, "Notebook": False, "Roster": True, "Journal": False,
+    }
+
+
 @pytest.mark.parametrize("level", ["advisory", "off"])
 def test_an_automatic_creation_needs_silent_capture(store, level):
     envelope.set_disposition("proactive_capture", level)
@@ -109,7 +137,12 @@ def test_an_automatic_creation_needs_silent_capture(store, level):
 
     assert error["code"] == "AUTOMATIC_CREATION_REFUSED"
     assert error["bound"] == "proactive_capture" and error["disposition"] == level
-    assert "without `automatic`" in error["message"]
+    # Under advisory the agent proposes and creates after the user confirms; under off it creates only on the user's request.
+    way = error["message"].split("; ")[-1]
+    assert way == (
+        "create it without `automatic` only if the user asked for it" if level == "off"
+        else "propose the collection to the user, and create it without `automatic` after they confirm"
+    )
     assert stored_collections(store) == 0
     # What the owner asked for stays served: the same manifest, without the flag, still creates.
     assert create(store, "Ledger", records_manifest("Ledger"))["operation"] == "create"
@@ -132,12 +165,28 @@ def test_a_schema_at_the_field_bound_is_accepted(store):
     assert create(store, "Ledger", at_bound, automatic=True)["automatic"] is True
 
 
-def test_a_manifest_that_declares_a_saved_view_is_refused(store):
-    with_view = records_manifest("Ledger").replace("\n---\n", "\nviews:\n  recent:\n    query:\n      columns: [title]\n---\n")
+VIEW = "views:\n  recent:\n    query:\n      columns: [title]\n"
 
-    error = refused(store, "Ledger", with_view)
 
-    assert error["bound"] == "authored_features" and error["declared"] == ["saved views"]
+@pytest.mark.parametrize(
+    ("extra", "declared"),
+    [
+        pytest.param(VIEW, "views", id="saved view"),
+        pytest.param("governance:\n  note: kept\n", "governance", id="governance"),
+        pytest.param("templates: []\n", "templates", id="templates"),
+    ],
+)
+def test_a_manifest_key_that_the_minimal_manifest_does_not_emit_is_refused(store, extra, declared):
+    error = refused(store, "Ledger", records_manifest("Ledger").replace("\n---\n", "\n" + extra + "---\n"))
+
+    assert error["bound"] == "authored_features" and error["declared"] == [declared]
+    assert stored_collections(store) == 0
+
+
+def test_an_item_schema_key_that_the_minimal_manifest_does_not_emit_is_refused(store):
+    error = refused(store, "Ledger", records_manifest("Ledger").replace("  fields:\n", "  dependencies: []\n  fields:\n"))
+
+    assert error["bound"] == "authored_features" and error["declared"] == ["item_schema.dependencies"]
 
 
 def test_a_manifest_that_declares_a_rollup_is_refused(store):
@@ -146,6 +195,21 @@ def test_a_manifest_that_declares_a_rollup_is_refused(store):
     error = refused(store, "Ledger", with_rollup)
 
     assert error["bound"] == "authored_features" and error["declared"] == ["rollups"]
+
+
+def nested_manifest(properties: int) -> str:
+    """`Ledger` with three item fields, one of them an object that declares `properties` fields of its own."""
+    nested = "".join(f"        p{n}: {{type: string}}\n" for n in range(properties))
+    return records_manifest("Ledger").replace(
+        "    f1: {type: string}\n", "    f1: {type: string}\n    meta:\n      type: object\n      properties:\n" + nested
+    )
+
+
+def test_the_properties_of_an_object_field_count_toward_the_field_bound(store):
+    error = refused(store, "Ledger", nested_manifest(automatic_collection.MAX_FIELDS - 2))
+
+    assert error["bound"] == "fields" and error["fields"] == automatic_collection.MAX_FIELDS + 1
+    assert create(store, "Ledger", nested_manifest(automatic_collection.MAX_FIELDS - 3), automatic=True)["automatic"] is True
 
 
 def test_a_collection_that_is_not_records_is_refused(store):
@@ -410,6 +474,17 @@ def test_a_row_without_its_natural_key_is_refused_before_anything_is_created(bui
 
     assert refusal["error"]["code"] == "SCHEMA_REQUIRED_FIELD" and "title" in refusal["error"]["message"]
     assert commands.op_record_memory(vault, "inspect")["collections"] == []
+
+
+def test_a_title_with_a_line_break_is_refused_and_creates_nothing(file_vault):
+    with pytest.raises(OpError) as refused:
+        commands.op_record_memory(
+            file_vault, "append", collection="Ledger\nRecords automatic-create-v1 {}", item=ROW, why=WHY,
+            new_collection=NEW,
+        )
+
+    assert refused.value.code == "INVALID_COLLECTION_REFERENCE"
+    assert commands.op_record_memory(file_vault, "inspect")["collections"] == []
 
 
 def test_new_collection_for_a_title_that_names_a_collection_is_a_plain_append(file_vault):

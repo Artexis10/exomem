@@ -43,6 +43,11 @@ WINDOW = dt.timedelta(hours=24)
 #: `json_valid` guards it so one unreadable receipt cannot fail the inventory or a create.
 RECEIPT_IS_AUTOMATIC = "(CASE WHEN json_valid(t.receipt_json) THEN json_extract(t.receipt_json, '$.automatic') = 1 END)"
 
+#: SQL for the ids of the store collections whose create transaction recorded the automatic flag: one read for all.
+AUTOMATIC_COLLECTION_IDS = (
+    f"SELECT c.collection_id FROM collections c JOIN txns t ON t.txn_id = c.created_txn WHERE {RECEIPT_IS_AUTOMATIC}"
+)
+
 #: A file collection's create writes this line under its audit event in the activity log. It names the
 #: collection and the instant, since the log's own heading carries a date only. The audit reader keeps
 #: only its own prefix, so an older release skips the line.
@@ -52,16 +57,29 @@ _STAMP = "%Y-%m-%dT%H:%M:%SZ"
 #: and a file collection it cannot place reports unknown rather than "not automatic".
 INVENTORY_ARCHIVES = 4
 
-_WAY_FORWARD = "propose the collection to the user and, after they confirm, create it without `automatic`"
-_FIELDS_WAY_FORWARD = "propose the field to the user and, after they confirm, add it with a confirmed `revise` of the collection"
+#: The manifest keys, and the `item_schema` keys, that `minimal_manifest` emits and an automatic create may declare.
+_MANIFEST_KEYS = frozenset({
+    "type", "exomem_id", "title", "semantic_profile", "collection_version", "schema_version", "lifecycle",
+    "storage", "item_schema",
+})
+_ITEM_SCHEMA_KEYS = frozenset({"natural_key", "fields"})
+_CREATE_ACT = "create it without `automatic`"
+_FIELD_ACT = "add it with a confirmed `revise` of the collection"
 #: The one directory under the collection folder where a minimal collection keeps its rows.
 _ROWS_SOURCE = "Items"
 
 
+def _way_forward(disposition: str, noun: str, act: str) -> str:
+    """The next step after a refusal. Under `off` the agent starts nothing, so the confirmed call is for what the user asked for."""
+    if disposition == "off":
+        return f"{act} only if the user asked for it"
+    return f"propose the {noun} to the user, and {act} after they confirm"
+
+
 def _refuse(bound: str, reason: str, **details: Any) -> Never:
-    raise collections.CollectionError(
-        "AUTOMATIC_CREATION_REFUSED", f"{reason}; {_WAY_FORWARD}", {"bound": bound, **details}
-    )
+    # A bound other than the disposition is checked only after the disposition allowed the call, so it is silent.
+    way = _way_forward(details.get("disposition", "silent"), "collection", _CREATE_ACT)
+    raise collections.CollectionError("AUTOMATIC_CREATION_REFUSED", f"{reason}; {way}", {"bound": bound, **details})
 
 
 def require_bounds(vault_root: Path, manifest_path: str, manifest_text: str) -> None:
@@ -84,22 +102,30 @@ def require_bounds(vault_root: Path, manifest_path: str, manifest_text: str) -> 
         _refuse("profile", "automatic creation is for Records collections", semantic_profile=manifest.semantic_profile)
     if not manifest.schema.natural_key:
         _refuse("natural_key", "an automatic collection declares a natural key, so a repeated item updates its row")
-    if len(manifest.schema.fields) > MAX_FIELDS:
+    total = field_count(manifest.schema.fields)
+    if total > MAX_FIELDS:
         _refuse(
-            "fields",
-            f"an automatic collection has at most {MAX_FIELDS} item fields",
-            fields=len(manifest.schema.fields),
-            maximum=MAX_FIELDS,
+            "fields", f"an automatic collection has at most {MAX_FIELDS} item fields", fields=total, maximum=MAX_FIELDS
         )
-    authored = {
-        "saved views": bool(manifest.views),
-        "references": bool(collections.declared_references(manifest.schema)),
-        "rollups": bool(vault.parse_frontmatter(manifest_text)[0].get("rollups")),
-        "derived rows": manifest.derived,
-    }
-    declared = [name for name, present in authored.items() if present]
+    front = vault.parse_frontmatter(manifest_text)[0]
+    # An allowlist of the keys `minimal_manifest` emits: the manifest grows keys (views, rollups, claims, capture,
+    # templates, presentation) that a denylist would miss, and each one is structure that a confirmed create makes.
+    declared = [
+        *sorted(set(front) - _MANIFEST_KEYS),
+        *(f"item_schema.{key}" for key in sorted(set(front["item_schema"]) - _ITEM_SCHEMA_KEYS)),
+        *(["references"] if collections.declared_references(manifest.schema) else []),
+    ]
     if declared:
         _refuse("authored_features", f"an automatic collection declares no {', '.join(declared)}", declared=declared)
+
+
+def field_count(fields: Mapping[str, collections.FieldSpec]) -> int:
+    """Every declared item field: each one counts, and so does each property of an object field or of an array's items."""
+
+    def nested(spec: collections.FieldSpec) -> int:
+        return field_count(spec.properties) + (nested(spec.items) if spec.items is not None else 0)
+
+    return sum(1 + nested(spec) for spec in fields.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,9 +150,8 @@ def _field_type(value: Any) -> str | None:
     """The field type of one value's JSON shape, or None when a single value gives it no scalar type."""
     if isinstance(value, bool):
         return "boolean"
-    if isinstance(value, int):
-        return "integer"
-    if isinstance(value, float):
+    if isinstance(value, int | float):
+        # One value cannot tell a whole-number field from a decimal one, and a `number` field takes both.
         return "number"
     if isinstance(value, str):
         return "date" if _is_calendar_date(value) else "string"
@@ -160,7 +185,8 @@ def minimal_manifest(
     from .collection_store import ownership
 
     folder = vault.sanitize_title_filename(title)
-    if not folder:
+    # The title is kept verbatim in the manifest: a line break or another control character would start a second line.
+    if not folder or not title.isprintable():
         raise collections.CollectionError(
             "INVALID_COLLECTION_REFERENCE", "`collection` is not a usable collection title: name it in plain words"
         )
@@ -273,32 +299,22 @@ def require_daily_room(vault_root: Path, connection: Any = None) -> None:
 
 
 def _refuse_fields(bound: str, reason: str, **details: Any) -> Never:
-    raise collections.CollectionError(
-        "AUTOMATIC_FIELDS_REFUSED", f"{reason}; {_FIELDS_WAY_FORWARD}", {"bound": bound, **details}
-    )
+    way = _way_forward(details.get("disposition", "silent"), "field", _FIELD_ACT)
+    raise collections.CollectionError("AUTOMATIC_FIELDS_REFUSED", f"{reason}; {way}", {"bound": bound, **details})
 
 
 def fields_to_add(manifest: collections.CollectionManifest, values: Mapping[str, Any]) -> dict[str, str]:
     """The fields `values` names that `manifest` does not declare yet, each typed from its value.
 
-    A name already declared with the type its value gives adds nothing, so a replayed call is the same call.
-    A name declared with another type is refused: `new_fields` never retypes a field. A value that gives
-    no scalar type (null, a list, an object) cannot type a field from one row.
+    A name the collection already declares adds nothing, so a replayed call is the same call, and the row's own
+    validation judges its value against the declared type: `new_fields` never retypes a field. A new field whose
+    value gives no scalar type (null, a list, an object) cannot be typed from one row.
     """
     added: dict[str, str] = {}
     for name, value in values.items():
-        field_type = _field_type(value)
-        declared = manifest.schema.fields.get(name)
-        if declared is not None and declared.type == field_type:
+        if name in manifest.schema.fields:
             continue
-        if declared is not None:
-            _refuse_fields(
-                "field_type",
-                f"field {name!r} is already declared as {declared.type}, and this value is {field_type or 'not a scalar'}; "
-                "name only undeclared fields in new_fields, and write this value as its declared type",
-                field=name,
-                declared=declared.type,
-            )
+        field_type = _field_type(value)
         if field_type is None:
             _refuse_fields(
                 "field_type", f"field {name!r} holds null, a list or an object, which new_fields cannot type from one row",
@@ -341,7 +357,7 @@ def require_field_bounds(
             f"adding a field automatically needs proactive_capture silent, and it is {disposition}",
             disposition=disposition,
         )
-    total = len(manifest.schema.fields) + len(added)
+    total = field_count(manifest.schema.fields) + len(added)
     if total > MAX_FIELDS and created_automatically(vault_root, manifest.collection_id, store_created=store_created):
         _refuse_fields(
             "fields",
@@ -352,7 +368,7 @@ def require_field_bounds(
 
 
 def with_added_fields(manifest_text: str, added: Mapping[str, str]) -> str:
-    """`manifest_text` with one declaration per `added` field after the last of `item_schema.fields`, every other byte kept.
+    """`manifest_text` with one declaration per `added` field at the end of `item_schema.fields`, every other byte kept.
 
     The manifest is YAML frontmatter and a collection may carry comments and saved views, so this edits
     at the parsed node's position as `record_formats.render_manifest_audit_head` does, rather than dumping
@@ -370,18 +386,28 @@ def with_added_fields(manifest_text: str, added: Mapping[str, str]) -> str:
     declared = child(child(document, "item_schema"), "fields")
     if not isinstance(declared, yaml.MappingNode) or declared.flow_style or not declared.value:
         _refuse_fields("layout", "this collection's fields are not written one per line, so a field cannot be added in place")
-    last = declared.value[-1][1]
-    while isinstance(last, yaml.MappingNode) and not last.flow_style and last.value:
-        last = last.value[-1][1]
     newline = "\r\n" if "\r\n" in front_text else "\n"
     indent = " " * declared.value[0][0].start_mark.column
     entries = "".join(
         textwrap.indent(yaml.safe_dump({name: {"type": field_type}}, sort_keys=False), indent)
         for name, field_type in added.items()
     ).replace("\n", newline)
-    line_end = front_text.find("\n", last.end_mark.index)
-    if line_end < 0:
-        revised = front_text + newline + entries.removesuffix(newline)
+    # The `fields` mapping ends where the next token starts (a sibling key, a later top-level key), or at the document
+    # end. A last field that is a block sequence or a block scalar ends on that same mark, so its own end is no
+    # insertion line.
+    end = declared.end_mark
+    if end.index >= len(front_text):
+        revised = front_text + entries if front_text.endswith("\n") else front_text + newline + entries.removesuffix(newline)
     else:
-        revised = front_text[: line_end + 1] + entries + front_text[line_end + 1 :]
+        line_start = end.index - end.column
+        revised = front_text[:line_start] + entries + front_text[line_start:]
+    # The edit is checked against the document it edits, so a layout this does not foresee is refused, never written.
+    expected = yaml.safe_load(front_text)
+    expected["item_schema"]["fields"].update({name: {"type": field_type} for name, field_type in added.items()})
+    try:
+        intact = yaml.safe_load(revised) == expected
+    except yaml.YAMLError:
+        intact = False
+    if not intact:
+        _refuse_fields("layout", "a field cannot be added in place to this collection's manifest without moving other content")
     return manifest_text.replace(front_text, revised, 1)

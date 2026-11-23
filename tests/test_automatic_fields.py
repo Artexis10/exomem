@@ -8,6 +8,7 @@ the row's values, and says so in the same reply. Everything else about the schem
 from __future__ import annotations
 
 import pytest
+import yaml
 from test_automatic_collection import WHY, file_create, records_manifest
 from test_automatic_collection import file_vault as file_vault  # noqa: F401 - the fixture, by name
 from test_automatic_collection import (
@@ -113,6 +114,10 @@ def test_a_capture_that_is_not_silent_refuses_the_new_field_and_returns_the_prop
     error = refused.value.as_public_dict()
     assert error["code"] == "AUTOMATIC_FIELDS_REFUSED"
     assert error["bound"] == "proactive_capture" and error["disposition"] == level
+    assert error["message"].split("; ")[-1] == (
+        "add it with a confirmed `revise` of the collection only if the user asked for it" if level == "off"
+        else "propose the field to the user, and add it with a confirmed `revise` of the collection after they confirm"
+    )
     assert error["proposal"] == {"collection": "Ledger", "add_fields": {"outside_claim": "string", "checked_on": "date"}}
     assert declared(file_vault) == {"title": "string", "f1": "string"} and rows(file_vault) == []
     # What the owner confirms is the revise the refusal carries; the row then fits the collection.
@@ -134,7 +139,7 @@ def test_an_undeclared_field_is_refused_with_the_call_that_adds_it_under_silent_
     assert inspected["held"] == 0
 
 
-def test_an_undeclared_field_is_refused_with_the_proposal_and_no_retry_under_advisory_capture(build):
+def test_an_undeclared_field_under_advisory_capture_is_refused_with_the_confirmed_revise_and_no_new_fields_retry(build):
     async def scenario(client):
         await _call(client, "add_record", FIRST_ROW)
         envelope.set_disposition("proactive_capture", "advisory")
@@ -270,15 +275,115 @@ def test_an_undeclared_field_of_a_served_automatic_collection_at_the_bound_carri
     assert "retry_with" not in error
 
 
-def test_a_field_declared_with_another_type_is_refused_and_a_declared_one_of_the_same_type_adds_nothing(file_vault):
+def test_a_declared_field_adds_nothing_and_its_value_is_judged_by_the_row(file_vault):
+    file_create(file_vault, "Ledger")
+
+    # A date-shaped string for a string field is a valid row, whatever type the value would have given a new field.
+    again = append(file_vault, item={"title": "second", "f1": "2026-11-20"}, new_fields=["f1"])
+    with pytest.raises(OpError) as refused:
+        append(file_vault, item={"title": "third", "f1": 5}, new_fields=["f1"])
+
+    assert again["operation"] == "append" and "added_fields" not in again and "automatic" not in again
+    # The row's own validation refuses a value the declared type does not take, and the field stays as declared.
+    assert refused.value.code == "SCHEMA_FIELD_TYPE" and declared(file_vault)["f1"] == "string"
+
+
+def test_a_field_typed_from_a_whole_number_takes_a_later_fraction(file_vault):
+    file_create(file_vault, "Ledger")
+
+    first = append(file_vault, item={"title": "first", "score": 4}, new_fields=["score"])
+    second = append(file_vault, item={"title": "second", "score": 4.5})
+
+    assert first["added_fields"] == {"score": "number"} and declared(file_vault)["score"] == "number"
+    assert second["operation"] == "append"
+    assert {row["title"]: row["score"] for row in rows(file_vault)} == {"first": 4, "second": 4.5}
+
+
+def test_a_field_that_new_fields_names_with_no_scalar_value_is_refused(file_vault):
     file_create(file_vault, "Ledger")
 
     with pytest.raises(OpError) as refused:
-        append(file_vault, item={"title": "second", "f1": 5}, new_fields=["f1"])
-    again = append(file_vault, item={"title": "second", "f1": "text"}, new_fields=["f1"])
+        append(file_vault, item={"title": "second", "tags": ["a", "b"]}, new_fields=["tags"])
 
     assert refused.value.as_public_dict()["bound"] == "field_type"
-    assert again["operation"] == "append" and "added_fields" not in again and "automatic" not in again
+    assert "tags" not in declared(file_vault)
+
+
+BLOCK_ENUM = "    kind:\n      type: enum\n      enum:\n        - open\n        - closed\n"
+BLOCK_SCALAR = "    kind:\n      type: string\n      description: >\n        what the kind\n        means\n"
+NATURAL_KEY_AFTER = "  natural_key: [title]\n"
+LINKS_AFTER = NATURAL_KEY_AFTER + "links:\n    note: kept\n"
+
+
+def layout_ledger(vault, last_field: str, after_fields: str):
+    """`Ledger` whose `fields` end with `last_field`, followed by `after_fields`, both written as given."""
+    text = records_manifest("Ledger").replace("  natural_key: [title]\n", "")
+    text = text.replace("    f1: {type: string}\n---\n", last_field + after_fields + "---\n")
+    return commands.op_record_memory(
+        vault, "create", manifest_path=manifest_path().replace("Work", "Ledger"), manifest_text=text, why=WHY
+    )
+
+
+def front(vault) -> dict:
+    return yaml.safe_load((vault / manifest_path().replace("Work", "Ledger")).read_text().split("---\n")[1])
+
+
+LAYOUTS = [
+    pytest.param(BLOCK_ENUM, NATURAL_KEY_AFTER, id="block enum, then natural_key"),
+    pytest.param(BLOCK_SCALAR, NATURAL_KEY_AFTER, id="block scalar, then natural_key"),
+    pytest.param(BLOCK_ENUM, LINKS_AFTER, id="block enum, then a mapping key"),
+]
+
+
+@pytest.mark.parametrize(("last_field", "after_fields"), LAYOUTS)
+def test_a_field_is_added_after_a_last_field_written_as_a_block_and_nothing_else_moves(file_vault, last_field, after_fields):
+    layout_ledger(file_vault, last_field, after_fields)
+    before = front(file_vault)
+
+    receipt = append(file_vault, new_fields=["outside_claim", "checked_on"])
+
+    after = front(file_vault)
+    assert receipt["added_fields"] == {"outside_claim": "string", "checked_on": "date"}
+    assert after["item_schema"]["fields"] == {
+        **before["item_schema"]["fields"], "outside_claim": {"type": "string"}, "checked_on": {"type": "date"}
+    }
+    assert {key: value for key, value in after.items() if key not in {"item_schema", "record_audit"}} == {
+        key: value for key, value in before.items() if key not in {"item_schema", "record_audit"}
+    }
+    assert after["item_schema"]["natural_key"] == ["title"]
+    assert [row["title"] for row in rows(file_vault)] == ["second"]
+
+
+def test_a_refused_field_keeps_its_proposal_and_its_confirmed_revise_after_a_block_last_field(file_vault):
+    layout_ledger(file_vault, BLOCK_ENUM, NATURAL_KEY_AFTER)
+    envelope.set_disposition("proactive_capture", "advisory")
+
+    with pytest.raises(OpError) as refused:
+        append(file_vault)
+
+    error = refused.value.as_public_dict()
+    assert error["code"] == "SCHEMA_UNKNOWN_FIELD" and error["bound"] == "proactive_capture"
+    assert error["proposal"] == {"collection": "Ledger", "add_fields": {"outside_claim": "string", "checked_on": "date"}}
+    commands.op_record_memory(file_vault, **{**error["retry_call"]})
+    assert append(file_vault)["operation"] == "append"
+
+
+def test_a_refused_field_of_a_collection_whose_fields_cannot_be_extended_in_place_says_why_it_has_no_revise(file_vault):
+    flow = records_manifest("Ledger").replace(
+        "  fields:\n    title: {type: string}\n    f1: {type: string}\n", "  fields: {title: {type: string}}\n"
+    )
+    commands.op_record_memory(
+        file_vault, "create", manifest_path=manifest_path().replace("Work", "Ledger"), manifest_text=flow, why=WHY
+    )
+    envelope.set_disposition("proactive_capture", "advisory")
+
+    with pytest.raises(OpError) as refused:
+        append(file_vault)
+
+    error = refused.value.as_public_dict()
+    # The proposal survives, and the missing revise names its reason instead of vanishing.
+    assert error["proposal"]["add_fields"] == {"outside_claim": "string", "checked_on": "date"}
+    assert "retry_call" not in error and "one per line" in error["retry_unavailable"]
 
 
 def test_a_new_field_on_a_planning_collection_is_refused_and_nothing_changes(file_vault):

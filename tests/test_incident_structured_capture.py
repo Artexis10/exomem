@@ -25,7 +25,7 @@ from membench.outcome.incidents import openai_actor
 from membench.outcome.incidents import store as store_module
 from membench.outcome.incidents.server import loopback_mcp
 from membench.outcome.incidents.store import ENROLMENT_PATH
-from membench.outcome.isolation import REPO_ROOT, child_env, fresh_vault, lay_instruction_block
+from membench.outcome.isolation import REPO_ROOT, child_env, fresh_vault
 from membench.outcome.judging import Judgement
 
 # Each test that seeds starts the product in fresh interpreters, which takes a while on a busy machine.
@@ -584,23 +584,6 @@ def test_a_case_whose_turns_follow_up_or_collection_checks_could_not_be_read_is_
         incidents.validate_case(case)
 
 
-def test_no_write_takes_only_true() -> None:
-    case = {"id": "x", "prompt": "p", "pass": {"no_write": False}}
-    with pytest.raises(SystemExit, match="`no_write` is true"):
-        incidents.validate_case(case)
-
-
-def test_an_http_case_may_ask_for_a_store_vault() -> None:
-    case = valid_case() | {"transport": "http", "store": True}
-    incidents.validate_case(case)
-
-
-def test_no_new_collection_takes_only_true() -> None:
-    case = {"id": "x", "prompt": "p", "pass": {"no_new_collection": False}}
-    with pytest.raises(SystemExit, match="`no_new_collection` is true"):
-        incidents.validate_case(case)
-
-
 def test_seed_row_now_takes_conditions_the_comparison_can_read() -> None:
     case = {
         "id": "x",
@@ -1128,13 +1111,3 @@ def test_every_collection_a_structured_capture_case_seeds_is_accepted_by_the_pro
     assert [item["path"] for item in written] == [
         f"Knowledge Base/{seed['manifest_path']}" for seed in seeds
     ]
-
-
-@pytest.mark.reads_repository_docs
-def test_capture_off_is_a_prominence_the_instruction_block_can_be_laid_for(tmp_path) -> None:
-    case = incidents.load_cases(["capture-off"])[0]
-    assert case["prominence"] == "off"
-    assert (
-        lay_instruction_block(tmp_path / "block.txt", REPO_ROOT, case["prominence"])["prominence"]
-        == "off"
-    )

@@ -2416,15 +2416,15 @@ class CollectionWriter:
         with self.read_snapshot(mutation=True):
             self._prepare_create(manifest_path, manifest_text, scaffold)
 
-    def created_automatically(self, collection_id: str) -> bool:
-        """Whether the collection's create transaction recorded the automatic flag (a legacy import has none)."""
+    def automatic_collection_ids(self) -> frozenset[str]:
+        """The collections whose create transaction recorded the automatic flag (a legacy import has none), in one read."""
         with self.read_snapshot():
-            row = self.connection.execute(
-                f"SELECT {automatic_collection.RECEIPT_IS_AUTOMATIC} FROM collections c "  # noqa: S608 - a module constant
-                "JOIN txns t ON t.txn_id = c.created_txn WHERE c.collection_id = ?",
-                (collection_id,),
-            ).fetchone()
-        return bool(row and row[0])
+            rows = self.connection.execute(automatic_collection.AUTOMATIC_COLLECTION_IDS).fetchall()
+        return frozenset(row[0] for row in rows)
+
+    def created_automatically(self, collection_id: str) -> bool:
+        """Whether the collection's create transaction recorded the automatic flag."""
+        return collection_id in self.automatic_collection_ids()
 
     def _new_item_key_scheme(self, manifest) -> str:
         """The item key scheme a collection takes at creation; the store fixes it for the collection's life.

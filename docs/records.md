@@ -74,16 +74,19 @@ A collection is rarely complete at its first row. When a later fact has no field
 claim from an outside source, the agent adds the field in the same call that writes the row:
 `add_record` or `edit_record` with `options: {"new_fields": [...]}`, which names the fields of
 the row that the collection does not declare. Under `silent` the server adds each one, typed
-from its value, leaves the earlier rows without a value for it, and reports `added_fields` in
-the reply. Under `advisory` or `off`, or when an automatic collection would pass 12 fields, the call is
-refused with a proposal and the confirmed `revise` that makes the change. Renaming, retyping
-or removing a field is never automatic.
+from its value (a whole number and a decimal are both a number), leaves the earlier rows
+without a value for it, and reports `added_fields` in the reply. Under `advisory` or `off`, or
+when an automatic collection would pass 12 fields, the call is refused with a proposal and the
+confirmed `revise` that makes the change: under `advisory` the agent proposes it first, and
+under `off` it makes it only if you asked. Renaming, retyping or removing a field is never
+automatic.
 
 An automatic creation, whether through `new_collection` or `records.create` with
 `automatic: true`, gets `AUTOMATIC_CREATION_REFUSED`: the server names the failed
 bound and creates nothing, unless all of these hold: capture is `silent`; the collection is a
-Records collection with a declared natural key and a short field list; it declares no saved
-views, references or rollups; and the vault has created fewer than three collections
+Records collection with a declared natural key and a short field list, where the properties of
+an object field count too; it declares only the keys of a minimal manifest, so no saved views,
+references, rollups, templates or governance; and the vault has created fewer than three collections
 automatically in the last 24 hours. A vault with a collection store and a vault of plain
 files both qualify. The limits live in `exomem.automatic_collection`. Every other creation,
 every Planning collection and every schema change other than adding fields, merge or deletion still needs your
