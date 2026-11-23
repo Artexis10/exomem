@@ -170,6 +170,16 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
+    # Cell discovery for a product that holds a service credential. The gateway serves every
+    # cell from this host and answers only an authenticated GET, with that credential's cell's
+    # document; an older gateway answers 404, so the route is safe before its release.
+    - kind: Rule
+      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/.well-known/exomem-cell`) && Method(`GET`)
+      middlewares:
+        - name: exomem-cloud-trusted-ingress
+      services:
+        - name: exomem-cloud-gateway
+          port: 8080
 {{- if .Values.cloudGateway.uploadCellIds }}
     # The gateway's fixed upload route (CLOUD_UPLOAD_PATH). It checks the signed handoff
     # before it reads a body byte, so the route adds no buffering or body-size middleware:
