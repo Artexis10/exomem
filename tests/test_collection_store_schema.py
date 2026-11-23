@@ -66,6 +66,7 @@ EXPECTED_TABLES = {
     "store_binaries",
     "store_manifest",
     "store_projection_queue",
+    "store_derivation_queue",
     "store_held",
     "store_audit",
 }

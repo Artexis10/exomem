@@ -31,7 +31,7 @@ from test_vault_store_bypass_writers import (
     unimported_note,
 )
 from test_vault_store_migration import vault  # noqa: F401
-from test_vault_store_write_path import planned, revision, store_rows, tree
+from test_vault_store_write_path import commits_since, planned, revision, store_rows, tree
 
 from exomem import delete_directory, delete_file, move_file, recover_from_trash, semantic_contract
 from exomem import vault as vault_module
@@ -46,6 +46,7 @@ from exomem.governance.principal import (
 from exomem.vault_store import (
     availability,
     batch,
+    derivation,
     importer,
     projection,
     projector,
@@ -75,6 +76,9 @@ def race_after_check(monkeypatch, writer, change):
         if not raced:
             raced.append(1)
             write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "race", **change))
+            # A competing writer's rows are derived before any later write checks the store: the store
+            # thread drains first. This one commits inside the batch's own hold, so it drains here.
+            derivation.drain(writer.root, writer)
 
     monkeypatch.setattr(batch, "_check_held", check_then_race)
 
@@ -139,7 +143,7 @@ def test_a_move_of_a_page_that_a_competing_commit_changed_refuses_and_commits_no
         move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
     assert refused.value.code == "SOURCE_CHANGED"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert read.owned_bytes(served, GAMMA) == b"# Gamma, raced\n"
     assert not read.page_exists(served, MOVED)
     assert tree(served) == before
@@ -161,7 +165,7 @@ def test_a_move_of_a_page_that_gains_a_link_after_the_scan_refuses_and_commits_n
     assert refused.value.code == "SOURCE_CHANGED"
     assert "a page now links to it" in refused.value.reason
     assert EPSILON not in refused.value.reason
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
     assert not read.page_exists(served, MOVED)
 
@@ -178,7 +182,7 @@ def test_a_move_onto_a_page_that_a_competing_commit_created_refuses_and_keeps_bo
         move_file.move_file(served, old_path=GAMMA, new_path=MOVED)
 
     assert refused.value.code == "DEST_EXISTS"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert read.owned_bytes(served, MOVED) == b"# Taken\n"
     assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
 
@@ -446,7 +450,7 @@ def test_a_recovery_of_a_trashed_page_that_a_competing_commit_changed_refuses_an
         recover_from_trash.recover_from_trash(served, trash_path=trashed.trash_path)
 
     assert refused.value.code == "PATH_GUARD_CHANGED"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert read.owned_bytes(served, trashed.trash_path) == b"# Gamma, raced\n"
     assert not read.page_exists(served, GAMMA)
     assert store_rows(
@@ -674,7 +678,7 @@ def test_a_folder_trash_where_a_page_changed_after_the_check_refuses_and_commits
         delete_directory.delete_directory(served, path=HARBOUR, confirm=True, recursive=True)
 
     assert refused.value.code == "PATH_GUARD_CHANGED"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     with read.snapshot(served) as view:
         assert view.held_pages(pages) == frozenset(pages)
     assert tree(served) == before, "the refused commit must roll back the sidecar it published"

@@ -14,6 +14,7 @@ note, the semantic drain's wake and the heat projection.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ from .write import (
     StoreChange,
     StoreConflict,
 )
+
+log = logging.getLogger(__name__)
 
 DEFERRED_GRAPH_UNSUPPORTED = "VAULT_STORE_DEFERRED_GRAPH_UNSUPPORTED"
 VOCABULARY_AUTHORITY_UNSUPPORTED = "VAULT_STORE_VOCABULARY_AUTHORITY_UNSUPPORTED"
@@ -174,6 +177,15 @@ def commit_batch(
     working_set_heat.persist_commit(observed)
     if post_commit_fanout:
         _after_commit(plan, index_reports)
+        written = [*(rel for rel, _write in plan.pages), *plan.refresh, *_lifecycle_paths(lifecycle)]
+        rels = list(dict.fromkeys(written))
+        if rels:
+            # After the request's own drain, which the commit queued first: the acknowledgement says
+            # whether the rows were derived when the write returned, over every path that the
+            # commit wrote, moved or removed, so that it speaks for each report the writer made.
+            from .. import writer_lease
+
+            writer_lease.defer_until_terminal_persisted(lambda: _derived_report(root, rels))
     return [write.path for write in caller_writes]
 
 
@@ -528,28 +540,63 @@ def _record(rel: str, write: vault.PlannedWrite) -> BinaryRecord:
     return BinaryRecord(rel, hashlib.sha256(raw).hexdigest(), len(raw))
 
 
-def _row_components() -> list[Any]:
-    """The outcomes of the derived rows that a store commit makes current in its own transaction."""
-    from .. import index_sync
+def _row_components(root: Path, rels: Iterable[str]) -> list[Any]:
+    """The outcomes of the identity, lexical and graph rows of ``rels``, from the derivation queue.
 
+    The commit queues them and the writing request derives them after it releases the vault boundary
+    (``derivation``), so a report made at the commit names them deferred and one made after that drain
+    names what it left. A queue that cannot be read leaves them deferred: never a completion unseen.
+    """
+    from .. import index_sync
+    from ..collection_store.preview import bound_writer
+    from . import derivation
+
+    writer = bound_writer(Path(root).resolve())
+    state = ("deferred", "store_derivation_unread")
+    if writer is not None:
+        try:
+            state = derivation.outcome(writer.connection, list(dict.fromkeys(rels)))
+        except Exception:  # noqa: BLE001 - an unread queue is reported as such, and the write stands
+            log.debug("the derivation queue could not be read for a report", exc_info=True)
     return [
-        index_sync.IndexComponentOutcome(name, "completed", "store_commit")
+        index_sync.IndexComponentOutcome(name, *state)
         for name in ("memory_refs", "lexstore", "epistemic_graph")
     ]
 
 
-def row_report(operation: str, paths: Iterable[str]) -> Any:
-    """The fan-out report of a lifecycle commit: its lexical, graph and identity rows came with it.
+def row_report(operation: str, paths: Iterable[str], *, root: Path) -> Any:
+    """The fan-out report of a lifecycle commit: where its lexical, graph and identity rows stand.
 
     It names no embeddings outcome: the vector sidecar follows the store's audit rows after the
     commit, and a report must not say that work is done which no code has done yet.
     """
     from .. import index_sync
 
-    requested, truncated = index_sync._bounded_paths(list(paths))
+    named = list(paths)
+    requested, truncated = index_sync._bounded_paths(named)
     return index_sync.IndexSyncReport(
-        operation, requested, requested, tuple(_row_components()), truncated
+        operation, requested, requested, tuple(_row_components(root, named)), truncated
     )
+
+
+def _lifecycle_paths(lifecycle: Lifecycle | None) -> list[str]:
+    """Every path that a lifecycle commit moves a page or binary from or to, or removes."""
+    if lifecycle is None:
+        return []
+    return [
+        *(path for move in (*lifecycle.moves, *lifecycle.binary_moves) for path in (move.src, move.dst)),
+        *(delete.rel for delete in (*lifecycle.deletes, *lifecycle.binary_deletes)),
+    ]
+
+
+def _derived_report(root: Path, rels: list[str]) -> list[Any]:
+    """The report that a governed write acknowledges with, once its request derived its rows."""
+    from .. import index_sync
+
+    requested, truncated = index_sync._bounded_paths(rels)
+    return [index_sync.IndexSyncReport(
+        "upsert", requested, requested, tuple(_row_components(root, rels)), truncated
+    )]
 
 
 def _after_commit(plan: _Plan, index_reports: list[Any] | None) -> None:
@@ -561,7 +608,7 @@ def _after_commit(plan: _Plan, index_reports: list[Any] | None) -> None:
     from . import vectors
 
     rels = [*(rel for rel, _write in plan.pages), *plan.refresh]
-    components = _row_components()
+    components = _row_components(plan.root, rels)
     if mode.service_profile_enabled() and rels:
         if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
             components.append(

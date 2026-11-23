@@ -1060,7 +1060,7 @@ def _trash_in_store(
         due_state.refresh_after_writes(
             root, [due_state.PageWrite(rel_path, prior_markdown=prior_markdown)]
         )
-    index = governed.settle(root, deletion, store_batch.row_report("delete", [rel_path]), warnings)
+    index = governed.settle(root, deletion, "delete", [rel_path], warnings)
     store_targets.publish_catalog(
         catalog_target, error_class=DeleteFileError, what="the file was trashed"
     )

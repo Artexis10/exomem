@@ -1683,21 +1683,34 @@ def _from_store_identities(
 def _store_identity_owners(
     vault_root: Path, ids: Iterable[str]
 ) -> dict[str, tuple[str, ...]] | None:
-    """Every page that holds each normalized id, from the store; None outside store mode."""
+    """Every page that holds each normalized id, from the store; None outside store mode.
+
+    A page whose derivation trails its stored bytes (``derivation.underived``) answers from those
+    bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
+    with its row is not an owner, and one that a failed write gave an id is.
+    """
+    from .vault_store import derivation
+
     wanted = list(dict.fromkeys(ids))
+    root = Path(vault_root)
 
     def owners(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
+        underived = derivation.underived(conn)
         found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
         for start in range(0, len(wanted), REFS_QUERY_CHUNK):
             chunk = wanted[start : start + REFS_QUERY_CHUNK]
             for exomem_id, path in conn.execute(
                 "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
-                f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)}) "
-                "ORDER BY exomem_id, path",
+                f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
                 chunk,
             ):
-                found[str(exomem_id)].append(str(path))
-        return {identifier: tuple(paths) for identifier, paths in found.items()}
+                if path not in underived:
+                    found[str(exomem_id)].append(str(path))
+        for path, raw in underived.items():
+            row = None if raw is None else identity_row(root, path, raw)
+            if row is not None and row[4] == "valid" and row[1] in found:
+                found[row[1]].append(path)
+        return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
 
     return _from_store_identities(vault_root, owners)
 

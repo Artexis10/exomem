@@ -576,9 +576,11 @@ IDENTITY = "0f5c3a52-7d1e-4b8a-9c1f-2a6e4d8b0c11"
 #: When set, the index test writes each statement's ``EXPLAIN QUERY PLAN`` to this file: the plans
 #: that tasks.md 3.2 records, run with ``EXOMEM_READERS_DRILL_PAGES`` at scale.
 PLAN_REPORT = os.environ.get("EXOMEM_READERS_PLAN_REPORT")
-#: The store's settings tables hold one row per setting, never one per page, so reading all of
-#: them costs the same at any vault size.
-SETTINGS_TABLES = {"meta", "store_meta", "store_mode"}
+#: The tables whose rows do not grow with the vault. The settings tables hold one row per setting,
+#: never one per page, so reading all of them costs the same at any vault size. The derivation
+#: queue holds only the intents that still lag, which the store thread drains before each request:
+#: its rows follow the lag, not the vault.
+UNSCALED_TABLES = {"meta", "store_meta", "store_mode", "store_derivation_queue"}
 
 
 def full_reads(reader, sql):
@@ -600,7 +602,7 @@ def full_reads(reader, sql):
         opened[cursor]
         for _addr, op, cursor, *_rest in code
         if op in ("Rewind", "Last") and cursor in opened
-    } - SETTINGS_TABLES
+    } - UNSCALED_TABLES
 
 
 @pytest.mark.timeout(1800)
@@ -684,7 +686,7 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
         monkeypatch.setattr(
             lexstore, seam, lambda *args, _seam=seam, **kwargs: repairs.append(_seam)
         )
-    write.commit(writer, put(PROFILES, b"profiles: {}\n"))
+    overlay = write.commit(writer, put(PROFILES, b"profiles: {}\n"))
     find_module.clear_cache()
 
     found = commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
@@ -693,7 +695,8 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
     assert found["hits"] and asked["hits"]
     assert "warming" not in found and "warming" not in asked
     assert found["lag"]["registry"] == "rebuilding"
-    assert found["lag"]["revision"] < found["lag"]["target"] == read.current_revision(stored)
+    # The target is the overlay's commit; the derivation of its page moved the revision after it.
+    assert found["lag"]["revision"] < found["lag"]["target"] == overlay.revision
     assert found["notice"] in asked["notice"]
     assert (find_lighthouse(stored), find_lighthouse(stored)) == (False, True)
     assert repairs == []

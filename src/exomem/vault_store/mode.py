@@ -223,6 +223,11 @@ STORE_FIGURES = (
     "registry_waiting_on_paths",
     "owner_schema",
     "unowned_rows_as_of",
+    "derived",
+    "derived_pending",
+    "derived_failed",
+    "derived_failed_by_code",
+    "oldest_derivation_age_seconds",
 )
 
 
@@ -245,6 +250,10 @@ def status(vault_root: Path) -> dict:
     the registry pass creates and fills (``registry`` is then ``unknown``), else ``current``.
     ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
     the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
+    ``derived`` says whether the search, identity and graph rows follow every committed page
+    (``current``), wait for the store thread (``behind``), or hold an intent that failed its retries
+    (``failed``), with ``derived_pending``, ``derived_failed`` by reason code and the age of the
+    oldest intent; a store that has no queue yet reports ``unknown``.
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
     on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
     root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
@@ -284,7 +293,7 @@ def _reason(error: Exception) -> str:
 
 
 def _store_figures(vault_root: Path) -> dict:
-    from . import read, rederive
+    from . import derivation, read, rederive
 
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
@@ -295,10 +304,21 @@ def _store_figures(vault_root: Path) -> dict:
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
         ).fetchone()
+        present = {
+            name for (name,) in reader.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # A store that an earlier release wrote lacks the tables of a later schema until the service
+        # opens it; their figures are unknown, never zero.
         counts = {
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
+            if table in present
         }
+        derived = (
+            derivation.figures(reader)
+            if "store_derivation_queue" in present
+            else {"derived": UNKNOWN}
+        )
         # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
         # The age counts what the projector can still act on: a held path waits for a person. An
         # intent that the projector deferred is counted, so that it never hides as a quiet queue.
@@ -323,6 +343,8 @@ def _store_figures(vault_root: Path) -> dict:
         "held": counts["store_held"],
         "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
+        # Whether the search, identity and graph rows follow every committed page (``derivation``).
+        **derived,
         "registry": registry.state,
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,

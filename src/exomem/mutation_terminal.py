@@ -2149,6 +2149,58 @@ def with_fast_acknowledgement(
     return frozen
 
 
+class LeafWarning(str):
+    """A warning that work run after the terminal adds to the leaf's own, such as the not-exact
+    warning of a governed transition that settles after its request derived its rows."""
+
+    __slots__ = ()
+
+
+def with_leaf_index_observed(
+    terminal: Mapping[str, Any], observations: Sequence[Any], warnings: Sequence[str] = ()
+) -> Mapping[str, Any]:
+    """The terminal whose leaf ``index`` names each component that it deferred as the later
+    ``observations`` (index reports) do over its paths, with ``warnings`` added to the leaf's own.
+
+    A leaf reports its index while it holds its boundary, before the work that its request runs
+    after the terminal; the reply also carries that work's observation (``derived_components``).
+    Each ``deferred`` component of the leaf's report, or of each report under its index (a move's),
+    takes the later observation, so that one reply says one thing.
+    """
+    from . import index_sync
+
+    leaf = terminal.get("leaf_result")
+    if not isinstance(leaf, Mapping):
+        return terminal
+    index = leaf.get("index")
+    current_leaf: dict[str, Any] = dict(leaf)
+    if observations and isinstance(index, Mapping):
+
+        def refreshed(value: Any) -> Any:
+            if isinstance(value, list):
+                return [refreshed(item) for item in value]
+            if isinstance(value, Mapping):
+                return index_sync.with_observed_components(value, observations)
+            return value
+
+        current_leaf["index"] = (
+            refreshed(index)
+            if "components" in index
+            else {key: refreshed(value) for key, value in index.items()}
+        )
+    if warnings:
+        current_leaf["warnings"] = [*(leaf.get("warnings") or ()), *map(str, warnings)]
+    if current_leaf == leaf:
+        return terminal
+    current_leaf = source_result_attribution.carry(leaf, current_leaf)
+    changed = {**terminal, "leaf_result": current_leaf}
+    if warnings:
+        count = terminal.get("warnings_count")
+        known = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        changed["warnings_count"] = known + len(warnings)
+    return source_result_attribution.carry(terminal, changed)
+
+
 def as_replay(terminal: Any) -> Any:
     """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
 
@@ -2887,6 +2939,18 @@ def project_terminal(
             # diagnostic detail, and the leaf above has it stripped.
             reply["diagnostics"]["capture_sweep"] = capture_sweep
     return reply
+
+
+def reply_leaf(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The leaf result in a full reply's ``diagnostics``, as ``project_terminal`` places it.
+
+    A reply that acknowledges derived components nests the leaf under ``leaf_result``; any other
+    reply spreads a mapping leaf beside ``operational``.
+    """
+    leaf = diagnostics.get("leaf_result")
+    if "derived_components" in diagnostics and isinstance(leaf, Mapping):
+        return leaf
+    return diagnostics
 
 
 def _agent_reply(

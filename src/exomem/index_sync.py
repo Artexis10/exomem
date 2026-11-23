@@ -495,6 +495,79 @@ def with_component(report: IndexSyncReport, outcome: IndexComponentOutcome) -> I
     )
 
 
+#: The derived acknowledgement's states, least finished last (``mutation_terminal.DERIVED_SYNC_OUTCOMES``).
+# nosemgrep: ep-word-dict -- the closed states that `derived_state` returns, least to most severe.
+DERIVED_STATE_SEVERITY = {"completed": 0, "pending": 1, "failed": 2}
+
+
+def derived_state(component: IndexComponentOutcome) -> str:
+    """``completed``, ``pending`` or ``failed``: what one fan-out component says of its work.
+
+    The outcomes and the accepted codes are the closed sets that ``IndexComponentOutcome`` fixes.
+    """
+    if component.outcome in {"failed", "degraded"}:  # nosemgrep: ep-word-membership -- closed outcome set
+        return "failed"
+    if component.outcome in {"registered", "deferred"}:  # nosemgrep: ep-word-membership -- closed outcome set
+        return "pending"
+    # nosemgrep: ep-word-membership -- the closed codes of work that was not required.
+    if component.outcome == "accepted" and component.code not in {"embeddings_disabled", "no_eligible_paths"}:
+        return "pending"
+    return "completed"
+
+
+def with_observed_components(
+    report: Mapping[str, Any], observations: Sequence[IndexSyncReport]
+) -> Mapping[str, Any]:
+    """``report``, an ``as_dict`` form, with each ``deferred`` component replaced by the least
+    finished later observation of it over the report's own paths.
+
+    An observation speaks for every path that its report names. A component takes one only where
+    the reports that observe it together name every path of ``report``; otherwise it stays deferred.
+    Anything that is not such a report comes back as is.
+    """
+    components = report.get("components")
+    named = report.get("requested_paths")
+    if not isinstance(components, list) or not isinstance(named, (list, tuple)) or not named:
+        return report
+    if report.get("paths_truncated") is not False:
+        return report
+    own = set(named)
+    observed: dict[str, IndexComponentOutcome] = {}
+    for item in components:
+        if not isinstance(item, Mapping) or item.get("outcome") != "deferred":
+            continue
+        seen = [
+            (observation.requested_paths, outcome)
+            for observation in observations
+            if not observation.paths_truncated and own.intersection(observation.requested_paths)
+            for outcome in observation.components
+            if outcome.component == item.get("component")
+        ]
+        if seen and own <= {path for paths, _outcome in seen for path in paths}:
+            observed[item["component"]] = max(
+                (outcome for _paths, outcome in seen),
+                key=lambda outcome: DERIVED_STATE_SEVERITY[derived_state(outcome)],
+            )
+    if not observed:
+        return report
+    try:
+        rebuilt = IndexSyncReport(
+            report["operation"],
+            tuple(named),
+            tuple(report["eligible_paths"]),
+            tuple(
+                observed[item["component"]]
+                if item["outcome"] == "deferred" and item["component"] in observed
+                else IndexComponentOutcome(item["component"], item["outcome"], item["code"])
+                for item in components
+            ),
+            report["paths_truncated"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return report
+    return {**report, **rebuilt.as_dict()}
+
+
 def failed_upsert_report(
     vault_root: Path,
     written_paths: list[Path],
