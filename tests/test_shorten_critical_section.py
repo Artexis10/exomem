@@ -6,11 +6,13 @@ loading — turn 3 (C3): guard narrowing + pre-warm + telemetry for `remember`.
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 from pathlib import Path
 
 import pytest
 
+from exomem import commands as commands_module
 from exomem import (
     curation,
     metrics,
@@ -18,9 +20,11 @@ from exomem import (
     relation_review,
     reserved_paths,
     semantic_writes,
+    temporal,
     writer_lease,
 )
-from exomem.cli_ops import OpError
+from exomem import vault as vault_module
+from exomem.cli_ops import OpError, error_dict
 from exomem.commands import op_remember, product_commands_for
 from exomem.vault import content_hash
 
@@ -933,3 +937,411 @@ def test_a_commit_after_a_governed_commit_judges_the_pages_that_commit_left(
     else:
         _invoke_remember(vault, manager, **kwargs)
         assert page.is_file()
+
+
+def _approved_edit_plan(vault: Path, *rels: str) -> dict:
+    return {
+        "version": 1,
+        "title": "Reword the pages",
+        "steps": [
+            {
+                "step_id": f"reword-{index}",
+                "kind": "edit",
+                "args": {
+                    "path": rel,
+                    "why": "Apply the reviewed wording.",
+                    "operation": {
+                        "kind": "replace_string",
+                        "old_string": "Before.",
+                        "new_string": "Reworded.",
+                        "expected_hash": content_hash((vault / rel).read_text(encoding="utf-8")),
+                        "relation_disposition": "reviewed_none",
+                        "relation_review_reason": "No relation changes.",
+                    },
+                },
+            }
+            for index, rel in enumerate(rels)
+        ],
+    }
+
+
+def _curation(manager: writer_lease.LeaseManager, vault: Path, *, scope: str = "principal:test", **arguments):
+    maintain = next(c for c in product_commands_for("mcp") if c.name == "maintain_memory")
+    return manager.invoke(
+        maintain,
+        (vault,),
+        {"mode": "curation", **arguments},
+        implicit_idempotency_scope=scope,
+    )
+
+
+def _resume(manager: writer_lease.LeaseManager, vault: Path, proposed: dict, *, call: str):
+    # `invoke_command` gives each resume call its own scope, so a new call runs the next step.
+    return _curation(
+        manager, vault, scope=f"principal:test\0resume:{call}",
+        curation_action="resume", run_id=proposed["run_id"], plan_id=proposed["plan_id"],
+    )
+
+
+def _apply_arguments(proposed: dict) -> dict:
+    return {
+        "curation_action": "apply",
+        "run_id": proposed["run_id"],
+        "plan_id": proposed["plan_id"],
+        "expected_plan_fingerprint": proposed["plan_fingerprint"],
+        "why": "Apply the reviewed wording.",
+    }
+
+
+def _run_outcome(vault: Path, run_id: str, rel: str) -> dict:
+    store = curation.CurationStore(vault)
+    (receipt,) = store._receipt_records(run_id)
+    (witness_file,) = store.evidence_dir(run_id).iterdir()
+    witness = store._read_json(witness_file)
+    # The operation id and result digest derive from the plan id, which binds each vault's own
+    # registries; every other field is the step's own outcome.
+    return {
+        "receipt": {key: value for key, value in receipt.items() if key not in {"operation_id", "result_digest"}},
+        "witness_after": witness["after"],
+        "page": (vault / rel).read_bytes(),
+    }
+
+
+def _park_the_next_leaf_preflight(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, threading.Event]:
+    parked, release = threading.Event(), threading.Event()
+    real_edit = commands_module.op_edit_memory
+
+    def park(*args, **kwargs):
+        if kwargs.get("operation", {}).get("validate_only") and not parked.is_set():
+            parked.set()
+            assert release.wait(30.0)
+        return real_edit(*args, **kwargs)
+
+    monkeypatch.setattr(commands_module, "op_edit_memory", park)
+    return parked, release
+
+
+def _in_thread(name: str, call) -> tuple[threading.Thread, dict]:
+    outcome: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            outcome["result"] = call()
+        except BaseException as error:  # noqa: BLE001 - inspect the thread outcome
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run, name=name)
+    thread.start()
+    return thread, outcome
+
+
+def test_a_note_save_commits_while_a_curation_step_prepares_its_leaf(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow leaf preflight in an approved curation step must not hold the vault
+    boundary: a keyed save on another page commits without waiting, and the step
+    lands the same receipt, witness and bytes as a run under the wide boundary."""
+    from conftest import FIXTURE_VAULT, initialize_vault_state_offline
+
+    rel = "Knowledge Base/Notes/Insights/apply-edit-a.md"
+    page_id = "00000000-0000-4000-8000-0000000000a7"
+    twin = tmp_path / "twin"
+    shutil.copytree(FIXTURE_VAULT, twin)
+    initialize_vault_state_offline(twin, source="twin of the canonical vault fixture")
+    for root in (vault, twin):
+        _write_existing_page(root, rel, page_id=page_id)
+    save = _validated_kwargs(vault)
+    # Both runs stamp `updated:` at one instant, so their sealed bytes can be compared.
+    instant = temporal.now()
+    monkeypatch.setattr(temporal, "now", lambda: instant)
+
+    # The instrument behind `boundary_hold_ms` in the mutation journal, per thread, plus every
+    # refused wait, which a keyed save absorbs and retries.
+    holds: list[tuple[str, str, float, float]] = []
+    refused_waits: list[tuple[str, float]] = []
+    real_record_timing = mutation_lock._record_timing
+    real_busy = mutation_lock._mutation_busy
+
+    def record_every_hold(coordinator, timing):
+        if coordinator.kind == mutation_lock.COORDINATOR_VAULT_BOUNDARY:
+            holds.append(
+                (threading.current_thread().name, timing["operation"], timing["wait_ms"], timing["hold_ms"])
+            )
+        return real_record_timing(coordinator, timing)
+
+    def record_every_refusal(*args, **kwargs):
+        refused_waits.append((threading.current_thread().name, kwargs.get("wait_ms") or 0.0))
+        return real_busy(*args, **kwargs)
+
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+
+    monkeypatch.setattr(mutation_lock, "_record_timing", record_every_hold)
+    monkeypatch.setattr(mutation_lock, "_mutation_busy", record_every_refusal)
+    parked, release = _park_the_next_leaf_preflight(monkeypatch)
+    holds.clear()
+    applier, outcome = _in_thread("curation-apply", lambda: _curation(manager, vault, **_apply_arguments(proposed)))
+    try:
+        assert parked.wait(30.0)
+        saved = manager.invoke(_remember_command(), (vault,), save, idempotency_key="save-during-curation")
+    finally:
+        release.set()
+        applier.join(timeout=60.0)
+    assert not applier.is_alive()
+
+    assert (vault / saved["path"]).is_file()
+    save_holds = [hold for hold in holds if hold[0] == "MainThread"]
+    assert refused_waits == [] and save_holds, (refused_waits, holds)
+    assert sum(hold[2] for hold in save_holds) < 1000.0, holds
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"]["phase"] == "completed"
+    curation_holds = [hold for hold in holds if hold[0] == "curation-apply" and not hold[1].startswith("semantic_")]
+    assert curation_holds and all(hold[3] < 1000.0 for hold in curation_holds), holds
+
+    monkeypatch.setenv("EXOMEM_WIDE_MUTATION_BOUNDARY", "1")
+    wide = _standalone_manager(twin.parent / "twin-state", mutation_timeout_seconds=0.5)
+    twin_proposed = _curation(wide, twin, curation_action="propose", plan=_approved_edit_plan(twin, rel))
+    wide.invoke(_remember_command(), (twin,), _validated_kwargs(twin), idempotency_key="save-during-curation")
+    _curation(wide, twin, **_apply_arguments(twin_proposed))
+
+    assert _run_outcome(vault, proposed["run_id"], rel) == _run_outcome(twin, twin_proposed["run_id"], rel)
+
+
+def _two_step_run_with_its_first_step_committed(vault: Path, manager: writer_lease.LeaseManager) -> dict:
+    rels = ("Knowledge Base/Notes/Insights/resume-edit-a.md", "Knowledge Base/Notes/Insights/resume-edit-b.md")
+    for index, rel in enumerate(rels):
+        _write_existing_page(vault, rel, page_id=f"00000000-0000-4000-8000-0000000000b{index}")
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, *rels))
+    assert _curation(manager, vault, **_apply_arguments(proposed))["phase"] != "completed"
+    return proposed
+
+
+def _second_step_record(vault: Path, run_id: str) -> tuple[list[str], int]:
+    store = curation.CurationStore(vault)
+    outcomes = [receipt["outcome"] for receipt in store._receipt_records(run_id) if receipt["step_id"] == "reword-1"]
+    return outcomes, len(list(store.evidence_dir(run_id).iterdir()))
+
+
+def test_a_second_resume_of_a_run_in_flight_is_refused_as_busy(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no hold across a step, two resumes of one run would both execute it. The second
+    must hear a retryable CURATION_RUN_BUSY that committed nothing, and the step lands once."""
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _two_step_run_with_its_first_step_committed(vault, manager)
+    parked, release = _park_the_next_leaf_preflight(monkeypatch)
+
+    first, outcome = _in_thread("first-resume", lambda: _resume(manager, vault, proposed, call="first"))
+    try:
+        assert parked.wait(30.0)
+        with pytest.raises(Exception) as refused:
+            _resume(manager, vault, proposed, call="second")
+    finally:
+        release.set()
+        first.join(timeout=60.0)
+
+    public = error_dict(refused.value)
+    assert (public["code"], public.get("status"), public.get("committed")) == (
+        "CURATION_RUN_BUSY", "retryable", False,
+    ), public
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"]["phase"] == "completed"
+    assert _second_step_record(vault, proposed["run_id"]) == (["committed"], 2)
+
+
+def test_a_leaf_refused_by_a_busy_vault_commits_on_the_next_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-guarded leaf now meets other writers at its own commit. A vault held past the
+    timeout refuses it as retryable and uncommitted, and the next resume commits it once.
+    Absorption is off, so the refusal reaches the caller as it does when the wait runs out."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _two_step_run_with_its_first_step_committed(vault, manager)
+    parked, release = _park_the_next_leaf_preflight(monkeypatch)
+    holding, leaf_refused = threading.Event(), threading.Event()
+    real_busy = mutation_lock._mutation_busy
+
+    def note_the_leaf_refusal(*args, **kwargs):
+        if threading.current_thread().name == "curation-resume":
+            leaf_refused.set()
+        return real_busy(*args, **kwargs)
+
+    def other_writer() -> None:
+        assert parked.wait(30.0)
+        with manager.mutation_guard(vault, operation="other_writer"):
+            holding.set()
+            assert leaf_refused.wait(30.0)
+
+    monkeypatch.setattr(mutation_lock, "_mutation_busy", note_the_leaf_refusal)
+    holder, held = _in_thread("other-writer", other_writer)
+    resumer, outcome = _in_thread("curation-resume", lambda: _resume(manager, vault, proposed, call="refused"))
+    try:
+        assert holding.wait(10.0), held.get("error")
+    finally:
+        release.set()
+        resumer.join(timeout=60.0)
+        leaf_refused.set()
+        holder.join(timeout=60.0)
+
+    assert "error" not in held, held.get("error")
+    refusal = outcome.get("error")
+    assert isinstance(refusal, OpError) and refusal.code == "MUTATION_BUSY", outcome
+    assert (refusal.details.get("status"), refusal.details.get("committed")) == ("retryable", False)
+    assert _second_step_record(vault, proposed["run_id"]) == (["failed"], 1)
+
+    assert _resume(manager, vault, proposed, call="next")["phase"] == "completed"
+    assert _second_step_record(vault, proposed["run_id"]) == (["failed", "committed"], 2)
+
+
+def test_a_save_to_the_page_after_a_curation_leaf_commits_leaves_the_step_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save to the same page between a step's leaf commit and its receipt made the step's live
+    check fail: every resume then blocked as uncertain, and the undo left the step out."""
+    rel = "Knowledge Base/Notes/Insights/settle-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c1")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+
+    def another_writer_saves_the_page_after_the_leaf(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        result = real_dispatch(*args, **kwargs)
+        current = content_hash((vault / rel).read_text(encoding="utf-8"))
+        saver, saved = _in_thread(
+            "same-page-save",
+            lambda: _invoke_edit_memory(
+                vault, manager, path=rel, why="A later save.", new_body="Saved later.", expected_hash=current
+            ),
+        )
+        saver.join(timeout=60.0)
+        assert "error" not in saved, saved.get("error")
+        return result
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_writer_saves_the_page_after_the_leaf)
+
+    applied = _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert applied["phase"] == "completed"
+    assert "Saved later." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    assert [receipt["outcome"] for receipt in receipts] == ["committed"]
+    # The undo accounts for the step: the later save makes its inverse stale, not absent.
+    with pytest.raises(curation.CurationError) as undo:
+        curation.propose_compensation(vault, run_id=proposed["run_id"])
+    assert undo.value.code == "CURATION_BINDING_STALE"
+
+
+def test_a_leaf_batch_that_could_not_remove_its_witness_is_not_recorded_as_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch rolls back in reverse, so its witness goes first. When that removal fails and the
+    page is restored, the witness outlives a batch that did not commit: it is no proof of the step."""
+    rel = "Knowledge Base/Notes/Insights/rollback-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c3")
+    before = (vault / rel).read_bytes()
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    evidence = curation.CurationStore(vault).evidence_dir(proposed["run_id"]).resolve()
+    real_unlink = vault_module._BatchWorkspace.unlink_installed
+    kept: list[Path] = []
+
+    def fail_after_the_witness_lands(path: Path) -> None:
+        if Path(path).resolve().parent == evidence:
+            raise OSError("the batch failed after its witness landed")
+
+    def keep_the_witness_once(self, final, expected, *, inverse_recheck):  # noqa: ANN001, ANN202
+        if Path(final).resolve().parent == evidence and not kept:
+            kept.append(Path(final))
+            raise OSError("the witness could not be removed")
+        return real_unlink(self, final, expected, inverse_recheck=inverse_recheck)
+
+    monkeypatch.setattr(vault_module, "_after_batch_destination_published", fail_after_the_witness_lands)
+    monkeypatch.setattr(vault_module._BatchWorkspace, "unlink_installed", keep_the_witness_once)
+
+    with pytest.raises(Exception) as refused:
+        _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert error_dict(refused.value)["code"] == "CURATION_OUTCOME_UNCERTAIN"
+    assert kept and (vault / rel).read_bytes() == before
+    store = curation.CurationStore(vault)
+    assert store.reconstruct(proposed["run_id"])["phase"] != "completed"
+    assert [receipt["outcome"] for receipt in store._receipt_records(proposed["run_id"])] == []
+
+
+def test_a_leaf_that_commits_after_another_call_refused_its_step_leaves_the_step_committed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another process can refuse the step for good while this call's leaf is not yet at its
+    commit, for a blocker on a later binding. The leaf still commits: the run then stopped on that
+    refusal for every resume, and its undo left the committed step out."""
+    rel = "Knowledge Base/Notes/Insights/refused-elsewhere-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c5")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+
+    def another_process_refuses_the_step_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        return real_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_process_refuses_the_step_first)
+
+    applied = _curation(manager, vault, **_apply_arguments(proposed))
+
+    assert applied["phase"] == "completed"
+    assert "Reworded." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    # The undo derives the steps to reverse from these receipts.
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "committed"]
+
+
+def test_a_step_refused_elsewhere_whose_leaf_committed_is_recorded_by_the_next_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The call whose leaf committed after another process refused the step can stop before its
+    settle hold. Every resume then stopped on that refusal, and the status read the run as failed."""
+    monkeypatch.setenv("EXOMEM_CAPTURE_CONTENTION_ABSORB", "0")
+    rel = "Knowledge Base/Notes/Insights/refused-unsettled-edit-a.md"
+    _write_existing_page(vault, rel, page_id="00000000-0000-4000-8000-0000000000c7")
+    manager = _standalone_manager(vault.parent / "state", mutation_timeout_seconds=0.5)
+    proposed = _curation(manager, vault, curation_action="propose", plan=_approved_edit_plan(vault, rel))
+    real_dispatch = curation._dispatch_step
+    holding, release = threading.Event(), threading.Event()
+    holders: list[tuple[threading.Thread, dict]] = []
+
+    def other_writer() -> None:
+        with manager.mutation_guard(vault, operation="other_writer"):
+            holding.set()
+            assert release.wait(30.0)
+
+    def refuse_first_then_hold_the_settle(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        result = real_dispatch(*args, **kwargs)
+        holders.append(_in_thread("other-writer", other_writer))
+        assert holding.wait(10.0)
+        return result
+
+    monkeypatch.setattr(curation, "_dispatch_step", refuse_first_then_hold_the_settle)
+    try:
+        with pytest.raises(Exception) as stopped:
+            _curation(manager, vault, **_apply_arguments(proposed))
+    finally:
+        release.set()
+        for holder, held in holders:
+            holder.join(timeout=60.0)
+            assert "error" not in held, held.get("error")
+
+    assert error_dict(stopped.value).get("committed") is True
+    status = curation.status(vault, run_id=proposed["run_id"])
+    assert (status["phase"], status["recovery"], status["next_action"]) == ("executing", "receipt-required", "resume")
+    assert _resume(manager, vault, proposed, call="after")["phase"] == "completed"
+    assert "Reworded." in (vault / rel).read_text(encoding="utf-8")
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "recovered-committed"]

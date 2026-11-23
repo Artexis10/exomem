@@ -7122,16 +7122,13 @@ class LeaseManager:
         # it (`reconcile.reconcile`). Its long read-only and self-locked phases run with no
         # hold, so other writers commit between phases. The graph join after it holds none.
         narrow_reconcile = runs_reconcile and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
-        # A curation proposal, forward or compensating, prepares read-only, then
-        # seals; the seal (`seal_proposal`, `propose_compensation`) takes the
-        # mutation boundary itself and re-checks every binding under it, so
-        # preparation can run without the lock. Apply, resume and applying a
-        # compensation write step by step and keep the wide boundary. The two
-        # actions are members of the closed curation action enum.
-        narrow_curation_proposal = (
+        # A curation proposal seals, and an apply or resume writes, under short holds that
+        # curation takes itself and re-checks its bindings under (`curation._step_boundary`).
+        # Preparation, probes and a self-guarded step's leaf run without curation's hold, so
+        # other writers commit between a step's seams.
+        narrow_curation = (
             command.name == "maintain_memory"
-            and kwargs.get("mode") == "curation"
-            and kwargs.get("curation_action") in ("propose", "propose-compensation")
+            and curation_module.guards_own_boundary(kwargs)
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         # Only record owns a short guard around fresh admission, revision
@@ -7151,7 +7148,7 @@ class LeaseManager:
             or narrow_maintenance_job_cancel
             or narrow_maintenance_job
             or narrow_reconcile
-            or narrow_curation_proposal
+            or narrow_curation
             or narrow_episode_record
             # Issuance writes no vault-owned file: upload and download mint a token over a private
             # copy or store, and a session open or rotate writes only its own SQLite transaction.
