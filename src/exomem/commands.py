@@ -9944,6 +9944,7 @@ def op_transfer_artifact(
     hold: bool = False, artifacts: list[str] | None = None,
     uploads: list[str] | None = None,
     import_identity: str | None = None,
+    size_bytes: int | None = None,
 ) -> dict:
     """Prepare a file transfer or cancel owned waiting uploads.
 
@@ -9958,6 +9959,7 @@ def op_transfer_artifact(
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
         import_identity: Durable external ID for a held Source upload.
+        size_bytes: Exact Source size in bytes to select resumable upload.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
         uploads: Cancellation only: held-upload references owned by this authenticated session.
@@ -9970,6 +9972,13 @@ def op_transfer_artifact(
         or artifact is not None or artifacts is not None or uploads is not None
     ):
         raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload with expected_sha256")
+
+    if size_bytes is not None and (
+        operation != "upload" or lane != "source" or expected_sha256 is None
+        or artifact is not None or artifacts is not None or uploads is not None
+    ):
+        raise ValueError("INVALID_MODE: size_bytes needs a Source upload with expected_sha256")
+    held_only = hold
 
     if operation == "cancel":
         from . import held_uploads
@@ -10055,6 +10064,7 @@ def op_transfer_artifact(
 
         return upload_handoff.prepare_upload(
             vault_root, lane=lane, expected_sha256=expected_sha256, import_identity=import_identity,
+            size_bytes=size_bytes, held_only=held_only,
         )
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:

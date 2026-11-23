@@ -2310,6 +2310,15 @@ class _BatchPayloadCustody:
     finished: Callable[[], None] | None = None
 
 
+@dataclass(frozen=True)
+class _BatchFileWitness:
+    """A trusted owner's durable intent and proof at the native file commit boundaries."""
+
+    begin: Callable[[], None]
+    seal: Callable[[], None]
+    retire_rolled_back: Callable[[], None]
+
+
 @dataclass(slots=True)
 class _WorkspaceArtifact:
     workspace: _BatchWorkspace
@@ -5206,13 +5215,11 @@ def _read_stored_guarded(root: Path, target: str, limit: int) -> tuple[bytes, Pa
     _require_read_limit(limit)
     rel = "/".join(_safe_guard_target(target))
     try:
-        page = read.owned_page(root, rel)
+        page = read.owned_page(root, rel, max_bytes=limit)
     except FileNotFoundError as error:
         raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
     if page is None:
         return None
-    if page.meta.size > limit:
-        raise _refuse_unbounded_leaf(target, _over_limit_reason(page.meta.size, limit))
     return page.body, _store_guard(rel, page.meta.sha256)
 
 
@@ -6255,6 +6262,7 @@ def batch_atomic_write(
     _publish_originals: Callable[[], None] | None = None,
     _retained_original: PathGuard | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _file_commit_witness: _BatchFileWitness | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -6290,6 +6298,7 @@ def batch_atomic_write(
                 vocabulary_auxiliaries=_vocabulary_auxiliaries,
                 validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
                 publish_originals=_publish_originals, retained_original=_retained_original,
+                file_commit_witness=_file_commit_witness,
             )
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
@@ -6357,6 +6366,7 @@ def batch_atomic_write(
                     _publish_originals, curation_witness.publication_hook(curation_witness_state)
                 ),
                 _payload_custody=_payload_custody,
+                _file_commit_witness=_file_commit_witness,
             )
         except BaseException:
             working_set_heat.abandon_commit(heat_commit)
@@ -6453,6 +6463,7 @@ def _batch_atomic_write_locked(
     _graph_epoch: bool = True,
     _before_commit_point: Callable[[], None] | None = None,
     _payload_custody: _BatchPayloadCustody | None = None,
+    _file_commit_witness: _BatchFileWitness | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -6919,6 +6930,7 @@ def _batch_atomic_write_locked(
     # diff about whitespace hides that.
     canonical_started_monotonic = _fast_ack_monotonic()
     additive_guard = None
+    file_commit_sealed = False
     try:
         from . import vocabulary_auxiliaries, vocabulary_gate
         from .writer_lease import (
@@ -7010,9 +7022,12 @@ def _batch_atomic_write_locked(
                     (write.path.relative_to(vault_root).as_posix() for write in caller_writes
                      if write.path.is_relative_to(vault_root)),
                 )
-            if index == 0 and _before_first_install is not None:
-                # The owner's own durable write, never in `replaced`: a rollback does not revert it.
-                _before_first_install()
+            if index == 0:
+                if _file_commit_witness is not None:
+                    _file_commit_witness.begin()
+                if _before_first_install is not None:
+                    # The owner's own durable write, never in `replaced`: a rollback does not revert it.
+                    _before_first_install()
             replacement_intents: tuple[Any, ...] = ()
             if publication_intents_enabled:
                 from . import file_watcher
@@ -7079,6 +7094,10 @@ def _batch_atomic_write_locked(
             _before_commit_point()
         if additive_guard is not None:
             additive_guard.commit()
+        if _file_commit_witness is not None:
+            # A provisional file receipt can precede the final validation and the authority commit.
+            _file_commit_witness.seal()
+            file_commit_sealed = True
         log_active_mutation_phase("canonical_files_committed", affected_count=len(replaced))
         # Opens the span the writer lease closes when the mutation row reaches
         # `canonically_committed`. On the 0.83.1 deploy that stretch was the
@@ -7097,10 +7116,10 @@ def _batch_atomic_write_locked(
             with call_spans.span("commit_tail.mutation_committed"):
                 mark_active_mutation_committed()
     except Exception as commit_error:
-        if additive_guard is not None and additive_guard.committed:
-            # Authority and canonical bytes are already committed together.
+        if file_commit_sealed or (additive_guard is not None and additive_guard.committed):
+            # A seal or a spent authority proves the canonical bytes already committed.
             # A later diagnostic failure must recover that outcome, never
-            # roll the bytes back while leaving an exact approval spent.
+            # roll the bytes back while leaving committed proof.
             mark_active_mutation_committed()
             raise
         rollback_errors: list[BaseException] = []
@@ -7210,6 +7229,8 @@ def _batch_atomic_write_locked(
 
             file_watcher.abort_publication_intents(publication_intents)
         _remove_empty_created_dirs(created_dirs)
+        if _file_commit_witness is not None:
+            _file_commit_witness.retire_rolled_back()
         raise
     except BaseException:
         if publication_intents:

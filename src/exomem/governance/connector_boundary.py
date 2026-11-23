@@ -370,12 +370,18 @@ def capture_membership(root: Path, path: str, compiled: policy.Policy) -> frozen
 _ADMISSION_REFUSALS = (*UNDECIDED, reserved_paths.ReservedPathLeafError)
 
 
-def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None,
+            artifact_copy: reserved_paths.GenericFileCopy | None = None, resolve_bytes: bool = True) -> bool:
     """Admit a named file through the shared membership kernel before disclosure."""
     try:
         root = Path(root)
         current = snapshot(root)
         denied = current.denied_scopes(who) if current is not None else frozenset()
+        if denied and not resolve_bytes and content is None:
+            if root / path == activation_manifest.manifest_path(root):
+                return False
+            scopes = membership.evaluate_path_only(root, path, policy.load(root), resolve_bytes=False)
+            return permits_scopes(denied, scopes.require_classified())
         return _permits_denied(root, path, denied, who, content=content, artifact_copy=artifact_copy)
     except _ADMISSION_REFUSALS:
         return False

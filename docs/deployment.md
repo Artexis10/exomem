@@ -1931,12 +1931,32 @@ Source page. It does not accept `archive=members`. Evidence also accepts
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
+For a large original on the personal HTTP listener, call `upload_files` with
+`lane="source"`, the file's `expected_sha256` and its exact `size_bytes`.
+Above the one-shot limit, the reply describes a resumable Source upload.
+Save that reply privately as a handoff file and run `exomem attach --handoff-file handoff.json original.bin`.
+The same command resumes from the server's offset after a dropped request.
+It returns a Source receipt after the full hash matches and the Source commits.
+It can retrieve the same receipt for 24 hours after settlement. The account
+must retain its owner binding and the issuing MCP login must remain active.
+Refreshing the access token keeps that login active.
+Each receipt read applies the current release policy to the Source and its
+original. If the policy withholds either path, the upload keeps its receipt
+and reports that it cannot release it.
+
+If creation reports a spent handoff without returning a session, request a
+new handoff. If a known session becomes unavailable, check Source custody
+before starting another upload.
+
+Requests within the one-shot limit still produce a held file for `save_source`.
+An explicit hold or import identity keeps that limit. Cloud's gateway also uses
+the one-shot limit. The tool reports the applicable limit for an oversized request.
+
 A Source capability does not grant read access to its destination. If governance
 withholds the custody receipt, the session retains the bytes and reports
 `SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.
-Use an authorized reader to inspect
-custody, and reuse this session for a retry. A different caller's credential
-does not change this session's transfer principal.
+Use an authorized reader to inspect custody and use the same command to check
+the session's receipt.
 
 The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
@@ -2002,6 +2022,12 @@ session; do not create a new identity for an uncertain Source commit.
 `SOURCE_OUTCOME_UNKNOWN` also retains the bytes when recovery proves a commit
 without recovering its complete receipt. That state needs reconciliation and
 does not authorize another Source publication.
+
+Receipt reads use current release policy and a bounded comparison against the
+validated lifecycle snapshot. When the marker namespace changes, the server
+validates it in the background. The client keeps polling the same session while
+the receipt check is pending. The server may withhold identifiers when current
+metadata cannot establish release.
 
 A Source receipt preserves the original and its Source page. Its
 `semantic_compilation` field remains `unassessed` until an agent compiles the

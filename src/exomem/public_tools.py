@@ -690,10 +690,11 @@ def _save_episode(wire: dict[str, Any], ctx: Context) -> Translated:
 
 class UploadFiles(Wire):
     lane: Literal["source", "evidence", "import"] = Field(
-        description="Original, proof, or personal-server folder archive.")
-    expected_sha256: str | None = Field(default=None, description="SHA-256 of the file to upload.")
-    import_identity: str | None = Field(default=None, description="Durable external ID for a held Source upload.")
-    hold: bool | None = Field(default=None, description="Keep the upload for this session; needs expected_sha256.")
+        description="Source, Evidence or import archive.")
+    expected_sha256: str | None = Field(default=None, description="File SHA-256.")
+    size_bytes: int | None = Field(default=None, strict=True, ge=0, description="Exact Source bytes.")
+    import_identity: str | None = Field(default=None, description="Held Source import ID.")
+    hold: bool | None = Field(default=None, description="Hold bytes for a later save.")
     detail: Detail | None = _DETAIL
 
 
@@ -703,6 +704,7 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
     return "transfer_artifact", {"operation": "upload", **_given({
         "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
         "import_identity": wire.get("import_identity"),
+        "size_bytes": wire.get("size_bytes"),
         "response_detail": wire.get("detail")})}
 
 
@@ -1058,7 +1060,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("episode_memory", "record"),),
           captures=True),
     _tool("upload_files", "Upload files",
-          "Get a one-use upload. Follow the reply, then pass its handle to save_source or save_evidence.",
+          "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
           [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
     _tool("download_files", "Download files",

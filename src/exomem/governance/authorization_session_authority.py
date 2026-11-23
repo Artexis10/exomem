@@ -19,6 +19,7 @@ from typing import Final
 from .authorization_session_lifecycle import (
     AuthorizationSessionContext,
     AuthorizationSessionUnavailable,
+    AuthorizationSessionUnreadable,
 )
 
 _TOKEN_VERSION: Final = "wh1"
@@ -179,7 +180,7 @@ def _active_context(
             (context.session_id,),
         ).fetchone()
     except sqlite3.Error:
-        raise _unavailable() from None
+        raise AuthorizationSessionUnreadable from None
     expected = (
         context.principal_id,
         context.issuer_family,
@@ -1023,7 +1024,7 @@ def active_session_purpose(
             ),
         ).fetchone()
     except sqlite3.Error:
-        raise _unavailable() from None
+        raise AuthorizationSessionUnreadable from None
     return None if row is None else _text(row[0])
 
 

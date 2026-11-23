@@ -12,6 +12,7 @@ import os
 import secrets
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -26,16 +27,20 @@ from . import (
     cloud_origin,
     held_uploads,
     private_state,
+    upload_sessions,
     upload_tokens,
 )
 from .governance import principal, raw_protection
 
 TOKEN_PREFIX = "exomem-upload:"
+RESUMABLE_PREFIX = "exomem-upload-resumable:"
 #: Lanes a ticket may name. The import lane is a ticket's alone: bearer tokens and `exomem attach` stay on the two lanes.
 HANDOFF_LANES = (*upload_tokens.UPLOAD_LANES, held_uploads.IMPORT_LANE)
 _TICKET_BYTES = 32
 MAX_BYTES = 100 * 1024 * 1024
 STORE_DIRNAME = "upload-handoffs"
+# A downgraded worker can only look up a nonce in the legacy store.
+_SOURCE_TICKET_STORE = "source-upload-handoffs"
 UNAVAILABLE_REASON = "no usable upload handoff"
 #: The upload route's content-free refusal for a ticket it cannot use: a new upload is always a valid way on.
 TICKET_UNUSABLE_REASON = f"{UNAVAILABLE_REASON}; request a new one with upload_files"
@@ -44,15 +49,27 @@ SPENT_REMEDY = "This upload is used now; a retry needs a new one from upload_fil
 _now = time.time
 
 
+class SourceOriginBusy(ValueError):
+    """The issuing login could not be checked. Retry without replacing the ticket."""
+
+    def __init__(self) -> None:
+        super().__init__("UPLOAD_ORIGIN_BUSY: the issuing login cannot be checked yet")
+
+
+class SourceTicketSpent(ValueError):
+    """The service removed a ticket but could not confirm durable consumption."""
+
+
 def _unavailable() -> ValueError:
     return ValueError("UPLOAD_HANDOFF_UNAVAILABLE: " + UNAVAILABLE_REASON)
 
 
-def parse_ticket(value: object) -> str | None:
+def parse_ticket(value: object, *, resumable: bool = False) -> str | None:
     """Return the canonical nonce from an upload ticket, or None for any other shape."""
-    if not isinstance(value, str) or not value.startswith(TOKEN_PREFIX):
+    prefix = RESUMABLE_PREFIX if resumable else TOKEN_PREFIX
+    if not isinstance(value, str) or not value.startswith(prefix):
         return None
-    nonce = value[len(TOKEN_PREFIX):]
+    nonce = value[len(prefix):]
     # The wire format fixes 256 bits as 64 lowercase hexadecimal characters.
     try:
         if len(nonce) == 2 * _TICKET_BYTES and bytes.fromhex(nonce).hex() == nonce:
@@ -76,7 +93,8 @@ def parse_handoff_token(value: object) -> str | None:
     ticket in the gateway's routing envelope. Recognition grants no authority:
     the receiving endpoint verifies whichever form arrives.
     """
-    if parse_ticket(value) is not None or cloud_origin.envelope_nonce(value) is not None:
+    if (parse_ticket(value) is not None or parse_ticket(value, resumable=True) is not None
+            or cloud_origin.envelope_nonce(value) is not None):
         return value  # type: ignore[return-value]
     return None
 
@@ -169,11 +187,33 @@ async def _active(root: Path, who: principal.RequestPrincipal) -> bool:
     return await auth_sessions.origin_session_active(who)
 
 
+def _require_source_login(state: auth_sessions.OriginLogin) -> None:
+    if state is auth_sessions.OriginLogin.UNREADABLE:
+        raise SourceOriginBusy
+    if state is not auth_sessions.OriginLogin.VALID:
+        raise _unavailable()
+
+
+def _require_source_governance(root: Path, who: principal.RequestPrincipal) -> None:
+    try:
+        if who.surface == "mcp" and raw_protection.has_unrestricted_access(root, who, report_unreadable=True):
+            return
+    except raw_protection.AuthorityUnreadable:
+        raise SourceOriginBusy from None
+    raise _unavailable()
+
+
+async def _check_source_authority(root: Path, who: principal.RequestPrincipal) -> None:
+    _require_source_governance(root, who)
+    _require_source_login(await auth_sessions.origin_login_state(who, require_owner=True))
+
+
 def prepare_upload(
     vault_root: Path, *, lane: str, expected_sha256: str,
     base_url: str | None = None, max_bytes: int | None = None, import_identity: str | None = None,
+    size_bytes: int | None = None, held_only: bool = False,
 ) -> dict:
-    """Issue one held-byte handoff; the caller's current session owns its result."""
+    """Issue one upload handoff; the caller's current session owns its result."""
     async def prepare():
         from . import source_imports
         from .client_artifacts import fetch_budget
@@ -198,8 +238,29 @@ def prepare_upload(
             if cloud:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
             raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this transport has no verified HTTP session; use a personal HTTP MCP connection")
-        if not await _active(vault_root, who):
+        configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
+        limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError("INVALID_UPLOAD_HANDOFF: max_bytes must be positive")
+            limit = min(limit, max_bytes)
+        if limit <= 0:
             raise _unavailable()
+        if size_bytes is not None and (lane != "source" or type(size_bytes) is not int or size_bytes < 0):
+            raise ValueError("INVALID_UPLOAD_HANDOFF: size_bytes must be a nonnegative Source size")
+        large_source = size_bytes is not None and size_bytes > limit
+        resumable = large_source and not (cloud or held_only or import_key is not None)
+        if resumable:
+            await _check_source_authority(vault_root, who)
+        elif not await _active(vault_root, who):
+            raise _unavailable()
+        if size_bytes is not None and large_source:
+            if not resumable:
+                raise ValueError(f"TOO_LARGE: this handoff holds at most {limit:,} bytes")
+            session_limit = upload_sessions.max_bytes_from_env()
+            if size_bytes > session_limit:
+                raise ValueError(f"TOO_LARGE: a Source session holds at most {session_limit:,} bytes")
+            limit = size_bytes
         route = None
         if cloud:
             # The gateway's capsule names its own fixed endpoint and bounds the ticket's life.
@@ -213,23 +274,24 @@ def prepare_upload(
             if not base:
                 raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this MCP session has no HTTP upload listener")
             endpoint = upload_endpoint(base + "/upload")
-        configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
-        limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)
-        if max_bytes is not None:
-            if type(max_bytes) is not int or max_bytes <= 0:
-                raise ValueError("INVALID_UPLOAD_HANDOFF: max_bytes must be positive")
-            limit = min(limit, max_bytes)
-        if limit <= 0:
-            raise _unavailable()
         binding = held_uploads.principal_binding(who)
         if binding is None:
             raise _unavailable()
         # Lowercase hex survives the terminal scrubber without reducing the ticket's 256-bit entropy.
         secret = secrets.token_hex(_TICKET_BYTES)
-        token = cloud_origin.handoff_token(route, secret) if route is not None else TOKEN_PREFIX + secret
-        # Named before the record exists, so a lane whose steps cannot be named leaves no ticket behind.
-        steps = _import_steps(token, endpoint) if lane == held_uploads.IMPORT_LANE else _file_steps(endpoint, lane)
-        store = private_state.store(vault_root, STORE_DIRNAME)
+        if route is not None:
+            token = cloud_origin.handoff_token(route, secret)
+        else:
+            token = (RESUMABLE_PREFIX if resumable else TOKEN_PREFIX) + secret
+        # Name the next step before writing a ticket.
+        if resumable:
+            steps = [{"step": "send", "text": "Use exomem attach with this handoff file and the Source original. "
+                      "The client resumes the upload and returns the verified Source receipt."}]
+        elif lane == held_uploads.IMPORT_LANE:
+            steps = _import_steps(token, endpoint)
+        else:
+            steps = _file_steps(endpoint, lane)
+        store = private_state.store(vault_root, _SOURCE_TICKET_STORE if resumable else STORE_DIRNAME)
         with FileLock(store / ".lock"):
             now = _now()
             count = 0
@@ -257,12 +319,14 @@ def prepare_upload(
                 "expires": expires, "lane": lane,
                 "expected_sha256": expected, "max_bytes": limit,
                 **({"import_key": import_key} if import_key is not None else {}),
+                **({"size_bytes": size_bytes} if resumable else {}),
             }, temp_suffix=".part")
         return {
             "token": token, "upload_url": endpoint,
-            "ttl_seconds": ttl, "hold": True, "lane": lane,
+            "ttl_seconds": ttl, "hold": not resumable, "lane": lane,
             "expected_sha256": expected, "max_bytes": limit,
             "handoff_status": "handoff_prepared", "committed": False, "next": steps,
+            **({"size_bytes": size_bytes, "resumable": upload_sessions.handoff(endpoint.removesuffix("/upload"), lane=lane)} if resumable else {}),
         }
 
     try:
@@ -275,12 +339,15 @@ def prepare_upload(
         return pool.submit(context.run, lambda: asyncio.run(prepare())).result()
 
 
-async def claim_upload(vault_root: Path, token: str) -> dict:
-    """Consume a ticket before reading a request body, or give one content-free refusal."""
-    secret = parse_ticket(token)
+async def claim_upload(
+    vault_root: Path, token: str, *, resumable: bool = False, size_bytes: int | None = None, sha256: str | None = None,
+    admit: Callable[[principal.RequestPrincipal], Awaitable[None]] | None = None,
+) -> dict:
+    """Consume the ticket before byte receipt, after delegated admission if supplied."""
+    secret = parse_ticket(token, resumable=resumable)
     if secret is None:
         raise _unavailable()
-    store = private_state.store(vault_root, STORE_DIRNAME)
+    store = private_state.store(vault_root, _SOURCE_TICKET_STORE if resumable else STORE_DIRNAME)
     key = hashlib.sha256(secret.encode("ascii")).hexdigest()
     path = store / f"{key}.json"
     with FileLock(store / ".lock"):
@@ -290,25 +357,65 @@ async def claim_upload(vault_root: Path, token: str) -> dict:
             record = json.loads(path.read_text(encoding="utf-8"))
             who = upload_tokens._principal_from_values(dict(record["principal"]))
             validate_sha256(record["expected_sha256"])
+            bound_size = record["max_bytes"]
+            if resumable:
+                if (record["lane"] != "source" or record["size_bytes"] != bound_size or size_bytes != bound_size
+                        or sha256 != record["expected_sha256"] or not raw_protection.is_owner(who)):
+                    raise _unavailable()
+                maximum = upload_sessions.max_bytes_from_env()
+            else:
+                maximum = MAX_BYTES
+                if "size_bytes" in record:
+                    raise _unavailable()
             if (not math.isfinite(float(record["expires"])) or float(record["expires"]) <= _now()
                     or record["deployment"] != artifact_recovery.deployment(vault_root)
                     or record["binding"] != held_uploads.principal_binding(who)
                     or record["lane"] not in HANDOFF_LANES
-                    or type(record["max_bytes"]) is not int
-                    or not 0 < record["max_bytes"] <= MAX_BYTES):
+                    or type(bound_size) is not int
+                    or not 0 < bound_size <= maximum):
                 raise _unavailable()
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             raise _unavailable() from None
-    if not await _active(vault_root, who):
+    if resumable:
+        await _check_source_authority(vault_root, who)
+        if admit is not None:
+            await admit(who)
+    elif not await _active(vault_root, who):
         raise _unavailable()
     with FileLock(store / ".lock"):
         try:
             if json.loads(path.read_text(encoding="utf-8")) != record or float(record["expires"]) <= _now():
                 raise _unavailable()
             path.unlink()
+        except (OSError, ValueError, KeyError, TypeError):
+            raise _unavailable() from None
+        try:
             # Refuse before accepting bytes if consumption cannot survive a crash;
             # otherwise replay can recreate a cancelled import's upload identity.
             private_state.sync_directory(store)
-        except (OSError, ValueError, KeyError, TypeError):
+        except OSError:
+            if resumable:
+                raise SourceTicketSpent(TICKET_UNUSABLE_REASON) from None
             raise _unavailable() from None
-    return {**record, "principal": who, "nonce": secret}
+    return {**record, "principal": who, "nonce": secret,
+            **({"source_handoff": {"principal": record["principal"], "binding": record["binding"],
+                                  "deployment": record["deployment"], "ticket_sha256": key}} if resumable else {})}
+
+
+def source_principal(vault_root: Path, record: dict) -> principal.RequestPrincipal:
+    """Reconstruct a personal Source session's authority from its private, issued record."""
+    try:
+        from .source_capture import validate_sha256
+
+        authority = record["source_handoff"]
+        who = upload_tokens._principal_from_values(dict(authority["principal"]))
+        validate_sha256(authority["ticket_sha256"])
+        if (authority["deployment"] != artifact_recovery.deployment(vault_root)
+                or not authority["binding"] or authority["binding"] != record["binding"]
+                or authority["binding"] != held_uploads.principal_binding(who)):
+            raise _unavailable()
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise _unavailable() from None
+    _require_source_governance(vault_root, who)
+    _require_source_login(auth_sessions.origin_login_state_sync(who, require_owner=True))
+    return who
