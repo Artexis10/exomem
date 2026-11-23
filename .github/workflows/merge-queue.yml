@@ -2,14 +2,15 @@ name: merge queue
 
 # The repository's merge queue (scripts/merge_queue.py has the whole design).
 # Each event can make a queued pull request ready or free the queue for the
-# next batch: auto-merge enabled, a pull request's CI finishing, a batch
-# landing on main, and a queue run's verdict (dispatched from ci.yml). The
-# schedule recovers a run whose wake-up was lost.
+# next batch: auto-merge enabled, a pull request's checks finishing, a batch
+# landing on main, and a queue run's verdict or the controller itself
+# (dispatches). The schedule recovers a run whose wake-up was lost.
 on:
   pull_request_target:
     types: [auto_merge_enabled]
   workflow_run:
-    workflows: [CI]
+    # A pull request's two required checks; the queue takes it once both passed.
+    workflows: [CI, PR title]
     types: [completed]
   push:
     branches: [main]
@@ -19,7 +20,7 @@ on:
 
 jobs:
   advance:
-    # A pull request's CI finishing matters; main's own push runs are covered by the push event.
+    # A pull request's checks finishing matter; main's own push runs are covered by the push event.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request' }}
     # One controller at a time; GitHub keeps the newest waiting job and drops older
     # ones, and each job reads the whole queue again. The group sits on the job so a

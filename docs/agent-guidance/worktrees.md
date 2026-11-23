@@ -74,5 +74,9 @@ runs only its changed tests and the guard modules.
 5. If the status is "failed", fix the cause and push. The queue takes the new head.
 6. If the failure was a flake, run `gh pr merge <number> --disable-auto`, then step 2 again.
 
+A pull request from a fork cannot join the queue, because its code would run
+with this repository's write token before it lands. Push its branch to this
+repository and open the pull request from there.
+
 A plain `gh pr merge` without `--auto` is refused while the status is missing.
 Auto-merge lands the pull request when the queue passes it.

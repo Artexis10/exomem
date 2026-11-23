@@ -121,17 +121,20 @@ def test_a_finished_queue_run_sets_each_members_status(kind, members, result, at
         assert all(description.endswith(queue.RERUN) for _, _, description in outcome)
 
 
-def test_a_pass_on_an_older_main_is_withdrawn_and_a_reconcile_passes_without_a_run():
+def test_a_pass_that_did_not_land_is_withdrawn_and_a_reconcile_passes_without_a_run():
     """Catches an old pass landing on a tree no run tested, and a release cut waiting on the queue."""
     main = "d" * 40
     old_pass = _pull(1, status=_status("success", "passed on main ccccccc; tree x", minutes_ago=40))
-    landing = _pull(2, status=_status("success", "passed on main ccccccc; tree x", minutes_ago=2))
-    current = _pull(3, status=_status("success", f"passed on main {main[:7]}; tree y", minutes_ago=40))
+    landing = _pull(2, status=_status("success", f"passed on main {main[:7]}; tree x", minutes_ago=2))
     reconcile = _pull(4, branch="release-reconcile/" + "e" * 40, auto=False)
 
-    assert [pull.number for pull in queue.stale_passes([old_pass, landing, current, reconcile], main, NOW)] == [1]
+    assert [pull.number for pull in queue.stale_passes([old_pass, landing, reconcile], NOW)] == [1]
     assert [pull.number for pull in queue.reconciles([old_pass, reconcile])] == [4]
     assert queue.plan([reconcile], NOW).wait
+    # A fork asking to land is told why it cannot, once.
+    fork = _pull(5, fork=True)
+    told = _pull(6, fork=True, status=_status("failure", "failed: a fork cannot join the queue"))
+    assert [pull.number for pull in queue.forks([fork, told, old_pass])] == [5]
 
 
 def test_a_verdict_refuses_a_run_outside_the_queues_branches(monkeypatch):
@@ -178,15 +181,12 @@ def test_the_candidate_is_the_tree_that_squash_merging_each_pull_request_gives_m
     _git(repository, "init", "-q", "-b", "main")
     (repository / "a.txt").write_text("a\n")
     (repository / "b.txt").write_text("b\n")
-    (repository / ".github/workflows").mkdir(parents=True)
-    (repository / ".github/workflows/ci.yml").write_text("main's workflow\n")
     _git(repository, "add", ".")
     _git(repository, "commit", "-qm", "base")
     main = _git(repository, "rev-parse", "HEAD")
     first = _branch(repository, "first", main, {"a.txt": "a changed\n"})
     second = _branch(repository, "second", main, {"b.txt": "b changed\n"})
     clashing = _branch(repository, "clashing", main, {"a.txt": "a otherwise\n"})
-    workflow = _branch(repository, "workflow", main, {"b.txt": "b from workflow\n", ".github/workflows/ci.yml": "changed\n"})
     monkeypatch.chdir(repository)
     monkeypatch.setattr(queue, "git", lambda *args, env=None: _git(repository, *args, env=env))
 
@@ -204,11 +204,7 @@ def test_the_candidate_is_the_tree_that_squash_merging_each_pull_request_gives_m
     # A clash with a pull request ahead of it defers the change; only a clash with main fails it.
     assert blocked is None
     assert alone is not None
-    # A pull request that changes workflows is still tested, on its code with main's workflows,
-    # because the workflow token cannot push a workflow change.
-    tested = queue.squash(main, main, workflow, "workflow")
-    assert _git(repository, "show", f"{tested}:b.txt") == "b from workflow"
-    assert _git(repository, "show", f"{tested}:.github/workflows/ci.yml") == "main's workflow"
+
 
 
 def test_main_skips_the_shards_only_for_the_tree_the_queue_passed(tmp_path, monkeypatch):
@@ -264,10 +260,10 @@ def test_the_queue_reads_the_gate_and_workflow_names_that_ci_yml_declares():
     import yaml
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
+    title = yaml.safe_load((ROOT / ".github/workflows/pr-title.yml").read_text())
     controller = yaml.safe_load((ROOT / ".github/workflows/merge-queue.yml").read_text())
 
     assert workflow["jobs"]["gate"]["name"] == queue.PR_GATE
-    title = yaml.safe_load((ROOT / ".github/workflows/pr-title.yml").read_text())
     assert [job["name"] for job in title["jobs"].values()] == [queue.TITLE_CHECK]
-    # PyYAML reads the bare `on` key as True.
-    assert controller[True]["workflow_run"]["workflows"] == [workflow["name"]]
+    # PyYAML reads the bare `on` key as True. The controller wakes when either required check finishes.
+    assert controller[True]["workflow_run"]["workflows"] == [workflow["name"], title["name"]]

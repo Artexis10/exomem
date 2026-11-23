@@ -22,8 +22,8 @@ queue's whole state, and main's branch protection requires it:
    request's queue run passed on the same tree, so main's run can skip the core
    and harness shards that would repeat those tests on the same files.
 
-A passed status names the main it was tested on; once main moves on and the
-pull request has not landed, `advance` queues it again. A release reconcile
+A pass that has not landed within MERGE_WAIT goes back into the queue, so it
+never lands later on a tree that no run tested. A release reconcile
 pull request passes without a queue run: it carries release metadata that the
 release cut itself checks, and a cut must not wait on the queue.
 
@@ -36,7 +36,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -50,9 +49,10 @@ from release_evidence import RECONCILE_PREFIX
 #: The queue tests only a pull request that can land once the queue passes it.
 PR_GATE = "required CI gate"
 TITLE_CHECK = "Conventional Commit title"
-#: GitHub refuses the workflow token a push that changes workflow files, so a
-#: candidate keeps main's workflows and main's push run tests the pull request's.
-WORKFLOWS = ".github/workflows"
+#: GitHub refuses the workflow token a push that changes workflow files, and tests
+#: read those files, so such a pull request passes without a queue run and main's
+#: push run tests it.
+WORKFLOWS = ".github/workflows/"
 #: A batch's cap. A failed batch costs one retest per member.
 BATCH_LIMIT = 4
 #: A queue run takes about 25 minutes. A testing status older than this lost its run.
@@ -182,19 +182,24 @@ def _is(status: Status | None, state: str, token: str) -> bool:
     return status is not None and status.state == state and status.description.startswith(token)
 
 
-def stale_passes(pulls: list[PullRequest], main: str, now: datetime) -> list[PullRequest]:
-    """Open pull requests whose pass names an older main and did not land in time.
+def stale_passes(pulls: list[PullRequest], now: datetime) -> list[PullRequest]:
+    """Open pull requests whose pass did not land in time.
 
-    Such a pass would let the pull request land on a tree no queue run tested.
+    Such a pass would let the pull request land later, during another batch or
+    on a newer main, on a tree no queue run tested.
     """
     return [
         pull
         for pull in pulls
         if not pull.branch.startswith(RECONCILE_PREFIX)
         and _is(pull.queue, "success", PASSED)
-        and not pull.queue.description.startswith(f"{PASSED} on main {main[:7]}")
         and now - pull.queue.created >= MERGE_WAIT
     ]
+
+
+def forks(pulls: list[PullRequest]) -> list[PullRequest]:
+    """Fork pull requests asking to land that have not been told why they cannot."""
+    return [pull for pull in pulls if pull.fork and pull.auto_merge and not _is(pull.queue, "failure", FAILED)]
 
 
 def reconciles(pulls: list[PullRequest]) -> list[PullRequest]:
@@ -256,22 +261,11 @@ def changed_paths(base: str, head: str) -> list[str]:
     return [p for p in git("diff", "--name-only", "--no-renames", "-z", merge_base, head).split("\0") if p]
 
 
-def with_workflows_of(tree: str, source: str) -> str:
-    """`tree` with `source`'s workflow directory in place of its own."""
-    with tempfile.TemporaryDirectory() as scratch:
-        env = {**os.environ, "GIT_INDEX_FILE": os.path.join(scratch, "index")}
-        git("read-tree", tree, env=env)
-        git("rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", WORKFLOWS, env=env)
-        git("read-tree", f"--prefix={WORKFLOWS}/", f"{source}:{WORKFLOWS}", env=env)
-        return git("write-tree", env=env)
-
-
 def squash(tip: str, main: str, head: str, message: str) -> str | None:
     """The commit that applies `head`'s change onto `tip`, as a squash merge would, or None on a conflict.
 
     The change is `head` against its merge base with main, the diff GitHub's
-    squash merge applies, so the candidate's tree is the tree main gets. The
-    candidate keeps main's workflow files (see WORKFLOWS).
+    squash merge applies, so the candidate's tree is the tree main gets.
     """
     merge_base = git("merge-base", main, head)
     result = subprocess.run(
@@ -282,8 +276,7 @@ def squash(tip: str, main: str, head: str, message: str) -> str | None:
     if result.returncode == 1:
         return None
     result.check_returncode()
-    tree = with_workflows_of(result.stdout.splitlines()[0], main)
-    return git("commit-tree", tree, "-p", tip, "-m", message)
+    return git("commit-tree", result.stdout.splitlines()[0], "-p", tip, "-m", message)
 
 
 def run_id(url: str) -> str:
@@ -299,16 +292,26 @@ def rerun_failed_jobs(pulls: list[PullRequest]) -> None:
             pending.setdefault(pull.queue.target_url, []).append(pull)
     for url, members in pending.items():
         identifier = run_id(url)
-        # The verdict job asks for the rerun as the run's last step; the run finishes seconds later.
-        for _ in range(30):
-            if api(f"actions/runs/{identifier}")["status"] == "completed":
-                break
-            time.sleep(10)
-        run("gh", "run", "rerun", identifier, "--failed", "--repo", repository())
+        try:
+            # The verdict job asks for the rerun as the run's last step; the run finishes seconds later.
+            for _ in range(30):
+                if api(f"actions/runs/{identifier}")["status"] == "completed":
+                    break
+                time.sleep(10)
+            run("gh", "run", "rerun", identifier, "--failed", "--repo", repository())
+        except subprocess.CalledProcessError as error:
+            # The testing status times out and queues the members again; the rest of the queue moves on.
+            print(f"Could not rerun run {identifier}: {error.stderr}", file=sys.stderr)
+            continue
         for pull in members:
             description = pull.queue.description.removesuffix(RERUN).rstrip(": ")
             set_status(pull.head, "pending", description, url)
         print(f"Reran the failed jobs of run {identifier}.")
+
+
+def wake() -> None:
+    """Start another controller run, which reads the statuses this one just wrote."""
+    run("gh", "workflow", "run", "merge-queue.yml", "--repo", repository(), "--ref", "main")
 
 
 def advance() -> int:
@@ -323,11 +326,14 @@ def advance() -> int:
     for pull in reconciles(pulls):
         set_status(pull.head, "success", f"{PASSED} on main {main[:7]} without a queue run: release metadata that the cut checks")
         print(f"#{pull.number} passed without a queue run: a release reconcile.")
-    for pull in stale_passes(pulls, main, now):
-        set_status(pull.head, "pending", f"{QUEUED}: main moved on after it passed")
-        print(f"#{pull.number} is queued again: main moved on after it passed.")
-    if any(stale_passes(pulls, main, now)) or any(reconciles(pulls)):
-        # The next run reads the statuses just written.
+    for pull in stale_passes(pulls, now):
+        set_status(pull.head, "pending", f"{QUEUED}: it passed but did not land in time")
+        print(f"#{pull.number} is queued again: it passed but did not land in time.")
+    for pull in forks(pulls):
+        set_status(pull.head, "failure", f"{FAILED}: a fork cannot join the queue; push the branch to this repository")
+        print(f"#{pull.number} is a fork and cannot join the queue.")
+    if stale_passes(pulls, now) or reconciles(pulls):
+        wake()
         return 0
 
     decision = plan(pulls, now, requeued)
@@ -348,10 +354,16 @@ def advance() -> int:
             set_status(head, "failure", f"{FAILED}: conflicts with main; rebase onto main")
             print(f"#{pull.number} conflicts with main.")
             continue
-        if docs_only(changed_paths(main, head)):
+        paths = changed_paths(main, head)
+        bypass = ""
+        if docs_only(paths):
             # Only docs-marked tests read these paths, and the pull request's own CI ran them.
-            set_status(head, "success", f"{PASSED} on main {main[:7]} without a queue run: a docs-only change")
-            print(f"#{pull.number} passed without a queue run: a docs-only change.")
+            bypass = "a docs-only change"
+        elif any(path.startswith(WORKFLOWS) for path in paths):
+            bypass = "it changes workflows, which the queue cannot push; main's push run tests it"
+        if bypass:
+            set_status(head, "success", f"{PASSED} on main {main[:7]} without a queue run: {bypass}")
+            print(f"#{pull.number} passed without a queue run: {bypass}.")
             bypassed = True
         else:
             testable.append(pull)
@@ -430,7 +442,7 @@ def verdict() -> int:
     outcome = verdicts(kind, members, os.environ["RESULT"], attempt, tree, base)
     for head, state, description in outcome:
         set_status(head, state, description, url)
-    run("gh", "workflow", "run", "merge-queue.yml", "--repo", repository(), "--ref", "main")
+    wake()
     if all(not description.endswith(RERUN) for _, _, description in outcome):
         try:
             api(f"git/refs/heads/{branch}", method="DELETE")
