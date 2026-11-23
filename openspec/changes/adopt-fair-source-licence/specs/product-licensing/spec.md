@@ -2,7 +2,7 @@
 
 ### Requirement: Each shipped artifact declares one licence expression
 
-Every artifact published from this repository SHALL declare one SPDX licence expression covering all the code it ships. The repository licence files, the package metadata, the image labels and the README licence map SHALL agree on that expression for the same artifact.
+Every artifact published from this repository SHALL declare one SPDX licence expression covering the code from this repository that it ships. Third-party code it ships keeps its own licence and notices. The repository licence files, the package metadata, the image labels and the README licence map SHALL agree on that expression for the same artifact.
 
 #### Scenario: The declarations agree
 
@@ -52,7 +52,7 @@ A version made available after the licence change, and every image published for
 #### Scenario: Scanning a release image
 
 - **WHEN** the code that the product imports or links in a published release image is listed with its licences
-- **THEN** none is GPL or AGPL licensed
+- **THEN** none is licensed only under GPL or AGPL without a linking exception
 - **AND** each LGPL library is a separate shared object
 
 #### Scenario: Contributed code licensed only under the old terms
@@ -60,6 +60,15 @@ A version made available after the licence change, and every image published for
 - **WHEN** the licence change is cut
 - **THEN** no line contributed under AGPL-3.0-or-later by a contributor who has not signed the agreement remains in the product
 - **AND** no line remains that carries such a contribution's expression
+
+### Requirement: Licence choices and linking exceptions are recorded
+
+A dependency offered under a choice of licences SHALL pass the copyleft constraint when at least one option is not strong copyleft, and the scan record SHALL name the licence elected. A library under a linking exception, such as the GCC runtime libraries, SHALL pass wherever it ships, including inside a dependency wheel, and the record SHALL list it.
+
+#### Scenario: A dual-licensed dependency
+
+- **WHEN** a dependency offered under the Artistic License or GPL is in the product's imported code
+- **THEN** the scan passes it and records the Artistic License as elected
 
 ### Requirement: The operating-system layer is recorded, not combined
 
@@ -72,12 +81,18 @@ Separate programs in an image's operating-system layer, such as the shell, core 
 
 ### Requirement: Removing a copyleft dependency keeps user-visible behaviour
 
-Replacing a dependency to meet the licence constraint SHALL NOT change what users get. Text extraction, the OCR fallback for scanned pages, document identity evidence, the deployment profile the doctor detects, HEIF decoding and audio and video decoding SHALL keep their behaviour. Their failure reasons SHALL stay distinct outcomes.
+Replacing a dependency to meet the licence constraint SHALL NOT change what users get. Text extraction, the OCR fallback for scanned pages, document identity evidence, the deployment profile the doctor detects, HEIF decoding and audio and video decoding SHALL keep their behaviour. Their failure reasons, including memory exhaustion, SHALL stay distinct outcomes. A job SHALL never complete with part of its content missing because a resource failed.
 
 #### Scenario: A scanned PDF after the PDF library change
 
 - **WHEN** a PDF whose pages have no text layer is ingested with OCR switched on
 - **THEN** each page is rendered and read by OCR as before
+
+#### Scenario: A page that cannot be rendered
+
+- **WHEN** rendering or reading a page fails because memory runs out or the renderer errors
+- **THEN** the job ends as a memory stop where that can be told apart, and otherwise as a named failure
+- **AND** it never completes as an extraction with that page's text missing
 
 #### Scenario: A video codec after the codec layer change
 
