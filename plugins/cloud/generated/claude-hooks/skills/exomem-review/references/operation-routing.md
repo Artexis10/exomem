@@ -87,7 +87,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `upload_url`, open the prefilled browser upload form or give its URL to the user for a
   manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
-  (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
+  (Whisper), OCRs images (Tesseract), reads PDFs (PDFium), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),
   and CLIP-embeds images and per-keyframe video frames for visual search — all
   server-side after upload, filling an embedded sidecar so any upload becomes

@@ -624,7 +624,7 @@ cannot be undone.
   `filename`, `description`, and **`text`**.
   **Searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
-  (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
+  (PDFium), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
   txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
   frames for visual search. It fills an embedded sidecar so the binary becomes
   findable by content. You *may* still pass a `text` field to supply your own
