@@ -639,8 +639,8 @@ def _offer_learning_instruction(
         )
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
-            "  Setup keeps it between Evermatter markers. Delete that block, or run "
-            "`exomem install-hook --uninstall --client all`, to remove it."
+            "  Setup keeps it between the `exomem learning instruction` markers. Delete that "
+            "block, or run `exomem install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"

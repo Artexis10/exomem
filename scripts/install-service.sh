@@ -743,7 +743,7 @@ fi
 
 INSTALLED_VERSION="$(exomem_installed_version "$VENV_PYTHON" || true)"
 [[ -n "$INSTALLED_VERSION" ]] \
-    || die "target interpreter has no importable Evermatter version; service remains stopped"
+    || die "target interpreter has no installed evermatter or exomem distribution; service remains stopped"
 
 render_launchd_plist() {
     [[ -f "$PLIST_SRC" ]] || die "launchd template not found: $PLIST_SRC"
