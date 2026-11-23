@@ -10,6 +10,8 @@ A governed move runs one preflight for each step. The preflight builds the corpu
 
 `_evaluate_relocation` sets the flag for every page that it judges. `ProjectedMoves.refuse_blocked` calls the same function, so a relocation and its undo pass or refuse by one rule.
 
+The rule also reaches a linker withheld from other audiences. The owner may write such a page, so its move rewrites a withheld linker whose old debt the rewrite keeps, and no longer refuses for that debt. A linker in an append-only tree, or one that the rewrite gives a new error key, still refuses the owner's move: the owner never gets a restricted writer's skip. A restricted writer still leaves every withheld linker unchanged and commits. Where a caller may write a withheld linker that it cannot see, `move_file` skips the linker only when the rewrite adds an error key; old debt alone no longer causes the skip.
+
 ### An older page follows its lineage back to the baseline
 
 The activation manifest matches a page without an exomem_id by its path and its source hash. A governed move changes the path and appends a `moved_from` entry, so the hash changes too. `page_lineage.remove_latest` gives back the exact bytes that the move found. The grandfathering check removes the page's lineage entries one at a time, newest first, and asks the manifest about each earlier path with the hash of the bytes at that point. It reads the page only when the page has no exomem_id, records lineage, and fails the direct check.
