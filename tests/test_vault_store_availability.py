@@ -49,6 +49,13 @@ def _enter_store_mode(vault, stored_only=None):
             migrate.create_owner_schema(tx)
             tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
+            # A release from before the derivation queue derived each page's rows inside the page's
+            # commit. This release's commit queues them, so the queue stands in until they are derived.
+            queueless = tx.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'store_derivation_queue'"
+            ).fetchone() is None
+            if queueless:
+                schema._migrate_to_20(tx)
         # In store mode a page read answers from the store, so the pages must be there.
         pages = tuple(
             write.PagePut(owned.rel, (stored_only or {}).get(owned.rel, (vault / owned.rel).read_bytes()),
@@ -60,6 +67,11 @@ def _enter_store_mode(vault, stored_only=None):
             CollectionWriter(vault, handle),
             write.StoreChange(write.Origin.MIGRATION, "test fixture", puts=pages),
         )
+        if queueless:
+            # The earlier release left every row derived and no queue behind.
+            with handle.transaction() as tx:
+                assert tx.execute("SELECT COUNT(*) FROM store_derivation_queue").fetchone() == (0,)
+                tx.execute("DROP TABLE store_derivation_queue")
     state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     return vault
 
