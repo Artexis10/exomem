@@ -9,5 +9,5 @@
 
 services:
   exomem:
-    image: ghcr.io/artexis10/exomem:cuda
+    image: ghcr.io/artexis10/evermatter:cuda
     gpus: all

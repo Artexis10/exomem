@@ -96,7 +96,7 @@ def test_release_workflow_publishes_cuda_tags() -> None:
 
     assert "target: cuda" in text
     assert "platforms: linux/amd64" in text
-    assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda"' in text
+    assert '"cuda ghcr.io/artexis10/exomem:$version-cuda cuda ghcr.io/artexis10/evermatter"' in text
 
 
 def test_release_builds_cloud_images_natively_without_discovery_tags() -> None:
@@ -211,8 +211,8 @@ def test_compose_overrides_select_cpu_ml_and_cuda() -> None:
     ml = _read("compose.ml.yaml")
     cuda = _read("compose.cuda.yaml")
 
-    assert "image: ghcr.io/artexis10/exomem:ml" in ml
-    assert "image: ghcr.io/artexis10/exomem:cuda" in cuda
+    assert "image: ghcr.io/artexis10/evermatter:ml" in ml
+    assert "image: ghcr.io/artexis10/evermatter:cuda" in cuda
     assert "gpus: all" in cuda
     assert "EXOMEM_MODE=performance" in cuda
 

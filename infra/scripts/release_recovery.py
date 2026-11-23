@@ -102,6 +102,17 @@ def project(tag: str) -> dict:
     return tomllib.loads(run("git", "show", f"{tag}:pyproject.toml"))["project"]
 
 
+def package_names(package: dict) -> tuple[str, ...]:
+    # The Evermatter rename (D3) publishes the same release twice: once under
+    # the new distribution name and once under `exomem` so existing installs
+    # keep resolving. Tags cut before the rename name `exomem` directly and
+    # publish that one distribution only.
+    names = [package["name"]]
+    if package["name"] == "evermatter":
+        names.append("exomem")
+    return tuple(names)
+
+
 def distribution_kind(filename: str, package: str, version: str) -> str | None:
     try:
         if filename.endswith(".whl"):
@@ -115,9 +126,15 @@ def distribution_kind(filename: str, package: str, version: str) -> str | None:
     return kind if name == canonicalize_name(package) and parsed == Version(version) else None
 
 
-def distributions_complete(names, package: str, version: str) -> bool:
-    # These are the two distribution formats required by the release contract.
-    return {distribution_kind(name, package, version) for name in names} >= {"wheel", "sdist"}
+def distributions_complete(names, packages: str | tuple[str, ...], version: str) -> bool:
+    # These are the two distribution formats required by the release contract,
+    # for every published distribution name.
+    if isinstance(packages, str):
+        packages = (packages,)
+    return all(
+        {distribution_kind(name, package, version) for name in names} >= {"wheel", "sdist"}
+        for package in packages
+    )
 
 
 def missing_distributions(files: list[Path], urls: list[dict]) -> list[Path]:
@@ -141,6 +158,29 @@ def pypi_files(package: str, version: str) -> list[dict]:
         if error.code == 404:
             return []
         raise
+
+
+def release_pypi_files(packages: tuple[str, ...], version: str) -> list[dict]:
+    return [row for package in packages for row in pypi_files(package, version)]
+
+
+def _compat_build(name: str, kind: str, tag: str, directory: Path) -> None:
+    # The compatibility distribution is the same source tree with only its
+    # distribution name rewritten, so both wheels carry identical module files.
+    with tempfile.TemporaryDirectory(prefix=f"{name}-build-") as temporary:
+        archive = Path(temporary) / "source.tar"
+        run("git", "archive", "--output", str(archive), tag)
+        source = Path(temporary) / "source"
+        source.mkdir()
+        shutil.unpack_archive(archive, source)
+        pyproject = source / "pyproject.toml"
+        rewritten, count = re.subn(
+            r'(?m)^name = "[^"]+"', f'name = "{name}"', pyproject.read_text(), count=1
+        )
+        if count != 1:
+            raise ValueError("compatibility build could not rewrite the project name")
+        pyproject.write_text(rewritten)
+        run("uv", "build", f"--{kind}", "--out-dir", str(directory), str(source))
 
 
 def cloud_files(tag: str) -> dict[str, tuple[str, str]]:
@@ -313,19 +353,24 @@ def qualify_python(
         root = Path(temporary)
         original = root / "producer"
         download_artifact(artifact, repository, original)
+        packages = package_names(package)
         files = [
             path
             for path in original.iterdir()
-            if distribution_kind(path.name, package["name"], package["version"])
+            if any(
+                distribution_kind(path.name, name, package["version"]) for name in packages
+            )
         ]
         names = {path.name for path in files}
         official_names = {
             asset["name"]
             for asset in release_assets(tag)
-            if distribution_kind(asset["name"], package["name"], package["version"])
+            if any(
+                distribution_kind(asset["name"], name, package["version"]) for name in packages
+            )
         }
         if (
-            not distributions_complete(names, package["name"], package["version"])
+            not distributions_complete(names, packages, package["version"])
             or official_names != names
         ):
             raise ValueError("official GitHub distributions differ from the complete producer set")
@@ -336,8 +381,11 @@ def qualify_python(
         for observation in range(6):
             urls = [
                 row
-                for row in pypi_files(package["name"], package["version"])
-                if distribution_kind(row["filename"], package["name"], package["version"])
+                for row in release_pypi_files(packages, package["version"])
+                if any(
+                    distribution_kind(row["filename"], name, package["version"])
+                    for name in packages
+                )
             ]
             missing = missing_distributions(files, urls)
             if not missing:
@@ -457,13 +505,17 @@ def producer_artifacts(
                         source = Path(temporary) / "files"
                         download_artifact(artifact, repository, source)
                         if package is not None:
+                            packages = package_names(package)
                             files = [
                                 p
                                 for p in source.iterdir()
-                                if distribution_kind(p.name, package["name"], package["version"])
+                                if any(
+                                    distribution_kind(p.name, name, package["version"])
+                                    for name in packages
+                                )
                             ]
                             if not distributions_complete(
-                                [p.name for p in files], package["name"], package["version"]
+                                [p.name for p in files], packages, package["version"]
                             ):
                                 continue
                             if any(
@@ -481,6 +533,7 @@ def producer_artifacts(
 
 def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
     package = project(tag)
+    packages = package_names(package)
     version = package["version"]
     if Version(version) != Version(tag.removeprefix("v")):
         raise ValueError("package version differs from release tag")
@@ -488,11 +541,13 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
     if not dry_run:
         assets = release_assets(tag)
         names = [
-            a["name"] for a in assets if distribution_kind(a["name"], package["name"], version)
+            a["name"]
+            for a in assets
+            if any(distribution_kind(a["name"], name, version) for name in packages)
         ]
         download_release(tag, names, directory)
-        for row in pypi_files(package["name"], version):
-            if not distribution_kind(row["filename"], package["name"], version):
+        for row in release_pypi_files(packages, version):
+            if not any(distribution_kind(row["filename"], name, version) for name in packages):
                 continue
             target = directory / row["filename"]
             if not target.exists():
@@ -500,7 +555,7 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
             if sha256(target) != row["digests"]["sha256"]:
                 raise ValueError(f"immutable distribution differs: {target.name}")
         if not distributions_complete(
-            [p.name for p in directory.iterdir()], package["name"], version
+            [p.name for p in directory.iterdir()], packages, version
         ):
             producer_artifacts(
                 tag,
@@ -510,21 +565,31 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
                 package=package,
             )
         if any(directory.iterdir()) and not distributions_complete(
-            [p.name for p in directory.iterdir()], package["name"], version
+            [p.name for p in directory.iterdir()], packages, version
         ):
             raise ValueError(
                 "original publication distributions are incomplete; recover the producer artifact"
             )
-    kinds = {distribution_kind(p.name, package["name"], version) for p in directory.iterdir()}
     # uv owns the actual wheel/sdist filenames; never infer Python build tags.
-    for kind in ("wheel", "sdist"):
-        if kind not in kinds:
-            run("uv", "build", f"--{kind}", "--out-dir", str(directory))
-    files = [p for p in directory.iterdir() if distribution_kind(p.name, package["name"], version)]
-    if not distributions_complete([p.name for p in files], package["name"], version):
-        raise ValueError("build did not produce both release distributions")
+    for name in packages:
+        kinds = {
+            distribution_kind(p.name, name, version) for p in directory.iterdir()
+        }
+        for kind in ("wheel", "sdist"):
+            if kind not in kinds:
+                if name == package["name"]:
+                    run("uv", "build", f"--{kind}", "--out-dir", str(directory))
+                else:
+                    _compat_build(name, kind, tag, directory)
+    files = [
+        p
+        for p in directory.iterdir()
+        if any(distribution_kind(p.name, name, version) for name in packages)
+    ]
+    if not distributions_complete([p.name for p in files], packages, version):
+        raise ValueError("build did not produce all release distributions")
     if not dry_run:
-        missing_distributions(files, pypi_files(package["name"], version))
+        missing_distributions(files, release_pypi_files(packages, version))
 
 
 def stage_cloud(tag: str, directory: Path) -> None:
@@ -551,6 +616,7 @@ def upload_missing(tag: str, paths: Iterable[Path]) -> None:
 
 def asset_status(tag: str) -> dict:
     package = project(tag)
+    packages = package_names(package)
     assets = release_assets(tag)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
@@ -559,23 +625,27 @@ def asset_status(tag: str) -> dict:
             a["name"]
             for a in assets
             if a["name"] in expected_cloud
-            or distribution_kind(a["name"], package["name"], package["version"])
+            or any(
+                distribution_kind(a["name"], name, package["version"]) for name in packages
+            )
         ]
         download_release(tag, names, directory)
         distributions = [
             p
             for p in directory.iterdir()
-            if distribution_kind(p.name, package["name"], package["version"])
+            if any(
+                distribution_kind(p.name, name, package["version"]) for name in packages
+            )
         ]
         complete = distributions_complete(
-            [p.name for p in distributions], package["name"], package["version"]
+            [p.name for p in distributions], packages, package["version"]
         )
         cloud_complete = all(
             (directory / name).is_file() and sha256(directory / name) == digest
             for name, (_, digest) in expected_cloud.items()
         )
         try:
-            urls = pypi_files(package["name"], package["version"])
+            urls = release_pypi_files(packages, package["version"])
             pypi_complete = complete and not missing_distributions(distributions, urls)
             pypi_state = "present" if pypi_complete else "missing"
         except (OSError, ValueError) as error:
@@ -799,7 +869,7 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
                 )
             complete = all(existing == digest for existing in aliases.values())
             if (
-                entry.get("floating_tag")
+                entry.get("floating_tags")
                 and run(
                     "gh",
                     "api",
@@ -809,7 +879,10 @@ def inspect_images(tag: str, images: dict, directory: Path, *, dry_run: bool) ->
                 )
                 == tag
             ):
-                complete = complete and image_digest(entry["floating_tag"]) == digest
+                complete = complete and all(
+                    image_digest(reference) == digest
+                    for reference in entry["floating_tags"]
+                )
             assets = {a["name"] for a in release_assets(tag)}
             entry["state"] = (
                 "present" if complete and all(p.name in assets for p in files) else "missing"
@@ -861,7 +934,7 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
             if image_digest(reference) != digest:
                 raise ValueError(f"discovery tag digest differs: {reference}")
         if (
-            entry.get("floating_tag")
+            entry.get("floating_tags")
             and run(
                 "gh",
                 "api",
@@ -871,19 +944,19 @@ def finish_images(tag: str, images: dict, directory: Path) -> None:
             )
             == tag
         ):
-            reference = entry["floating_tag"]
-            run(
-                "docker",
-                "buildx",
-                "imagetools",
-                "create",
-                "--prefer-index=false",
-                "--tag",
-                reference,
-                f"{repository}@{digest}",
-            )
-            if image_digest(reference) != digest:
-                raise ValueError(f"floating tag digest differs: {reference}")
+            for reference in entry["floating_tags"]:
+                run(
+                    "docker",
+                    "buildx",
+                    "imagetools",
+                    "create",
+                    "--prefer-index=false",
+                    "--tag",
+                    reference,
+                    f"{repository}@{digest}",
+                )
+                if image_digest(reference) != digest:
+                    raise ValueError(f"floating tag digest differs: {reference}")
     if incomplete:
         raise ValueError(
             f"release incomplete; original producer evidence unavailable: {', '.join(incomplete)}"
@@ -1007,20 +1080,27 @@ def main() -> None:
         stage_cloud(args.tag, args.directory)
     elif args.command == "upload":
         package = project(args.tag)
+        packages = package_names(package)
         cloud = cloud_files(args.tag)
         upload_missing(
             args.tag,
             (
                 path
                 for path in args.directory.iterdir()
-                if distribution_kind(path.name, package["name"], package["version"])
+                if any(
+                    distribution_kind(path.name, name, package["version"])
+                    for name in packages
+                )
                 or path.name in cloud
             ),
         )
     elif args.command == "pypi":
         package = project(args.tag)
         files = list(args.directory.iterdir())
-        missing = missing_distributions(files, pypi_files(package["name"], package["version"]))
+        missing = missing_distributions(
+            files,
+            release_pypi_files(package_names(package), package["version"]),
+        )
         destination = args.directory / "missing"
         destination.mkdir()
         for path in missing:

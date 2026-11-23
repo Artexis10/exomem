@@ -6,4 +6,4 @@
 
 services:
   exomem:
-    image: ghcr.io/artexis10/exomem:ml
+    image: ghcr.io/artexis10/evermatter:ml

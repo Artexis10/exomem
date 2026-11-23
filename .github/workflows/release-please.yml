@@ -183,24 +183,31 @@ jobs:
             track "MCP registry" "$server $version" "publishing disabled"
           fi
 
-          # These targets and tags are the closed Docker release contract.
+          # These targets and tags are the closed Docker release contract. Every
+          # image is published under its Evermatter name AND its exomem name from
+          # the one build's digest (rename D3): `ref` keeps the repository the
+          # attestations and admission contracts name, and the alias column adds
+          # the second repository's immutable and floating tags.
           image_list=(
-            "lean ghcr.io/artexis10/exomem:$version latest"
-            "ml ghcr.io/artexis10/exomem:$version-ml ml"
-            "cuda ghcr.io/artexis10/exomem:$version-cuda cuda"
-            "cloud ghcr.io/artexis10/exomem:$version-cloud cloud"
-            "cellctl ghcr.io/artexis10/exomem-cellctl:$version -"
+            "lean ghcr.io/artexis10/exomem:$version latest ghcr.io/artexis10/evermatter"
+            "ml ghcr.io/artexis10/exomem:$version-ml ml ghcr.io/artexis10/evermatter"
+            "cuda ghcr.io/artexis10/exomem:$version-cuda cuda ghcr.io/artexis10/evermatter"
+            "cloud ghcr.io/artexis10/exomem:$version-cloud cloud ghcr.io/artexis10/evermatter"
+            "cellctl ghcr.io/artexis10/exomem-cellctl:$version - ghcr.io/artexis10/evermatter-cellctl"
           )
           images='{}'
           for entry in "${image_list[@]}"; do
-            read -r name ref floating <<<"$entry"
+            read -r name ref floating alias <<<"$entry"
             repository=${ref%:*}
             commit_tag="$repository:$source_commit-$name"
             [[ "$name" == cellctl ]] && commit_tag="$repository:$source_commit"
-            floating_tag="$repository:$floating"
-            [[ "$floating" == - ]] && floating_tag=""
-            images=$(jq -c --arg name "$name" --arg ref "$ref" --arg commit "$commit_tag" --arg floating "$floating_tag" \
-              '.[$name] = {ref: $ref, immutable_tags: [$ref, $commit], floating_tag: $floating, publish: false}' <<<"$images")
+            alias_ref="$alias:${ref#*:}"
+            alias_commit="$alias:${commit_tag#*:}"
+            floating_tags="[]"
+            [[ "$floating" != - ]] && floating_tags=$(jq -cn --arg a "$repository:$floating" --arg b "$alias:$floating" '[$a, $b]')
+            images=$(jq -c --arg name "$name" --arg ref "$ref" --arg commit "$commit_tag" \
+              --arg alias_ref "$alias_ref" --arg alias_commit "$alias_commit" --argjson floats "$floating_tags" \
+              '.[$name] = {ref: $ref, immutable_tags: [$ref, $commit, $alias_ref, $alias_commit], floating_tags: $floats, publish: false}' <<<"$images")
           done
           if [[ "$DRY_RUN" == true || "$GHCR_ENABLED" == true ]]; then
             arguments=()
