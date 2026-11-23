@@ -1220,7 +1220,7 @@ jobs:
   merge-queue-verdict:
     name: merge queue verdict
     needs: gate
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.queue }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.queue && startsWith(github.ref, 'refs/heads/merge-queue/') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

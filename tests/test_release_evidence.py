@@ -449,3 +449,33 @@ def test_a_merge_queue_dispatch_is_never_full_evidence():
     }
     assert evidence.trusted_full({**run, "head_branch": "main"}, "example/project", 7)
     assert not evidence.trusted_full({**run, "head_branch": "merge-queue/abc-1"}, "example/project", 7)
+
+
+def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status(monkeypatch):
+    """Catches a release cut waiting forever on the merge queue status.
+
+    A release PR lands on its cut branch, which the queue never serves. A reconcile
+    PR lands on main, so it needs the queue's status, and main must require that
+    status from any source: a commit status carries no App identity.
+    """
+    policy = [
+        {"context": "Conventional Commit title", "app_id": 15368},
+        {"context": "merge queue", "app_id": -1},
+        {"context": "required CI gate", "app_id": 15368},
+    ]
+    monkeypatch.setattr(evidence, "main_check_policy", lambda: policy)
+    assert [check["context"] for check in evidence.release_pr_check_policy()] == [
+        "Conventional Commit title",
+        "required CI gate",
+    ]
+
+    def api(path, pages=False):
+        if "check-runs" in path:
+            return [{"check_runs": [
+                {"id": 1, "name": "Conventional Commit title", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+                {"id": 2, "name": "required CI gate", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+            ]}]
+        return [{"statuses": [{"id": 3, "context": "merge queue", "state": "success"}]}]
+
+    monkeypatch.setattr(evidence, "api", api)
+    assert {check["bucket"] for check in evidence.inherited_checks("a" * 40, policy)} == {"pass"}

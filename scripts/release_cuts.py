@@ -204,7 +204,7 @@ def prepare(source: str) -> dict:
         "source": source,
         "branch": branch,
         "predecessor": previous,
-        "policy": evidence.main_check_policy(),
+        "policy": evidence.release_pr_check_policy(),
         "propose": pr is None,
         "merged": bool(pr and pr.get("merged")),
     }
@@ -411,7 +411,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
         "head": head,
         "version": version,
         "predecessor": previous,
-        "policy": evidence.main_check_policy(),
+        "policy": evidence.release_pr_check_policy(),
         "fallback_requested": bool(checkpoint and checkpoint.get("fallback_requested")),
     }
     if checkpoint and checkpoint.get("evidence"):
@@ -457,7 +457,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
     for _ in range(evidence.CHECK_POLLS):
         if not pr.get("merged"):
             evidence.release_pr(pr["number"], source, head)
-        intent["policy"] = evidence.main_check_policy()
+        intent["policy"] = evidence.release_pr_check_policy()
         checks = evidence.inherited_checks(head, intent["policy"])
         if checks is not None:
             if any(check["bucket"] != "pass" for check in checks):

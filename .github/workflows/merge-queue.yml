@@ -17,16 +17,16 @@ on:
   schedule:
     - cron: "*/15 * * * *"
 
-# One controller at a time; GitHub keeps the newest waiting run and drops older
-# ones, and each run reads the whole queue again.
-concurrency:
-  group: merge-queue
-  cancel-in-progress: false
-
 jobs:
   advance:
     # A pull request's CI finishing matters; main's own push runs are covered by the push event.
     if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request' }}
+    # One controller at a time; GitHub keeps the newest waiting job and drops older
+    # ones, and each job reads the whole queue again. The group sits on the job so a
+    # skipped run never takes the waiting slot from a real wake-up.
+    concurrency:
+      group: merge-queue
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -39,8 +39,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
+          # Commits only: merge bases need the history, and trees and blobs load on demand.
           fetch-depth: 0
-          filter: blob:none
+          filter: tree:0
       - name: Start the next batch when the queue is free
         env:
           GH_TOKEN: ${{ github.token }}

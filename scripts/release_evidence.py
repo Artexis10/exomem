@@ -21,8 +21,9 @@ RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
 # The cut controller pushes a release's post-release metadata to main from this branch family.
 RECONCILE_PREFIX = "release-reconcile/"
-# The merge queue's candidate branches (scripts/merge_queue.py BRANCH_PREFIX).
+# The merge queue's candidate branches and its commit status (scripts/merge_queue.py).
 MERGE_QUEUE_PREFIX = "merge-queue/"
+MERGE_QUEUE_CONTEXT = "merge queue"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
 # Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
@@ -324,6 +325,15 @@ def main_check_policy() -> list[dict]:
     if not policy:
         raise ValueError("main has no readable required-check policy; no cut can land")
     return sorted(policy, key=lambda check: (check["context"], check.get("app_id") or -1))
+
+
+def release_pr_check_policy() -> list[dict]:
+    """Main's required checks for a release PR, which lands on its cut branch, not main.
+
+    The merge queue gates only what lands on main and never reads a PR on another
+    base, so its status never appears on a release PR. Full evidence covers that tree.
+    """
+    return [check for check in main_check_policy() if check["context"] != MERGE_QUEUE_CONTEXT]
 
 
 def inherited_checks(head: str, policy: list[dict]) -> list[dict] | None:
