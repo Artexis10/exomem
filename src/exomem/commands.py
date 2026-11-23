@@ -15397,23 +15397,14 @@ _BUSY_INTAKE_COMMANDS = frozenset({
     "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
     "episode_memory", "capture_source", "preserve_evidence", "record_memory", "plan_memory",
 })
-#: Arguments that make a call of a busy-intake command a capture-attempt protocol step. Such a step
-#: must run while its reservation is active, so it keeps the busy refusal instead of queueing.
-# nosemgrep: ep-word-set -- closed tool-schema parameter names of these commands.
-_BUSY_INTAKE_STEP_ARGUMENTS: dict[str, frozenset[str]] = {
-    "capture_source": frozenset({"capture_reservation"}),
-}
-
-
 def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     """Whether the write these JSON `arguments` select may be queued when the boundary is busy.
 
     A grouped command decides per operation (`OperationEntry.queues_when_busy`); a call that
-    matches no write operation keeps the busy refusal.
+    matches no write operation keeps the busy refusal. A capture under a `capture_reservation`
+    never reaches this check: `writer_lease.replay_origin` gives it no replay identity.
     """
     if not command.busy_intake:
-        return False
-    if any(arguments.get(name) is not None for name in _BUSY_INTAKE_STEP_ARGUMENTS.get(command.name, ())):
         return False
     from . import operation_entries
 

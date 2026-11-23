@@ -271,8 +271,8 @@ def test_a_write_the_intake_does_not_accept_keeps_the_busy_refusal(
 def test_a_protocol_step_keeps_the_busy_refusal_while_a_save_of_the_same_command_queues(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A step that answers its caller's next move (an episode prepare against a journal digest, a
-    # capture under a short reservation) would run against moved state if it were applied later.
+    # A step whose reply the caller needs for its next step (an episode prepare), or a capture under a
+    # short reservation, would run against moved state if it were applied later.
     _writer, holder = managers
     monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "1")
     episode = _command("episode_memory")
@@ -284,7 +284,8 @@ def test_a_protocol_step_keeps_the_busy_refusal_while_a_save_of_the_same_command
         assert recap["state"] == "queued"
         with pytest.raises(OpError) as prepare:
             _send(episode, vault, {"action": "prepare", "episode": "ep-0123456789abcdef0123456789abcdef",
-                                   "candidate": "c1", "input_revision": 1, "journal_digest": "d" * 64},
+                                   "candidate": "c1", "proposal": {"route": "no_capture", "alternatives": [], "evidence": [],
+                                                                  "reason": "Covered by an existing note.", "leaves": []}},
                   injected=schema)
         assert prepare.value.code == "MUTATION_BUSY"
         with pytest.raises(OpError) as reserved:

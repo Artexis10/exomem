@@ -91,7 +91,7 @@ class OperationEntry:
     #: A repeat of this write changes nothing more than its first run did. Reads are idempotent already.
     idempotent: bool = False
     #: The service may queue this write when the boundary is busy and apply it later (`write_intake`).
-    #: A protocol step or a job start is False: it must run while its caller still waits on it.
+    #: False for a job start and for a protocol step whose reply the caller needs for its next step.
     queues_when_busy: bool = True
 
     @property
@@ -732,7 +732,7 @@ _REMAINING = {
     )),
     "episode_memory": ("action", (
         _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved"),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
+        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
         _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),
         _row("candidates", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
