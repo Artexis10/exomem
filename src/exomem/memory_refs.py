@@ -731,9 +731,12 @@ class ReferenceIndex:
         for path in lagging:
             raw = underived[path]
             row = None if raw is None else identity_row(self.vault_root, path, raw)
-            if row is not None and row[4] == "valid":
-                ids[path] = row[1]
-        owners = _owners_at(conn, self.vault_root, sorted(set(ids.values())), underived) if ids else {}
+            identifier = None if row is None or row[4] != "valid" else row[1]
+            if identifier is not None:
+                ids[path] = identifier
+        owners = (
+            _owners_at(conn, self.vault_root, sorted(set(ids.values())), underived) if ids else {}
+        )
         for path in lagging:
             held = ids.get(path)
             refs[path] = memory_ref(held) if held is not None and len(owners[held]) == 1 else None
@@ -1795,8 +1798,9 @@ def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | N
         }
         for path, raw in underived.items():
             row = None if raw is None else identity_row(root, path, raw)
-            if row is not None and row[4] == "valid" and row[1].startswith(prefix):
-                found.add(row[1])
+            identifier = None if row is None or row[4] != "valid" else row[1]
+            if identifier is not None and identifier.startswith(prefix):
+                found.add(identifier)
         return tuple(sorted(found))
 
     return _from_store_identities(vault_root, owners)

@@ -132,6 +132,27 @@ def test_pending_rows_never_tell_a_restricted_caller_withheld_from_missing(
     assert "NOT_FOUND" in missing[1]
 
 
+def test_fetch_names_a_withheld_page_as_it_names_an_absent_one(vault: Path) -> None:
+    """`fetch` echoed a withheld page's id as the caller spelled it and an absent page's with the
+    `.md` the suffix rule adds, so a spelling without one told the two apart."""
+    page = "Knowledge Base/Notes/Hidden/withheld-example.md"
+    _write_page(vault, page, memory_refs.new_id())
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    fetch = next(item for item in commands.COMMANDS if item.name == "fetch")
+
+    def refusal() -> str:
+        with request_scope(EXTERNAL), pytest.raises(ValueError) as caught:
+            writer_lease.invoke_command(fetch, vault, id=page.removesuffix(".md"))
+        return str(caught.value)
+
+    withheld = refusal()
+    delete_page(vault, page)
+    missing = refusal()
+
+    assert withheld == missing
+    assert "NOT_FOUND" in missing
+
+
 def _door_arguments(name: str, target: str) -> dict:
     """Each floored door's own spelling of "this one path"."""
     return {

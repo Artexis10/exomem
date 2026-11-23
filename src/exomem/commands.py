@@ -3727,7 +3727,9 @@ def op_fetch(
         stable_ref=snapshot_ref,
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {id}")
+        # The absent branch's own spelling, as in `op_get`: the raw `id` kept a
+        # suffix-less or backslashed spelling that the absent refusal normalizes.
+        raise ValueError(f"NOT_FOUND: file does not exist: {prepared.missing_path}")
     body_for_text = str(released.get("body", ""))
     # Below full disclosure the ladder caps what may be rendered: `annotate_page`
     # has already bounded the body at L5, so honour that ceiling rather than
@@ -6908,7 +6910,8 @@ def op_get_video_frames(
     # Local reads gate before extraction. Cloud's preparation handshake supplies
     # the exact retained source proof before the worker decodes anything.
     if not cloud_cell_module.cloud_mode_enabled() and not egress_module.release_allows_frames(vault_root, path):
-        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+        # `get_frames`' own absent text, so a withheld video reads as a missing one.
+        raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}")
     video_frames_module = _video_frames_module()
     try:
         result = video_frames_module.get_frames(
