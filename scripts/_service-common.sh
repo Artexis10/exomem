@@ -22,7 +22,7 @@ exomem_transition_receipt_path() {
     if [[ -n "${EXOMEM_TRANSITION_RECEIPT_ROOT:-}" ]]; then
         root="$EXOMEM_TRANSITION_RECEIPT_ROOT"
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        root="$HOME/Library/Application Support/Exomem/transitions"
+        root="$HOME/Library/Application Support/Evermatter/transitions"
     else
         root="${XDG_STATE_HOME:-$HOME/.local/state}/exomem/transitions"
     fi
@@ -372,7 +372,7 @@ exomem_start_service() {
 exomem_assert_service_stopped() {
     local captured_pids="$1" ports="$2" service_id="${3:-}" pid port
     exomem_service_is_stopped "$service_id" || {
-        echo "service manager does not prove Exomem stopped; offline migration refused." >&2
+        echo "service manager does not prove Evermatter stopped; offline migration refused." >&2
         return 1
     }
     [[ -n "$captured_pids" ]] || {
@@ -382,7 +382,7 @@ exomem_assert_service_stopped() {
     while IFS= read -r pid; do
         [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
         if exomem_pid_alive "$pid"; then
-            echo "captured Exomem transition pid $pid is still alive; offline migration refused." >&2
+            echo "captured Evermatter transition pid $pid is still alive; offline migration refused." >&2
             return 1
         fi
     done <<< "$captured_pids"
@@ -409,7 +409,7 @@ exomem_assert_stopped_resume_authority() {
         return 1
     fi
     exomem_service_is_stopped "$service_id" || {
-        echo "service manager does not prove Exomem stopped; stopped-transition recovery refused." >&2
+        echo "service manager does not prove Evermatter stopped; stopped-transition recovery refused." >&2
         return 1
     }
     pids="$(exomem_transition_receipt_field \
@@ -436,11 +436,11 @@ exomem_assert_stopped_resume_authority() {
 exomem_assert_service_restarted() {
     local before="${1:-0}" after="${2:-0}"
     if ! [[ "$after" =~ ^[1-9][0-9]*$ ]] || ! exomem_pid_alive "$after"; then
-        echo "no running Exomem worker pid was observed after start." >&2
+        echo "no running Evermatter worker pid was observed after start." >&2
         return 1
     fi
     if [[ "$before" =~ ^[1-9][0-9]*$ && "$before" == "$after" ]]; then
-        echo "Exomem is still running the captured pre-transition pid $before." >&2
+        echo "Evermatter is still running the captured pre-transition pid $before." >&2
         return 1
     fi
 }
@@ -673,7 +673,7 @@ PY
     printf '%s' "$value"
 }
 
-# True when the per-user uv tool registry already owns Exomem.  Looking at the
+# True when the per-user uv tool registry already owns Evermatter.  Looking at the
 # registry, rather than merely `command -v exomem`, avoids taking over an
 # independently managed pip/pipx command in auto mode.
 exomem_uv_tool_has_exomem() {
@@ -693,7 +693,7 @@ exomem_sync_uv_cli() {
             ;;
         auto)
             if ! exomem_uv_tool_has_exomem; then
-                echo "No existing uv-managed Exomem CLI; auto mode will not install one."
+                echo "No existing uv-managed Evermatter CLI; auto mode will not install one."
                 return 0
             fi
             ;;
@@ -739,7 +739,7 @@ exomem_managed_manifest_path() {
     if [[ -n "${EXOMEM_MANAGED_INSTALL_MANIFEST:-}" ]]; then
         printf '%s\n' "$EXOMEM_MANAGED_INSTALL_MANIFEST"
     elif [[ "$(uname -s)" == "Darwin" ]]; then
-        printf '%s\n' "$HOME/Library/Application Support/Exomem/managed-install.json"
+        printf '%s\n' "$HOME/Library/Application Support/Evermatter/managed-install.json"
     else
         printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/exomem/managed-install.json"
     fi

@@ -5,7 +5,7 @@
 The fastest way to try exomem with Claude Code: no `uv`, no Python, no clone.
 
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/exomem:latest --transport stdio
+claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/evermatter:latest --transport stdio
 ```
 
 Replace `/path/to/vault` with your Obsidian/markdown vault's absolute path.
@@ -27,7 +27,7 @@ For an always-on remote deployment (mobile/web access via claude.ai), skip to
 
 `lean` is the default and is what the stdio one-liner above pulls — no torch,
 no model download, matching a fast zero-Python onboarding path. Opt into
-hybrid search with the `ml` tag (`ghcr.io/artexis10/exomem:ml`); the first
+hybrid search with the `ml` tag (`ghcr.io/artexis10/evermatter:ml`); the first
 `find` call downloads the embedding/CLIP model weights into the `/data` volume
 (see below), so later restarts don't re-download them.
 
@@ -38,7 +38,7 @@ docker run --gpus all -i --rm \
   -v "/path/to/vault:/vault" \
   -v exomem-data:/data \
   -e EXOMEM_VAULT_PATH=/vault \
-  ghcr.io/artexis10/exomem:cuda --transport stdio
+  ghcr.io/artexis10/evermatter:cuda --transport stdio
 ```
 
 The CUDA image is **capable**, not **resident by default**. It still boots in
@@ -51,7 +51,7 @@ docker run --gpus all -i --rm \
   -v exomem-data:/data \
   -e EXOMEM_VAULT_PATH=/vault \
   -e EXOMEM_MODE=performance \
-  ghcr.io/artexis10/exomem:cuda --transport stdio
+  ghcr.io/artexis10/evermatter:cuda --transport stdio
 ```
 
 Use `ml` for reproducible hybrid search without NVIDIA runtime. Use native install
@@ -88,8 +88,8 @@ documented in [deployment.md](deployment.md).
    pulls the published image, so no local Python/`uv` install is required:
 
    ```bash
-   git clone https://github.com/Artexis10/exomem.git
-   cd exomem
+   git clone https://github.com/Artexis10/evermatter.git
+   cd evermatter
    cp env.example .env
    ```
 

@@ -171,7 +171,7 @@ def _held(conn, manifest, cid):
 
 
 def _disk_files(root, relative):
-    """Every file below one vault directory, skipping Exomem's own registered scratch."""
+    """Every file below one vault directory, skipping Evermatter's own registered scratch."""
     found, pending = [], [Path(root) / relative]
     while pending:
         try:
@@ -440,7 +440,7 @@ def _require_retire_route(fence_client):
             raise
         raise CollectionStoreError(
             preflight.UPGRADE_REQUIRED, "the writer-lease coordinator cannot retire a collection store fence or read a retired one; "
-            f"upgrade it to Exomem {preflight._running_release()}, the release running here") from error
+            f"upgrade it to Evermatter {preflight._running_release()}, the release running here") from error
 
 
 def _begin(session, manager, fence_client, *, plan_id, why):

@@ -1,12 +1,12 @@
 ---
 name: exomem
-description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
+description: Use Evermatter for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Evermatter, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Evermatter's to govern.
 metadata:
   skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
   version: "0.32.0"
 ---
 
-# Exomem
+# Evermatter
 
 MCP calls use the typed tools shown by discovery; each takes its own fields.
 `inspect_memory` (reads) and `manage_memory` (writes) take `operation`, named
@@ -14,12 +14,12 @@ MCP calls use the typed tools shown by discovery; each takes its own fields.
 for the arguments and one example. REST and CLI calls keep their grouped command
 selectors. Keep file attachments in the top-level `files` field.
 
-Exomem is the connector/MCP; the Knowledge Base is the governed layer inside a
+Evermatter is the connector/MCP; the Knowledge Base is the governed layer inside a
 markdown vault (Obsidian optional). Keep temporary working context in the current
-conversation. Exomem holds durable preferences, feedback, personal baselines,
+conversation. Evermatter holds durable preferences, feedback, personal baselines,
 project knowledge, sourced conclusions, decisions, failures, and proof-bearing records.
 Capture follows the live engagement policy. Use native assistant memory only as
-an explicit fallback when Exomem cannot capture; move durable results when it can.
+an explicit fallback when Evermatter cannot capture; move durable results when it can.
 
 **Sources are immutable. Compiled material is governed. Evidence is preserved.**
 Raw inputs go to `Sources/`; proof-bearing artifacts to `Evidence/`; conclusions
@@ -125,11 +125,11 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -142,7 +142,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a
@@ -156,11 +156,11 @@ Without method continuity, freshly read a method before reusing it.
 An unchanged map does not certify method freshness. Refresh when the task, evidence
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
-## When Exomem is unreachable
+## When Evermatter is unreachable
 
-Exomem is disconnected when tool discovery offers no Exomem tools or only an
-`authenticate` tool, or an Exomem call fails authorization. Tell the user nothing is
-saved and to reconnect Exomem in the app's MCP or connector settings. Never report a
+Evermatter is disconnected when tool discovery offers no Evermatter tools or only an
+`authenticate` tool, or an Evermatter call fails authorization. Tell the user nothing is
+saved and to reconnect Evermatter in the app's MCP or connector settings. Never report a
 save that returned no committed result.
 
 ## Vault skills
@@ -298,7 +298,7 @@ the tool returned it.
 
 Partition durable material into reusable objects, resolve a canonical home for each, and reuse current search results and known sources before a compiled write. Read `references/before-writing.md` before the first compiled write in a session.
 
-## What Exomem does on its own
+## What Evermatter does on its own
 
 Read the active **delegation envelope** in the `read_instructions` reply's `engagement.envelope`.
 Prominence sets participation; the envelope sets authority for each action class.

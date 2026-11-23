@@ -1,6 +1,6 @@
 """Existing-vault adoption report.
 
-``adopt`` is the product-facing companion to ``overview``: it says what Exomem
+``adopt`` is the product-facing companion to ``overview``: it says what Evermatter
 found, what remains untouched, which packs look relevant, and which safe next
 actions are available. The default mode is read-only and must work before
 ``Knowledge Base/`` exists. Write modes are explicit and only write under the
@@ -180,7 +180,7 @@ def _governance(scan: dict) -> dict:
         "governed_path": kb.get("path") if present else None,
         "read_only_input": (
             "All existing files outside the governed Knowledge Base are searchable "
-            "read-only input. Exomem does not rewrite, move, delete, or add "
+            "read-only input. Evermatter does not rewrite, move, delete, or add "
             "frontmatter to them by default."
         ),
     }
@@ -456,7 +456,7 @@ def render_text_source(
         "",
         f"# {title}",
         "",
-        f"> Copied from `{_clean_inline(rel_original)}` by Exomem adoption. The original remains unchanged.",
+        f"> Copied from `{_clean_inline(rel_original)}` by Evermatter adoption. The original remains unchanged.",
         "",
         "## Original Metadata",
         "",
@@ -493,7 +493,7 @@ def render_artifact_source(
         url=None,
         tags=["imported"],
         why_captured=(
-            f"Copied from `{_clean_inline(planned['original_path'])}` by Exomem adoption. "
+            f"Copied from `{_clean_inline(planned['original_path'])}` by Evermatter adoption. "
             "The original remains unchanged."
         ),
         content=add_module._describe_artifact(
@@ -1438,7 +1438,7 @@ def adopt(
         "scope_note": overview_module.SCOPE_NOTE,
         "write_contract": (
             "Default adoption is read-only. Originals stay where they are. "
-            "Governed Exomem writes happen only under Knowledge Base/ after an "
+            "Governed Evermatter writes happen only under Knowledge Base/ after an "
             "explicit save/copy/compile action."
         ),
         "governance": governance,

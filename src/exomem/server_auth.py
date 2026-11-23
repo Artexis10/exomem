@@ -1,4 +1,4 @@
-"""OAuth wiring for Exomem's HTTP transport."""
+"""OAuth wiring for Evermatter's HTTP transport."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class CloudCellAccessToken(AccessToken):
 
 
 class CloudCellTokenVerifier(TokenVerifier):
-    """FastMCP bearer verifier for one Exomem Cloud cell's per-cell bearer (D1).
+    """FastMCP bearer verifier for one Evermatter Cloud cell's per-cell bearer (D1).
 
     Accepts a bearer equal to the current token, or, during rotation, the
     previous one, each compared in constant time (fixed-length digest

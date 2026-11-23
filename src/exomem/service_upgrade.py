@@ -253,14 +253,14 @@ def _wheel_metadata(wheel: Path) -> tuple[str, str]:
         with zipfile.ZipFile(wheel) as archive:
             metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
             if len(metadata_names) != 1 or "exomem/__init__.py" not in archive.namelist():
-                raise RuntimeError("candidate artifact is not an Exomem wheel")
+                raise RuntimeError("candidate artifact is not an Evermatter wheel")
             metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
     except (OSError, zipfile.BadZipFile) as exc:
         raise RuntimeError("candidate artifact is not a readable wheel") from exc
     name = metadata.get("Name", "").strip()
     version = metadata.get("Version", "").strip()
     if re.sub(r"[-_.]+", "-", name).lower() != "exomem" or not version:
-        raise RuntimeError("candidate artifact is not an Exomem wheel")
+        raise RuntimeError("candidate artifact is not an Evermatter wheel")
     if not wheel.name.startswith(f"exomem-{version}-"):
         raise RuntimeError("candidate wheel filename does not match its package metadata")
     return name, version
@@ -741,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--resume", action="store_true", help="roll forward a recorded failed transition")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--package-version", default="", help="pin the staged PyPI release")
-    source.add_argument("--wheel", type=Path, help="stage an immutable local Exomem wheel")
+    source.add_argument("--wheel", type=Path, help="stage an immutable local Evermatter wheel")
     parser.add_argument("--source-revision", default="", help="full source revision for a local wheel")
     parser.add_argument("--profile", choices=PROFILES, default="standard")
     args = parser.parse_args(argv)

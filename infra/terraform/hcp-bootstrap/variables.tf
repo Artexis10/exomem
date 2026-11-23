@@ -10,7 +10,7 @@ variable "hcp_hostname" {
 }
 
 variable "hcp_organization" {
-  description = "Existing HCP Terraform organization that owns Exomem Hosted state."
+  description = "Existing HCP Terraform organization that owns Evermatter Hosted state."
   type        = string
 
   validation {

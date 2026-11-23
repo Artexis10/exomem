@@ -360,7 +360,7 @@ Record their image growth during qualification instead of reusing the earlier to
 
 The Cloud image decodes audio and video through PyAV, built in the `av-lgpl` stage of the `Dockerfile` against an FFmpeg that carries no GPL code.
 The PyPI `av` wheel bundles an FFmpeg linked with libx264 and libx265, which are GPL, so the Cloud image does not install it.
-No Exomem module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
+No Evermatter module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
 AV1 decoding uses libdav1d from the Debian package `libdav1d7`.
 The PyAV release is the one `uv.lock` pins, built from its hash-checked source distribution with pinned build tools.
 The build gate decodes only PCM audio and MPEG-4 Part 2 video.

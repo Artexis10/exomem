@@ -1097,7 +1097,7 @@ def _store_mode_server(root):
             availability.SERVICE_REQUIRED,
             "this vault's pages live in the collection store, so a write needs the service that "
             "serves it",
-            "Send this request to the Exomem service for this vault, through its MCP or REST "
+            "Send this request to the Evermatter service for this vault, through its MCP or REST "
             "interface, and start that service first if none runs. To work without a service, "
             f"run {availability.ROLLBACK} to return the pages to files.",
         )

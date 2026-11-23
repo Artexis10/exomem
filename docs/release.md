@@ -45,7 +45,7 @@ uv build
 After a release with GHCR publishing enabled, smoke the published image:
 
 ```bash
-docker run --rm ghcr.io/artexis10/exomem:latest demo --json
+docker run --rm ghcr.io/artexis10/evermatter:latest demo --json
 ```
 
 Optional host-specific checks:

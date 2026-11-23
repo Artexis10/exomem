@@ -1,4 +1,4 @@
-"""Derived epistemic graph sidecar over Exomem Markdown files.
+"""Derived epistemic graph sidecar over Evermatter Markdown files.
 
 The graph is rebuildable measurement state. Markdown remains canonical; this
 module indexes files, semantic blocks, and deterministic relations into a SQLite
@@ -4969,7 +4969,7 @@ class EpistemicGraphIndex:
                     return declined("indexed_sources_differ")
 
                 # Stabilize the cold proof after every read. A direct editor
-                # does not participate in Exomem's mutation lock and may
+                # does not participate in Evermatter's mutation lock and may
                 # replace bytes while this O(vault) proof is running. Re-read
                 # each captured source, then repeat both path censuses and the
                 # policy identity so a mid-proof edit cannot bless the older

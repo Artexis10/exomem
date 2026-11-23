@@ -940,7 +940,7 @@ def _state_ttl(body: dict) -> float | None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the Exomem SQLite writer-lease coordinator")
+    parser = argparse.ArgumentParser(description="Run the Evermatter SQLite writer-lease coordinator")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8770)
     parser.add_argument("--database", type=Path, default=None)

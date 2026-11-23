@@ -1263,7 +1263,7 @@ def upgrade_blocker() -> str | None:
     if not unrecognized:
         return None
     try:
-        release = f"Exomem {version('exomem')}"
+        release = f"Evermatter {version('exomem')}"
     except PackageNotFoundError:
         release = "a release whose installed version is unrecorded"
     return (f"the supervisor runs {release}, older than the vault's state, which records "

@@ -2,7 +2,7 @@
 
 # First-class semantic language
 
-Exomem keeps Markdown readable while making small observations, richer typed
+Evermatter keeps Markdown readable while making small observations, richer typed
 units, retrieval filters, ranking evidence, and authored graph relations
 addressable through the public product commands. Markdown remains the source of
 truth; lexical, vector, and graph stores are rebuildable sidecars.
@@ -21,7 +21,7 @@ Semantic roles:
 - Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind.
 - Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind.
 
-Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Exomem writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
+Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Evermatter writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
 
 - Compact category: the unit's one primary open-vocabulary subject or domain label. After trimming, use 1-64 Unicode code points; begin with a Unicode letter; then use only Unicode letters or digits, spaces, `_`, or `-`. Apply Unicode NFKC and casefold, then collapse runs of spaces, `_`, and `-` to one `_`. Registry alias resolution is separate from authored canonicalization; an unseen valid category needs no registry write.
 - Compact content: the unit's substantive observation. Use non-empty content that remains on one Markdown line. Escaped parentheses, embedded hashes, and non-trailing tag-like text remain content.
@@ -269,12 +269,12 @@ a fabricated per-hit zero.
 
 Unit-level recall returns an exact `unit_ref`. Pass it to `read_page` (in `options`) to read
 the current unit with bounded parent context. Missing, stale, ambiguous, and
-superseded references are explicit statuses; Exomem never substitutes a nearby
+superseded references are explicit statuses; Evermatter never substitutes a nearby
 unit.
 
 `connect_memory(operation="graph-context")` accepts an exact `unit_ref` or
 registry-resolved `categories`/`kinds` filters. Compact and rich units appear as
-derived graph nodes, but traversal follows authored edges only. Exomem does not
+derived graph nodes, but traversal follows authored edges only. Evermatter does not
 infer a typed edge from a compact observation's category or prose.
 
 ## Reviewed creation and adoption

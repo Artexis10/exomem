@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud platform deployment
+# Evermatter Cloud platform deployment
 
 This runbook converges the K3s fleet and upgrades the `exomem-platform` Helm
 release: cellctl, the Cloud gateway and ingress, storage, the scheduler and its
@@ -68,7 +68,7 @@ with console access confirmed (2026-10-05).
   role run keeps admitting it once UFW is enabled.
 - An existing host with NetBird down admits 22/tcp only on `wt0`, so neither
   Terraform nor Ansible can reach it. From the Hetzner console first run
-  `ufw allow from <ip> to any port 22 proto tcp comment 'Exomem administrator SSH'`,
+  `ufw allow from <ip> to any port 22 proto tcp comment 'Evermatter administrator SSH'`,
   then open the same CIDR in Terraform. The managed comment lets the next
   Ansible run retire the rule.
 

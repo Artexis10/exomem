@@ -1,6 +1,6 @@
-"""install-skill: copy the bundled Exomem skill into a filesystem-based agent client.
+"""install-skill: copy the bundled Evermatter skill into a filesystem-based agent client.
 
-The Exomem MCP server is only the *hands* — the `find`/`add`/`note`/`edit` tools. The
+The Evermatter MCP server is only the *hands* — the `find`/`add`/`note`/`edit` tools. The
 *brain* that tells the agent when to capture, how to file a source, and how to
 compile a note under the schema is the **skill**: `_scaffold/_Schema/SKILL.md`
 plus its `references/`. Clients discover skills at
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import package_skills, workflow_skills
 
-# The Exomem skill ships inside the package, the same `_Schema/` that `init` lays into a
+# The Evermatter skill ships inside the package, the same `_Schema/` that `init` lays into a
 # vault. Resolving from `__file__` works for an installed wheel too, not just a
 # git checkout — same pattern as init.py's _SCAFFOLD.
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
@@ -121,7 +121,7 @@ def install_skills(
 # upgrade it loads as a stale duplicate, so `remove_legacy_skill` retires it — but
 # only when it is unmistakably ours (see that function).
 _LEGACY_MARKER = "name: knowledge-base"
-_LEGACY_FINGERPRINT = "Exomem"
+_LEGACY_FINGERPRINT = "Evermatter"
 
 
 def install_skill(
@@ -130,7 +130,7 @@ def install_skill(
     force: bool = False,
     link: bool = False,
 ) -> dict:
-    """Install the bundled Exomem skill into a Claude Code skills folder.
+    """Install the bundled Evermatter skill into a Claude Code skills folder.
 
     Copies (or, with ``link=True``, symlinks) the canonical `_Schema/` — SKILL.md,
     references/, project-keys.yaml, and the workflow-skill definitions — to
@@ -272,7 +272,7 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     Before the rename to ``exomem`` the skill installed at
     ``~/.claude/skills/knowledge-base``; left in place after an upgrade it loads as a
     stale, second skill with the old description. We remove it only when its SKILL.md
-    still carries the old ``name: knowledge-base`` marker *and* the ``Exomem``
+    still carries the old ``name: knowledge-base`` marker *and* the ``Evermatter``
     fingerprint — so a user's own, unrelated skill that merely shares that folder name
     is never touched. Best-effort for copy installs; a ``--link`` symlink (whose
     content already reflects the renamed scaffold) is left for the user to clear.

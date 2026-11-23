@@ -1,4 +1,4 @@
-"""Acceptance smoke for an installed Exomem wheel (run with that environment's Python)."""
+"""Acceptance smoke for an installed Evermatter wheel (run with that environment's Python)."""
 
 from __future__ import annotations
 

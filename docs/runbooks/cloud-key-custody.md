@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud key custody
+# Evermatter Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
 that key. `cellctl` holds no credential that creates or deletes keys. In the founder account it holds no credential that

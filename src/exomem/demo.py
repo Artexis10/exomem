@@ -170,7 +170,7 @@ def run_demo(
             return True, "broken_wikilink, unprocessed_source"
 
         if not json_out:
-            echo("exomem demo — bundled sample vault, keyword mode, fully local")
+            echo("Evermatter demo — bundled sample vault, keyword mode, fully local")
             echo(f"vault: {target}")
             echo("")
 
@@ -267,5 +267,5 @@ def main(argv: list[str]) -> int:
             json_out=args.json,
         )
     except Exception as e:  # noqa: BLE001 — top-level CLI guard, mirror _serve_main
-        print(f"exomem demo failed: {e}", file=sys.stderr)
+        print(f"Evermatter demo failed: {e}", file=sys.stderr)
         return 1

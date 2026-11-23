@@ -4,7 +4,7 @@
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
 #   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
-#   cloud (target `cloud` — Exomem Cloud cell runtime, derived from `cell-runtime`)
+#   cloud (target `cloud` — Evermatter Cloud cell runtime, derived from `cell-runtime`)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
@@ -145,7 +145,7 @@ print('offline load verified', MODEL_NAME, v.shape)"
 #
 # The PyPI `av` wheel declares BSD-3-Clause, but it bundles an FFmpeg linked with
 # libx264 and libx265, which are GPL. An image that carries that wheel conveys GPL
-# code. Exomem only decodes audio and video; no module opens a container for
+# code. Evermatter only decodes audio and video; no module opens a container for
 # writing, adds a stream or encodes. This stage therefore builds the pinned FFmpeg
 # release from its source tarball with no `--enable-gpl` and no `--enable-nonfree`
 # (configure refuses any GPL component without them), with no encoder or muxer,
@@ -293,9 +293,9 @@ ENV PATH=/app/.venv/bin:$PATH \
     HF_HOME=/data/hf \
     EXOMEM_CONTAINER_VARIANT=ml
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
-      org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (ml: hybrid embeddings + CLIP search, CPU-only torch, no GPU)"
+      org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (ml: hybrid embeddings + CLIP search, CPU-only torch, no GPU)"
 
 # No HEALTHCHECK here by design (design.md D5) — a Dockerfile-level HEALTHCHECK
 # would run unconditionally, including for `--transport stdio`, where there is
@@ -325,9 +325,9 @@ ENV PATH=/app/.venv/bin:$PATH \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
-      org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
+      org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
 
 # No HEALTHCHECK here by design — a Dockerfile-level HEALTHCHECK would run
 # unconditionally, including for `--transport stdio`, where there is no HTTP
@@ -383,7 +383,7 @@ ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]
 
 ########################################################################
-# Final: cloud (target `cloud`). Exomem Cloud cell runtime (design D1/D2/D8).
+# Final: cloud (target `cloud`). Evermatter Cloud cell runtime (design D1/D2/D8).
 #
 # Derived from `cell-runtime`: the offline ONNX model environment,
 # `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with bge-m3 as its
@@ -534,9 +534,9 @@ assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 print('image load verified', MODEL_NAME, v.shape)" \
  && find /tmp -mindepth 1 -delete
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
-      org.opencontainers.image.description="exomem — Exomem Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
+      org.opencontainers.image.description="Evermatter — Evermatter Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment
 # above; cellctl reads readiness from the pod's own probes, not from Docker.
@@ -562,9 +562,9 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_DISABLE_EMBEDDINGS=1 \
     EXOMEM_CONTAINER_VARIANT=lean
 
-LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/evermatter" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
-      org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (lean: keyword/BM25 search, no torch, no model download)"
+      org.opencontainers.image.description="Evermatter — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (lean: keyword/BM25 search, no torch, no model download)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment
 # above; the healthcheck lives in compose.yaml.

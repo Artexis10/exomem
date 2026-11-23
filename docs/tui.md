@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# The Exomem terminal UI (`exomem tui`)
+# The Evermatter terminal UI (`exomem tui`)
 
 A persistent, keyboard-first surface over the same product commands the CLI,
 MCP, and REST doors expose. One long-lived process (no per-command Python
@@ -40,7 +40,7 @@ With no resolvable vault, first run opens.
 ## First run is a ledger
 
 Setup is a short conversation on one screen. Each answer collapses into a line
-you can read back — `✓ vault  created ~/Exomem — 28 files, plain markdown` —
+you can read back — `✓ vault  created ~/Evermatter — 28 files, plain markdown` —
 and the active question sits below the lines already recorded. Four steps:
 vault, packs, a first capture, and asking for what you just captured. Under two
 minutes, and the last step is the product demo built from your own words.
@@ -75,7 +75,7 @@ First run never reopens once a vault is connected.
 | 7 | Status | doctor preflight, resources, warm state, hooks, install provenance — each warning with its remediation |
 | 8 | Settings | compute mode (quiet/normal/performance, persisted), theme toggle, vault identity |
 
-Ask presents *measurements*, not generated prose: Exomem is a pure substrate —
+Ask presents *measurements*, not generated prose: Evermatter is a pure substrate —
 the server measures, your model reasons. The copyable context packet exists
 precisely to hand that evidence to a reasoning model.
 

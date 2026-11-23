@@ -2,13 +2,13 @@
 
 # Semantic blocks
 
-Semantic blocks are optional Markdown sections that make Exomem notes easier to
+Semantic blocks are optional Markdown sections that make Evermatter notes easier to
 parse without making them harder to read. They are normal headings plus optional
 metadata bullets. The body remains ordinary Markdown.
 
 This is not a separate DSL. The goal is governed cognition: claims, evidence,
 decisions, assumptions, risks, records, cases, and actions can be named,
-related, validated, and reused by Exomem tooling. Compact observations, rich
+related, validated, and reused by Evermatter tooling. Compact observations, rich
 units, category/kind governance, retrieval, and exact unit reads are documented
 in [first-class semantic language](semantic-language.md).
 
@@ -81,7 +81,7 @@ bullet has one governed lower-snake-case relation type and one wikilink:
 - relates_to [[Knowledge Base/Notes/Research/Project/Adjacent Finding]]
 ```
 
-These links remain visible and editable in Obsidian. Exomem indexes the declared
+These links remain visible and editable in Obsidian. Evermatter indexes the declared
 edge type instead of a redundant generic edge. Inline references elsewhere in
 the note remain generic `links_to` connections.
 

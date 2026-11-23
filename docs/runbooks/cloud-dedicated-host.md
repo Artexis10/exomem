@@ -2,7 +2,7 @@
 
 # Dedicated K3s agents (servers Terraform does not create)
 
-Add, unlock, repair or remove an Exomem Cloud K3s agent on a machine Terraform
+Add, unlock, repair or remove an Evermatter Cloud K3s agent on a machine Terraform
 does not create: a Hetzner dedicated or auction server, or a server at another
 provider (openspec `move-cloud-cells-to-local-storage` D2 and D8). You install
 the OS. Ansible does the rest:
@@ -19,7 +19,7 @@ Terraform-created agents keep [cloud-node-pool.md](cloud-node-pool.md).
 
 - The server is bought and reachable in its provider's rescue system or
   installer. Nothing here buys hardware or calls a provider API.
-- Exomem Cloud runs TopoLVM with the `thin` device class, or you accept that
+- Evermatter Cloud runs TopoLVM with the `thin` device class, or you accept that
   the agent publishes 0 cell slots until it does. The join says which.
 - The Tang key set is escrowed, once, before the first dedicated agent. Generate
   it with `jose` and hand it straight to SOPS. It is never written to disk or
@@ -554,7 +554,7 @@ Steps, with `CELL_ID` set to the cell's ID:
    the time of the backup. Record the time from the mark to `ready`.
 5. Accept the cell:
    1. Read its governance status again, as in step 2, into a second file. It must match the first.
-   2. Through the owner's Exomem Cloud connector, ask for a note the vault held before the move. It must answer.
+   2. Through the owner's Evermatter Cloud connector, ask for a note the vault held before the move. It must answer.
    3. Make one governed write, such as a short note, and read it back.
 6. Remove the mark:
 

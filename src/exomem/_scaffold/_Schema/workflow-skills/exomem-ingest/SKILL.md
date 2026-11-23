@@ -1,6 +1,6 @@
 ---
 name: exomem-ingest
-description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
+description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Evermatter while preserving raw evidence before compiling conclusions.
 metadata:
   skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
   version: "0.1.0"
@@ -41,11 +41,11 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -58,7 +58,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a
@@ -160,7 +160,7 @@ Semantic roles:
 - Tag: Zero or more optional secondary retrieval labels refine lookup and never replace category or determine kind.
 - Kind: The governed semantic form: compact units always use `observation`; rich units use their recognized heading kind.
 
-Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Exomem writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
+Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid compact observations anywhere outside fenced code blocks. Evermatter writers use `-` under the canonical `## Observations` section. Parser bullet markers are `-`, `*`, `+`; the canonical marker is `-`. Parse from the end by taking anchor, then context, then trailing tags; the authored display order remains tags, context, anchor. Category uses open vocabulary.
 
 - Compact category: the unit's one primary open-vocabulary subject or domain label. After trimming, use 1-64 Unicode code points; begin with a Unicode letter; then use only Unicode letters or digits, spaces, `_`, or `-`. Apply Unicode NFKC and casefold, then collapse runs of spaces, `_`, and `-` to one `_`. Registry alias resolution is separate from authored canonicalization; an unseen valid category needs no registry write.
 - Compact content: the unit's substantive observation. Use non-empty content that remains on one Markdown line. Escaped parentheses, embedded hashes, and non-trailing tag-like text remain content.

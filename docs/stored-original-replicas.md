@@ -3,7 +3,7 @@
 # Check the replicas of your originals
 
 A replica is a second encrypted copy of an original file in a store that you declared.
-Exomem checks each replica on a cycle, reports a damaged one as a finding and copies it again when it can.
+Evermatter checks each replica on a cycle, reports a damaged one as a finding and copies it again when it can.
 This page says what each check proves, how to set the sample budget and how to read a finding.
 
 ## Free space on a personal vault disk
@@ -56,7 +56,7 @@ A check proves one of three levels. The status names the level that each replica
 | Level | What the check does | What it proves |
 |---|---|---|
 | `presence` | Asks the store whether the version exists with the recorded size and SHA-256. | The store says it holds the object. A store that only repeats the digest it was given proves nothing more. |
-| `content` | Asks a store that recomputes the SHA-256 of the stored ciphertext. | The stored bytes are the bytes that Exomem wrote. |
+| `content` | Asks a store that recomputes the SHA-256 of the stored ciphertext. | The stored bytes are the bytes that Evermatter wrote. |
 | `decrypted` | Downloads the replica, decrypts it and hashes the plaintext. | The key still opens the replica and the plaintext matches the original. |
 
 The `head_recomputes` field of the store's descriptor picks between the first two levels.
@@ -156,7 +156,7 @@ Each store, and the totals, report these values:
 - `checks_not_scheduled`: the replicas whose store gets no check, with the reasons.
 - `sample`: the `budget_bytes` of the month, the `spent_bytes`, the replicas `skipped_for_size` and the replicas `not_sampled` with a reason each.
 
-A value that Exomem cannot read shows as `unknown`, never as zero.
+A value that Evermatter cannot read shows as `unknown`, never as zero.
 A store that is offline, slow or not answering as itself changes no replica. That includes a disk or NAS that is unmounted while a check or a copy starts: the store reads as unavailable, never as empty.
 Unavailable is not proof of loss, so it never makes a finding.
 
@@ -193,7 +193,7 @@ A first replica of an evicted original takes its source by the same rule, its po
 A wrong plaintext belongs to the stored bytes, not to one name. A finding of a wrong plaintext records the digest of those bytes, so a copy of them under any other name counts as damaged too: it is no source, eviction does not trust it, and the same finding quarantines its filing with a queued copy, so the status counts it as damaged and not recoverable at once. A finding of another cause, such as an absent version, does not clear that digest, and it moves every quarantined filing of the version to its own cause, so none keeps an older one.
 The damaged version stays in its store as an orphan. For the store that serves eviction, its name is also released for collection, unless a retried copy reuses it.
 Filings of equal bytes can share one version in the store that serves eviction, and the media allowance counts it once. A finding is about the version, so the status reports every filing that shares a damaged version as a finding, and each has its own queued copy. The worker writes one new version for the first of them, and the others point to it, including after a key rotation. Until each has moved, the allowance counts both versions.
-Exomem records a damaged version once, whichever filings list it. Eviction keeps an original's local bytes while its version is recorded, even if the filing that held the finding is gone, and a rebuild quarantines any filing that still lists it and never forgets the record. A new filing of equal bytes never reuses a recorded version: it uploads its own, and the filings that still list the damaged one copy from it. A filing whose original is on the volume and hashes to its binding uploads its own copy under the current key version, and does not take a replacement of an older key; one whose bytes do not verify takes it. A sample picks only a filing that a wrong plaintext holds, and releases it only if no newer finding was recorded since the sample began: a wrong plaintext of the same bytes under any name, or another cause on its version. A version that a later finding found lost or differing is no false alarm: its filings stay quarantined with their queued copies. Eviction that finds a pooled original's version absent or condemned records the finding in the same way.
+Evermatter records a damaged version once, whichever filings list it. Eviction keeps an original's local bytes while its version is recorded, even if the filing that held the finding is gone, and a rebuild quarantines any filing that still lists it and never forgets the record. A new filing of equal bytes never reuses a recorded version: it uploads its own, and the filings that still list the damaged one copy from it. A filing whose original is on the volume and hashes to its binding uploads its own copy under the current key version, and does not take a replacement of an older key; one whose bytes do not verify takes it. A sample picks only a filing that a wrong plaintext holds, and releases it only if no newer finding was recorded since the sample began: a wrong plaintext of the same bytes under any name, or another cause on its version. A version that a later finding found lost or differing is no false alarm: its filings stay quarantined with their queued copies. Eviction that finds a pooled original's version absent or condemned records the finding in the same way.
 Eviction and fixity never read a quarantined replica.
 A `plaintext_mismatch` finding gets one more sample per cycle, and a sample that decrypts to the original lifts it, for every filing that shares the version or holds a copy of its bytes under another name and is quarantined for a wrong plaintext, and drops their queued copies.
 Any other finding stays until a new copy replaces the entry.

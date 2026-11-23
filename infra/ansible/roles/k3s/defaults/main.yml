@@ -1,6 +1,6 @@
 ---
 k3s_version: "v1.35.6+k3s1"
-# The pinned K3s binary for each node architecture Exomem Cloud images run on,
+# The pinned K3s binary for each node architecture Evermatter Cloud images run on,
 # keyed by the Ansible `architecture` fact. Each sha256 is the entry in that
 # release's sha256sum-<arch>.txt. One cluster runs one architecture.
 k3s_binaries:
@@ -104,7 +104,7 @@ k3s_cluster_hosts: "{{ groups['hosted_nodes'] | default([]) }}"
 k3s_firewall_peer_ips: >-
   {{ k3s_cluster_hosts | difference([inventory_hostname])
      | map('extract', hostvars, 'private_node_ip') | select('defined') | list }}
-k3s_firewall_comment: Exomem K3s inter-node
+k3s_firewall_comment: Evermatter K3s inter-node
 
 # A node outside the Hetzner network joins over WireGuard (D8): it peers with
 # every other node, and every other node peers with it. No dash: Ansible's

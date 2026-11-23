@@ -47,7 +47,7 @@ dedicated_host_recovery_passphrase: >-
 # Its key set is escrowed; the agents pin its signing key's thumbprint.
 dedicated_host_tang_keys: ""
 dedicated_host_tang_port: 7500
-dedicated_host_tang_comment: Exomem Tang
+dedicated_host_tang_comment: Evermatter Tang
 dedicated_host_tang_server: >-
   {{ (groups['hosted_nodes'] | default([])) | difference(groups['k3s_agents'] | default([])) | first | default('') }}
 dedicated_host_tang_url: >-

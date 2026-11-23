@@ -467,7 +467,7 @@ def _update_sources_index(
 #: Descriptions for the folders that existed before the source taxonomy became
 #: an open vocabulary, kept verbatim so upgrading never rewrites an existing
 #: index row. Everything beyond these is described by the taxonomy registry, so
-#: a kind Exomem never shipped still gets a real description — this table is no
+#: a kind Evermatter never shipped still gets a real description — this table is no
 #: longer a vocabulary, and nothing should be added to it.
 _LEGACY_FOLDER_DESCRIPTIONS: dict[str, str] = {
     "Articles": "captured web/PDF content",

@@ -1,4 +1,4 @@
-# The unit kinds Exomem ships. A kind is what a `##` heading says a unit is.
+# The unit kinds Evermatter ships. A kind is what a `##` heading says a unit is.
 #
 # `labels` map a language tag to the kind's name in that language, and each label names the kind
 # as a heading, as `## Claim` does. A shipped label is English and always spells the kind's own key

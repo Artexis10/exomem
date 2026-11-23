@@ -1,4 +1,4 @@
-"""The platform chart's Exomem Cloud entries, rendered and applied.
+"""The platform chart's Evermatter Cloud entries, rendered and applied.
 
 `helm template` runs from a pinned Helm image against a copy of
 `infra/helm/platform` with its subchart dependencies removed (the rehearsal

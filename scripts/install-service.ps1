@@ -358,7 +358,7 @@ if ($Release) {
 
 $installedVersion = Get-ExomemInstalledVersion -PythonPath $python
 if (-not $installedVersion) {
-    throw "The target interpreter has no importable Exomem version after installation."
+    throw "The target interpreter has no importable Evermatter version after installation."
 }
 if ($existingTransition) {
     Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "installed"

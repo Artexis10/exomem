@@ -968,7 +968,7 @@ jobs:
           digest=$(python3 .release-tools/infra/scripts/release_recovery.py join-image --tag "$TAG" --image cloud --directory native-image-digests)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Attest the exact Exomem Cloud cell image
+      - name: Attest the exact Evermatter Cloud cell image
         id: cloud-attestation
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cloud.publish && env.DRY_RUN != 'true' && steps.cloud-build.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
@@ -1006,7 +1006,7 @@ jobs:
           digest=$(python3 .release-tools/infra/scripts/release_recovery.py join-image --tag "$TAG" --image cellctl --directory native-image-digests)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Attest the exact Exomem Cloud cellctl image
+      - name: Attest the exact Evermatter Cloud cellctl image
         id: cellctl-attestation
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cellctl.publish && env.DRY_RUN != 'true' && steps.cellctl-build.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4

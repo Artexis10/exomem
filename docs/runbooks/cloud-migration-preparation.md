@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Prepare the Cloud migration without changing personal Exomem
+# Prepare the Cloud migration without changing personal Evermatter
 
 This is the operational companion to
 [`adopt-exomem-cloud-plain-cells`](../../openspec/changes/adopt-exomem-cloud-plain-cells/design.md).

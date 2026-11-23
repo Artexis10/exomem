@@ -1,10 +1,10 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud security model
+# Evermatter Cloud security model
 
-Exomem Cloud is the managed Exomem service of Substrate Systems OÜ. Each account gets one cell that runs
+Evermatter Cloud is the managed Evermatter service of Substrate Systems OÜ. Each account gets one cell that runs
 this repository's server. Each section states a claim, mostly from the
-[privacy page](https://substratesystems.io/exomem/privacy), the public code behind it, a check and its
+[privacy page](https://evermatter.ai/privacy), the public code behind it, a check and its
 limits. The control plane is in the public [substrate repository](https://github.com/substrate-systems/substrate).
 Deployment values are not public, so this page marks each control that is off by default.
 
@@ -263,7 +263,7 @@ image. The admission policy `exomem-cellctl-scope` in
 [cellctl.yaml](../infra/helm/platform/templates/cellctl.yaml) admits only digest-pinned images from the
 configured repository.
 
-**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/exomem:<version>-cloud --repo
+**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/evermatter:<version>-cloud --repo
 Artexis10/exomem --signer-workflow Artexis10/exomem/.github/workflows/release-please.yml --source-ref
 refs/tags/v<version>`.
 
@@ -288,7 +288,7 @@ public.
 
 ## What the service is not
 
-Exomem Cloud is not zero-knowledge or end-to-end encrypted. The edge and gateway see requests and
+Evermatter Cloud is not zero-knowledge or end-to-end encrypted. The edge and gateway see requests and
 responses. Substrate Systems holds the keys, so it could deliberately read your content. When Home and
 its viewer are on, Substrate on Vercel sees what they show (`callCloudViewerTool` in `cloud-home-mcp.ts`).
 `cloudHomeChannelEnabled` and `cloudViewerEnabled` are off by default. Home's own grants do not appear

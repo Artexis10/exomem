@@ -1,4 +1,4 @@
-"""Thin synchronous facade between TUI screens and Exomem's product services.
+"""Thin synchronous facade between TUI screens and Evermatter's product services.
 
 Every knowledge read/write goes through `product_invoke` — the same seam the
 CLI drives — so TUI semantics cannot drift from CLI/MCP/REST. The handful of

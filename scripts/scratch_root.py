@@ -166,7 +166,7 @@ def sweep_stale_scratch_roots(
     return swept
 
 
-#: The variables that choose where Exomem keeps per-vault state. A tool run
+#: The variables that choose where Evermatter keeps per-vault state. A tool run
 #: from an operator shell inherits the live service's, and a scratch vault's
 #: state written there lands beside the real vault's.
 _STATE_VARIABLES = ("EXOMEM_STATE_ROOT", "XDG_STATE_HOME")
@@ -176,7 +176,7 @@ _STATE_VARIABLES = ("EXOMEM_STATE_ROOT", "XDG_STATE_HOME")
 def scratch_root(prefix: str, *, keep: bool = False) -> Iterator[Path]:
     """A fresh scratch root for one run, swept in and removed on the way out.
 
-    The run's Exomem state lives inside the root as well: `EXOMEM_STATE_ROOT`
+    The run's Evermatter state lives inside the root as well: `EXOMEM_STATE_ROOT`
     and `XDG_STATE_HOME` point into it until the block exits, then return to
     what they were, so no scratch vault writes into the caller's state root.
 

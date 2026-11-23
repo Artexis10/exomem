@@ -104,7 +104,7 @@ def server_code(response: httpx2.Response) -> str:
 def cloud_oauth(config: CloudImportClientConfig) -> OAuth:
     """The one OAuth setup for every `exomem cloud` command; share it so that a run signs in once."""
     return OAuth(mcp_url=config.mcp_url, client_id=config.oauth_client_id,
-                 client_name="Exomem CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
+                 client_name="Evermatter CLI", scopes=["exomem.read", "exomem.write", "offline_access"],
                  callback_host="127.0.0.1", callback_port=None)
 
 
@@ -116,9 +116,9 @@ def authorized_api_client(config: CloudImportClientConfig, oauth: OAuth | None =
 def add_endpoint_arguments(command: argparse.ArgumentParser) -> None:
     """The Cloud endpoint options that every `exomem cloud` command shares."""
     command.add_argument("--mcp-url", default=os.environ.get("EXOMEM_CLOUD_MCP_URL") or PRODUCTION_MCP_URL,
-                         help="Cloud MCP URL (default: Exomem Cloud, or EXOMEM_CLOUD_MCP_URL)")
+                         help="Cloud MCP URL (default: Evermatter Cloud, or EXOMEM_CLOUD_MCP_URL)")
     command.add_argument("--api-base-url", default=os.environ.get("EXOMEM_CLOUD_API_BASE_URL") or PRODUCTION_API_BASE_URL,
-                         help="Cloud API origin (default: Exomem Cloud, or EXOMEM_CLOUD_API_BASE_URL)")
+                         help="Cloud API origin (default: Evermatter Cloud, or EXOMEM_CLOUD_API_BASE_URL)")
     command.add_argument("--oauth-client-id", default="exomem-cloud-cli")
 
 

@@ -1,4 +1,4 @@
-"""The unit kinds Exomem ships, their heading spellings and the closed kind-trait set.
+"""The unit kinds Evermatter ships, their heading spellings and the closed kind-trait set.
 
 The shipped kinds are data in the `kinds.yaml` pack. This leaf module reads that
 pack once, so `semantic_blocks` (which parses headings) and

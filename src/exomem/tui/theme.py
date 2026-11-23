@@ -33,7 +33,7 @@ STRUCK = "#6b655a"
 CHROME_BG = "#1c1916"
 BACKGROUND = "#0a0908"
 SURFACE = "#14120f"
-#: Phosphor amber, confirmed as Exomem's terminal accent in Substrate Design
+#: Phosphor amber, confirmed as Evermatter's terminal accent in Substrate Design
 #: System v2 (truecolor #ffb000, 256-color 214, 16-color yellow 3).
 ACCENT = "#ffb000"
 #: Selected-row fill: a warm near-neutral, with the amber bar carrying the

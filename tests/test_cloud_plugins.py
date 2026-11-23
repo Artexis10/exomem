@@ -355,9 +355,9 @@ def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -
     package = tmp_path / "openai"
 
     importing = (package / "skills/exomem/references/importing.md").read_text()
-    assert f"uvx exomem@{release}" in importing
+    assert f"uvx evermatter@{release}" in importing
     routing = (package / "skills/exomem/references/operation-routing.md").read_text()
-    assert f"pip install exomem=={release}" in routing
+    assert f"pip install evermatter=={release}" in routing
 
     offenders = [
         path.relative_to(package).as_posix()

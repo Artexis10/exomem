@@ -65,7 +65,7 @@ def coordinator_capability(fence_client=None) -> dict:
         raise connection.CollectionStoreError(
             UPGRADE_REQUIRED,
             f"the writer-lease coordinator does not serve the {writer_lease.COLLECTION_STORE_CAPABILITY} "
-            f"store fence; upgrade it to Exomem {_running_release()}, the release running here") from error
+            f"store fence; upgrade it to Evermatter {_running_release()}, the release running here") from error
     return {"status": "supported", "capability": fence.capability, "enrolled": fence.enrolled}
 
 

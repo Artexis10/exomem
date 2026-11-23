@@ -1192,7 +1192,7 @@ def _projected(tx: Connection, rel: str, revision: int, sha256: str) -> bool:
 #: Which audit operations open and end a path's life in the store, as ``_Trail`` records them. A
 #: write, an import, or the new side of a move (the row that names the old path) opens a life; a
 #: delete, or the old side of a move, ends one. The projector reads them to tell the bytes that
-#: Exomem put at a path in its current life from those of an earlier life, which a person may have
+#: Evermatter put at a path in its current life from those of an earlier life, which a person may have
 #: restored.
 BEGINS_A_LIFE = (
     "(operation IN ('write', 'import') OR (operation = 'move' AND from_path IS NOT NULL))"
@@ -1200,7 +1200,7 @@ BEGINS_A_LIFE = (
 ENDS_A_LIFE = "(operation = 'delete' OR (operation = 'move' AND from_path IS NULL))"
 #: A migration or a rollback writes one audit row for the whole vault, with no path. Every path's
 #: life starts after the latest one: the vault ran in file mode in between, so no byte that the
-#: audit trail names from before it is known to be Exomem's.
+#: audit trail names from before it is known to be Evermatter's.
 RESETS_EVERY_LIFE = "(path IS NULL AND operation IN ('migrate', 'rollback'))"
 
 

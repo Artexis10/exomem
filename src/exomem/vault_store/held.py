@@ -1,7 +1,7 @@
 """Held items of a store-mode vault: list them, and resolve each with keep-mine or keep-store
 (OpenSpec make-vault-store-canonical, design D5, tasks 4.1 to 4.4).
 
-A held item is a person's outside edit that raced an Exomem change, or an outside delete of a page
+A held item is a person's outside edit that raced an Evermatter change, or an outside delete of a page
 the store owns. The projector, and later the importer, records it in ``store_held`` and stops
 projecting that path. Keep-mine makes the person's file the stored page. Keep-store lets the
 store's page win, and first saves the person's bytes to ``held-exports/<date>/<path>`` in the
@@ -289,8 +289,8 @@ def _bound_writer(root: Path) -> CollectionWriter:
     if writer is None:
         raise OpError(
             NO_WRITER,
-            "a held item resolves inside the running Exomem service, which holds the writer",
-            "Resolve it through the repair tool of a connected Exomem service.",
+            "a held item resolves inside the running Evermatter service, which holds the writer",
+            "Resolve it through the repair tool of a connected Evermatter service.",
         )
     return writer
 
@@ -388,7 +388,7 @@ def _held_row(row: tuple) -> write.HeldRow:
 def _keep_mine(rel: str, row: tuple, disk: _Disk, why: str) -> write.StoreChange:
     """The person's file as it is now becomes the stored page, or the page goes with the file.
 
-    The page must still be at the revision it had when the edit was held, so a newer Exomem change
+    The page must still be at the revision it had when the edit was held, so a newer Evermatter change
     is refused and never overwritten. The file already holds the bytes, so nothing is projected.
     """
     held_revision = row[2]

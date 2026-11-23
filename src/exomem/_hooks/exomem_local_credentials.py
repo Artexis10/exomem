@@ -101,7 +101,7 @@ def service_env_path() -> Path | None:
     if os.name == "nt":
         return None
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "Exomem" / "service.env"
+        return Path.home() / "Library" / "Application Support" / "Evermatter" / "service.env"
     base = os.environ.get("XDG_CONFIG_HOME", "").strip() or str(Path.home() / ".config")
     return Path(base) / "exomem" / "service.env"
 

@@ -367,7 +367,7 @@ exomem_update_transition_receipt \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" started
 
 # The verified live process is the release authority.  Keep the daily CLI lean:
-# align its Exomem release, not the service's optional ML/media dependency set.
+# align its Evermatter release, not the service's optional ML/media dependency set.
 CLI_REQUIRED=0
 if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
     CLI_REQUIRED=1

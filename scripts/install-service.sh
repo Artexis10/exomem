@@ -163,7 +163,7 @@ ARCH="$(uname -m)"
 CURRENT_USER="${USER:-$(id -un)}"
 case "$OS" in
     Darwin)
-        CONFIG_ROOT="$HOME/Library/Application Support/Exomem"
+        CONFIG_ROOT="$HOME/Library/Application Support/Evermatter"
         DEFAULT_SERVICE_ROOT="$CONFIG_ROOT/service"
         PLIST_SRC="$SCRIPT_DIR/com.exomem.plist"
         PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -743,7 +743,7 @@ fi
 
 INSTALLED_VERSION="$(exomem_installed_version "$VENV_PYTHON" || true)"
 [[ -n "$INSTALLED_VERSION" ]] \
-    || die "target interpreter has no importable Exomem version; service remains stopped"
+    || die "target interpreter has no importable Evermatter version; service remains stopped"
 
 render_launchd_plist() {
     [[ -f "$PLIST_SRC" ]] || die "launchd template not found: $PLIST_SRC"
@@ -910,7 +910,7 @@ for _attempt in $(seq 1 45); do
     sleep 2
 done
 [[ -n "$SERVED_VERSION" ]] \
-    || die "$HEALTH_URL never reported a live Exomem version; service stopped"
+    || die "$HEALTH_URL never reported a live Evermatter version; service stopped"
 [[ "$SERVED_VERSION" == "$INSTALLED_VERSION" ]] \
     || die "live service version '$SERVED_VERSION' differs from target interpreter '$INSTALLED_VERSION'; service stopped"
 

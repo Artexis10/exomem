@@ -1,9 +1,9 @@
 <!-- authority:non-specification -->
 
-# Distribution: getting Exomem into each client
+# Distribution: getting Evermatter into each client
 
 The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth for skill
-artifacts. Generated skill copies are checked by CI; the Exomem Cloud plugin
+artifacts. Generated skill copies are checked by CI; the Evermatter Cloud plugin
 definition, hooks and fixtures are maintained by their own channel contracts.
 
 ## Distribution channels
@@ -48,7 +48,7 @@ exomem package-skills --plugin-root plugins/claude-code
 
 ## Hosted Claude and OpenAI channels
 
-The Exomem Cloud release input is `plugins/cloud/definition.json`, built by
+The Evermatter Cloud release input is `plugins/cloud/definition.json`, built by
 `scripts/cloud-plugin.py`. See
 [cloud-plugin-distribution.md](cloud-plugin-distribution.md) for the packages
 and the directory preparation.
@@ -80,7 +80,7 @@ exomem package-skills --vault "/path/to/vault"
 
 Pair the client with the remote connector as described in
 [remote-quickstart.md](remote-quickstart.md). A custom instruction should only
-ask the assistant to retrieve relevant governed Exomem material, cite it, and
+ask the assistant to retrieve relevant governed Evermatter material, cite it, and
 capture durable conclusions when requested. It is not a substitute for a
 directory listing or for native client skill activation.
 

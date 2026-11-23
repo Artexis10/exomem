@@ -12,7 +12,7 @@
     {
       "name": "exomem",
       "source": "./plugins/claude-code",
-      "description": "Exomem: MCP server, ten skills, and capture/retrieve hooks in one install. Raw sources stay immutable, conclusions carry provenance, nothing is deleted - it is superseded.",
+      "description": "Evermatter: MCP server, ten skills, and capture/retrieve hooks in one install. Raw sources stay immutable, conclusions carry provenance, nothing is deleted - it is superseded.",
       "category": "knowledge",
       "keywords": [
         "memory",

@@ -24,13 +24,13 @@ exactly one cell from server-side state, checks provider-neutral entitlements, a
 forwards a compatible registry command. Public callers cannot select a tenant, cell,
 private endpoint, credential, or vault path.
 
-Exomem cells own command execution, mutation safety, private readiness, bounded feature
+Evermatter cells own command execution, mutation safety, private readiness, bounded feature
 enforcement, and canonical export/restore. They do not own accounts, public sessions,
 Paddle, provisioning, encrypted backup retention, KMS, or destructive external deletion.
 Paddle is never a cell request-path or package runtime dependency; Substrate projects its
 billing state into internal provider-neutral capabilities before routing.
 
-See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
+See the Evermatter Cloud runbooks in [runbooks/](runbooks/) and the
 [Substrate control-plane contract](substrate-control-plane-contract.md).
 
 ## Public MCP Tools
@@ -80,12 +80,12 @@ REST and CLI calls keep the grouped commands in the following registry.
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
 | served_context | 2 | REST, CLI | read | no | - | served_context | served_context_id | Inspect retained composed response metadata with verified owner authority. |
-| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect or change saved Exomem engagement for this vault. |
+| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect or change saved Evermatter engagement for this vault. |
 | inspect_captured_sources | 1 | MCP, REST, CLI | read | no | - | inspect_captured_sources | system*, record_id, cursor, limit | List canonical captured revisions with complete-publication and exact-index observations. |
 | inspect_capture_erasure_policy | 1 | MCP, REST, CLI | read | no | - | - | system* | Read whether current host policy enables erasure for one opaque identity system. |
 | erase_captured_source | 1 | MCP, REST, CLI | write | no | - | - | operation_id*, source_identity*, expected_source_ref*, expected_source_hash*, response_detail | Advance retirement of one captured Source incarnation and report each component's progress. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Read writer-lease health during outages. |
-| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Exomem's contract and live settings when missing or changed; reuse while current. |
+| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Evermatter's contract and live settings when missing or changed; reuse while current. |
 | search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |
 | recall_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation, trigger, initiator, native_skills | Recall authorized context; abstain if uncertain. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose, history_limit, history_continuation, continuation, follow_corrections, offset, units, brief | Read a page, exact unit, exomem://map view, or topic brief. |
@@ -119,8 +119,8 @@ REST and CLI calls keep the grouped commands in the following registry.
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, item_id, response_detail | Manage intent; record_memory holds outcomes. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a vault CSV, TSV or JSON dataset. |
 | read_media | 2 | MCP | read | no | path | get_video_frames | path, media, paths, max_frames, start_sec, end_sec, max_side, region | Show images, sampled video frames or a stored preview inline (MCP only). |
-| observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check imports into and exports out of this Exomem Cloud memory, and how to send files. |
-| transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Exomem Cloud memory. |
+| observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check imports into and exports out of this Evermatter Cloud memory, and how to send files. |
+| transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Evermatter Cloud memory. |
 
 ## Semantic Authoring Command Contract
 

@@ -11,7 +11,7 @@ ChatGPT supplies file handles to `save_source` and `save_evidence` through the t
 Each handle requires `download_url` and `file_id`; `mime_type` and `file_name` are optional.
 The `file_id` correlates the attachment with its receipt. The ID alone cannot fetch bytes; an HTTPS `download_url` provides them.
 
-Exomem preserves the bytes that the client supplies. A rendered preview or screenshot does not prove custody of the camera original.
+Evermatter preserves the bytes that the client supplies. A rendered preview or screenshot does not prove custody of the camera original.
 Use the original file through a supported handle or the CLI and HTTP upload steps below.
 Issuing an upload handoff only permits a transfer; it does not transfer or preserve the file.
 Verify the capture receipt and stored SHA-256 before treating the original as preserved.
@@ -34,8 +34,8 @@ After an upload loses its reply, obtain a fresh handoff; the unused hold expires
 
 ## Sandbox clients
 
-A chat client with a code sandbox and no local `exomem` install can use the same handoff on a personal server or on Exomem Cloud.
-This covers claude.ai, Claude desktop chat and Cowork. It needs the user's opt-in: code execution on, and the Exomem host allowed for network access.
+A chat client with a code sandbox and no local `exomem` install can use the same handoff on a personal server or on Evermatter Cloud.
+This covers claude.ai, Claude desktop chat and Cowork. It needs the user's opt-in: code execution on, and the Evermatter host allowed for network access.
 It needs no user token.
 
 1. Compute the file's SHA-256 in the sandbox, for example with `sha256sum original.txt`; retain the digest.
@@ -63,7 +63,7 @@ Standalone stdio has no verified HTTP session and cannot issue upload handoffs.
 Connect through personal HTTP MCP or supply a supported client file handle.
 These clients can still capture an original through a supported client file handle.
 
-## Exomem Cloud
+## Evermatter Cloud
 
 A Cloud cell configured for gateway upload handoffs uses the same steps and descriptor fields.
 Its token starts with `exomem-cloud-upload:v1:`, and its `upload_url` is the Cloud gateway's `/upload` endpoint.
@@ -76,7 +76,7 @@ On Cloud, `upload_files` prepares held uploads only. It does not issue download 
 ## Signed document containers
 
 Capture an ASiC-E `.asice` file through the same original-file interfaces.
-Exomem preserves the container unchanged and gives each supported DOCX or PDF payload its own unchanged original and searchable companion.
+Evermatter preserves the container unchanged and gives each supported DOCX or PDF payload its own unchanged original and searchable companion.
 The initial container and payloads publish together. Each payload records the container's path and SHA-256, its member path, and its own SHA-256 and size.
 Use `transfer_artifact(operation="download", artifact=path)` to retrieve each exact original through the existing download interface.
 

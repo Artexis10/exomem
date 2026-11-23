@@ -1,6 +1,6 @@
 name: Cloud images
 
-# Every release publishes the Exomem Cloud cell and cellctl images for
+# Every release publishes the Evermatter Cloud cell and cellctl images for
 # linux/amd64 and linux/arm64 (release-please.yml, build-cloud-images). This
 # workflow builds both images natively on each architecture and runs them, so a
 # binary fetched for the wrong architecture, or a dependency with no build for
@@ -89,7 +89,7 @@ jobs:
           test "$(docker image inspect --format '{{.Architecture}}' exomem:cloud-smoke)" = "${{ matrix.arch }}"
       - name: restic runs in the Cloud cell image
         run: docker run --rm --network=none --read-only --entrypoint restic exomem:cloud-smoke version
-      - name: The Exomem CLI identifies itself in Cloud mode
+      - name: The Evermatter CLI identifies itself in Cloud mode
         run: docker run --rm --network=none --read-only -e EXOMEM_CLOUD_CELL=1 exomem:cloud-smoke --version
       # Cell init, then create_note and search_memory over MCP HTTP with the cell
       # bearer, under a read-only root, UID 10001 and no capabilities. The test

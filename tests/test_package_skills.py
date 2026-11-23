@@ -61,10 +61,12 @@ def test_every_packaged_skill_pins_install_lines_to_the_release(tmp_path: Path) 
                 if name.endswith(".md")
             )
         assert package_module.RELEASE_PLACEHOLDER not in text
+        assert "evermatter@latest" not in text
         assert "exomem@latest" not in text
+        assert "pip install evermatter)" not in text
         assert "pip install exomem)" not in text
-        assert f"uvx exomem@{release}" in text
-        assert f"exomem=={release}" in text
+        assert f"uvx evermatter@{release}" in text
+        assert f"evermatter=={release}" in text
 
 
 def test_scaffold_never_hardcodes_a_release_pin() -> None:
@@ -73,7 +75,9 @@ def test_scaffold_never_hardcodes_a_release_pin() -> None:
     text = "\n".join(
         path.read_text(encoding="utf-8") for path in scaffold.rglob("*.md")
     )
+    assert "evermatter@latest" not in text
     assert "exomem@latest" not in text
+    assert "pip install evermatter)" not in text
     assert "pip install exomem)" not in text
     assert package_module.RELEASE_PLACEHOLDER in text
 

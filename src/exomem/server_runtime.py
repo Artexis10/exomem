@@ -1,4 +1,4 @@
-"""Server startup wiring for Exomem.
+"""Server startup wiring for Evermatter.
 
 This module owns process-local runtime setup: environment loading, vault
 resolution, warmup/model policy, media extraction, and file watching. It is kept

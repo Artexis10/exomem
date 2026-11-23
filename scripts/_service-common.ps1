@@ -571,7 +571,7 @@ function Sync-ExomemUvCli {
         return $false
     }
     if ($Mode -eq "auto" -and -not (Test-ExomemUvToolInstall)) {
-        Write-Host "No existing uv-managed Exomem CLI; auto mode will not install one."
+        Write-Host "No existing uv-managed Evermatter CLI; auto mode will not install one."
         return $false
     }
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {

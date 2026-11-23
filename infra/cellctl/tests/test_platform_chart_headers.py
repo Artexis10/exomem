@@ -158,7 +158,7 @@ def _helm_template_result(*extra: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
-    # Decision 10: the shared database admits the Exomem roles only from the
+    # Decision 10: the shared database admits the Evermatter roles only from the
     # K3s server's public /32, so a client scheduled on an agent is refused.
     documents = _helm_template()
     for name in ("cellctl", "exomem-cloud-gateway"):

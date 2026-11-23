@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# §4.6c runbook — the 25-case Exomem direct-vs-MemoryBench equivalence gate
+# §4.6c runbook — the 25-case Evermatter direct-vs-MemoryBench equivalence gate
 
 The prerequisite for every comparative run. Both lanes retrieve; neither reads
 or judges, so this tier is **unmetered** — the ⛳ founder gate at §7.4 covers the
@@ -10,7 +10,7 @@ metered reader/judge tier, not this. No `OPENAI_API_KEY` is needed.
 
 **Run only on a quiesced machine.** This ingests 25 LongMemEval-S cases twice —
 once in-process, once through MemoryBench's Bun harness against an ephemeral
-Exomem REST service. Check first; the programme forbids benchmark runs on a busy
+Evermatter REST service. Check first; the programme forbids benchmark runs on a busy
 host, and **no latency claim may ever come from this machine**.
 
 ```

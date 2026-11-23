@@ -65,7 +65,7 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
 
     An atomic replace changes the inode and an in-place rewrite changes ``st_ctime_ns``, which no caller can
     set back, so an unchanged signature means the same bytes. On Windows ``st_ctime_ns`` is the
-    creation time, so only the file ID covers a rewrite there; Exomem writes the manifest by
+    creation time, so only the file ID covers a rewrite there; Evermatter writes the manifest by
     ``os.replace``, which gives it a new ID, and only a hand edit that restores the mtime would go
     unseen.
     """

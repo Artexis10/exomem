@@ -476,9 +476,9 @@ def gateway_required_error(name: str):
 
     return OpError(
         "CLOUD_GATEWAY_REQUIRED",
-        f"`{name}` runs on the Exomem Cloud control plane, and this call did not pass "
+        f"`{name}` runs on the Evermatter Cloud control plane, and this call did not pass "
         "through a gateway that serves it. Nothing was read or changed.",
-        "Call it through your Exomem Cloud connector; if the error persists, the "
+        "Call it through your Evermatter Cloud connector; if the error persists, the "
         "operator has not enabled transfer tools, so use Home to import or export.",
     )
 

@@ -152,7 +152,7 @@
         rule: allow
         port: "{{ k3s_wireguard_port | string }}"
         proto: udp
-        comment: Exomem WireGuard private link
+        comment: Evermatter WireGuard private link
       when: inventory_hostname in k3s_wireguard_hosts
 
     - name: Enable the WireGuard interface

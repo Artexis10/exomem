@@ -1,4 +1,4 @@
-# The released Exomem image the platform's own jobs run on: the scheduler
+# The released Evermatter image the platform's own jobs run on: the scheduler
 # requests, the scheduler collector and alert evaluator. Each job runs a
 # script the chart mounts, so set the current
 # Cloud cell image, ghcr.io/artexis10/exomem@sha256:<digest>. Always a digest,
@@ -119,7 +119,7 @@ traefik:
       port: 8000
       exposedPort: 80
     websecure:
-      # D11: the Exomem Cloud MCP hostname is served here, exposed only
+      # D11: the Evermatter Cloud MCP hostname is served here, exposed only
       # through this entrypoint on the node's real port 443 via hostPort.
       # servicelb stays disabled and no trustedIPs are set, so Traefik
       # overwrites X-Real-Ip with the peer address hostPort preserves; the
@@ -145,7 +145,7 @@ traefik:
   accessLog:
     enabled: false
 
-# --- Exomem Cloud (adopt-exomem-cloud-plain-cells) ---
+# --- Evermatter Cloud (adopt-exomem-cloud-plain-cells) ---
 #
 # Cloud cellctl and its gateway run in their own namespace (exomem-cloud)
 # with their own StorageClass, separate from the `storage` block above.

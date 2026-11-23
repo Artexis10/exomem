@@ -412,14 +412,14 @@ class Series:
 
 
 def not_sent_notice(members: list[Member]) -> str:
-    """The sentence that every stop carries (D12): what is not in Exomem yet, and that the person must keep it."""
+    """The sentence that every stop carries (D12): what is not in Evermatter yet, and that the person must keep it."""
     count, size = len(members), sum(member.size for member in members)
-    return (f"The members not yet sent ({count:,} files, {human_bytes(size)}) are not in Exomem. "
+    return (f"The members not yet sent ({count:,} files, {human_bytes(size)}) are not in Evermatter. "
             "You must keep them: do not delete or move your source folder")
 
 
 class Stopped(CloudImportError):
-    """A stop that already says the members not yet sent are not in Exomem."""
+    """A stop that already says the members not yet sent are not in Evermatter."""
 
 
 def stopped(series: Series, code: str, message: str) -> Stopped:
@@ -469,7 +469,7 @@ class _Run:
         return fresh if fresh is not None and (fresh.size, fresh.mtime_ns) == (member.size, member.mtime_ns) else None
 
     def stop(self, code: str, message: str) -> Stopped:
-        """Every stop says that the members not yet sent are not in Exomem."""
+        """Every stop says that the members not yet sent are not in Evermatter."""
         return stopped(self.series, code, message)
 
     def say_once(self, line: str) -> None:
@@ -1065,7 +1065,7 @@ async def import_folder(source: Path, config: CloudImportClientConfig, checkpoin
         failure = error if isinstance(error, CloudImportError) else _coded(where, error)
         if not held:  # No series exists yet, so nothing was sent.
             raise failure from (None if failure is not error else error.__cause__)
-        # Once a series exists, every stop says that the members not yet sent are not in Exomem.
+        # Once a series exists, every stop says that the members not yet sent are not in Evermatter.
         raise Stopped(failure.phase, failure.code, f"{failure.message}. {not_sent_notice(held[0].not_landed())}",
                       failure.import_id, resume=failure.resume) from None
 
@@ -1075,10 +1075,10 @@ async def _import_folder(source, config, checkpoint, *, cell, api, uploads, incl
     # nosemgrep: ep-word-membership -- the series file's own reserved name, fixed by D12.
     if os.path.lexists(source / import_stage.SERIES_FILE):
         raise CloudImportError(PREFLIGHT, "SERIES_FILE_IN_SOURCE", f"the source folder holds a file named {import_stage.SERIES_FILE} "
-                               "at its top level, a name that Exomem reserves for a series; rename it and run the command again", resume=False)
+                               "at its top level, a name that Evermatter reserves for a series; rename it and run the command again", resume=False)
     if checkpoint.is_relative_to(source):
         raise CloudImportError(PREFLIGHT, "CHECKPOINT_INSIDE_SOURCE", "the checkpoint folder must be outside the source folder")
-    # The record is read before any network call, so a failure on the first call still says what is not in Exomem.
+    # The record is read before any network call, so a failure on the first call still says what is not in Evermatter.
     _ensure_private_directory(checkpoint)
     record = checkpoint / (RESEND_RECORD if resend else SERIES_RECORD)
     series = Series.read(record)

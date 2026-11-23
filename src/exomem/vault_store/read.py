@@ -390,9 +390,9 @@ def derived_behind():
 
     return OpError(
         DERIVED_BEHIND,
-        "This vault's store was set up by an older Exomem build, and its link rows are not derived "
-        "yet, so Exomem cannot say which pages link here.",
-        "Start the Exomem service: it derives the rows in the background. `exomem store-mode "
+        "This vault's store was set up by an older Evermatter build, and its link rows are not derived "
+        "yet, so Evermatter cannot say which pages link here.",
+        "Start the Evermatter service: it derives the rows in the background. `exomem store-mode "
         "status` shows `owner_schema` as current once they are done.",
     )
 
@@ -484,7 +484,7 @@ _REBUILDING_NOTICE = (
     "finishes."
 )
 _UNKNOWN_NOTICE = (
-    "Exomem has not yet confirmed that the search, graph and link rows of every stored page "
+    "Evermatter has not yet confirmed that the search, graph and link rows of every stored page "
     "follow the current schema and access policy; a background pass is checking them."
 )
 #: The sentence for a snapshot that holds pages whose rows the store thread has not derived yet.
