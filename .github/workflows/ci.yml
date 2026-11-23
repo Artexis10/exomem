@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "17 2 * * *"
   workflow_dispatch:
+    inputs:
+      queue:
+        description: Set only by the merge queue (scripts/merge_queue.py), which names the pull requests this candidate tests. Empty means a Full run
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ci-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.ref) || github.event.pull_request.number || github.ref }}
@@ -50,10 +56,17 @@ jobs:
           fetch-depth: 2
       - id: scope
         run: python3 scripts/release_evidence.py scope
+      # A push to main skips the core and harness shards when the merge queue passed them on this tree.
+      - id: queue
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/merge_queue.py tested
       - id: docs-scope
         env:
           EVENT_NAME: ${{ github.event_name }}
           FULL: ${{ steps.scope.outputs.full }}
+          QUEUE_TESTED: ${{ steps.queue.outputs.tested }}
           # The one list of test runtimes and shard counts; the supported floor
           # (requires-python >=3.11) comes first. A pull request runs no shard,
           # only its own changed test modules plus the repository-wide guards in
@@ -134,7 +147,7 @@ jobs:
           -o timeout=180
           --durations-path="$EXOMEM_DURATIONS_PATH"
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-serial.xml
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
+          ${{ needs.scope.outputs.full == 'true' && '--store-durations --clean-durations' || '' }}
       - name: Upload test timing evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -146,7 +159,7 @@ jobs:
           if-no-files-found: warn
       # Clean snapshots contain only measured cases, so cached values cannot overwrite another job's evidence.
       - name: Upload refreshed test durations
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-core-py${{ matrix.python-version }}-serial
@@ -284,7 +297,7 @@ jobs:
           --durations-min=1
           --junitxml=test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ needs.scope.outputs.pytest_args }}
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
+          ${{ needs.scope.outputs.full == 'true' && '--store-durations --clean-durations' || '' }}
           ${{ matrix.selection && '--changed-tests="$EXOMEM_CHANGED_TESTS" || test $? -eq 5' || '' }}
       - name: Upload test timing evidence
         if: always()
@@ -296,7 +309,7 @@ jobs:
           path: test-results/junit-core-${{ matrix.python-version }}-shard-${{ matrix.shard }}*.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-core-py${{ matrix.python-version }}-shard-${{ matrix.shard }}
@@ -428,7 +441,7 @@ jobs:
           --durations-min=1
           --junitxml=test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           ${{ needs.scope.outputs.pytest_args }}
-          ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}
+          ${{ needs.scope.outputs.full == 'true' && '--store-durations --clean-durations' || '' }}
           ${{ matrix.selection && '--changed-tests="$EXOMEM_CHANGED_TESTS" || test $? -eq 5' || '' }}
       - name: Upload test timing evidence
         if: always()
@@ -440,7 +453,7 @@ jobs:
           path: test-results/junit-harness-${{ matrix.python-version }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: warn
       - name: Upload refreshed test durations
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: needs.scope.outputs.full == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: test-durations-harness-py${{ matrix.python-version }}-shard-${{ matrix.shard }}
@@ -1200,6 +1213,32 @@ jobs:
                 gh issue close "$number" --comment "Main CI is green again."$'\n\n'"$facts"
               done ;;
           esac
+
+  # A merge queue run (scripts/merge_queue.py) reports its result on each member
+  # pull request and wakes the queue. A run the workflow token dispatched raises
+  # no workflow_run event, so it wakes the queue itself.
+  merge-queue-verdict:
+    name: merge queue verdict
+    needs: gate
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.queue && startsWith(github.ref, 'refs/heads/merge-queue/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+      statuses: write
+    steps:
+      # The verdict runs main's script, so a candidate that breaks it still gets a verdict.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts
+      - name: Post the result on each member and wake the queue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE: ${{ inputs.queue }}
+          RESULT: ${{ needs.gate.result }}
+        run: python3 scripts/merge_queue.py verdict
 
   # A full run that release-evidence-automation.yml dispatched with
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full
