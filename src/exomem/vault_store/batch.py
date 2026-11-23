@@ -177,10 +177,12 @@ def commit_batch(
     working_set_heat.persist_commit(observed)
     if post_commit_fanout:
         _after_commit(plan, index_reports)
-        rels = [*(rel for rel, _write in plan.pages), *plan.refresh]
+        written = [*(rel for rel, _write in plan.pages), *plan.refresh, *_lifecycle_paths(lifecycle)]
+        rels = list(dict.fromkeys(written))
         if rels:
             # After the request's own drain, which the commit queued first: the acknowledgement says
-            # whether the rows were derived when the write returned.
+            # whether the rows were derived when the write returned, over every path that the
+            # commit wrote, moved or removed, so that it speaks for each report the writer made.
             from .. import writer_lease
 
             writer_lease.defer_until_terminal_persisted(lambda: _derived_report(root, rels))
@@ -575,6 +577,16 @@ def row_report(operation: str, paths: Iterable[str], *, root: Path) -> Any:
     return index_sync.IndexSyncReport(
         operation, requested, requested, tuple(_row_components(root, named)), truncated
     )
+
+
+def _lifecycle_paths(lifecycle: Lifecycle | None) -> list[str]:
+    """Every path that a lifecycle commit moves a page or binary from or to, or removes."""
+    if lifecycle is None:
+        return []
+    return [
+        *(path for move in (*lifecycle.moves, *lifecycle.binary_moves) for path in (move.src, move.dst)),
+        *(delete.rel for delete in (*lifecycle.deletes, *lifecycle.binary_deletes)),
+    ]
 
 
 def _derived_report(root: Path, rels: list[str]) -> list[Any]:

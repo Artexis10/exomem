@@ -32,6 +32,7 @@ from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
 from test_vault_store_bypass_writers import RAW_SOURCE, govern
+from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVATION_SECONDS, holds
 from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
@@ -57,8 +58,9 @@ from exomem import (
     writer_lease,
 )
 from exomem.collection_store import runtime
+from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import derivation, importer, projector, read, rederive, write
+from exomem.vault_store import derivation, derive, importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -210,6 +212,63 @@ def test_a_governed_trash_through_the_served_door_settles_its_receipt_in_the_req
 
     assert not any("not exact" in warning for warning in reply.get("warnings", ()))
     assert [marker["state"] for marker in tombstones(stored)] == ["committed"]
+
+
+def test_a_governed_trash_holds_the_boundary_no_longer_when_its_derivation_is_slow(
+    stored, service, monkeypatch
+):
+    """A governed page trashed, recovered and trashed again through the served door, the second
+    time with rows that take seconds to derive. Settled under the boundary, the trash held it for
+    those seconds; it holds it no longer, and its request still settles its receipt."""
+    govern(stored, BETA)
+    held = holds(monkeypatch)
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True, force_orphan=True)
+    quick = max(held)
+    # A governed reply withholds the trashed path; its tombstone names it.
+    [trashed] = tombstones(stored)[0]["manifest"]
+    call(stored, "manage_memory_file", operation="recover", trash_path=trashed["trash_path"])
+    held.clear()
+    delay[0] = SLOW_DERIVATION_SECONDS
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    slow = max(held)
+    assert slow - quick < HOLD_GROWTH_LIMIT_MS, (
+        f"the trash held the boundary {slow:.0f} ms with a {SLOW_DERIVATION_SECONDS:.0f} s "
+        f"derivation, against {quick:.0f} ms with an instant one"
+    )
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)][-1:] == ["committed"]
+
+
+def test_a_governed_trash_whose_rows_cannot_be_derived_says_so_in_its_reply(
+    stored, service, monkeypatch
+):
+    """A governed page trashed while its rows fail to derive. The trash settles after its terminal,
+    so a warning that the settling adds then must still reach the reply, which otherwise says
+    nothing while the content stays tombstoned."""
+    govern(stored, BETA)
+
+    def derive_paths(*arguments, **keywords):
+        raise RuntimeError("the derivation fails")
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True, response_detail="full")
+
+    assert lifecycle.TRASH_NOT_EXACT in reply["warnings"]
+    assert reply["diagnostics"]["operational"]["warnings_count"] == len(reply["warnings"])
+    assert [marker["state"] for marker in tombstones(stored)] == ["pending"]
 
 
 def test_a_full_reply_names_each_derived_component_as_its_acknowledgement_does(stored, service):

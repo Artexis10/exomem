@@ -135,8 +135,12 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 
 #### Scenario: A governed trash settles in its request
 - **WHEN** a governed page is trashed or recovered in store mode
-- **THEN** the request derives the transition's intents before it settles the receipt
-- **AND** the receipt settles without a reconcile
+- **THEN** the request derives the transition's intents after it releases the boundary, then settles the receipt in a second short hold that reads their state
+- **AND** the receipt settles without a reconcile, and the boundary hold does not grow with the derivation
+
+#### Scenario: A governed trash whose rows stay underived says so
+- **WHEN** a governed trash's rows are still pending or failed when its request settles it
+- **THEN** its reply carries the not-exact warning and the content stays tombstoned until reconcile
 
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.

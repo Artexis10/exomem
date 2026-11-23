@@ -59,6 +59,7 @@ from .mutation_lock import _release_os_lock as _release_owner_lock
 from .mutation_lock import _try_os_lock as _try_owner_lock
 from .mutation_terminal import (
     _DERIVED_COMPONENT_NAMES,
+    LeafWarning,
     ResponseDetail,
     _CanonicalRequestReplay,
     as_replay,
@@ -560,55 +561,25 @@ def _with_post_terminal_fanout_acknowledgement(
     performed. Only media's real fan-out ever returns a non-empty report list
     (review: merge fallout -- heat's registrant made this run unconditionally
     on every write once it started sharing the queue)."""
+    from . import index_sync
+
     if not isinstance(result, Mapping) or result.get("state") != "committed":
         return result
+    # A governed transition that settles after its request's derivation adds its warning to the leaf.
+    warnings = [item for item in reports if isinstance(item, LeafWarning)]
+    reports = [item for item in reports if not isinstance(item, LeafWarning)]
     if not reports and not drain_failed:
-        return result
+        return with_leaf_index_observed(result, (), warnings)
 
     derived_sync, unfinished, diagnostics = _derived_sync_of(reports, drain_failed=drain_failed)
+    observations = [report for report in reports if isinstance(report, index_sync.IndexSyncReport)]
     return with_fast_acknowledgement(
-        with_leaf_index_observed(result, _observed_components(reports)),
+        with_leaf_index_observed(result, observations, warnings),
         derived_sync=derived_sync,
         derived_sync_components=unfinished,
         component_diagnostics=diagnostics,
         advisory_sync="not_required",
     )
-
-
-#: The order of the derived acknowledgement's states (``DERIVED_SYNC_OUTCOMES``), the least finished last.
-# nosemgrep: ep-word-dict -- the closed `derived_sync` states that `_derived_state` returns, least to most severe.
-_SEVERITY = {"completed": 0, "pending": 1, "failed": 2}
-
-
-def _derived_state(component: Any) -> str:
-    """``completed``, ``pending`` or ``failed``: what one fan-out component says of its work.
-
-    The outcomes and the accepted codes are the closed sets that ``index_sync.IndexComponentOutcome``
-    fixes.
-    """
-    if component.outcome in {"failed", "degraded"}:  # nosemgrep: ep-word-membership -- closed outcome set
-        return "failed"
-    if component.outcome in {"registered", "deferred"}:  # nosemgrep: ep-word-membership -- closed outcome set
-        return "pending"
-    # nosemgrep: ep-word-membership -- the closed codes of work that was not required.
-    if component.outcome == "accepted" and component.code not in {"embeddings_disabled", "no_eligible_paths"}:
-        return "pending"
-    return "completed"
-
-
-def _observed_components(reports: list[Any]) -> dict[str, Any]:
-    """Each component that the fan-out observed, the least finished observation when several do."""
-    from . import index_sync
-
-    observed: dict[str, Any] = {}
-    for report in reports:
-        if not isinstance(report, index_sync.IndexSyncReport):
-            continue
-        for component in report.components:
-            kept = observed.get(component.component)
-            if kept is None or _SEVERITY[_derived_state(component)] > _SEVERITY[_derived_state(kept)]:
-                observed[component.component] = component
-    return observed
 
 
 def _derived_sync_of(
@@ -617,6 +588,7 @@ def _derived_sync_of(
     """Classify drained fan-out reports: the outcome, its unfinished components and their diagnostics."""
     from . import index_sync
 
+    severity = index_sync.DERIVED_STATE_SEVERITY
     component_outcomes: dict[str, tuple[str, str | None]] = {}
     diagnostics: list[dict[str, str | None]] = []
     for report in reports:
@@ -633,9 +605,9 @@ def _derived_sync_of(
             )
             if component.component not in _DERIVED_COMPONENT_NAMES:
                 continue
-            outcome = _derived_state(component)
+            outcome = index_sync.derived_state(component)
             previous = component_outcomes.get(component.component)
-            if previous is None or _SEVERITY[outcome] > _SEVERITY[previous[0]]:
+            if previous is None or severity[outcome] > severity[previous[0]]:
                 component_outcomes[component.component] = (outcome, component.code)
 
     states = {outcome for outcome, _code in component_outcomes.values()}
