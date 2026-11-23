@@ -78,6 +78,7 @@ from ..published_admission import (
     request_decisions,
 )
 from . import (
+    admission_memo,
     artifact_census,
     authorization_custody,
     authorization_session_authority,
@@ -8310,7 +8311,26 @@ def release_walk_filter(
                 within_request=request_identity,
             )
 
-    keep = AdmittedPredicate(Admission(identity, judge, judge_many))
+    def judge_kept(paths: list[str]) -> dict[str, bool]:
+        from .. import document_containers
+
+        def decide_paths(wanted: list[str]) -> dict[str, bool]:
+            return {path: verdict[0] for path, verdict in judge_many(wanted, False).items()}
+
+        # Only the bound writer's request pins the snapshot whose hashes prove a kept verdict current.
+        # Staged container pages are read in place of stored ones, which no kept hash names.
+        if not paths or bound_writer(vault_root) is None or document_containers._OVERLAY.get():
+            return decide_paths(paths)
+        with release_decision_context(vault_root):
+            named = request_identity()
+            collector = _collector()
+            # A kept verdict records no outcome, so only a request that emits no receipt may use one.
+            if named is None or (collector is not None and not collector.sink):
+                return decide_paths(paths)
+            key = (named, who, policy.conflicted, membership_module.subject_inputs(vault_root, policy))
+            return admission_memo.decide(vault_root, key, paths, decide_paths, who)
+
+    keep = AdmittedPredicate(Admission(identity, judge, judge_many, judge_kept))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -8397,16 +8417,19 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
         yield
 
 
-def admitted(keep: Callable[[str], bool], paths: Iterable[str]) -> frozenset[str]:
+def admitted(keep: Callable[[str], bool], paths: Iterable[str], *, kept: bool = False) -> frozenset[str]:
     """The paths that the release filter `keep` admits, decided as one set.
 
     A filter that offers its `Admission` decides the set through `decide_many`; any other filter is
-    asked once per path. Each path gets the verdict that `keep(path)` gives it.
+    asked once per path. Each path gets the verdict that `keep(path)` gives it. With `kept`, the
+    filter may answer from verdicts it keeps from one request to the next (`Admission.decide_kept`).
     """
     wanted = list(dict.fromkeys(paths))
     offered = admission_of(keep)
     if offered is None:
         return frozenset(path for path in wanted if keep(path))
+    if kept:
+        return frozenset(path for path, allowed in offered.decide_kept(wanted).items() if allowed)
     return frozenset(path for path, verdict in offered.decide_many(wanted).items() if verdict[0])
 
 

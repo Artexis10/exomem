@@ -4243,7 +4243,7 @@ def build_corpus_context_with_census(
             if memo is not None and memo[0] is context and not restricted:
                 return memo[2], census
         # A filter decides every page: as one set, under one snapshot.
-        admitted = None if visible is None else egress.admitted(visible, context.pages)
+        admitted = None if visible is None else egress.admitted(visible, context.pages, kept=True)
         withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
         # The current admission proved every page. Reuse the validated enrichment
         # without copying its page states into a second mapping.

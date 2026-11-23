@@ -227,6 +227,10 @@ class StoreSnapshot:
         """The paths in ``rels`` that the store holds a page at, read in a few queries."""
         return frozenset(path for path, in self._each(rels, "path"))
 
+    def page_hashes(self, rels: Iterable[str]) -> dict[str, str]:
+        """The SHA-256 of each page in ``rels`` that the store holds, read from the metadata index."""
+        return dict(self._each(rels, "path, sha256", source=_META_FROM))
+
     def prefetch_pages(self, rels: Iterable[str]) -> None:
         """Hold a bounded caller-selected batch for repeated parent and target reads in this snapshot."""
         pages = self.memo.setdefault("pages", {})
