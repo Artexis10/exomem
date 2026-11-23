@@ -436,10 +436,34 @@ def edit(
 # ---------------- path resolution ----------------
 
 
-# REWRITE-SLOT 1
-    # REWRITE-SLOT 2
-    # REWRITE-SLOT 3
-        # REWRITE-SLOT 4
+def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
+    """The vault-relative path of a real file inside the vault but beyond the managed root.
+
+    Returns `None` for anything else. `_missing_page_error` uses it to choose
+    between its two refusals. It confirms nothing that `get_page` does not
+    already show, and it never accepts a path that leaves the vault. Like
+    `_resolve`, it adds `.md` only when the text lacks it.
+    """
+    # Read the text exactly as typed: `kb_page_target` and `kb_page_relative_form`
+    # prepend the managed root, which would hide what this function asks, namely
+    # whether the caller named something outside it.
+    page = given.strip().replace("\\", "/").lstrip("/")
+    if managed_split(page) is not None:
+        # The caller already addressed the managed root, so a miss there is a plain miss.
+        return None
+    if not page.endswith(".md"):
+        page += ".md"
+    try:
+        vault = vault_root.resolve()
+        real = (vault / page).resolve()
+        inside_vault = real.is_relative_to(vault)
+        under_root = real.is_relative_to(kb_root(vault_root).resolve())
+        # `real` is the link target, so a symlink is judged by what it points at.
+        return page if inside_vault and not under_root and real.is_file() else None
+    except (ValueError, OSError):
+        return None
+
+
 def _write_target_withheld(vault_root: Path, rel: str) -> bool:
     from .governance import egress
 
@@ -448,7 +472,17 @@ def _write_target_withheld(vault_root: Path, rel: str) -> bool:
 
 def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
     """Distinguish a missing governed page from a real page outside the governed root."""
-    # REWRITE-SLOT 5
+    outside = _existing_page_outside_kb(vault_root, path)
+    if outside is not None:
+        return EditError(
+            code="OUTSIDE_GOVERNED_ROOT",
+            missing=["path"],
+            reason=(
+                f"{outside} is a page in the vault, but it lies beyond the managed root "
+                f"{managed_join('')}, and governed edits apply only inside that root. "
+                f"Move the page into {managed_join('')} or refer to it by its location there."
+            ),
+        )
     return EditError(code="NOT_FOUND", missing=["path"], reason=f"file does not exist: {rel}")
 
 
@@ -499,7 +533,9 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).
     if not candidate.exists() or _write_target_withheld(vault_root, rel):
-        # REWRITE-SLOT 6
+        # Re-rooting the caller's path can miss a page that really exists elsewhere
+        # in the vault (#599). `_missing_page_error` picks the refusal; nothing is
+        # ever written outside the managed root.
         raise _missing_page_error(vault_root, path, rel)
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
