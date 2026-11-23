@@ -306,9 +306,9 @@ _FALSY_ENV = {"", "0", "false", "no", "off"}
 
 # This word list is existing C6 debt; the rename only adds the product's new name beside its old
 # one, so a short prompt naming either name keeps the same treatment.
+# nosemgrep: ep-word-search, ep-lexical-intent -- existing C6 debt, kept as is; this change adds only the product's new name.
 _KB_BEARING_RE = re.compile(
     r"\b("
-    # nosemgrep: ep-word-search, ep-lexical-intent -- the closed set of this product's own names.
     r"kb|knowledge\s+base|exomem|evermatter|note|notes|remember|save|capture|"
     r"conclud(?:e|ed|ion|ions)?|decision|decisions|"
     r"prior|previous|earlier|history|looked\s+at|have\s+i|did\s+i"
