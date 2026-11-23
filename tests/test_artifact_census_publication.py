@@ -220,6 +220,16 @@ def test_an_unpublished_census_takes_the_walk_and_is_never_empty(
     assert artifact_census.published_view(vault) is None
 
 
+def test_an_unpublished_census_redacts_a_withheld_path_that_ends_a_sentence(vault: Path) -> None:
+    _withhold_from_external(vault, "Notes/Patterns/**")
+    _write(vault, f"{WITHHELD_DIR}/orchid-memo.md")
+
+    released = _gate(vault, f"Record it in {WITHHELD_DIR}/orchid-memo.md.")
+
+    assert released == f"Record it in {egress.WITHHELD_REFERENCE}."
+    assert artifact_census.published_view(vault) is None
+
+
 def test_a_burst_of_new_files_withdraws_the_census_to_the_walk(
     vault: Path, walks: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
