@@ -9579,7 +9579,7 @@ def invoke_command(
         try:
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
-                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0]))
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=True))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()

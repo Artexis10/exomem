@@ -137,7 +137,7 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 - **THEN** its reply carries the not-exact warning and the content stays tombstoned until reconcile
 
 ### Requirement: A read reflects the writes acknowledged before it, or says what lags
-A store-mode request SHALL wait, holding no store connection and for at most one second and its remaining budget, until no derivation intent at or below the store revision that it first read is pending. When the wait ends first, a ranked read SHALL answer with the derived-behind notice, and a read that would answer that something does not exist SHALL answer from the stored bytes or refuse with `VAULT_STORE_DERIVED_BEHIND`.
+While a store thread in its process derives rows, a store-mode read request SHALL wait at its door, holding no store connection, for at most one second and half its remaining budget, until no intent at or below the revision it first read is pending. If intents stay pending, a ranked read SHALL answer with the derived-behind notice, and a direct page read that finds no page SHALL refuse with `VAULT_STORE_DERIVED_BEHIND`.
 
 #### Scenario: Search and graph see the write after acknowledgement
 - **WHEN** a governed write that adds a page and a link returns success and a lexical search for a term in the page starts after that
@@ -152,8 +152,17 @@ A store-mode request SHALL wait, holding no store connection and for at most one
 #### Scenario: A slow derivation is reported, not hidden
 - **WHEN** a governed write's derivation has not finished when a later search's wait ends
 - **THEN** the search answers with the derived-behind notice, its counts and its age, and with no path, title or content
-- **AND** a read of the new page's reference returns the page from its stored bytes, not a missing page
+- **AND** a read of the new page's reference or short id returns the page from its stored bytes, not a missing page
 - **AND** a read of a moved page's old path refuses with `VAULT_STORE_DERIVED_BEHIND`, not as a missing page
+
+#### Scenario: A recall during the lag answers and says what lags
+- **WHEN** a recall's wait ends before a save's rows are derived, and its conversation cites the new page's short id or a ref that names no page
+- **THEN** the recall returns its packet with the derived-behind notice
+- **AND** no ref, hint, brief seed or anchor refuses for the lag
+
+#### Scenario: A read with no drainer answers at once
+- **WHEN** derivation intents are pending and no store thread in the reader's process derives them
+- **THEN** the read answers at once with the derived-behind notice
 
 #### Scenario: A waiting reader holds no store connection
 - **WHEN** a search waits for the derivation of an earlier write
@@ -168,7 +177,7 @@ A store-mode request SHALL wait, holding no store connection and for at most one
 - **THEN** the read does not wait for that write's derivation
 
 #### Scenario: A write and a drain never wait for rows
-- **WHEN** the store thread, a drain or a holder of the vault mutation boundary reads the store
+- **WHEN** a write, a drain, the store thread or an internal read such as a warm-up or a cache build reads the store while derivation intents are pending
 - **THEN** it reads at once, without waiting for any derivation intent
 
 ### Requirement: Markdown is a byte-exact projection

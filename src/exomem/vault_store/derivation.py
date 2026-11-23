@@ -58,8 +58,10 @@ OWN_DERIVATION_SECONDS = 30.0
 #: The longest that a read waits for the derivation of the writes acknowledged before it began
 #: (``caught_up``); its request budget may cut the wait shorter.
 READ_WAIT_SECONDS = 1.0
-#: The first and the longest pause between two looks at the queue by a waiting reader. A drain in
-#: this process wakes the reader at once; one in another process is seen only at a look.
+#: The share of a request's remaining budget that the wait may take, leaving the rest to the read.
+READ_WAIT_BUDGET_SHARE = 0.5
+#: The first and the longest pause between two looks at the queue by a waiting reader. A drain
+#: wakes the reader at once; a change that signals nothing is seen only at a look.
 _LOOK_FIRST_SECONDS, _LOOK_MOST_SECONDS = 0.01, 0.1
 
 #: The vault whose derived rows this context writes without the vault mutation boundary.
@@ -365,9 +367,10 @@ def caught_up(still_held_back: Callable[[], bool], seconds: float) -> bool:
     """Wait until ``still_held_back()`` is False, for at most ``seconds``; whether it became False.
 
     The caller holds no store connection while it waits, and ``still_held_back`` opens one only for
-    its look. A drain in this process wakes the wait at once; a drain in another process is seen at
-    the next look, after a pause that doubles up to ``_LOOK_MOST_SECONDS``. The waiting request lets
-    the store thread run meanwhile, which a foreground request otherwise parks.
+    its look. Each drain batch and each recorded failure wakes the wait at once (``_signal``); a
+    change that signals nothing, such as a later save that moves a page's intent past the reader's
+    revision, is seen at the next look, after a pause that doubles up to ``_LOOK_MOST_SECONDS``. The
+    waiting request lets the store thread run meanwhile, which a foreground request otherwise parks.
     """
     deadline = time.monotonic() + seconds
     pause = _LOOK_FIRST_SECONDS

@@ -151,8 +151,9 @@ def _paths_for_head(
     # they narrow the owners before each survivor is checked in full.
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
+    stored = memory_refs.store_owners_by_prefix(root, leading)
     with egress.decide_without_receipt():
-        for owner in _identity_owners(root, serve_stale):
+        for owner in _identity_owners(root, serve_stale) if stored is None else stored:
             if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
                 continue
             try:
@@ -302,11 +303,6 @@ def resolve_page(
         paths = [path for path in paths if prefer(path)] or paths
     if len(paths) > 1:
         raise _ambiguous(root, paths, field, named=f"are titled \u201c{raw}\u201d")
-    if not paths and writer_lease.invocation_reads():
-        from .vault_store import read as store_read
-
-        # The page that a moved path or a title names may be one whose rows are still being derived.
-        store_read.require_caught_up(root)
     return resolve_reference(root, paths[0] if paths else raw)
 
 

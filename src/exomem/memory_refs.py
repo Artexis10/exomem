@@ -1740,6 +1740,38 @@ def _store_identity_owners(
     return _from_store_identities(vault_root, owners)
 
 
+def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | None:
+    """Every well-formed id in the store that starts with ``prefix``; None outside store mode.
+
+    One read through the id index, with the rule of ``_store_identity_owners`` for a page whose
+    derivation trails its stored bytes, so a page saved a moment ago is found by its id at once.
+    """
+    from .vault_store import derivation
+
+    root = Path(vault_root)
+    # The first string after every one that starts with ``prefix``, for an index range.
+    end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+    def owners(conn: sqlite3.Connection) -> tuple[str, ...]:
+        underived = derivation.underived(conn)
+        found = {
+            str(exomem_id)
+            for exomem_id, path in conn.execute(
+                "SELECT exomem_id, path FROM identities "
+                "WHERE status = 'valid' AND exomem_id >= ? AND exomem_id < ?",
+                (prefix, end),
+            )
+            if path not in underived
+        }
+        for path, raw in underived.items():
+            row = None if raw is None else identity_row(root, path, raw)
+            if row is not None and row[4] == "valid" and row[1].startswith(prefix):
+                found.add(row[1])
+        return tuple(sorted(found))
+
+    return _from_store_identities(vault_root, owners)
+
+
 def _identity_issues(conn: sqlite3.Connection) -> list[dict[str, str]]:
     """The duplicate and malformed identities that the rows of ``conn`` hold, in one read each."""
     malformed = conn.execute(

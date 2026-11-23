@@ -3471,7 +3471,7 @@ def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.G
     try:
         page = get_page_module.get_page(vault_root, path=path)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if egress_module.page_withheld_entirely(
         vault_root,
         page.as_dict(include_raw=False),
@@ -3632,6 +3632,23 @@ def op_search(
     return {"results": [_search_result_from_hit(hit) for hit in hits]}
 
 
+def _page_read_error(vault_root: Path, error: get_page_module.GetError) -> Exception:
+    """A ``GetError`` from a direct page read, as the error that its caller sees.
+
+    A read that found no page answers ``NOT_FOUND``. While rows of the writes acknowledged before this request still lag, a moved path or a title
+    may name a page that those rows do not hold yet, so the read refuses with
+    ``VAULT_STORE_DERIVED_BEHIND`` instead (``vault_store.read.require_caught_up``). It decides on
+    the queue alone, so a withheld page and an absent one answer alike. Hints, refs, brief seeds
+    and anchors never come here: a name that resolves to nothing degrades there, and the read's
+    derived-behind notice says what lags.
+    """
+    from .vault_store import read as store_read
+
+    if error.code == "NOT_FOUND":
+        store_read.require_caught_up(vault_root)
+    return ValueError(f"{error.code}: {error.reason}")
+
+
 def _refuse_policy_tree_read(
     candidate: object,
     *,
@@ -3688,7 +3705,7 @@ def op_fetch(
         )
         page = get_page_module.get_page(vault_root, path=id, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     # Release gate. `fetch` is the deep-research read step between metadata-only
     # `search` and full `get`, and it reached `get_page` directly — so a
     # sub-notice item's body, title, frontmatter and canonical path crossed the
@@ -4713,7 +4730,7 @@ def op_get(
     except get_page_module.GetError as e:
         if e.code == "NOT_FOUND" and (row := _retired_item(vault_root, path)) is not None:
             return row
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     _refuse_policy_tree_read(
         prepared.resolved_relative,
         missing_path=prepared.missing_path,
@@ -4722,7 +4739,7 @@ def op_get(
         with call_spans_module.span("read.page"):
             result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if frontmatter_only:
         out = {
             "path": result.path,
@@ -7396,11 +7413,15 @@ def op_activate_context(
                         # delivered on attach, so like upkeep it waits for the agent's first recall with a turn.
                         if str(turn or "").strip():
                             vocabulary_delta_module.for_packet(vault_root, packet, session=session)
-                        # A store-mode vault serves its rows while a registry pass re-derives them:
-                        # the diagnostics name the pass, and the lanes serve.
+                        # A store-mode vault serves its rows while a registry pass re-derives them,
+                        # or while the rows of recent saves are still being derived: the packet says
+                        # so in the words of every store-mode reader, the diagnostics name the pass,
+                        # and the lanes serve.
                         registry_lag = store_read_module.request_registry_notice(vault_root)
-                        if registry_lag is not None and isinstance(packet.get("generation"), dict):
-                            packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
+                        if registry_lag is not None:
+                            packet.update(_store_registry_lag(vault_root) or {})
+                            if isinstance(packet.get("generation"), dict):
+                                packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
                     _carry_thread_through_abstention(packet, continuity)
                     # Last among the paths that set the token: the token names the policy its holder holds.
                     capture_carrier_module.stamp(packet, capture_policy)
@@ -8604,7 +8625,7 @@ def read_memory_stored(
         try:
             prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         _refuse_policy_tree_read(
             prepared.resolved_relative,
             missing_path=prepared.missing_path,
@@ -8612,7 +8633,7 @@ def read_memory_stored(
         try:
             page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         # The page decision `op_get` takes, taken BEFORE any unit is resolved.
         # A unit, its parent citation and its surrounding Markdown are the
         # page's own contents, and whether a reference resolves is itself a

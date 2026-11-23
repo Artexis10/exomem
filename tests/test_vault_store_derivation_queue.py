@@ -25,7 +25,7 @@ from test_vault_store_write_path import bm25_paths, planned, served, store_rows 
 from exomem import delete_file, lexstore, media_capacity, memory_refs, mutation_lock, writer_lease
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
-from exomem.collection_store import connection
+from exomem.collection_store import connection, runtime
 from exomem.vault_store import derivation, derive, projection, read, verify, write
 
 SMALL = "Knowledge Base/Notes/Small.md"
@@ -364,13 +364,32 @@ def test_a_page_whose_derivation_failed_holds_no_reader_back(served, writer, mon
         save(served, SMALL, SMALL_TEXT)
     fail_derivations(served, writer, monkeypatch, RuntimeError("the derivation broke"), 1)
     monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 30.0)
+    monkeypatch.setattr(runtime, "drains", lambda _root: True)  # a reader waits only for a drainer
 
     began = time.monotonic()
-    with read.request_snapshot(served):
+    with read.request_snapshot(served, catch_up=True):
         behind = read.request_registry_notice(served)
     waited = time.monotonic() - began
 
     assert waited < 5, f"the read waited {waited:.1f} s for a derivation that had failed"
+    assert behind is not None and behind["lag"]["derived_pending"] == 1
+
+
+def test_a_reader_with_no_drainer_answers_at_once_and_says_what_lags(served, writer, monkeypatch):  # noqa: F811
+    """A save whose rows nothing in this process derives: the service is down after a crash, and
+    a command-line read runs. Waiting for rows that would not arrive, every such read paid the
+    whole wait bound."""
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        save(served, SMALL, SMALL_TEXT)
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 30.0)
+
+    began = time.monotonic()
+    with read.request_snapshot(served, catch_up=True):
+        behind = read.request_registry_notice(served)
+    waited = time.monotonic() - began
+
+    assert waited < 5, f"the read waited {waited:.1f} s for rows that no process derives"
     assert behind is not None and behind["lag"]["derived_pending"] == 1
 
 
@@ -383,6 +402,7 @@ def test_a_reader_does_not_wait_for_a_write_that_committed_after_it_began(
     later = "Knowledge Base/Notes/Later.md"
     monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 30.0)
     monkeypatch.setattr(derivation, "BATCH_PAGES", 1)  # the drain derives the saves one at a time
+    monkeypatch.setattr(runtime, "drains", lambda _root: True)  # this test drains, as the store thread
     with monkeypatch.context() as patch:
         patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
         save(served, SMALL, SMALL_TEXT)
@@ -397,7 +417,7 @@ def test_a_reader_does_not_wait_for_a_write_that_committed_after_it_began(
     seen = []
 
     def search():
-        with read.request_snapshot(served), read.snapshot(served) as view:
+        with read.request_snapshot(served, catch_up=True), read.snapshot(served) as view:
             seen.extend(path for (path,) in view.connection.execute(
                 "SELECT path FROM pages WHERE path IN (?, ?)", (SMALL, later)
             ))

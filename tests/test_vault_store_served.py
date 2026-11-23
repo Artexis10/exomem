@@ -49,7 +49,9 @@ from exomem import (
     media_replicas,
     media_store,
     media_worker,
+    memory_refs,
     mutation_lock,
+    page_ids,
     relation_review,
     reserved_paths,
     scene_frames,
@@ -393,6 +395,85 @@ def test_a_search_that_outwaits_its_bound_says_the_rows_lag_and_a_lookup_refuses
     assert by_reference["path"] == saved["path"]
     assert read.DERIVED_BEHIND in str(refused.value), refused.value
     assert read.page_exists(stored, archived)
+
+
+def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):
+    """A save whose rows the store thread derives only after the next recall's wait ran out. The
+    recall cannot rank the page yet, and without the notice that a search carries it missed the
+    page in silence."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        call(stored, "remember", **QUOKKA)
+        packet = call(stored, "activate_context", turn="How did the quokka population change?")
+
+    assert "not yet in the search" in packet["notice"]
+    assert packet["lag"]["derived_pending"] >= 1
+
+
+def test_a_recall_during_the_lag_answers_whatever_its_refs_name(stored, service, monkeypatch):
+    """A recall whose conversation cites the short id of a page saved a moment ago, and a ref that
+    names no page, while the save's rows lag. A refusal for the lag inside the shared name lookup
+    made one such ref fail the whole recall."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+        page = call(stored, "read_memory", path=saved["ref"])
+        short = page_ids.page_id(
+            memory_refs.parse_memory_ref(saved["ref"]), page["path"], page["content_hash"]
+        )
+        cited = call(
+            stored, "activate_context", turn="Summarise the census.", conversation={"refs": [short]}
+        )
+        unnamed = call(
+            stored, "activate_context", turn="Summarise the census.",
+            conversation={"refs": ["A page that nobody wrote"]},
+        )
+
+    assert "not yet in the search" in cited["notice"]
+    assert "not yet in the search" in unnamed["notice"]
+
+
+def test_a_saved_pages_short_id_names_it_before_and_after_its_rows(stored, service, monkeypatch):
+    """A page that only the store holds, read by its short id. The id lookup read the ids from the
+    cached corpus or the files, neither of which holds such a page."""
+    with derivation_held(monkeypatch) as release:
+        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+        page = call(stored, "read_memory", path=saved["ref"])
+        short = page_ids.page_id(
+            memory_refs.parse_memory_ref(saved["ref"]), page["path"], page["content_hash"]
+        )
+        before = call(stored, "read_memory", path=short)
+        release.set()
+    derived(stored)
+    after = call(stored, "read_memory", path=short)
+
+    assert before["path"] == after["path"] == saved["path"]
+
+
+def test_a_write_and_a_drain_never_wait_for_rows(stored, service, monkeypatch):
+    """Two saves and a move while the rows of earlier saves are pending, then the drain of them all.
+    A write that waited for those rows would add up to the wait bound to every save in a burst, and
+    a drain that waited would wait for the rows it derives itself."""
+    waits = []
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        waits.append(threading.current_thread().name)
+        return real_caught_up(still_held_back, seconds)
+
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        call(stored, "remember", **QUOKKA)
+        call(stored, "remember", **{**QUOKKA, "title": "Second census"})
+        call(stored, "manage_memory_file", operation="move", old_path=ALPHA,
+             new_path=f"{NOTES}/Archive/Alpha.md")
+        assert store_rows(stored, "SELECT 1 FROM store_derivation_queue LIMIT 1"), (
+            "the rows must be pending for this check to mean anything"
+        )
+    derived(stored)
+
+    assert waits == []
 
 
 def test_a_reader_holds_no_store_connection_while_it_waits_for_the_rows(

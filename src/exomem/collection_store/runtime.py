@@ -1313,6 +1313,21 @@ def on_store_thread(vault_root) -> bool:
     return server is not None and server.thread is threading.current_thread()
 
 
+def drains(vault_root) -> bool:
+    """Whether a store thread in this process derives ``vault_root``'s rows: it runs, its store is
+    open, and its lease is not idle-released. A read waits for those rows only then
+    (``vault_store.read.request_snapshot``); with none, they would not arrive within the wait. A
+    plain dict read."""
+    server = _SERVERS.get(Path(vault_root).resolve())
+    return (
+        server is not None
+        and server.thread.is_alive()
+        and server.runtime is not None
+        and not server._stopping()
+        and not server._idle_released()
+    )
+
+
 def notify_view_change(root, path, *, destination=None, directory=False):
     """Wake an existing store thread with a filesystem hint, without opening or calling it."""
     watched_root = Path(root)
