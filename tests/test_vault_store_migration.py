@@ -36,6 +36,7 @@ from exomem import (
     deferred_index,
     epistemic_graph,
     find,
+    freshness,
     graph_sync,
     index_sync,
     lexstore,
@@ -803,6 +804,10 @@ def _leave_graph_repair_queued(root):
     pages.batch_atomic_write([pages.PlannedWrite(root / GAMMA, page)], vault_root=root)
     epistemic_graph._admit_startup_source(root)  # the registry has no public release
     assert deferred_index.graph_queue_pending(root), "the save must leave graph repair queued"
+    # `migrate` runs in a fresh process: no live recall projection and no resolver cache from the
+    # rebuild that built this fixture. Drop them, or the catch-up borrows this process's warm state.
+    freshness.invalidate(root)
+    find.evict_resolver_caches(root)
 
 
 def test_a_migration_catches_up_graph_work_that_a_stopped_service_left_queued(vault, capsys):

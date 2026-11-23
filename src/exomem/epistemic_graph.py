@@ -5789,6 +5789,14 @@ class EpistemicGraphIndex:
             f"{REBUILD_PUBLICATION_ATTEMPTS} attempts; {graph_sync._RECONCILE_HINT}",
         )
 
+    def publish_recall_projection(self) -> None:
+        """Make the vault's recall projection live in this process, as a whole rebuild does.
+
+        A drain proves its repair against the live projection and declines without one. A service's
+        watcher makes it live; an offline lease holder (a migration) has to do it here.
+        """
+        self._reconcile_recall_publication()
+
     def _reconcile_recall_publication(self) -> None:
         """Seed/reconcile recall outside publication authority, then rebuild fresh."""
         pending = freshness.external_pending_epoch(self.vault_root)
