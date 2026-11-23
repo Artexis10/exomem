@@ -32,4 +32,4 @@ Updates the Dot E branding and memory workflow guidance. Connect an existing Eve
 
 Publisher: Substrate Systems OÜ.
 
-[Documentation](https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md) · [Privacy policy](https://substratesystems.io/exomem/privacy) · [Terms of service](https://substratesystems.io/exomem/terms) · [Support](https://substratesystems.io/exomem/support)
+[Documentation](https://github.com/Artexis10/evermatter/blob/main/QUICKSTART.md) · [Privacy policy](https://substratesystems.io/exomem/privacy) · [Terms of service](https://substratesystems.io/exomem/terms) · [Support](https://substratesystems.io/exomem/support)

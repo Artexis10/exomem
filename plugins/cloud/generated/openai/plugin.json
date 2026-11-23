@@ -7,8 +7,8 @@
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"
   },
-  "homepage": "https://substratesystems.io/exomem",
-  "repository": "https://github.com/Artexis10/exomem",
+  "homepage": "https://evermatter.ai",
+  "repository": "https://github.com/Artexis10/evermatter",
   "license": "Apache-2.0",
   "keywords": [
     "memory",
@@ -33,7 +33,7 @@
           "Read",
           "Write"
         ],
-        "websiteURL": "https://substratesystems.io/exomem",
+        "websiteURL": "https://evermatter.ai",
         "supportURL": "https://substratesystems.io/exomem/support",
         "privacyPolicyURL": "https://substratesystems.io/exomem/privacy",
         "termsOfServiceURL": "https://substratesystems.io/exomem/terms",

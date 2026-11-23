@@ -18,12 +18,12 @@
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"
   },
-  "homepage": "https://substratesystems.io/exomem",
-  "repository": "https://github.com/Artexis10/exomem",
+  "homepage": "https://evermatter.ai",
+  "repository": "https://github.com/Artexis10/evermatter",
   "privacy": "https://substratesystems.io/exomem/privacy",
   "terms": "https://substratesystems.io/exomem/terms",
   "support": "https://substratesystems.io/exomem/support",
-  "documentation": "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md",
+  "documentation": "https://github.com/Artexis10/evermatter/blob/main/QUICKSTART.md",
   "license": "Apache-2.0",
   "keywords": [
     "memory",
