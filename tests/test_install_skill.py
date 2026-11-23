@@ -93,12 +93,12 @@ def test_install_skill_via_cli(tmp_path: Path) -> None:
 
 
 def test_remove_legacy_skill_retires_ours(tmp_path: Path) -> None:
-    """A pre-rename install (old `name: knowledge-base` marker + the Exomem
+    """A pre-rename install (old `name: knowledge-base` marker + the Evermatter
     fingerprint) is removed."""
     legacy = tmp_path / "skills" / "knowledge-base"
     legacy.mkdir(parents=True)
     (legacy / "SKILL.md").write_text(
-        "---\nname: knowledge-base\n---\n\nThis skill is the Exomem contract.\n",
+        "---\nname: knowledge-base\n---\n\nThis skill is the Evermatter contract.\n",
         encoding="utf-8",
     )
     removed = install_module.remove_legacy_skill(legacy)

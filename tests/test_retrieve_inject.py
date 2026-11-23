@@ -224,7 +224,7 @@ def test_stub_header_gives_diagnostic_verification_guidance() -> None:
     [
         "what did I conclude about the kb hook design earlier?",
         "save this to the knowledge base",
-        "Have I looked at this Exomem decision before?",
+        "Have I looked at this Evermatter decision before?",
         "去年このプロジェクトについて何を結論づけましたか？詳しく教えてください。",
     ],
 )
@@ -673,7 +673,7 @@ def test_service_env_path_on_macos_uses_application_support(monkeypatch: pytest.
     monkeypatch.setattr(hook_mod.sys, "platform", "darwin")
     monkeypatch.setattr(hook_mod.Path, "home", classmethod(lambda cls: tmp_path / "mac-home"))
     assert credentials.service_env_path() == (
-        tmp_path / "mac-home" / "Library" / "Application Support" / "Exomem" / "service.env"
+        tmp_path / "mac-home" / "Library" / "Application Support" / "Evermatter" / "service.env"
     )
 
 

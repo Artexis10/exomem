@@ -251,7 +251,7 @@ def test_a_committed_save_leads_with_a_plain_summary(vault: Path) -> None:
     )
 
     assert next(iter(out)) == "user_summary"
-    assert out["user_summary"] == "Saved -> Knowledge Base/Notes/plain.md (personal Exomem)"
+    assert out["user_summary"] == "Saved -> Knowledge Base/Notes/plain.md (personal Evermatter)"
 
 
 def test_a_delete_summary_says_deleted_not_saved(vault: Path) -> None:
@@ -266,7 +266,7 @@ def test_a_delete_summary_says_deleted_not_saved(vault: Path) -> None:
     )
 
     assert out["user_summary"] == (
-        "Deleted -> Knowledge Base/Notes/Insights/to-delete.md (personal Exomem)"
+        "Deleted -> Knowledge Base/Notes/Insights/to-delete.md (personal Evermatter)"
     )
 
 
@@ -281,7 +281,7 @@ def test_a_move_summary_says_moved_and_names_both_ends(vault: Path) -> None:
     )
 
     assert out["user_summary"] == (
-        "Moved Knowledge Base/Notes/old-name.md -> Knowledge Base/Notes/new-name.md (personal Exomem)"
+        "Moved Knowledge Base/Notes/old-name.md -> Knowledge Base/Notes/new-name.md (personal Evermatter)"
     )
 
 
@@ -295,7 +295,7 @@ def test_a_write_that_stores_several_files_names_the_first_and_counts_the_rest()
 
     summary = mutation_terminal.project_terminal(terminal, outcome_verb="saved")["user_summary"]
 
-    assert summary == "Saved 3 files -> Sources/a.md and 2 more (personal Exomem)"
+    assert summary == "Saved 3 files -> Sources/a.md and 2 more (personal Evermatter)"
 
 
 def _preserve_batch(
@@ -362,7 +362,7 @@ def test_a_batch_that_stored_two_files_and_lost_one_says_so(
     assert [row["state"] for row in out["files"]] == ["stored", "stored", "failed"]
     assert next(iter(out)) == "user_summary"
     assert out["user_summary"] == (
-        f"Saved 2 of 3 files -> {_RAW}/a.bin and 1 more; 1 file could not be saved (personal Exomem)"
+        f"Saved 2 of 3 files -> {_RAW}/a.bin and 1 more; 1 file could not be saved (personal Evermatter)"
     )
 
 
@@ -382,7 +382,7 @@ def test_a_batch_that_found_a_copy_and_lost_a_file_never_says_saved(
 
     assert [row["state"] for row in out["files"]] == ["already_stored", "failed"]
     assert out["user_summary"] == (
-        "Nothing new saved; 1 already saved, 1 file could not be saved (personal Exomem)"
+        "Nothing new saved; 1 already saved, 1 file could not be saved (personal Evermatter)"
     )
 
 
@@ -403,7 +403,7 @@ def test_a_batch_that_stored_one_found_one_and_lost_one_reports_all_three(
     assert [row["state"] for row in out["files"]] == ["stored", "already_stored", "failed"]
     assert out["user_summary"] == (
         f"Saved 1 of 3 files -> {_RAW}/new.bin; 1 file could not be saved; 1 already saved"
-        " (personal Exomem)"
+        " (personal Evermatter)"
     )
 
 
@@ -418,7 +418,7 @@ def test_a_batch_of_copies_says_already_saved_and_names_the_first(
     )
 
     assert [row["state"] for row in out["files"]] == ["already_stored"]
-    assert out["user_summary"] == f"Already saved -> {_RAW}/a.bin (personal Exomem)"
+    assert out["user_summary"] == f"Already saved -> {_RAW}/a.bin (personal Evermatter)"
 
 
 def test_a_batch_that_stored_every_file_keeps_its_summary(
@@ -432,7 +432,7 @@ def test_a_batch_that_stored_every_file_keeps_its_summary(
         idempotency_key="all-stored",
     )
 
-    assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more (personal Exomem)"
+    assert out["user_summary"] == f"Saved 3 files -> {_RAW}/a.bin and 2 more (personal Evermatter)"
 
 
 @pytest.mark.usefixtures("duplicate_index")
@@ -451,9 +451,9 @@ def test_preserving_bytes_that_are_already_stored_says_already_saved(
         command, vault, filename="letter-copy.txt", idempotency_key="letter-again", **letter
     )
 
-    assert first["user_summary"] == f"Saved -> {first['path']} (personal Exomem)"
+    assert first["user_summary"] == f"Saved -> {first['path']} (personal Evermatter)"
     assert not (vault / "Knowledge Base/Evidence/case/letters/letter-copy.txt").exists()
-    assert again["user_summary"] == f"Already saved -> {first['path']} (personal Exomem)"
+    assert again["user_summary"] == f"Already saved -> {first['path']} (personal Evermatter)"
 
 
 def test_a_repeated_partial_batch_returns_the_same_summary_as_the_first(
@@ -509,7 +509,7 @@ def test_a_replayed_write_says_it_was_already_saved() -> None:
 
     assert next(iter(projected)) == "user_summary"
     assert projected["user_summary"] == (
-        "Already saved -> Knowledge Base/Records/log.md (personal Exomem)"
+        "Already saved -> Knowledge Base/Records/log.md (personal Evermatter)"
     )
     assert mutation_terminal.project_terminal(terminal, outcome_verb="saved") == projected
 
@@ -527,8 +527,8 @@ def test_the_summary_names_the_store_that_took_the_write(monkeypatch: pytest.Mon
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     cloud = mutation_terminal.project_terminal(terminal, outcome_verb="saved")
 
-    assert personal["user_summary"] == "Saved -> Sources/a.md (personal Exomem)"
-    assert cloud["user_summary"] == "Saved -> Sources/a.md (Exomem Cloud)"
+    assert personal["user_summary"] == "Saved -> Sources/a.md (personal Evermatter)"
+    assert cloud["user_summary"] == "Saved -> Sources/a.md (Evermatter Cloud)"
     assert next(iter(cloud)) == "user_summary"
     # A replay reads the stored terminal, so the same deployment gives the same sentence.
     assert mutation_terminal.project_terminal(terminal, outcome_verb="saved") == cloud
@@ -545,7 +545,7 @@ def test_the_narration_rule_reaches_the_bootstrap_and_the_skill(vault: Path) -> 
 
     assert rule in loop
     assert rule in skill
-    assert "Working on Exomem does not make an unrelated conversation diagnostic." in skill
+    assert "Working on Evermatter does not make an unrelated conversation diagnostic." in skill
 
 
 
@@ -559,7 +559,7 @@ def test_a_supersede_summary_leads_with_the_new_page(vault: Path) -> None:
 
     old_path, new_path = out["paths"]
     assert old_path == peer
-    assert out["user_summary"] == f"Replaced -> {new_path}, was {peer} (personal Exomem)"
+    assert out["user_summary"] == f"Replaced -> {new_path}, was {peer} (personal Evermatter)"
 
 
 def test_a_discard_summary_says_discarded_not_saved() -> None:
@@ -592,7 +592,7 @@ def test_a_reclassification_that_keeps_the_source_in_place_says_updated_not_move
 
     summary = mutation_terminal.project_terminal(terminal, outcome_verb=verb)["user_summary"]
 
-    assert summary == f"Updated -> {source} (personal Exomem)"
+    assert summary == f"Updated -> {source} (personal Evermatter)"
 
 
 def _declared_verbs() -> list[tuple[str, object]]:

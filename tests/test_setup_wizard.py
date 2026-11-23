@@ -192,7 +192,7 @@ def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     legacy = home / "skills" / "knowledge-base"
     legacy.mkdir(parents=True)
     (legacy / "SKILL.md").write_text(
-        "---\nname: knowledge-base\n---\n\nThis skill is the Exomem contract.\n",
+        "---\nname: knowledge-base\n---\n\nThis skill is the Evermatter contract.\n",
         encoding="utf-8",
     )
     code, out = _setup(vault, home, Recorder())
@@ -952,7 +952,7 @@ def test_scripted_setup_writes_no_instruction_file_unless_the_flag_asks(
 def test_a_level_saved_through_the_agent_keeps_setup_from_offering_the_instruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A user who told their agent "coding: off" asked Exomem to save only on request.
+    """A user who told their agent "coding: off" asked Evermatter to save only on request.
     Setup reads the vault's saved level as the owner, so it must not offer the
     instruction that asks for unprompted saves.
     """

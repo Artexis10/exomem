@@ -764,7 +764,7 @@ def test_shipped_guidance_does_not_name_relocated_state_as_in_vault() -> None:
         "first start over a vault carrying in-vault state migrates",
         "first time over an old vault, migrates",
         "Resolve and migrate the vault",
-        "Closed authority for Exomem's private in-vault state paths",
+        "Closed authority for Evermatter's private in-vault state paths",
     )
 
     violations = {

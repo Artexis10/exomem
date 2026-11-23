@@ -237,8 +237,8 @@ def test_a_collection_the_arm_could_not_list_is_unknown_and_not_an_empty_one(see
 REFUSED = json.dumps(
     {"error": {"code": "RELATION_DISPOSITION_MISSING", "message": "Nothing was saved."}}
 )
-SAVED = json.dumps({"user_summary": "Saved -> A note; not filed in Incidents (personal Exomem)"})
-UNFILED = json.dumps({"user_summary": "Saved -> A note (personal Exomem)"})
+SAVED = json.dumps({"user_summary": "Saved -> A note; not filed in Incidents (personal Evermatter)"})
+UNFILED = json.dumps({"user_summary": "Saved -> A note (personal Evermatter)"})
 
 
 def call(name: str, result: str | None, is_error: bool | None = False) -> dict:

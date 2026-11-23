@@ -155,7 +155,7 @@ def rig(tmp_path_factory: pytest.TempPathFactory):
             [
                 "openssl", "req", "-x509", "-newkey", "rsa:2048", "-days", "3",
                 "-nodes", "-keyout", str(tls_dir / "ca.key"), "-out", str(tls_dir / "ca.crt"),
-                "-subj", "/CN=Exomem Control Role Test CA",
+                "-subj", "/CN=Evermatter Control Role Test CA",
             ]
         )
         _run(

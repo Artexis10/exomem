@@ -1,6 +1,6 @@
 """Managed retrieval admission must survive the first write after a restart.
 
-The production shape (Exomem Cloud P3 rehearsal, #1378): a cell's pod is
+The production shape (Evermatter Cloud P3 rehearsal, #1378): a cell's pod is
 replaced (an upgrade, a pod kill, or leaving read-only mode, which is a
 rollout), the new process inherits a lexical catalog whose persisted recall
 checkpoints carry the previous process's registry instance id, and warm-up

@@ -1,4 +1,4 @@
-"""Contract for Exomem Cloud K3s agent nodes (openspec add-cloud-node-provisioning).
+"""Contract for Evermatter Cloud K3s agent nodes (openspec add-cloud-node-provisioning).
 
 Static checks over the Terraform root, the Ansible roles and playbooks, the
 inventory generator, the platform chart and the validation script. The

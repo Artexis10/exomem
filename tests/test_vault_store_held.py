@@ -2,7 +2,7 @@
 
 OpenSpec make-vault-store-canonical, design D5 and task 4.4. The vault is the migration suite's
 generated vault in store mode, and each page's change is a real ``write.commit``. A held row is
-inserted the way the projector writes one: Exomem changed a page, a person edited or deleted its
+inserted the way the projector writes one: Evermatter changed a page, a person edited or deleted its
 file, and the row records both.
 """
 
@@ -25,7 +25,7 @@ from exomem.cli_ops import OpError
 from exomem.curation import MAX_WHY_CHARS
 from exomem.vault_store import held, projector, read, write
 
-EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Exomem changed.\n"
+EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Evermatter changed.\n"
 MINE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe edit that a person made in the file.\n"
 WHY = "the owner asked"
 
@@ -35,7 +35,7 @@ def digest(body):
 
 
 def hold(root, writer, kind, *, body=True, exomem=EXOMEM, mine=MINE):
-    """Exomem changed ALPHA to ``exomem`` and a person changed its file to ``mine``.
+    """Evermatter changed ALPHA to ``exomem`` and a person changed its file to ``mine``.
 
     The store, the file and the held row end as the projector leaves them.
     """
@@ -77,7 +77,7 @@ def hold_a_binary(root, writer):
 
 
 def hold_after_store_delete(root, writer, *, mine=MINE):
-    """Exomem deleted ALPHA's page while a person edited its file, which stays with no page."""
+    """Evermatter deleted ALPHA's page while a person edited its file, which stays with no page."""
     manifest = rows(root, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[0][0]
     write.commit(
         writer, write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),))
@@ -92,7 +92,7 @@ def hold_after_store_delete(root, writer, *, mine=MINE):
 
 
 def hold_through_the_projector(root, writer, kind):
-    """A person changed ALPHA's file while Exomem changed its page; the real projector held it."""
+    """A person changed ALPHA's file while Evermatter changed its page; the real projector held it."""
     if kind == "edit":
         (root / ALPHA).write_bytes(MINE)
     else:
@@ -161,13 +161,13 @@ def test_the_list_gives_each_item_the_persons_file_and_the_stores_page_as_they_a
 
 
 def test_the_list_offers_only_the_choices_that_a_resolve_takes(stored, writer, monkeypatch):
-    """A list that offers keep-mine after Exomem changed the page again, or any choice for a file
+    """A list that offers keep-mine after Evermatter changed the page again, or any choice for a file
     too large to read whole, so the agent tries a resolution that the store must refuse."""
     hold(stored, writer, "edit")
     before = only_item(stored)
     assert (before.resolvable, before.keep_mine_possible) == (True, True)
     assert before.choices == (held.KEEP_MINE, held.KEEP_STORE)
-    write.commit(writer, put(ALPHA, EXOMEM + b"A later Exomem change.\n"))
+    write.commit(writer, put(ALPHA, EXOMEM + b"A later Evermatter change.\n"))
     after = only_item(stored)
     assert (after.resolvable, after.keep_mine_possible) == (True, False)
     assert after.choices == (held.KEEP_STORE,)
@@ -245,10 +245,10 @@ def test_keep_mine_on_an_edit_makes_the_persons_bytes_the_page_without_projectin
 
 
 def test_keep_mine_refuses_when_exomem_changed_the_page_after_the_edit_was_held(stored, writer):
-    """A keep-mine that overwrites a newer Exomem change with a person's older edit."""
+    """A keep-mine that overwrites a newer Evermatter change with a person's older edit."""
     hold(stored, writer, "edit")
     seen = only_item(stored).item_version
-    newer = EXOMEM + b"A later Exomem change.\n"
+    newer = EXOMEM + b"A later Evermatter change.\n"
     write.commit(writer, put(ALPHA, newer))
     with pytest.raises(write.StoreConflict) as refused:
         resolve(stored, writer, held.KEEP_MINE, seen=seen)
@@ -352,7 +352,7 @@ def test_keep_store_on_a_delete_queues_the_page_and_exports_nothing(stored, writ
 def test_keep_store_on_an_edit_of_a_page_the_store_deleted_removes_the_file_after_exporting_it(
     stored, writer
 ):
-    """A person's edit that raced Exomem's delete: keep-store must queue the file's removal, and the
+    """A person's edit that raced Evermatter's delete: keep-store must queue the file's removal, and the
     person's bytes must be saved first."""
     hold_after_store_delete(stored, writer)
     resolve(stored, writer, held.KEEP_STORE)

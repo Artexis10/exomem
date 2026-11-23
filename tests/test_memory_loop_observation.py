@@ -722,7 +722,7 @@ def test_two_sessions_episode_asks_normalise_to_one_template_digest() -> None:
 def test_an_activation_hook_binds_by_its_script_digest_not_its_live_packet() -> None:
     frozen = _fixture_frozen()["decomposition"]
     by_script = {"kind": "activation_hook", "detail": "installed hook", "sha256": obs.hook_script_sha256("exomem_retrieve_nudge.py")}
-    by_packet = _delivered("activation_hook", "[Exomem working memory] The rye order moved to the ridge mill.")
+    by_packet = _delivered("activation_hook", "[Evermatter working memory] The rye order moved to the ridge mill.")
 
     assert obs.evaluate(_hooked(frozen, product_prompts=[by_script]), frozen).ordinary_initiation.outcome == "pass"
     assert obs.evaluate(_hooked(frozen, product_prompts=[by_packet]), frozen).ordinary_initiation.outcome == "fail"

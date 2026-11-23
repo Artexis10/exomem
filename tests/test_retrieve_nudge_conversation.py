@@ -3,8 +3,8 @@
 In `working_set` mode, where the prompt event carries a transcript path, the
 hook reads the transcript's final 64 KiB, keeps human-typed user text and the
 assistant's final text, drops everything else (tool payloads, thinking, system
-and hook messages, media, every block Exomem itself injected), takes refs from
-Exomem read-call ARGUMENTS only, never sends `focus`, and fails silent inside a
+and hook messages, media, every block Evermatter itself injected), takes refs from
+Evermatter read-call ARGUMENTS only, never sends `focus`, and fails silent inside a
 50 ms budget. It never persists any of it. Fixtures hold invented content only.
 """
 
@@ -102,7 +102,7 @@ def test_nothing_excluded_reaches_the_conversation() -> None:
     blob = json.dumps(hook._conversation_from_transcript(str(CLAUDE), CURRENT))
     for sentinel in SENTINELS:
         assert sentinel not in blob, sentinel
-    assert "Exomem working set" not in blob
+    assert "Evermatter working set" not in blob
 
 
 CLAUDE_LEAKS = FIXTURES / "claude_code_leaks.jsonl"

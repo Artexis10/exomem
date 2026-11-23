@@ -195,7 +195,7 @@ def test_serialized_requests_are_blind_grep_the_bytes(tmp_path: Path) -> None:
             "and roadmap.md for details."
         ),
         candidate_answer=(
-            "Exomem and basic-memory (also mem0, GrayBox) report the deadline "
+            "Evermatter and basic-memory (also mem0, GrayBox) report the deadline "
             "moved, per [ref:SRC-AAAA1111]."
         ),
         provider_token=blinding.token_for("provider-one"),

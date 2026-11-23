@@ -454,7 +454,7 @@ def test_mcp_sends_the_reminder_on_a_short_acknowledgement(monkeypatch, capsys):
     monkeypatch.setattr(retrieve.sys, "stdin", io.StringIO(json.dumps(data)))
     assert retrieve.main() == 0
     context = json.loads(capsys.readouterr().out)["hookSpecificOutput"]["additionalContext"]
-    assert "[Exomem native MCP activation]" in context
+    assert "[Evermatter native MCP activation]" in context
 
 
 @pytest.mark.parametrize(

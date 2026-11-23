@@ -1,4 +1,4 @@
-"""Store mode's importer: a change made outside Exomem reaches the store, or is held, and no
+"""Store mode's importer: a change made outside Evermatter reaches the store, or is held, and no
 person's bytes are lost.
 
 OpenSpec make-vault-store-canonical tasks 4.2 and 4.3. The vault is the migration suite's
@@ -288,7 +288,7 @@ def test_one_held_path_edited_twice_is_one_row_with_the_latest_bytes(
 def test_replaying_exomems_own_projections_imports_nothing_and_holds_nothing(
     stored, writer, projecting, importing
 ):
-    """An importer that takes Exomem's own projection for a person's edit: the file a pass wrote,
+    """An importer that takes Evermatter's own projection for a person's edit: the file a pass wrote,
     one that a kill left before its manifest row, or older bytes of a revision still queued."""
     drifter = f"{NOTES}/Drifter.md"
     commit(writer, **put(drifter, b"# Drifter\n"))
@@ -586,7 +586,7 @@ def test_a_refused_refresh_of_a_new_file_is_asked_for_again(stored, writer):
     refusing = importer.Importer(stored, run=run)
     fresh = stored / "Outside" / "Fresh.md"
     fresh.parent.mkdir()
-    fresh.write_bytes(b"# Fresh\n\nA page that the harbour master added outside Exomem.\n")
+    fresh.write_bytes(b"# Fresh\n\nA page that the harbour master added outside Evermatter.\n")
 
     first = refusing.import_paths(["Outside/Fresh.md"])
     assert first.unjudged == {"Outside/Fresh.md": write.NOT_OWNED} and first.refreshed == []
@@ -680,7 +680,7 @@ def test_a_markdown_file_at_the_vault_root_is_imported_by_a_sweep_and_an_event(
 def test_a_file_restored_where_the_stores_life_of_the_path_ended_is_imported(
     stored, writer, projecting, importing
 ):
-    """An importer that takes the bytes of a deleted, moved or removed path for Exomem's own, so
+    """An importer that takes the bytes of a deleted, moved or removed path for Evermatter's own, so
     that a person's restore is neither imported nor held and the store never learns of it."""
     original = {rel: (stored / rel).read_bytes() for rel in (ALPHA, BETA, DIAGRAM)}
     moved = f"{NOTES}/Archive/Alpha.md"
@@ -724,7 +724,7 @@ def test_a_move_after_a_kill_that_lost_the_manifest_row_removes_the_old_file_and
     projecting.run_pass()
     report = importing.import_paths([old, new])
 
-    assert not (stored / old).exists(), "the projector removed Exomem's own leftover"
+    assert not (stored / old).exists(), "the projector removed Evermatter's own leftover"
     assert (stored / new).read_bytes() == body
     assert rows(stored, "SELECT path FROM store_pages WHERE path IN (?, ?)", old, new) == [(new,)]
     assert (report.imported, report.held) == ([], [])
@@ -734,7 +734,7 @@ def test_a_move_after_a_kill_that_lost_the_manifest_row_removes_the_old_file_and
 def test_a_sweep_adopts_the_file_of_a_page_that_the_store_lost_though_a_manifest_row_remains(
     stored, writer, importing
 ):
-    """A sweep that takes the file for Exomem's own because a manifest row remembers its bytes: the
+    """A sweep that takes the file for Evermatter's own because a manifest row remembers its bytes: the
     store holds no page there, so no reader serves the file and nothing imports it later."""
     with writer.handle.transaction() as tx:
         tx.execute("DELETE FROM store_pages WHERE path = ?", (ALPHA,))
@@ -752,7 +752,7 @@ def test_a_sweep_adopts_the_file_of_a_page_that_the_store_lost_though_a_manifest
 def test_a_sweep_leaves_the_files_of_a_delete_and_a_move_that_the_projector_has_not_run(
     stored, writer, importing
 ):
-    """A sweep that adopts the file of a page that Exomem just deleted or moved, so that the page
+    """A sweep that adopts the file of a page that Evermatter just deleted or moved, so that the page
     comes back at its old path before the projector removes the file."""
     commit(
         writer,

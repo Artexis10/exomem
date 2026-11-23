@@ -2135,7 +2135,7 @@ def _codex_rollout_with_exomem_call(
     assistant_text: str,
     tool_output: str,
 ) -> Path:
-    """Write Codex 0.144.x function-call records around an Exomem note call."""
+    """Write Codex 0.144.x function-call records around an Evermatter note call."""
     call_id = "call-exomem-note"
     lines = [
         {
@@ -2222,7 +2222,7 @@ def test_capture_reads_codex_0144_rollout_transcript(tmp_path: Path) -> None:
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> None:
@@ -2241,7 +2241,7 @@ def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> N
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_codex_silent_after_successful_exomem_function_call(
@@ -2365,7 +2365,7 @@ def test_capture_codex_still_fires_after_failed_exomem_function_call(
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
@@ -2379,7 +2379,7 @@ def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
 def test_capture_silent_when_already_saved(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    # Real post-rename connector tool name is Exomem (not Knowledge_Base) — the guard
+    # Real post-rename connector tool name is Evermatter (not Knowledge_Base) — the guard
     # regex must recognise it, or the nudge misfires after every real capture.
     t = _transcript(
         tmp_path,
@@ -2496,7 +2496,7 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
     )
     payload = json.loads(r.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
     assert (home / ".codex" / ".cache" / "exomem-nudge" / "codex-cap").exists()
     assert (home / ".codex" / "exomem-capture-nudge.log").exists()
     assert not (home / ".claude" / "exomem-capture-nudge.log").exists()

@@ -108,7 +108,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "Parse valid compact observations anywhere outside fenced code blocks."
         ),
         "canonical_authoring": (
-            "Exomem writers use `-` under the canonical `## Observations` section."
+            "Evermatter writers use `-` under the canonical `## Observations` section."
         ),
         "parser_bullet_markers": ["-", "*", "+"],
         "canonical_bullet_marker": "-",

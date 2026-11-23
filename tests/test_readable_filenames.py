@@ -51,7 +51,7 @@ def test_characters_are_removed_rather_than_substituted() -> None:
 
 def test_a_title_keeps_the_shape_that_made_it_readable() -> None:
     """The whole point: capitals, spaces and inner punctuation survive."""
-    title = "Exomem first-run defect inventory — issues 477 to 485"
+    title = "Evermatter first-run defect inventory — issues 477 to 485"
 
     assert vault.sanitize_title_filename(title) == title
 
@@ -235,7 +235,7 @@ def test_a_missing_key_file_or_key_means_no_preference_and_a_malformed_one_is_re
 
 
 _ISSUE_TITLES = [
-    "Exomem first-run defect inventory — issues 477 to 485",
+    "Evermatter first-run defect inventory — issues 477 to 485",
     "Zellij session serialization: what cold recovery can and cannot know",
     "Postgres MCP consolidated banner discriminator",
 ]
@@ -257,7 +257,7 @@ def test_title_style_produces_the_name_the_issue_asked_for(
 ) -> None:
     """#598 states the problem as a side-by-side `ls`; this is that comparison."""
     monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "title")
-    title = "Exomem first-run defect inventory — issues 477 to 485"
+    title = "Evermatter first-run defect inventory — issues 477 to 485"
 
     derived, warnings = vault.resolve_filename_slug(title, vault_root=tmp_path)
 
@@ -365,7 +365,7 @@ def test_changing_the_style_renames_nothing(
     notes = vault.kb_root(tmp_path) / "Notes"
     notes.mkdir(parents=True)
     existing = notes / "exomem-first-run-defect-inventory-issues-477-to-485.md"
-    existing.write_text("---\ntitle: Exomem first-run defect inventory\n---\nbody\n", encoding="utf-8")
+    existing.write_text("---\ntitle: Evermatter first-run defect inventory\n---\nbody\n", encoding="utf-8")
     before = {path.name: path.read_bytes() for path in notes.iterdir()}
 
     monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "title")

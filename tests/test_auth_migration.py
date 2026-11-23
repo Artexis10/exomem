@@ -60,7 +60,7 @@ class Authority:
 
     async def rotate_refresh(self, token: str, **kwargs: Any) -> Any:
         del kwargs
-        raise InvalidRefreshToken(f"invalid Exomem refresh token: {token[:8]}")
+        raise InvalidRefreshToken(f"invalid Evermatter refresh token: {token[:8]}")
 
     async def revoke_bearer(self, token: str, *, reason: str) -> bool:
         del reason
@@ -415,7 +415,7 @@ async def test_refresh_and_revocation_paths_never_read_or_mutate_legacy_state(
         monkeypatch.setattr(adapter, "delete", forbidden_legacy_access)
 
     assert await proxy.load_refresh_token(_client(), refresh_token) is None
-    with pytest.raises(TokenError, match="invalid Exomem refresh token"):
+    with pytest.raises(TokenError, match="invalid Evermatter refresh token"):
         await proxy.exchange_refresh_token(
             _client(),
             RefreshToken(

@@ -35,7 +35,7 @@ def _options(app, selector: str) -> str:
 
 async def _create_vault(app, pilot, folder) -> None:
     await _settle(app, pilot)
-    await pilot.press("enter")  # 'Create a fresh vault at ~/Exomem'
+    await pilot.press("enter")  # 'Create a fresh vault at ~/Evermatter'
     await pilot.pause()
     path_input = app.screen.query_one("#path-input")
     path_input.value = str(folder)

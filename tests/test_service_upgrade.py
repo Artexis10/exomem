@@ -33,7 +33,7 @@ def _wheel(
     signature: bool = False,
     compatibility: bool = False,
 ) -> Path:
-    """Build the smallest installable local Exomem wheel for staging tests."""
+    """Build the smallest installable local Evermatter wheel for staging tests."""
     dist_info = f"exomem-{version}.dist-info"
     path.parent.mkdir(parents=True, exist_ok=True)
     members = {
@@ -362,7 +362,7 @@ def test_failed_staging_leaves_no_release_directory(tmp_path: Path) -> None:
 
 
 def test_a_supervisor_that_reports_an_upgrade_blocker_stops_the_upgrade_before_staging(tmp_path: Path) -> None:
-    blocker = "the supervisor runs Exomem 0.1.0, older than the vault's state, which records sample-format-v9"
+    blocker = "the supervisor runs Evermatter 0.1.0, older than the vault's state, which records sample-format-v9"
     requests, thread = _control(tmp_path, count=1, upgrade_blocker=blocker)
     result = _operator(
         tmp_path, "--package-version", "0.2.0", "--profile", "lean",
@@ -770,7 +770,7 @@ def test_wheel_package_mismatch_refuses_staging(tmp_path: Path) -> None:
     from exomem import service_upgrade
 
     wheel = _wheel(tmp_path / "exomem-9.9.9-py3-none-any.whl", name="not-exomem")
-    with pytest.raises(RuntimeError, match="not an Exomem wheel"):
+    with pytest.raises(RuntimeError, match="not an Evermatter wheel"):
         service_upgrade.stage(tmp_path / "managed", sys.executable, "lean", "", wheel, "a" * 40)
     assert list((tmp_path / "releases").iterdir()) == []
 

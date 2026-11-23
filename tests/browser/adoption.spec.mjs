@@ -160,7 +160,7 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
   });
 
   // Step 1: start — the originals-untouched guarantee is visible from the door.
-  await expect(page.getByRole("heading", {name: "Bring your notes and files into Exomem"})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Bring your notes and files into Evermatter"})).toBeVisible();
   await expect(guarantee(page)).toContainText("Copies only");
   await page.getByRole("button", {name: "Look through my files"}).click();
 
@@ -181,7 +181,7 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
   await page.getByRole("button", {name: "Show me exactly what will happen"}).click();
 
   // Step 4: preview — exact plan, and still zero write-class calls.
-  await expect(page.locator("#adopt-contract")).toContainText("Exomem will COPY 4 files");
+  await expect(page.locator("#adopt-contract")).toContainText("Evermatter will COPY 4 files");
   await expect(page.locator("#adopt-plan-bullets")).toContainText("4 files will be copied in");
   await expect(page.getByText("0 files will be changed, moved, or deleted — always")).toBeVisible();
   await expect(guarantee(page)).toBeVisible();
@@ -189,7 +189,7 @@ test("deterministic happy path with guarantee badge and write gated on the dialo
 
   // Step 5: apply happens ONLY through the explicit dialog confirm.
   await page.getByRole("button", {name: "Bring these files in"}).click();
-  await expect(page.getByRole("dialog")).toContainText("Copy 4 files into Exomem?");
+  await expect(page.getByRole("dialog")).toContainText("Copy 4 files into Evermatter?");
   expect(applyCalls(calls)).toHaveLength(0);
   await page.getByRole("button", {name: "Yes, copy them in"}).click();
   try {
@@ -267,8 +267,8 @@ test("resumed preview preserves folder classification in the selection request",
   await page.getByRole("button", {name: "Show me exactly what will happen"}).click();
 
   await expect(page.getByRole("heading", {name: "Exactly what will happen"})).toBeVisible();
-  await expect(page.locator("#adopt-contract")).toContainText("Exomem will COPY 2 files");
-  await expect(page.locator("#adopt-plan-bullets")).toContainText("2 files are already in Exomem; no copy is needed");
+  await expect(page.locator("#adopt-contract")).toContainText("Evermatter will COPY 2 files");
+  await expect(page.locator("#adopt-plan-bullets")).toContainText("2 files are already in Evermatter; no copy is needed");
   await expect(page.locator("#adopt-plan-bullets")).toContainText("2 other files will be skipped");
   await expect(page.locator("#adopt-plan-bullets")).toContainText("file is larger than the artifact ceiling");
   const selected = calls.find((call) => call.body.action === "select");

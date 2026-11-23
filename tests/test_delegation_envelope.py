@@ -1,7 +1,7 @@
 """The delegation envelope: ceilings, derivation, overrides, and refusals.
 
-Prominence answers "how much should Exomem speak up". The envelope answers the
-question underneath it — "what is Exomem allowed to do on its own" — per action
+Prominence answers "how much should Evermatter speak up". The envelope answers the
+question underneath it — "what is Evermatter allowed to do on its own" — per action
 class, under hard ceilings that no level, override or adaptation may lift.
 
 The ceilings are product law; the envelope only ever chooses a disposition

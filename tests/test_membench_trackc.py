@@ -117,7 +117,7 @@ def test_substantive_prompts_fire(suite_report) -> None:
     for case_id in ("cp09", "cp10", "cp11"):
         row = suite_report.by_id(case_id)
         assert row.fired, f"{case_id} stayed quiet"
-        assert "[Exomem retrieval check]" in row.raw_stdout
+        assert "[Evermatter retrieval check]" in row.raw_stdout
 
 
 def test_cp12_fires_per_documented_control_window_limit(suite_report) -> None:
@@ -263,7 +263,7 @@ def test_checkpoint_round_trip_same_client() -> None:
     assert 0 < result.checkpoint_bytes <= checkpoint_driver.MAX_CHECKPOINT_BYTES
     # 100% recall of the markers the hook contract promises to surface.
     assert result.recall == 1.0, f"missing markers: {result.missing}"
-    assert result.restored_context.startswith("[Exomem continuation checkpoint]")
+    assert result.restored_context.startswith("[Evermatter continuation checkpoint]")
 
 
 def test_checkpoint_round_trip_cross_client_shared_home() -> None:

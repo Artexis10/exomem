@@ -159,7 +159,7 @@ def test_unknown_arm_id_refused() -> None:
         build_context_activation_arm("A99_bogus")
 
 
-# -- per-arm Exomem availability is what actually distinguishes the arms --
+# -- per-arm Evermatter availability is what actually distinguishes the arms --
 
 
 def test_a1_control_has_no_exomem_surface() -> None:
@@ -172,7 +172,7 @@ def test_a1_control_has_no_exomem_surface() -> None:
 def test_no_exomem_surface_arms_environment_carries_no_exomem_variables_at_all(arm_id: str, tmp_path) -> None:
     # M6 (A1), and the same fix applied to A5 (micro-round MINOR: A5 was
     # missing this strip despite allowed_tools == "" meaning no tools, so
-    # its oracle ceiling could still search memory). Both must have Exomem
+    # its oracle ceiling could still search memory). Both must have Evermatter
     # truly *absent* -- not merely denied via the tool allowlist over an
     # otherwise-normal isolated environment that still points
     # EXOMEM_CONFIG_PATH/EXOMEM_VAULT_PATH at a real directory.
@@ -197,8 +197,8 @@ def test_other_arms_environment_does_carry_exomem_variables(arm_id: str, tmp_pat
 
 @pytest.mark.parametrize("arm_id", ["A1_control", "A5_oracle_packet"])
 def test_no_exomem_surface_arms_argv_carries_no_mcp_config_or_allowedtools_flag_at_all(arm_id: str, tmp_path) -> None:
-    # Spec (Requirement: Agent arms and controls): "A1 control with Exomem
-    # absent, carrying no Exomem environment variable, no MCP configuration
+    # Spec (Requirement: Agent arms and controls): "A1 control with Evermatter
+    # absent, carrying no Evermatter environment variable, no MCP configuration
     # and no tool allowlist flag" -- the flags themselves must be absent
     # from argv, not merely carry an empty value. A5 gets the same
     # treatment for the same reason (micro-round MINOR).

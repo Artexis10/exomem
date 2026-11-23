@@ -1,7 +1,7 @@
 """A write under derived batch custody (fast durable ack) is not an outside edit.
 
 The live-index-freshness contract suppresses the watcher's echo of a write
-Exomem made itself. Fast ack moves the index publication behind the reply, and
+Evermatter made itself. Fast ack moves the index publication behind the reply, and
 the echo suppression has to stay with the write: otherwise every filesystem
 event of a Planning add or a Records append reaches the watcher as somebody
 else's edit, marks the vault external-pending and repeats the drain's fan-out

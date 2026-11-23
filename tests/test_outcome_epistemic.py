@@ -667,7 +667,7 @@ def test_an_earlier_report_of_another_split_or_case_set_is_refused(tmp_path):
 
 
 def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp_path, monkeypatch):
-    """Every folder and Exomem answer in a smoke run named its store, which would show the judge the arm."""
+    """Every folder and Evermatter answer in a smoke run named its store, which would show the judge the arm."""
     entries = [
         {
             "state": "answered",
@@ -686,7 +686,7 @@ def test_the_judge_reads_store_names_masked_while_the_report_counts_them_raw(tmp
             "task": "t",
             "key": {"value": "8443"},
             "behaviours": ["uses_current"],
-            "answer": "Port 8443, as Exomem recalled through mcp__exomem__recall_context.",
+            "answer": "Port 8443, as Evermatter recalled through mcp__exomem__recall_context.",
             "changed": "",
         },
     ]
@@ -1172,7 +1172,7 @@ def test_the_folder_arms_instruction_is_the_product_text_and_a_changed_product_t
 ):
     """F must read the learning instruction users get, pointed at its folder, or the pair measures two instructions."""
     text = epistemic_run.folder_instruction()
-    assert "Exomem" not in text and "memory/" in text
+    assert "Evermatter" not in text and "memory/" in text
 
     monkeypatch.setattr(epistemic_run, "LEARNING_INSTRUCTION", "Keep notes somewhere.")
     with pytest.raises(RuntimeError, match="no longer holds"):
@@ -1330,7 +1330,7 @@ def test_the_report_counts_the_answers_that_name_a_memory_store_per_arm():
     outcomes = [
         {**answered, "arm": "F", "answer": "I saved it to memory/ first."},
         {**answered, "arm": "F", "answer": "It is beta."},
-        {**answered, "arm": "P", "answer": "Recorded in Exomem: beta."},
+        {**answered, "arm": "P", "answer": "Recorded in Evermatter: beta."},
         {**answered, "arm": "P", "answer": "Beta, as the earlier note says."},
         {"state": "unanswered", "verdict": None, "arm": "P", "answer": None},
     ]

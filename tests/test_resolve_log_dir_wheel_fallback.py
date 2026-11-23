@@ -139,7 +139,7 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
     result = logging_config.resolve_log_dir()
 
     # Deliberately no blanket `result.name == "logs"`: macOS follows Apple's
-    # convention and lands on `~/Library/Logs/Exomem`, which the darwin branch
+    # convention and lands on `~/Library/Logs/Evermatter`, which the darwin branch
     # below already asserts in full. The two platforms that do end in `logs`
     # assert their whole path, which is the stronger claim anyway.
     if sys.platform == "win32":
@@ -158,7 +158,7 @@ def test_wheel_install_fallback_lands_in_a_per_platform_location(
         )
         assert result == Path(program_data) / "exomem" / "logs"
     elif sys.platform == "darwin":
-        assert result == Path.home() / "Library" / "Logs" / "Exomem"
+        assert result == Path.home() / "Library" / "Logs" / "Evermatter"
     else:
         assert result.name == "logs"
         assert result.parent.name == "exomem"
@@ -230,7 +230,7 @@ def test_win32_fallback_directory_name_matches_mode_config_path_lowercase(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Matches `mode.config_path()`'s `%PROGRAMDATA%/exomem/config.json`
-    convention exactly -- lowercase `exomem`, not `Exomem`."""
+    convention exactly -- lowercase `exomem`, not `Evermatter`."""
     monkeypatch.setattr(logging_config.sys, "platform", "win32")
     monkeypatch.setenv("PROGRAMDATA", "C:" + r"\ProgramData")
 
@@ -250,7 +250,7 @@ def test_darwin_fallback_uses_home_library_logs(monkeypatch: pytest.MonkeyPatch)
 
     result = logging_config._user_log_dir()
 
-    assert result == fake_home / "Library" / "Logs" / "Exomem"
+    assert result == fake_home / "Library" / "Logs" / "Evermatter"
 
 
 def test_linux_fallback_uses_xdg_state_home_when_set(monkeypatch: pytest.MonkeyPatch) -> None:

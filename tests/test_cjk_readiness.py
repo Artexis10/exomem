@@ -53,7 +53,7 @@ from exomem.vocabulary_fold import fold_term
 KB = "Knowledge Base"
 FALCON = f"{KB}/Products/ハヤブサ号.md"
 AOKI = f"{KB}/Entities/People/青木陽介.md"
-EXOMEM = f"{KB}/Systems/Exomem.md"
+EXOMEM = f"{KB}/Systems/Evermatter.md"
 WAGON = f"{KB}/Products/Harlow Wagon.md"
 SECRET = f"{KB}/Products/月影プロジェクト.md"
 
@@ -115,8 +115,8 @@ def _seed_japanese(vault: Path) -> None:
         f"# {entity.name}\n\n## Summary\n\n{entity.summary}\n",
     )
     _write(
-        kb / "Systems" / "Exomem.md",
-        _page("Exomem", "個人の知識ベース。検索のレイテンシは一秒以内が目標。"),
+        kb / "Systems" / "Evermatter.md",
+        _page("Evermatter", "個人の知識ベース。検索のレイテンシは一秒以内が目標。"),
     )
     _write(
         kb / "Products" / "Harlow Wagon.md",

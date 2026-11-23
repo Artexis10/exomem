@@ -274,11 +274,11 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
         (
             "Stop",
             {"last_assistant_message": "We settled the adapter boundary."},
-            "Exomem capture check",
+            "Evermatter capture check",
         ),
         ("PreCompact", {"trigger": "manual"}, ""),
         ("SessionEnd", {}, ""),
-        ("SessionStart", {"source": "resume"}, "[Exomem continuation checkpoint]"),
+        ("SessionStart", {"source": "resume"}, "[Evermatter continuation checkpoint]"),
     ):
         handler = registrations[event][0]["hooks"][0]
         argv = [arg.replace("${CLAUDE_PLUGIN_ROOT}", str(package)) for arg in handler["args"]]

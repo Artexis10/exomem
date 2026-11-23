@@ -623,7 +623,7 @@ def test_an_unusable_record_resolves_to_the_generic_default(config, saved):
     """An unreadable record must not hand a user MORE proactivity than they chose.
 
     The hookless surface default is `maximal`, so falling through to it turned an
-    identity that may well have saved `off` into the eagerest level Exomem has.
+    identity that may well have saved `off` into the eagerest level Evermatter has.
     The generic default is the honest floor: the record is gone, so the client's
     own preference cannot be the thing that widens it.
     """
