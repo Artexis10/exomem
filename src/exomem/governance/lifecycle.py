@@ -2013,7 +2013,7 @@ def _receipt_marker_generation(
             if marker_digests is not None:
                 # Only the background refresh reads marker bytes. Windows lstat ctime is a creation
                 # time, so the refresh binds its validation to these exact bytes. A request compares
-                # stat signatures alone, as the tombstone check does, so its cost stays per marker stat.
+                # stat signatures alone to bound its cost; a proof only ever holds validated bytes.
                 raw = _read_marker_bytes(root, path)
                 if raw is None or _physical_signature(path, path.lstat()) != signature:
                     raise LifecycleError("LIFECYCLE_PATH_UNSAFE", "receipt marker changed during the read")
@@ -2086,8 +2086,8 @@ class ReceiptLifecycle:
                 tombstones = _compute_tombstoned_paths(self._root, marker_digests=marker_digests)
                 if FAIL_CLOSED_TOMBSTONE not in tombstones and _receipt_marker_generation(self._root, None) == before:
                     proof = ReceiptLifecycleProof(tombstones, before, self._owner)
-        except (LifecycleError, OSError, ValueError):
-            pass
+        except (LifecycleError, OSError, ValueError, request_budget.ReadBudgetExhausted):
+            pass  # The finally block schedules a retry with backoff.
         finally:
             with self._lock:
                 self._proof = proof

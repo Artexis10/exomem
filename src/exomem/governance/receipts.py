@@ -2256,7 +2256,7 @@ def unregister_state_resolver(operation: str) -> None:
 
 
 def event_records(
-    vault_root: Path, *, checkpoint: request_budget.ReadCheckpoint | None = None, lifecycle_only: bool = False,
+    vault_root: Path, *, checkpoint: Callable[[], None] | None = None, lifecycle_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Return verified records or just the critical intents that bind lifecycle markers."""
     root = _events_root(Path(vault_root))

@@ -216,7 +216,8 @@ def test_serving_runtime_reclaims_abandoned_parts_and_receipts_without_a_request
         assert client.get("/health").status_code == 200
         activation = mcp._exomem_local_runtime_activation
         startup_deadline = time.monotonic() + 10
-        while activation._thread is None:
+        # The runtime publishes its thread before starting it, so wait until the thread has started.
+        while activation._thread is None or activation._thread.ident is None:
             assert time.monotonic() < startup_deadline, "the runtime did not activate"
             time.sleep(0.02)
         activation._thread.join(20)
