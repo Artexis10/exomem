@@ -10731,7 +10731,8 @@ def op_review_memory(
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
 
     Args:
-        mode: vocabulary records questions; item/write-advisory-result need ref. No authority:
+        mode: vocabulary records questions; item/write-advisory-result need ref; queued-write
+            lists saves held while Exomem was busy, or reads one by ref. No authority:
             apply through connect_memory accept-relation, adoption_studio
             apply-proposal or triage_memory. Modes: references/governance.md.
         categories: Category filter (attention, activation, audit) or upkeep family.
@@ -10750,7 +10751,7 @@ def op_review_memory(
             vocabulary takes open or all.
         ref: `exomem://review/<id>` for item mode (upkeep refs revalidate one
             item) or `exomem://write-advisory-result/<id>` for
-            write-advisory-result; for a vocabulary relation question, a current
+            write-advisory-result, or `exomem://queued-write/<id>` for queued-write; for a vocabulary relation question, a current
             relation-queue candidate ref alongside its source path.
         family: Vocabulary family for a meaning question; an edge needs
             `relation-type/v1` and the candidate `ref`. Creates only a review
@@ -10867,6 +10868,18 @@ def op_review_memory(
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
+    if mode == "queued-write":
+        from . import write_intake
+        from .cli_ops import OpError
+
+        if write_intake.principal_record(principal_module.effective_principal()) is None:
+            # Queued saves hold the owner's unpublished arguments: only a caller whose saves may queue reads them.
+            raise OpError(
+                "QUEUED_WRITE_OWNER_ONLY",
+                "queued saves are visible to the vault owner only",
+                "Ask the owner to check the save, or read the page once it is saved.",
+            )
+        return write_intake.read(vault_root, ref=ref, limit=limit)
     if mode == "procedure_approvals":
         return procedure_approval_operation_module.listing(vault_root, limit)
     if mode == held_operation_module.LIST_MODE:
@@ -10921,7 +10934,7 @@ def op_review_memory(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
-        "plan-progress, procedure_approvals, held, vocabulary, or write-advisory-result"
+        "plan-progress, procedure_approvals, held, vocabulary, write-advisory-result, or queued-write"
     )
 
 
@@ -14889,10 +14902,14 @@ def op_erase_captured_source(
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
+    from . import write_intake
     from .governance.raw_protection import is_owner
     from .writer_lease import coordination_status
 
     status = coordination_status(vault_root)
+    if write_intake.principal_record(principal_module.effective_principal()) is not None:
+        # Saves held because the boundary was busy; `unknown` when the store cannot be read.
+        status = {**status, "write_intake": write_intake.status(vault_root)}
     boundary = status.get("mutation_boundary")
     # The contention counters name the last lock holder and how often writers
     # collided. Only the owner needs them, so another caller gets the boundary state alone.
@@ -15373,6 +15390,31 @@ _PAGE_NAMING_COMMANDS = frozenset({
     "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
     "capture_source", "ask_memory", "read_memory",
 })
+#: The saves of knowledge that the serving process queues durably when the boundary stays busy
+#: (`Command.busy_intake`, `write_intake`). The keys are command names.
+# nosemgrep: ep-word-set -- the registry's own command names, not a customer vocabulary.
+_BUSY_INTAKE_COMMANDS = frozenset({
+    "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
+    "episode_memory", "capture_source", "preserve_evidence", "record_memory", "plan_memory",
+})
+def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
+    """Whether the write these JSON `arguments` select may be queued when the boundary is busy.
+
+    A grouped command decides per operation (`OperationEntry.queues_when_busy`); a call that
+    matches no write operation keeps the busy refusal. A capture under a `capture_reservation`
+    never reaches this check: `writer_lease.replay_origin` gives it no replay identity.
+    """
+    if not command.busy_intake:
+        return False
+    from . import operation_entries
+
+    operations = operation_entries.register_operations(command.name)
+    if operations is None:
+        return True
+    action = None
+    if operations.selector is not None:
+        action = _resolved_invocation_selector(command, dict(arguments), operations.selector)
+    return operations.queues_when_busy(action, arguments)
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -16198,6 +16240,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 executor=meta.get("executor", "cell"),
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
+                busy_intake=name in _BUSY_INTAKE_COMMANDS,
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )

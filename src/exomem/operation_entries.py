@@ -90,6 +90,9 @@ class OperationEntry:
     outcome_verb: OutcomeVerb | None = None
     #: A repeat of this write changes nothing more than its first run did. Reads are idempotent already.
     idempotent: bool = False
+    #: The service may queue this write when the boundary is busy and apply it later (`write_intake`).
+    #: False for a job start and for a protocol step whose reply the caller needs for its next step.
+    queues_when_busy: bool = True
 
     @property
     def kind(self) -> str:
@@ -268,6 +271,13 @@ class CommandOperations:
                 return entry.outcome_verb
         return None
 
+    def queues_when_busy(self, action: object, arguments: Mapping[str, object]) -> bool:
+        """Whether the write that `action` and `arguments` select may be queued; False when none matches."""
+        for entry in self.entries:
+            if entry.effect == "write" and (self.selector is None or entry.matches(action, arguments)):
+                return entry.queues_when_busy
+        return False
+
     def every_field(self) -> frozenset[str]:
         """Every field some operation accepts, which is the grouped command's whole signature."""
         return frozenset().union(*(entry.fields for entry in self.entries))
@@ -320,6 +330,7 @@ def _entry(
     public_kind: str | None = None,
     outcome_verb: OutcomeVerb | None = None,
     idempotent: bool = False,
+    queues_when_busy: bool = True,
 ) -> OperationEntry:
     return OperationEntry(
         action=action,
@@ -332,6 +343,7 @@ def _entry(
         public_kind=public_kind,
         outcome_verb=outcome_verb,
         idempotent=idempotent,
+        queues_when_busy=queues_when_busy,
     )
 
 
@@ -457,12 +469,12 @@ RECORDS = CommandOperations(
         # A start replaces the values of rows it re-imports; cancelling a job removes nothing.
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", destructive=True, outcome_verb="saved",
+            effect="write", destructive=True, outcome_verb="saved", queues_when_busy=False,
             constraints=(LiteralConstraint(("import_request", "mode"), "start"),),
         ),
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", outcome_verb="discarded",
+            effect="write", outcome_verb="discarded", queues_when_busy=False,
             constraints=(LiteralConstraint(("import_request", "mode"), "cancel"),),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
     ),
@@ -591,8 +603,8 @@ def _literal(field: str, value: bool | str | None, omitted: bool = False, *, imp
     return LiteralConstraint(tuple(field.split(".")), value, allow_omitted=omitted, implied=implied)
 
 
-def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb=None, idempotent=False):
-    return (action, tool, fields, required, kind, constraints, destructive, verb, idempotent)
+def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb=None, idempotent=False, queues_when_busy=True):
+    return (action, tool, fields, required, kind, constraints, destructive, verb, idempotent, queues_when_busy)
 
 
 # Fields remain grouped by the leaf job that owns them. Conditional values are closed API
@@ -676,6 +688,7 @@ _REMAINING = {
         _row("upkeep", "read_review", ("categories", "limit")),
         _row("plan-progress", "read_review", ("path", "limit")),
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
+        _row("queued-write", "read_review", ("ref", "limit")),
         _row("procedure_approvals", "read_review", ("limit",)),
         _row(held_operation.LIST_MODE, held_operation.REVIEW_TOOL, ("limit",)),
         _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family"),
@@ -719,14 +732,14 @@ _REMAINING = {
     )),
     "episode_memory": ("action", (
         _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved"),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
+        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
         _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),
         _row("candidates", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
         _row("coverage", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
-        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
 }
 
@@ -924,14 +937,14 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
     available = frozenset(p.name for p in parameters if p.name != selector and p.name != "response_detail")
     signature_required = frozenset(p.name for p in parameters if p.required and p.name != selector)
     entries = []
-    for action, tool, fields, required, kind, constraints, destructive, verb, idempotent in rows:
+    for action, tool, fields, required, kind, constraints, destructive, verb, idempotent, queues_when_busy in rows:
         fields = (available if retain else frozenset(required) | frozenset(item.path[0] for item in constraints)) if fields is None else frozenset(fields)
         # Singletons retain their exact required fields from the original signature.
         required = signature_required if selector is None else frozenset(required)
         effect = _TOOL_HELP[tool][0]
         entries.append(_entry(action, tool, fields, required, effect=effect,
                               constraints=constraints, public_kind=kind, destructive=destructive, outcome_verb=verb,
-                              idempotent=idempotent))
+                              idempotent=idempotent, queues_when_busy=queues_when_busy))
     specs = []
     for name in dict.fromkeys(entry.rendering for entry in entries):
         variants = [entry for entry in entries if entry.rendering == name]

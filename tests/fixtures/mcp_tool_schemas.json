@@ -670,6 +670,7 @@
             "review.provenance",
             "review.evolution",
             "review.advisory_result",
+            "review.queued_write",
             "review.held",
             "connections.suggest_links",
             "connections.suggest_relations",

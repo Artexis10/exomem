@@ -109,7 +109,12 @@ def _tracks_bindings(vault: Path, ledger) -> bool:
         with closing(ledger._connect(readonly=True)) as conn:
             state = checkpoint(conn)
             return state.complete and state.policy_projection
-    except (OSError, ValueError, RecursionError, sqlite3.Error):
+    except sqlite3.OperationalError:
+        return True  # A busy or locked ledger may still hold a complete frontier, so withdraw it.
+    except sqlite3.DatabaseError:
+        # No reader, eviction included, can trust a corrupt ledger, so it must not refuse the file write.
+        return False
+    except (OSError, ValueError, RecursionError):
         # A temporary configuration failure must withdraw any old proof without refusing the file write.
         return True
 

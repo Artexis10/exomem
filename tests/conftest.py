@@ -539,6 +539,22 @@ def _cancel_upload_reattempts():
         upload_sessions._forget(session_id)
 
 
+@pytest.fixture(autouse=True)
+def _stop_write_intake_drainers():
+    """No test leaves a write-intake drainer (`exomem-write-intake`) running into the next one.
+
+    The serving runtime starts one per vault and only its shutdown stops it. The thread
+    never ends by itself, so it cannot join `_VAULT_WALKING_THREAD_NAMES`; it is stopped here.
+    """
+    yield
+    from exomem import write_intake
+
+    with write_intake._DRAINERS_LOCK:
+        roots = list(write_intake._DRAINERS)
+    for root in roots:
+        write_intake.stop(root)
+
+
 #: Captured before any test can instrument the filesystem primitives: the
 #: guard below runs in autouse teardown, after test-scoped patches of
 #: `os.scandir`/`os.lstat` may still be mid-unwind, and the guard's own probe
