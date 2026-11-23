@@ -53,7 +53,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # 2026-11-22 (add-media-processing-policy).
 # The door operation `review.queued_write`, reading a save the service queued while it was busy, added 22 B to the
 # `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
-TOTAL_BUDGET = 29_890
+# The door operation `curation.relocate`, which derives and seals the plan that moves or renames a set of pages,
+# added 20 B to the write door's enum on 2026-11-22 (relocate-pages-in-one-curation-call).
+TOTAL_BUDGET = 29_910
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -69,7 +71,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_record": 850,
     "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2550,
+    "manage_memory": 2570,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

@@ -85,19 +85,20 @@ paths, and `curation_action="propose"` validates the agent-authored typed plan.
 rehome plans.
 
 A `move` step records the old path in the page's `moved_from`, so old links
-keep resolving. Its optional `fields` patch sets pointer fields only. One
-`repoint-links` step, last in the plan, rewrites every link to the plan's
-moved pages in one batch. In a Source or Evidence page it changes only the
-link span. Preview lists one outcome per referrer. Curation refuses `delete`
-and `recover`.
+keep resolving. Its optional `fields` patch sets pointer fields only. The
+`repoint-links` steps, last in the plan, rewrite every link to the plan's
+moved pages. One step rewrites every referrer in one batch. Several steps
+each name their `referrers`, and no page is named by two steps. In a Source
+or Evidence page a step changes only the link span. Preview lists one outcome
+per referrer. Curation refuses `delete` and `recover`.
 
 Call `curation_action="preview"` once for the immutable plan and show its exact
 actions, blockers, fingerprint, and compensation classes. That review is
 advisory. Execution is confirm-required: obtain one explicit confirmation bound
 to the returned plan id and fingerprint, then call `curation_action="apply"`.
-Each apply or `curation_action="resume"` request executes at most one content
-step. Continue resume automatically only while the durable phase is executing;
-stop and report `partial` or `blocked` truth.
+Each apply or `curation_action="resume"` request runs the steps its time
+allows. Follow `next_action`: continue resume automatically while it is
+`resume`, and otherwise stop and report `partial` or `blocked` truth.
 
 Compensation is a separate history-preserving plan. Derive it with
 `curation_action="propose-compensation"`, preview it, and obtain a fresh exact

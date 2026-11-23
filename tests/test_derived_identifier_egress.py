@@ -1446,6 +1446,7 @@ def test_a_withheld_raw_file_reads_as_absent_to_the_pointer_audit_and_repair(
         f"{KB}/Sources/Withheld/hidden-card.md": _page(
             "Hidden Card", "Raw text.", type="source", data_file=stale,
         ),
+        f"{KB}/Notes/Withheld/report.pdf": "withheld report bytes",
     }
     vaults = {
         "B": _materialize(tmp_path / "B" / "vault", dict(base), audience, scope=_WRITE_SCOPE),
@@ -1461,14 +1462,19 @@ def test_a_withheld_raw_file_reads_as_absent_to_the_pointer_audit_and_repair(
             report = audit_module.audit(vault, categories=["source_pointer_drift"])
         return _text([finding.as_dict() for finding in report.findings])
 
-    def repaired(vault: Path) -> str:
+    def repaired(vault: Path, artifact: str) -> str:
         return _text(_call(
             vault, _writer(audience), "manage_memory_file", operation="reclassify",
-            path=_OPEN_CARD, artifact_path=_WITHHELD_BYTES, reason="the file moved",
+            path=_OPEN_CARD, artifact_path=artifact, reason="the file moved",
         ))
 
     assert audited(vaults["A"]) == audited(vaults["B"]) != "[]"
-    assert repaired(vaults["A"]) == repaired(vaults["B"])
+    for artifact in (
+        _WITHHELD_BYTES,
+        f"{KB}/Sources/Withheld/hidden-card.md",
+        f"{KB}/Notes/Withheld/report.pdf",
+    ):
+        assert repaired(vaults["A"], artifact) == repaired(vaults["B"], artifact), artifact
     assert page_bytes(vaults["A"], _OPEN_CARD) == card_before
 
 

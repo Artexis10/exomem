@@ -401,13 +401,15 @@ def set_pointer_field(
     validate_only: bool = False,
     operation: str | None = None,
 ) -> SetFrontmatterResult | SetFrontmatterValidation:
-    """Correct a pointer field of an append-only page through the governed pointer write.
+    """Correct a pointer field of a page through the governed pointer write.
 
     Only a curation `edit` step calls this: the user confirms its exact plan, and `operation`
     files the record where the step's compensation finds it. The value span is patched where
     the YAML parser places it and every other byte, line endings included, is kept: `updated`
     is not a pointer, so the write's span proof would refuse it. A field that another operation
-    owns (`owned_field_route`) refuses.
+    owns (`owned_field_route`) refuses. A page outside the append-only trees takes the same
+    route, so a change that touches only where it belongs is reversible for every page type; a
+    page in a curated tree refuses, as `set_frontmatter_field` refuses it without `allow_curated`.
     """
     from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
 
@@ -418,11 +420,18 @@ def set_pointer_field(
         )
     except VaultPathError as e:
         raise SetFrontmatterError(code=e.code, reason=e.reason) from e
-    if in_append_only_tree(rel_path) is None:
+    curated = in_curated_tree(rel_path) if in_append_only_tree(rel_path) is None else None
+    if curated:
         raise SetFrontmatterError(
-            code="INVALID_SET", reason=f"{rel_path} is not captured content; edit it as any page"
+            code="CURATED_PROTECTED",
+            reason=f"{rel_path} is in curated tree {curated!r} (desk-managed); edit it there.",
         )
     if field not in page_fields.pointer_fields(vault_root):
+        if in_append_only_tree(rel_path) is None:
+            raise SetFrontmatterError(
+                code="INVALID_SET",
+                reason=f"`{field}` is not a pointer field; edit it in {rel_path} as any page.",
+            )
         raise SetFrontmatterError(
             code="APPEND_ONLY",
             reason=f"`{field}` is not a pointer field, so it keeps its captured bytes in {rel_path}.",
@@ -552,11 +561,17 @@ def apply_pointer_patch(
         raise SetFrontmatterError(error.code, error.reason) from error
 
 
-def pointer_patch_writes(vault_root: Path, fields: Mapping[str, Any]) -> tuple[PlannedWrite, ...]:
-    """The registry writes that the values of a `fields` patch need, one per registry file."""
+def pointer_patch_writes(
+    vault_root: Path, fields: Mapping[str, Any], *, folders: Mapping[str, str] | None = None
+) -> tuple[PlannedWrite, ...]:
+    """The registry writes that the values of a `fields` patch need, one per registry file.
+
+    `folders` names the folder of each project key the patch introduces; a key it omits
+    gets the registry's default folder.
+    """
     writes: dict[Path, PlannedWrite] = {}
     for field, value in fields.items():
-        for write in _plan_project_keys(vault_root, field, value):
+        for write in _plan_project_keys(vault_root, field, value, folders=folders):
             held = writes.get(write.path)
             if held is not None and held.content != write.content:
                 raise SetFrontmatterError(
@@ -569,31 +584,25 @@ def pointer_patch_writes(vault_root: Path, fields: Mapping[str, Any]) -> tuple[P
 
 
 def _plan_project_keys(
-    vault_root: Path, field: str, value: Any
+    vault_root: Path, field: str, value: Any, *, folders: Mapping[str, str] | None = None
 ) -> tuple[PlannedWrite, ...]:
-    """If the patched field is project/projects, validate via the registry.
+    """If the patched field carries project keys (page-field registry), validate via the registry.
 
     Mirrors note.py's behaviour: slug-shaped new keys auto-register,
     Levenshtein-close keys raise as PROJECT_KEY_TYPO so the agent self-
-    corrects. Non-project fields are unaffected.
+    corrects. Other fields are unaffected.
     """
-    if field not in ("project", "projects"):
+    if field not in page_fields.fields_carrying(vault_root, page_fields.CARRIES_PROJECT_KEY):
         return ()
 
-    if field == "project":
-        candidates: list[str] = [value] if isinstance(value, str) and value else []
-    else:
-        candidates = (
-            [v for v in value if isinstance(v, str) and v]
-            if isinstance(value, list)
-            else []
-        )
-
+    candidates = page_fields.carried_keys(value)
     if not candidates:
         return ()
 
     try:
-        plan = project_keys.plan_project_keys(vault_root, candidates)
+        plan = project_keys.plan_project_keys(
+            vault_root, candidates, folders=dict(folders) if folders else None
+        )
     except project_keys.ProjectKeyTypoError as error:
         raise SetFrontmatterError(
             code="PROJECT_KEY_TYPO", reason=str(error)
