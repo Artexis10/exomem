@@ -434,3 +434,18 @@ def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatc
         ),
     )
     assert evidence.full_inflight(source, repository)
+
+
+def test_a_merge_queue_dispatch_is_never_full_evidence():
+    """Catches a merge queue run, which runs only what a push to main runs, qualifying a release."""
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": "batch 1@" + "a" * 40}})["full"] is False
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": ""}})["full"] is True
+    run = {
+        "event": "workflow_dispatch",
+        "path": evidence.WORKFLOW,
+        "workflow_id": 7,
+        "repository": {"full_name": "example/project"},
+        "head_repository": {"full_name": "example/project"},
+    }
+    assert evidence.trusted_full({**run, "head_branch": "main"}, "example/project", 7)
+    assert not evidence.trusted_full({**run, "head_branch": "merge-queue/abc-1"}, "example/project", 7)

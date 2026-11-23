@@ -59,3 +59,18 @@ you must operate on the primary.
 - Manual: `git worktree add ../exomem-<topic> -b <branch>`; work, commit, push;
   then `git worktree remove ../exomem-<topic>`.
 
+
+## Merging through the merge queue
+
+Main requires the `merge queue` status. The queue runs every core and harness
+shard on main plus the queued pull requests before any of them lands, because
+a pull request's own CI runs only its changed tests and the guard modules.
+
+1. Wait until the review note approves the pull request's current patch.
+2. Run `gh pr merge <number> --squash --auto`.
+3. Read the `merge queue` status on the pull request. "testing" means a queue run is in progress.
+4. If the status is "failed: conflicts with main", rebase onto main and push.
+5. If the status is "failed alone", fix the failure, push, and enable auto-merge again.
+
+A plain `gh pr merge` without `--auto` is refused while the status is missing.
+Auto-merge lands the pull request when the queue passes it.

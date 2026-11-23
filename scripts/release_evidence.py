@@ -21,6 +21,8 @@ RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
 # The cut controller pushes a release's post-release metadata to main from this branch family.
 RECONCILE_PREFIX = "release-reconcile/"
+# The merge queue's candidate branches (scripts/merge_queue.py BRANCH_PREFIX).
+MERGE_QUEUE_PREFIX = "merge-queue/"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
 # Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
@@ -47,7 +49,10 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
             or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
         )
     )
-    return {"full": event_name in FULL_EVENTS, "release": release, "reconcile": reconcile}
+    # A merge queue dispatch (scripts/merge_queue.py) runs what a push to main runs, not Full.
+    queued = bool((event.get("inputs") or {}).get("queue"))
+    full = event_name in FULL_EVENTS and not queued
+    return {"full": full, "release": release, "reconcile": reconcile}
 
 
 def event_payload() -> dict:
@@ -77,6 +82,8 @@ def runs(commit: str) -> list[dict]:
 def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     return (
         run.get("event") in FULL_EVENTS
+        # Merge queue runs are dispatches too, but run only what a push to main runs.
+        and not (run.get("head_branch") or "").startswith(MERGE_QUEUE_PREFIX)
         and run.get("path") == WORKFLOW
         and run.get("workflow_id") == workflow_id
         and (run.get("repository") or {}).get("full_name") == repository

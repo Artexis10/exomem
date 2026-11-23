@@ -210,18 +210,14 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
     job = _workflow()["jobs"][job_id]
     command = _run_step(job)["run"]
     store = " ".join(command.split())
-    assert (
-        "${{ (github.event_name == 'schedule' || "
-        "github.event_name == 'workflow_dispatch') && '--store-durations --clean-durations' || '' }}"
-    ) in store
+    # The scope job's Full decision, so a merge queue dispatch never stores durations.
+    assert "${{ needs.scope.outputs.full == 'true' && '--store-durations --clean-durations' || '' }}" in store
 
     durations_step = next(
         step for step in job["steps"] if step.get("name") == "Upload refreshed test durations"
     )
     assert durations_step["uses"] == "actions/upload-artifact@v4"
-    condition = " ".join(str(durations_step["if"]).split())
-    assert "github.event_name == 'schedule'" in condition
-    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert durations_step["if"] == "needs.scope.outputs.full == 'true'"
     assert durations_step["with"]["name"] == (
         f"test-durations-{tier}-py${{{{ matrix.python-version }}}}"
         "-shard-${{ matrix.shard }}"
@@ -1112,12 +1108,13 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it. The push-run
     # cancel is a best-effort saving that must not decide evidence, and the tracking
-    # issue only reports the gate's result.
+    # issue and the merge queue verdict only report the gate's result.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
         "main-failing-issue",
+        "merge-queue-verdict",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
