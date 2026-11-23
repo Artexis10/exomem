@@ -9,6 +9,7 @@
 - [x] 2.1 Add the `busy_intake` registry field and declare it on the knowledge saves.
 - [x] 2.2 Add the `invoke_command` decorator: eligibility, waiting behind a non-empty queue, acceptance of a contention refusal, and the queued receipt; return the same receipt to a resend of a queued origin, derived from the dispatcher's own key and payload digest; fall through to the save on any intake fault.
 - [x] 2.3 Cap the busy wait at the intake wait when the save is eligible.
+- [x] 2.4 Carry eligibility per operation (`OperationEntry.queues_when_busy`) so the episode workflow steps, a Records import job and a reserved capture keep the busy refusal.
 
 ## 3. Visibility
 
