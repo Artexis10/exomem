@@ -47,6 +47,7 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -1897,12 +1898,24 @@ _PDF_OCR_DPI = 200
 _PDF_POINTS_PER_INCH = 72
 
 
+@contextmanager
 def _render_pdf_page(page):
-    """The page as a Pillow image at `_PDF_OCR_DPI`, with the PDFium raster already released."""
-    # PDFium draws on an opaque white page, so no alpha flattening is needed.
-    bitmap = page.render(scale=_PDF_OCR_DPI / _PDF_POINTS_PER_INCH)
+    """The page as a grayscale Pillow image at `_PDF_OCR_DPI`, valid inside the block only.
+
+    PDFium draws on an opaque white page, so no alpha flattening is needed. A gray bitmap is one byte a
+    pixel and Pillow shares its buffer. An RGB bitmap is three bytes a pixel, and Pillow stores RGB at
+    four, so its copy raised the peak to seven. Choosing the format, not PDFium's grayscale flag, also
+    spares the converted copy of an embedded scan that the flag makes PDFium hold. The bitmap is freed
+    when the block ends, after the image.
+    """
+    import pypdfium2 as pdfium
+
+    bitmap = page.render(
+        scale=_PDF_OCR_DPI / _PDF_POINTS_PER_INCH, force_bitmap_format=pdfium.raw.FPDFBitmap_Gray
+    )
     try:
-        return bitmap.to_pil()  # a copy: the bitmap's buffer is freed as this function returns
+        with bitmap.to_pil() as image:
+            yield image
     finally:
         bitmap.close()
 
