@@ -1482,6 +1482,53 @@ def test_an_unknown_full_rebuild_cause_is_logged_as_given(
     assert any("a_new_cause" in line for line in caplog.messages), caplog.messages
 
 
+def test_the_promoted_worker_s_own_store_start_does_not_decline_its_graph_proof(
+    handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-11-23 upgrade: taking ownership started the collection store, whose
+    takeover held the boundary and whose view passes advanced the commit generation
+    while promotion sampled and sealed the graph proof. The sample declined, the
+    graph handoff was not carried, and writes were refused as warming for minutes.
+    """
+    from exomem import writer_lease
+
+    root = handoff_vault
+    _enter_standby(monkeypatch, root)
+    assert service_standby.prove_graph_snapshot(root) is True
+    held = threading.Event()
+    store_threads: list[threading.Thread] = []
+
+    def store_takeover() -> None:
+        manager = writer_lease.get_manager()
+        with manager.consistency_guard(root, operation="collection_store_takeover"):
+            held.set()
+            for _ in range(3):
+                writer_lease._bump_commit_generation(
+                    manager.config.state_dir, root, operation="reconcile_views"
+                )
+            time.sleep(0.5)
+
+    def serve_collection_store() -> None:
+        thread = threading.Thread(target=store_takeover, name="exomem-collection-store")
+        store_threads.append(thread)
+        thread.start()
+        assert held.wait(5.0), "the store's takeover never took the boundary"
+
+    monkeypatch.setattr(
+        service_standby, "_acquire_ownership", lambda: serve_collection_store, raising=True
+    )
+    try:
+        record = service_standby.promote(root, migrated=False, request_seconds=30.0)
+    finally:
+        for thread in store_threads:
+            thread.join(5.0)
+
+    assert store_threads, "promotion must still start the collection store it now owns"
+    assert "reproof_declined" not in record, record
+    assert record["startup_validation"] == "carried", record
+    assert "graph_handoff" in record["carried_from_standby"], record
+
+
 def test_a_promotion_that_raises_does_not_leave_the_standby_promoting(
     handoff_vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9626,7 +9626,14 @@ def coordination_status(
     return get_manager().status(vault_or_cell)
 
 
-def start_server_lifecycle() -> LeaseManager:
+def start_server_lifecycle(*, serve_collection_store: bool = True) -> LeaseManager:
+    """Take the writer lease and, unless the caller starts it later, serve the collection store.
+
+    Standby promotion passes ``serve_collection_store=False`` and calls
+    ``serve_vault_collection_store`` once its graph proof is sealed: the store's
+    takeover holds the canonical boundary and its view reconciliation advances
+    the commit generation, either of which makes that proof decline.
+    """
     manager = get_manager()
     manager._serves_collection_store = True
     if manager.config.enabled and manager.config.preferred_writer:
@@ -9637,15 +9644,20 @@ def start_server_lifecycle() -> LeaseManager:
             pass
     manager.start_renewer()
     atexit.register(manager.close)
+    if serve_collection_store:
+        serve_vault_collection_store(manager)
+    return manager
+
+
+def serve_vault_collection_store(manager: LeaseManager | None = None) -> None:
+    """Serve the vault's collection store, if its marker routes any collection to one (S1)."""
     try:
         from .collection_store import runtime as store_runtime
         from .vault import resolve_vault
 
-        # The vault's collection store, if its marker routes any collection to one (S1).
-        store_runtime.serve(resolve_vault(), manager)
+        store_runtime.serve(resolve_vault(), manager or get_manager())
     except Exception:  # noqa: BLE001 - file collections serve regardless; store routes refuse
         logger.warning("collection store serving did not start", exc_info=True)
-    return manager
 
 
 def stop_server_lifecycle() -> None:
