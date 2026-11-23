@@ -7087,10 +7087,17 @@ def evaluate(
     before_review: RelationReviewState | None = None,
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
+    non_worsening: bool = False,
     include_relation_disposition: bool = True,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticContractResult:
-    """Evaluate supplied immutable state without crossing any adapter boundary."""
+    """Evaluate supplied immutable state without crossing any adapter boundary.
+
+    `grandfathered` and `non_worsening` each let the page keep the error keys its before state
+    already had and refuse only the ones the operation adds. The first comes from the activation
+    baseline; the second from an operation that changes where a page lives or how its links are
+    spelled, never what it says, so it owes no debt the page carried before it.
+    """
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
     before_context_matches = before is None or before_corpus.pages.get(before.path) == before
@@ -7149,7 +7156,9 @@ def evaluate(
         finding.key for finding in after_findings if finding.severity == "error"
     }
     use_subset_exception = (
-        grandfathered and operation in _GRANDFATHERED_OPERATIONS and before is not None
+        (grandfathered or non_worsening)
+        and operation in _GRANDFATHERED_OPERATIONS
+        and before is not None
     )
     normalized: list[ContractFinding] = []
     for finding in after_findings:
