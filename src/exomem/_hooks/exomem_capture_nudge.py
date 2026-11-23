@@ -1276,7 +1276,7 @@ def _log(text: str, outcome: str = "fired") -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return "Skip if Exomem is not connected or cannot capture; read_instructions first if no contract.\n" + reason
+        return "If Exomem is not connected or cannot capture, tell the user nothing is saved and to reconnect Exomem in the app's MCP or connector settings. Run read_instructions first if no contract.\n" + reason
     return reason
 
 

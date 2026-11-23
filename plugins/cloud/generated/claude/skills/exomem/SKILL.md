@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: ef311c3a6bb40dedca6f2d43cfa971ed087636ac47fd2135525d3f071734dcfb
+  skill_contract: 21c98a8680859844812e2d13d8f0f4c511012b840ad802eced19b8c01de8c780
   version: "0.32.0"
 ---
 
@@ -155,6 +155,13 @@ true, discard held method projections before using this response.
 Without method continuity, freshly read a method before reusing it.
 An unchanged map does not certify method freshness. Refresh when the task, evidence
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
+
+## When Exomem is unreachable
+
+Exomem is disconnected when tool discovery offers no Exomem tools or only an
+`authenticate` tool, or an Exomem call fails authorization. Tell the user nothing is
+saved and to reconnect Exomem in the app's MCP or connector settings. Never report a
+save that returned no committed result.
 
 ## Vault skills
 
