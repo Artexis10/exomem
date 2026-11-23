@@ -1298,6 +1298,31 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
     return raw
 
 
+def identifier_resolver_read_only(
+    vault_root: Path, values: Iterable[Any]
+) -> Callable[[str], str]:
+    """`resolve_identifier_read_only` for each of `values`, over one identity census.
+
+    The memory refs among `values` resolve together (`paths_for_ids_read_only`), so naming many
+    pages by ref costs one census instead of one per ref. Any other value resolves as before.
+    """
+    root = Path(vault_root)
+    ids = {
+        memory_id
+        for value in values
+        if (memory_id := parse_memory_ref(str(value or "").strip())) is not None
+    }
+    owners = paths_for_ids_read_only(root, sorted(ids)) if ids else {}
+
+    def resolve(value: str) -> str:
+        memory_id = parse_memory_ref(str(value or "").strip())
+        if memory_id is not None and memory_id in owners:
+            return _one_owner(memory_id, list(owners[memory_id]))
+        return resolve_identifier_read_only(root, value)
+
+    return resolve
+
+
 def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str, str]:
     """Add an identity without reserializing or reordering existing frontmatter."""
     fm, _body, fm_text = vault_module.parse_frontmatter(markdown)

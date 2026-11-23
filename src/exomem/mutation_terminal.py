@@ -2707,12 +2707,16 @@ def project_terminal(
             "operation", "action", "scope", "stored", "contexts", "context", "levels",
             "revision", "before_hash", "after_hash", "receipt_id", "engagement",
         ) if key in leaf})
-    elif (
-        isinstance(leaf, Mapping)
-        and isinstance(leaf.get("run_id"), str)
-        and str(leaf["run_id"]).startswith("cur-")
-        and isinstance(leaf.get("plan_id"), str)
+    elif isinstance(leaf, Mapping) and (
+        (
+            isinstance(leaf.get("run_id"), str)
+            and str(leaf["run_id"]).startswith("cur-")
+            and isinstance(leaf.get("plan_id"), str)
+        )
+        # A relocation that derives no step seals no run; its summary says why.
+        or leaf.get("action") == "relocate"
     ):
+        # `summary` and `progress` are bounded by their builders (`curation.SUMMARY_SAMPLE`, counts).
         compact.update(
             {
                 key: leaf[key]
@@ -2729,6 +2733,11 @@ def project_terminal(
                     "next_action",
                     "outcome",
                     "recovery",
+                    "sealed",
+                    "steps",
+                    "summary",
+                    "progress",
+                    "stopped",
                 )
                 if key in leaf
             }

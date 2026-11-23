@@ -866,7 +866,8 @@
             "curation.resume",
             "curation.propose_compensation",
             "curation.apply_compensation",
-            "curation.revert"
+            "curation.revert",
+            "curation.relocate"
           ],
           "description": "area.action; read_instructions(topic=<operation>) lists its fields."
         },

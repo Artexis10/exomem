@@ -60,8 +60,10 @@ def test_compensation_mapping_is_closed_and_reverses_committed_order() -> None:
 
 
 def test_compensation_is_distinct_reviewed_plan_and_runs_one_step_per_request(
-    vault: Path,
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     first_path, first_step = _edit_step(vault, "first", "compensation-first")
     second_path, second_step = _edit_step(vault, "second", "compensation-second")
     proposed = _propose(
@@ -150,6 +152,8 @@ def test_an_undo_prepares_without_the_vault_lock_and_refuses_a_step_the_run_comm
     _first_path, first_step = _edit_step(vault, "first", "undo-race-first")
     second_path, second_step = _edit_step(vault, "second", "undo-race-second")
     proposed = _propose(vault, first_step, second_step)
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     _apply(vault, proposed)
     prepare = curation._prepare_manifest
     locked: list[bool] = []

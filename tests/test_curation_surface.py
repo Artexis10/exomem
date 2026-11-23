@@ -48,6 +48,7 @@ def test_registry_exposes_closed_curation_arguments_and_actions() -> None:
         "propose-compensation",
         "apply-compensation",
         "revert",
+        "relocate",
     )
     assert all(
         command.params == commands_by_surface["mcp"].params
@@ -111,6 +112,7 @@ def test_generated_mcp_rest_openapi_and_cli_expose_the_same_curation_selector(
         "propose-compensation",
         "apply-compensation",
         "revert",
+        "relocate",
     ]
 
     def enum_values(schema: dict[str, object]) -> list[str]:
@@ -137,7 +139,15 @@ def test_curation_read_actions_are_classified_read_only(action: str) -> None:
 
 @pytest.mark.parametrize(
     "action",
-    ["propose", "apply", "resume", "propose-compensation", "apply-compensation", "revert"],
+    [
+        "propose",
+        "apply",
+        "resume",
+        "propose-compensation",
+        "apply-compensation",
+        "revert",
+        "relocate",
+    ],
 )
 def test_curation_write_actions_are_classified_mutating(action: str) -> None:
     assert not commands.invocation_is_read_only(
@@ -154,7 +164,7 @@ def test_omitted_or_unknown_curation_action_is_conservatively_mutating() -> None
 
 
 def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> None:  # noqa: ANN001
-    from exomem import curation, promotion_revert
+    from exomem import curation, promotion_revert, relocate
 
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -180,6 +190,8 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
         monkeypatch.setattr(curation, name, recording(name.replace("_", "-")))
     # A promotion revert plans and applies its own steps, so its leaf lives beside them.
     monkeypatch.setattr(promotion_revert, "revert", recording("revert"))
+    # A relocation derives its plan from the pages it names, so its leaf lives beside the lane.
+    monkeypatch.setattr(relocate, "propose", recording("relocate"))
 
     plan = {"version": 1, "title": "x", "steps": []}
     commands.op_maintain_memory(
@@ -224,6 +236,9 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
         expected_plan_fingerprint="f",
         why="because",
     )
+    commands.op_maintain_memory(
+        vault, mode="curation", curation_action="relocate", pages=["a.md"], to_project="harbor"
+    )
 
     assert [name for name, _kwargs in calls] == [
         "work-item",
@@ -235,6 +250,7 @@ def test_shared_leaf_routes_every_curation_action(vault: Path, monkeypatch) -> N
         "propose-compensation",
         "apply-compensation",
         "revert",
+        "relocate",
     ]
     assert calls[0][1] == {
         "refs": None,

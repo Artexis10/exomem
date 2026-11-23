@@ -112,7 +112,10 @@ def _witness(vault: Path, proposed: dict[str, object], step_id: str) -> dict[str
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_exact_approval_executes_at_most_one_real_content_step_per_request(vault: Path) -> None:
+def test_a_call_stops_starting_steps_when_its_budget_cannot_cover_another(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A call that started a step it could not finish in time would outlive the client's timeout.
     from exomem import curation
 
     proposed = _propose(
@@ -120,11 +123,13 @@ def test_exact_approval_executes_at_most_one_real_content_step_per_request(vault
         _create_step("first", "curation-first"),
         _create_step("second", "curation-second"),
     )
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
 
     first = _apply(vault, proposed)
 
     assert first["phase"] == "executing"
     assert first["step"]["step_id"] == "first"
+    assert first["progress"] == {"steps": 2, "committed": 1, "this_call": 1}
     assert (vault / first["step"]["path"]).is_file()
     assert not (vault / "Knowledge Base/Notes/Insights/curation-second.md").exists()
 
@@ -594,9 +599,13 @@ def test_terminal_receipt_crash_replays_without_reexecuting_leaf(vault: Path, mo
     assert calls == 1
 
 
-def test_stale_next_step_records_partial_terminal_truth(vault: Path) -> None:
+def test_stale_next_step_records_partial_terminal_truth(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from exomem import curation
 
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     proposed = _propose(
         vault,
         _create_step("first", "curation-partial-first"),
@@ -1354,7 +1363,6 @@ def test_a_plan_folds_several_copies_of_one_original_and_the_canonical_lists_eve
     """Both steps carry the canonical page as the review saw it, and both run in order."""
     from duplicate_fixtures import evidence_filing
 
-    from exomem import curation
     from exomem import vault as vault_module
 
     data = b"\x89PNG photo of the notice"
@@ -1367,9 +1375,7 @@ def test_a_plan_folds_several_copies_of_one_original_and_the_canonical_lists_eve
         _fold_duplicate_step(vault, canonical, second, step_id="second"),
     )
 
-    stopped = _apply(vault, proposed)
-    assert stopped["phase"] == "executing"
-    finished = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+    finished = _apply(vault, proposed)
 
     assert finished["phase"] == "completed"
     kept = vault_module.parse_frontmatter((vault / canonical).read_text(encoding="utf-8"))[0]

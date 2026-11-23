@@ -60,9 +60,8 @@ def test_register_new_project_key_writes_yaml(vault: Path) -> None:
     assert folder == "Vehicles"
     yaml_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
     assert yaml_path.exists()
-    text = yaml_path.read_text(encoding="utf-8")
-    assert "vehicles:" in text
-    assert "folder: Vehicles" in text
+    registry = project_keys_module.load_project_registry(vault)
+    assert registry.folder_for("vehicles") == "Vehicles"
     # Folder was created.
     folder_path = vault / "Knowledge Base" / "Notes" / "Research" / "Vehicles"
     assert folder_path.is_dir()

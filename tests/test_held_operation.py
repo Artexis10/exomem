@@ -30,6 +30,7 @@ from test_vault_store_held import (  # noqa: F401
 )
 from test_vault_store_migration import DIAGRAM, vault  # noqa: F401
 from test_vault_store_read_write import rows, stored, writer  # noqa: F401
+from test_vault_store_write_path import commits_since
 
 from exomem import commands, held_operation, state_paths
 from exomem.cli_ops import OpError
@@ -142,9 +143,10 @@ def test_the_repair_tool_keeps_the_stores_page_and_tells_where_the_persons_file_
         answer["saved_copy"] == exported.relative_to(state_paths.vault_state_dir(stored)).as_posix()
     )
     assert exported.read_bytes() == MINE
-    assert stored_page(stored)[0][1] == revision + 1 and queue(stored) == [(ALPHA, "write")]
+    # One canonical commit; the derivation of its rows moves the store revision past it.
+    assert commits_since(stored, revision) == 1 and queue(stored) == [(ALPHA, "write")]
     assert answer["outcome"].startswith("Kept Exomem's page for")
-    assert answer["diagnostics"] == {"revision": revision + 1, "saved_copy_sha256": digest(MINE)}
+    assert answer["diagnostics"] == {"revision": stored_page(stored)[0][1], "saved_copy_sha256": digest(MINE)}
     assert listed(stored)["items"] == []
 
 
