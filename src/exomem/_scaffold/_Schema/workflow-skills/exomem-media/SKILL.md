@@ -2,7 +2,7 @@
 name: exomem-media
 description: Search, inspect, cite, and preserve Evermatter media artifacts such as PDFs, images, audio, and video.
 metadata:
-  skill_contract: 67ed9a968b39cef45baa2f84350de7781047095bf9a8dddc8557ab7fb0fe23b1
+  skill_contract: e14f3c0c1daf7436b2597f8f4d937991a3bf7d3b291e41931b7a3f33a4d51680
   version: "0.1.0"
 ---
 
