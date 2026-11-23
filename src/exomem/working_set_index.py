@@ -1650,7 +1650,24 @@ def _collection_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Ca
     watcher-driven update. What it discovers is held for `_write` to publish
     under the generation that write produces, so a request thread can read the
     manifests instead of sweeping for them again.
+
+    The service runs that pass on a thread that no request binds to its
+    collection store, so the store collections are read through the store
+    the service serves (`runtime.read_served`). A store that cannot answer
+    now costs its own collections' anchors, never the file collections'.
     """
+    from .cli_ops import OpError
+    from .collection_store import runtime as store_runtime
+    from .collection_store.connection import CollectionStoreError
+
+    try:
+        return store_runtime.read_served(vault_root, lambda: _discovered_candidates(vault_root))
+    except (CollectionStoreError, OpError):
+        log.debug("activation index: the collection store could not answer discovery", exc_info=True)
+        return _discovered_candidates(vault_root)
+
+
+def _discovered_candidates(vault_root: Path) -> tuple[list[_Candidate], list[_Candidate]]:
     from . import structured_collections
 
     records: list[_Candidate] = []

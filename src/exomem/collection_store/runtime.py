@@ -1086,6 +1086,29 @@ def titled_arguments(command, vault_root, arguments, *, write=False):
     return arguments if path == selector else {**arguments, "collection": path}
 
 
+def read_served(vault_root, work):
+    """Run read-only ``work`` over the store this process serves for the vault, from a thread no request binds.
+
+    A background pass, such as the service's activation index build, otherwise reads every store
+    collection as unserved and leaves it out. The work reads one snapshot of the store's last commit
+    (``StoreServer.read_beside``), so keep it short. A call that a request already binds, a vault
+    whose store owns nothing, a process that serves no store for it and a rolled-back store run
+    ``work`` as it is.
+    """
+    from . import capability, ownership
+    from .preview import bound_writer
+
+    root = Path(vault_root).resolve()
+    if bound_writer(root) is not None:
+        return work()
+    proof = ownership.current(root)
+    server = None if proof.marker is None else _server(root)
+    if server is None or capability.records_summary_disabled(root):
+        return work()
+    connection.load_store_libraries()
+    return server.read_beside(work, initial=proof, progress=False)
+
+
 def _store_mode_server(root):
     """The store thread that a store-mode write runs on; without a service, the refusal."""
     from ..cli_ops import OpError

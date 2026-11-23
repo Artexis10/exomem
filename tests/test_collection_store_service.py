@@ -3056,3 +3056,19 @@ def test_a_store_whose_reference_state_was_lost_rebuilds_it_on_the_next_tick(ser
         _until(rebuilt)
     finally:
         restarted.stop()
+
+
+def test_the_services_background_activation_build_offers_a_store_collection(service):
+    """Recall's map lists the collections its activation index anchors, and the service builds that index on a
+    thread of its own, where no request binds the store. A store collection the build cannot see never reaches an
+    agent, which then saves a prose note beside the list the user already keeps."""
+    from exomem import working_set_index, working_set_runtime
+
+    def build():
+        working_set_runtime._warm_index(service.root, "", None)
+
+    thread = threading.Thread(target=build)
+    thread.start()
+    thread.join(120)
+    anchored = {row.path for row in working_set_index.WorkingSetIndex(service.root).anchors() if row.kind == "collection"}
+    assert manifest_path() in anchored
