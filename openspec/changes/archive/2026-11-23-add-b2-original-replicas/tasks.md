@@ -9,4 +9,4 @@
 
 - [x] 2.1 Verify encrypted replica and restore through the HTTP fixture, including interrupted replies and exact version checks.
 - [x] 2.2 Measure authorization and metadata request counts at the existing worker round boundary.
-- [ ] 2.3 Rehearse in the designated sandbox bucket and record exact content, range, capabilities, and latency evidence.
+- [x] 2.3 Rehearse in the designated sandbox bucket and record exact content, range, capabilities, and latency evidence.
