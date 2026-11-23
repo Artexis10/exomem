@@ -558,7 +558,8 @@ def embed_clip_text(query: str) -> np.ndarray:
             model = get_clip_query_model()
         except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
             raise ClipUnavailable(f"multilingual image query encoder unavailable: {error}") from error
-        with _turn_for(model)():
+        # The process admission bounds every encode, a search query's included; the lane only orders turns.
+        with runtime_resources.model_admission(), _turn_for(model)():
             vec = model.encode([query])[0]
     return vec.astype(np.float32, copy=False)
 

@@ -109,8 +109,6 @@ def test_a_page_search_image_query_does_not_wait_for_a_bulk_batch_on_the_shared_
     gate = runtime_resources.ModelAdmissionGate(2)
     monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
     monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
-    # The served text encoder runs inferences side by side, so search queries get their own lane.
-    monkeypatch.setattr(embeddings, "_MODEL", SimpleNamespace(concurrent_encodes=True))
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
     monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: SimpleNamespace(has_vectors=lambda: True))
     monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "__init__", lambda self: None)
@@ -134,3 +132,34 @@ def test_a_page_search_image_query_does_not_wait_for_a_bulk_batch_on_the_shared_
             release.set()
         batch.result()
     assert prepared.error is None and prepared.vector is not None, prepared
+
+
+def test_a_page_search_image_query_is_refused_while_every_process_admission_is_held(monkeypatch):
+    """The query lane orders turns only; an image query still counts against the process bound on model work."""
+    gate = runtime_resources.ModelAdmissionGate(1)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "__init__", lambda self: None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "encode",
+                        lambda self, texts: np.ones((len(texts), embeddings.CLIP_DIM), dtype=np.float32))
+    monkeypatch.setattr(embeddings, "_CLIP_QUERY_MODEL", clip_query.OnnxClipQueryEncoder())
+    holding, release = threading.Event(), threading.Event()
+
+    def bulk_encode():
+        with gate.admission():
+            holding.set()
+            assert release.wait(10)
+
+    def image_query():
+        with embeddings.query_turn():
+            return embeddings.embed_clip_text("harbour at dusk")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bulk = pool.submit(bulk_encode)
+        assert holding.wait(5)
+        try:
+            with pytest.raises(runtime_resources.ModelBusyError):
+                pool.submit(image_query).result(timeout=5)
+        finally:
+            release.set()
+        bulk.result()
