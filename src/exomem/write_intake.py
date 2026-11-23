@@ -555,8 +555,14 @@ class Drainer:
         is known, or mark this send in flight and return None; the caller ends that mark with
         `end_accept`. So a resend never runs beside the send it repeats.
         """
+        from . import request_budget
+
+        deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
+        budget = request_budget.current()
+        if budget is not None:
+            # Never wait past the time the caller can still receive a reply.
+            deadline = min(deadline, budget.deadline - request_budget.DELIVERY_RESERVE_SECONDS)
         with self._condition:
-            deadline = time.monotonic() + _ACCEPT_WAIT_SECONDS
             while origin in self._accepting and not self._stop.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

@@ -658,3 +658,19 @@ def test_an_acceptance_that_meets_a_busy_store_is_retried_and_queues_the_save(
     assert len(calls) >= 2
     _wait_for_state(vault, receipt["queued_write"]["ref"], "applied")
     assert len(_pages_titled(vault, "Queued save 29")) == 1
+
+
+def test_a_resend_waits_for_its_original_only_within_its_own_request_budget(drainer) -> None:
+    # A resend whose client has stopped waiting must not hold a request thread for the full wait.
+    from exomem import request_budget
+
+    assert drainer.enter("origin-2") is None  # the original is in flight
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=request_budget.DELIVERY_RESERVE_SECONDS + 0.5))
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            drainer.enter("origin-2")
+    finally:
+        request_budget.reset_current(token)
+        drainer.end_accept("origin-2")
+    assert time.monotonic() - started < 5
