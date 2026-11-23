@@ -76,6 +76,13 @@ class UploadTarget:
     token: str
 
 
+# Native B2 capabilities that can remove a stored version directly, through a lifecycle rule or a retention
+# bypass, or mint a key that can. A replica key holds none of them. Harmless bucket reads stay allowed,
+# because keys made in the provider's console carry several.
+_VERSION_REMOVING = ("deleteFiles", "deleteBuckets", "deleteKeys", "writeKeys", "writeBuckets",
+                     "writeBucketLifecycleRules", "bypassGovernance", "writeFileRetentions")
+
+
 @dataclass(frozen=True, slots=True)
 class BucketScope:
     bucket_id: str
@@ -90,7 +97,7 @@ class BucketScope:
                 or buckets[0]["id"] != self.bucket_id or buckets[0]["name"] != self.bucket_name
                 or allowed["namePrefix"] != self.prefix or not isinstance(capabilities, list)
                 or "readFiles" not in capabilities or "writeFiles" not in capabilities
-                or any(capability in capabilities for capability in ("deleteFiles", "deleteBuckets", "deleteKeys"))):
+                or any(capability in capabilities for capability in _VERSION_REMOVING)):
             raise ProviderRejected("the application key does not have the declared replica scope")
 
 
@@ -128,7 +135,7 @@ def _classify(response: httpx.Response, *, identify_missing: bool = False) -> Pr
     status = response.status_code
     message = f"the provider answered {status}"
     after = response.headers.get("Retry-After", "")
-    retry_after = float(after) if after.isdigit() else None
+    retry_after = float(after) if after.isascii() and after.isdigit() else None
     if status >= 500 or status == 408:
         return ProviderUncertain(message, status, retry_after=retry_after)
     return ProviderRejected(message, status, missing=identify_missing and missing_reply(status, response.content),
@@ -192,10 +199,10 @@ class B2:
                     del _sessions[self._session_key]
         self._session = None
 
-    async def _authorized(self) -> _Session:
-        if self._session is not None:
+    async def _authorized(self, *, fresh: bool = False) -> _Session:
+        if self._session is not None and not fresh:
             return self._session
-        if self._session_key is not None:
+        if self._session_key is not None and not fresh:
             with _sessions_lock:
                 cached = _sessions.get(self._session_key)
                 if cached is not None and time.monotonic() < cached[0]:
@@ -232,6 +239,10 @@ class B2:
 
     async def minimum_part_bytes(self) -> int:
         return (await self._authorized()).minimum_part_bytes
+
+    async def verify_identity(self) -> None:
+        """Authorize afresh, so the answer is a current observation of the provider and the key's scope."""
+        await self._authorized(fresh=True)
 
     async def _call(self, endpoint: str, body: dict) -> httpx.Response:
         session = await self._authorized()

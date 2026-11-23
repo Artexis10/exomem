@@ -120,8 +120,9 @@ class B2ReplicaStore:
                 runner.run(held.aclose())
 
     def require_identity(self, *, deadline: float | None = None) -> None:
+        # A reachability record must come from the provider now, not from a cached authorization.
         with self._operation(deadline=deadline) as (provider, run, _):
-            run(provider.minimum_part_bytes())
+            run(provider.verify_identity())
 
     def _key(self, name: str) -> str:
         if not is_sha256(name):
@@ -164,8 +165,8 @@ class B2ReplicaStore:
         _check_size_and_digest(stream, hashlib.sha256(data).hexdigest(), sha256)
         nonce = uuid.uuid4().hex
         for attempt in range(_UPLOAD_ATTEMPTS):
-            target = await provider.upload_target()
             try:
+                target = await provider.upload_target()
                 version = await provider.upload_file(
                     target, key, data, hashlib.sha1(data).hexdigest(),
                     {native.SHA256_INFO: sha256, native.NONCE_INFO: nonce},
@@ -217,24 +218,13 @@ class B2ReplicaStore:
     def open(
         self, name: str, version: str, *, expected_size: int | None = None, deadline: float | None = None,
     ):
-        return self._open(name, version, expected_size, None, deadline=deadline)
-
-    def open_range(
-        self, name: str, version: str, *, size: int, start: int, end: int, deadline: float | None = None,
-    ):
-        """Read the inclusive byte range of one known-size replica version."""
-        if not 0 <= start <= end < size:
-            raise ValueError("invalid B2 replica byte range")
-        byte_range = (start, end) if (start, end) != (0, size - 1) else None
-        return self._open(name, version, size, byte_range, deadline=deadline)
+        return self._open(name, version, expected_size, deadline=deadline)
 
     @contextmanager
-    def _open(self, name: str, version: str, size: int | None, byte_range: tuple[int, int] | None, *,
-              deadline: float | None) -> Iterator[StreamReader]:
+    def _open(self, name: str, version: str, size: int | None, *, deadline: float | None) -> Iterator[StreamReader]:
         key = self._key(name)
         with self._operation(deadline=deadline) as (provider, run, held):
-            requested = None if byte_range is None else f"bytes={byte_range[0]}-{byte_range[1]}"
-            response = run(held.enter_async_context(provider.download(version, requested)))
+            response = run(held.enter_async_context(provider.download(version)))
             if response.status_code == 404 and run(native.download_is_missing(response)):
                 raise ReplicaAbsent()
             length = response.headers.get("content-length", "")
@@ -243,15 +233,9 @@ class B2ReplicaStore:
                     not length.isascii() or not length.isdigit() or len(length) > 20):
                 raise _unavailable("download did not identify the exact version and length")
             received = int(length)
-            if byte_range is None:
-                if (response.status_code != 200 or "content-range" in response.headers
-                        or (size is not None and received != size)):
-                    raise _unavailable("download did not return the full declared version")
-            else:
-                start, end = byte_range
-                if (response.status_code != 206 or received != end - start + 1 or
-                        response.headers.get("content-range") != f"bytes {start}-{end}/{size}"):
-                    raise _unavailable("download did not return the requested byte range")
+            if (response.status_code != 200 or "content-range" in response.headers
+                    or (size is not None and received != size)):
+                raise _unavailable("download did not return the full declared version")
             chunks = native.stream_body(response, _BLOCK)
             run(held.enter_async_context(aclosing(chunks)))
 

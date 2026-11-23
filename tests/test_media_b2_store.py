@@ -139,7 +139,7 @@ def test_the_worker_restores_the_recorded_version_after_an_interrupted_upload(
     assert "download" in fake.calls
 
 
-@pytest.mark.parametrize("mismatch", ["bucket", "bucket_id", "prefix", "read", "write", "delete"])
+@pytest.mark.parametrize("mismatch", ["bucket", "bucket_id", "prefix", "read", "write", "delete", "lifecycle"])
 def test_wrong_scope_refuses_a_copy_before_opening_the_original(vault: Path, selected_store, b2, monkeypatch, mismatch):
     fake, config, _ = b2
     if mismatch in ("bucket", "bucket_id", "prefix"):
@@ -148,8 +148,10 @@ def test_wrong_scope_refuses_a_copy_before_opening_the_original(vault: Path, sel
         fake.capabilities.remove("readFiles")
     elif mismatch == "write":
         fake.capabilities.remove("writeFiles")
-    else:
+    elif mismatch == "delete":
         fake.capabilities.append("deleteFiles")
+    else:
+        fake.capabilities.append("writeBucketLifecycleRules")  # A lifecycle rule can delete recorded versions.
     _declare(vault, selected_store, config)
     path = _stored(vault, "recording")
     monkeypatch.setattr(media_store, "_open_local_original", lambda *args: pytest.fail("the original was opened"))
@@ -169,8 +171,9 @@ def test_a_lost_small_request_does_not_reuse_another_attempts_version(b2):
     assert fake.calls.count("head_name") == 1
 
 
-@pytest.mark.parametrize("size", [100, 400], ids=["small", "multipart"])
-def test_a_busy_upload_pod_is_retried_with_a_growing_pause(b2, monkeypatch, size):
+@pytest.mark.parametrize(("endpoint", "size"), [("b2_get_upload_url", 100), ("upload_file", 100), ("upload_part", 400)],
+                         ids=["upload-url", "small", "multipart"])
+def test_a_busy_upload_pod_is_retried_with_a_growing_pause(b2, monkeypatch, endpoint, size):
     fake, config, faults = b2
     monkeypatch.setattr(media_edge_b2, "DEFAULT_PART_BYTES", 128)
     pauses, busy = [], {"left": 2}
@@ -182,11 +185,11 @@ def test_a_busy_upload_pod_is_retried_with_a_growing_pause(b2, monkeypatch, size
         if busy["left"]:
             busy["left"] -= 1
             # A busy pod stores nothing; the fake has already applied the upload, so undo it.
-            fake.files.pop(reply.json().get("fileId"), None)
+            fake.files.pop(reply.json().get("fileId"), None) if endpoint == "upload_file" else None
             return httpx.Response(503, json={"code": "too_busy"}, headers={"Retry-After": "3"})
         return reply
 
-    faults["upload_part" if size > 128 else "upload_file"] = too_busy
+    faults[endpoint] = too_busy
     data = bytes(range(256)) * 2
     version = _upload(B2ReplicaStore.from_configuration(config), data[:size])
     assert fake.files[version]["data"] == data[:size]
@@ -277,6 +280,15 @@ def test_an_authorization_error_cannot_prove_a_version_missing(b2):
     assert fake.calls == ["authorize"]
 
 
+def test_the_identity_check_contacts_the_provider_even_with_a_warm_authorization(b2):
+    fake, config, _ = b2
+    store = B2ReplicaStore.from_configuration(config)
+    _upload(store)  # Warms the shared authorization cache.
+    fake.outage = True
+    with pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"):
+        store.require_identity()
+
+
 def test_reauthorization_rechecks_the_bucket_scope(b2):
     fake, config, _ = b2
     store = B2ReplicaStore.from_configuration(config)
@@ -303,39 +315,25 @@ def test_metadata_needs_the_exact_completed_version(b2, field: str):
         store.head(OBJECT, version)
 
 
-@pytest.mark.parametrize("fault", ["full", "shifted", "file-id", "name", "length"])
-def test_a_proper_range_refuses_incompatible_responses_before_yielding_bytes(b2, fault: str):
+@pytest.mark.parametrize("fault", ["ranged", "file-id", "name", "length"])
+def test_a_download_refuses_a_different_version_or_length_before_yielding_bytes(b2, fault: str):
     fake, config, faults = b2
     store = B2ReplicaStore.from_configuration(config)
     version = _upload(store)
-    with store.open_range(OBJECT, version, size=len(DATA), start=1, end=4) as source:
-        assert source.read() == DATA[1:5]
-    with store.open_range(OBJECT, version, size=len(DATA), start=0, end=len(DATA) - 1) as source:
-        assert source.read() == DATA
 
     async def change(request, reply):
-        if fault == "full":
-            headers = dict(reply.headers)
-            del headers["content-range"]
-            headers["content-length"] = str(len(DATA))
-            return httpx.Response(200, headers=headers, content=DATA)
-        changed = {
-            "shifted": ("content-range", f"bytes 2-5/{len(DATA)}"),
-            "file-id": ("x-bz-file-id", "wrong"),
-            "name": ("x-bz-file-name", "wrong"),
-            "length": ("content-length", "3"),
-        }
-        header, value = changed[fault]
+        if fault == "ranged":
+            reply.headers["content-range"] = f"bytes 0-{len(DATA) - 1}/{len(DATA) + 1}"
+            return reply
+        header, value = {"file-id": ("x-bz-file-id", "wrong"), "name": ("x-bz-file-name", "wrong"),
+                         "length": ("content-length", "3")}[fault]
         reply.headers[header] = value
-        if fault == "length":
-            return httpx.Response(206, headers=reply.headers, content=DATA[1:4])
-        return reply
+        return httpx.Response(200, headers=reply.headers, content=DATA[:3]) if fault == "length" else reply
 
     faults["download"] = change
     with (pytest.raises(media_store.MediaStoreError, match="MEDIA_STORE_UNAVAILABLE"),
-          store.open_range(OBJECT, version, size=len(DATA), start=1, end=4)):
-        pytest.fail("a wrong range returned a stream")
-    assert fake.calls.count("download") == 3
+          store.open(OBJECT, version, expected_size=len(DATA))):
+        pytest.fail("a different download returned a stream")
 
 
 def test_a_truncated_body_with_correct_headers_fails_the_download(b2):

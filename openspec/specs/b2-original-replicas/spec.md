@@ -30,7 +30,7 @@ The adapter SHALL use the exact provider version for metadata and byte reads. It
 - **WHEN** the location has a newer version and the recorded version remains available
 - **THEN** the worker reads the recorded version and verifies its bytes
 
-#### Scenario: The provider refuses a specific byte range
+#### Scenario: A download names another version
 
-- **WHEN** the provider gives the full file or a different range for a proper subrange
+- **WHEN** the provider's download names a different version, name or length
 - **THEN** the adapter refuses that response before it yields bytes

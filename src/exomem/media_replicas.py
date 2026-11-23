@@ -1171,8 +1171,8 @@ def observe(vault: Path, *, deadline: float | None = None) -> None:
     """Record whether each store that has a cheap check answers as itself now.
 
     Only the worker calls it (and the drain, when a copy meets a store that does not answer), so a status reports an
-    observation with its time and never reads a store itself. A store with no cheap check (a remote one) is not
-    probed and keeps no record.
+    observation with its time and never reads a store itself. A store with no cheap check is not probed and keeps
+    no record. A B2 store's check is a fresh authorization that also rechecks its key's scope.
     """
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
