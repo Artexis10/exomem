@@ -570,9 +570,9 @@ A surface without the required edit owner reports that limit; it does not invent
 
 ### Updating one unit with `edit_note`
 
-An update rebuilds the whole unit. `verdict`, `check_by` and the unit id persist
-(`edit_note` carries none of them), and metadata rows the tool does not own are
-carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
+An update rebuilds the whole unit. `verdict`, `check_by` and `as_of` persist
+when you omit them, and an empty string clears one; the unit id always persists,
+and metadata rows the tool does not own are carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
 clears it, so resend what should stay. A link in a body or in a unit reads and writes as
 `[[Title]]`; the vault stores the page's path form. `verdict` is a categorical epistemic outcome,
 a judgment in words and never a confidence score;
