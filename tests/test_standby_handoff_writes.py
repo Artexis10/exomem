@@ -101,11 +101,12 @@ EpistemicGraphIndex._rebuild_all_off_boundary = counted
 uncounted = []
 
 
-def count_calls(owner, name, kind):
+def count_calls(owner, name, kind, whole=lambda **kwargs: True):
     original = getattr(owner, name)
 
     def wrapper(*args, **kwargs):
-        uncounted.append(kind)
+        if whole(**kwargs):
+            uncounted.append(kind)
         return original(*args, **kwargs)
 
     setattr(owner, name, wrapper)
@@ -114,7 +115,13 @@ def count_calls(owner, name, kind):
 from exomem import epistemic_graph  # noqa: E402
 
 count_calls(lexstore.LexicalStore, "_rebuild", "lexical rebuild")
-count_calls(lexstore, "_schedule_repair", "lexical repair scheduled")
+# A repair of named paths or a pending-only check is the cheap answer to a busy catalogue.
+count_calls(
+    lexstore,
+    "_schedule_repair",
+    "whole-catalogue lexical repair scheduled",
+    whole=lambda deferred_paths=None, pending_only=False, **_: deferred_paths is None and not pending_only,
+)
 count_calls(epistemic_graph, "_start_background_proof", "background graph proof")
 
 if retry_catalogue:
@@ -359,7 +366,8 @@ def record_stall(index):
     lines = [f"write {{index}} still running after {{ACK_BOUND_SECONDS}} seconds"]
     for ident, frame in frames.items():
         if ident != threading.get_ident():
-            lines.append(f"thread {{ident}}")
+            names = {{thread.ident: thread.name for thread in threading.enumerate()}}
+            lines.append(f"thread {{names.get(ident, ident)}}")
             lines.append("".join(traceback.format_stack(frame)))
     stall_traces.append("\\n".join(lines))
 
@@ -474,6 +482,9 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
         path = handoff_vault / GENERATED / "generated-note-0001.md"
         path.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
     report = _run_standby(handoff_vault, tmp_path, arm)
+    # Report a stall's trace before any assertion can fail and hide it.
+    for trace in report["stall_traces"]:
+        warnings.warn(f"[{arm}] {trace}", stacklevel=1)
 
     cutover = report["readiness"]
     assert cutover["components"]["graph_snapshot"] == "ready", cutover
@@ -491,11 +502,9 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     assert report["per_write_uncounted"] == [[]] * WRITE_COUNT, (
         f"a write started whole-vault work: {report['per_write_uncounted']}"
     )
-    for trace in report["stall_traces"]:
-        warnings.warn(f"[{arm}] {trace}", stacklevel=1)
     # Only the retry arm writes in a managed runtime, and on CI one or two of its ten writes
     # stall 2.0-3.4 s with no whole-vault work counted; the cause is not yet known, and the
-    # stall traces above name it. The other arms keep the incremental bound.
+    # stall traces name it. Once they do, fix the cause and return this arm to the 2.0 s bound.
     if arm == "retry":
         _assert_incremental_latency(report["acknowledgements"], bound=LIVE_ACK_BOUND_SECONDS)
     else:
