@@ -186,6 +186,9 @@ def verify_event(conn, txn):
                     _fail(txn, "imported envelope binding differs")
             if envelope["imported_at"] != txn["committed_at"]:
                 _fail(txn, "imported time binding differs")
+            # An imported shape-history entry is bound by its event's digest, as a native revise binds its own.
+            if envelope.get("shape_sha256") != shape_history.bound_digest(conn, txn["txn_id"]):
+                _fail(txn, "imported shape-history entry differs")
             if original is None:
                 for row_id, key, version, payload, schema_version in conn.execute(
                     "SELECT v.row_id,i.item_key,v.row_version,v.payload_hash,v.schema_version FROM version_identity v "
