@@ -328,7 +328,7 @@ In store mode, once stage 2 ships, a governed operation SHALL be able to add, re
 
 #### Scenario: A first stored relationship pins the unit's identity
 - **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
-- **THEN** the same transaction writes an anchor at the end of that unit and stores the relationship against the anchored identity
+- **THEN** the same transaction writes an anchor at the end of that unit and stores the relationship against that unit's store-assigned id
 - **AND** a later edit of the unit's text keeps the relationship attached
 
 ### Requirement: A stored relationship keeps its history and two-ended visibility
