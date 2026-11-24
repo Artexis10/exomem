@@ -2,7 +2,7 @@ version: 1
 skills:
   - name: exomem-continue
     standalone_authoring: true
-    purpose: Resume prior project or session context from Exomem.
+    purpose: Resume prior project or session context from Evermatter.
     triggers:
       - continue where we left off
       - what was I doing on X?
@@ -16,10 +16,10 @@ skills:
       - remember this decision
   - name: exomem-ingest
     standalone_authoring: true
-    purpose: Add an external artifact to Exomem and compile what matters.
+    purpose: Add an external artifact to Evermatter and compile what matters.
     triggers:
       - ingest this
-      - add this to Exomem
+      - add this to Evermatter
       - process this source
   - name: exomem-research
     standalone_authoring: true
@@ -51,14 +51,14 @@ skills:
       - what's stale?
   - name: exomem-review
     standalone_authoring: true
-    purpose: Drain Exomem review and audit queues safely.
+    purpose: Drain Evermatter review and audit queues safely.
     triggers:
       - review my KB
       - what needs attention?
       - drain the backlog
   - name: exomem-media
     standalone_authoring: true
-    purpose: Retrieve and reason over Exomem media artifacts.
+    purpose: Retrieve and reason over Evermatter media artifacts.
     triggers:
       - find the video where
       - look inside this recording

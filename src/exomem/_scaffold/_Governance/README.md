@@ -28,7 +28,7 @@ review, commit, suspend, resume, or undo policy. REST and CLI retain the grouped
 commit activates one immutable policy/projector/catalog tuple; a direct edit does
 not silently replace the active tuple.
 
-This tree and Exomem's internal governance state, including
+This tree and Evermatter's internal governance state, including
 `Knowledge Base/.governance.sqlite` and its transactional siblings, are reserved.
 Generic file, dataset, media, transfer, and download commands intentionally hide
 or refuse them. A `RESERVED_PATH` response means to use the governance tools, not to
@@ -36,5 +36,5 @@ retry through an alias, link, alternate spelling, or direct file operation.
 
 Before first enrollment, an absent folder or empty document set means governance
 is not configured. After enrollment, deleting this folder or its internal state
-does not disable governance. Exomem fails closed until the owner repairs or
+does not disable governance. Evermatter fails closed until the owner repairs or
 migrates the authority state.

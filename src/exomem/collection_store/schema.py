@@ -771,7 +771,7 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
     the export manifest the member came from. ``rows_digest`` chains each accepted
     row's item key and payload hash in member order (``importer``), and
     ``row_count_after`` is the collection's row count once the member is in.
-    ``importer_version`` is the Exomem release that imported the member and
+    ``importer_version`` is the Evermatter release that imported the member and
     ``zone_rules`` the zone rules' release, NULL when the mapping names no zone. A
     later job with the same mapping skips a member the log records.
     """

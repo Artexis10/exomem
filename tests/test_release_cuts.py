@@ -488,7 +488,7 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
             # This source arrives after prospective validation, inside the merge transport.
             page = root / "src/exomem/_scaffold/_Schema/references/late-release/usage.md"
             page.parent.mkdir(parents=True)
-            page.write_text("Use exomem@<exomem-release> with the selected source.\n")
+            page.write_text("Use evermatter@<exomem-release> with the selected source.\n")
             pyproject.write_text(pyproject.read_text().replace('"httpx>=0.28"', '"httpx>=0.28.1"'))
             refresh_lock(root, env, "--offline")
             subprocess.run(

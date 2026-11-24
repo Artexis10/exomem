@@ -3,7 +3,7 @@
 Three ideas are shared by every screen and therefore live here.
 
 **Receipts.** An action that happened leaves a line you can read back —
-`✓ vault     created ~/Exomem — 14 files, plain markdown`. The same shape
+`✓ vault     created ~/Evermatter — 14 files, plain markdown`. The same shape
 renders setup steps, save confirmations, and session history, so the language
 of the first run is the language of the daily loop.
 

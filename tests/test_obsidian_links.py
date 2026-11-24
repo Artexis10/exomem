@@ -19,7 +19,7 @@ SCANS = [
 
 
 def test_unique_trailing_path_resolves_to_its_file():
-    """A path link that Exomem's resolver leaves unresolved today resolves in Obsidian by its tail."""
+    """A path link that Evermatter's resolver leaves unresolved today resolves in Obsidian by its tail."""
     match = links.resolve_link("alpha/receipts/Scan", links.build_index(SCANS))
 
     assert match.outcome is Resolution.RESOLVED

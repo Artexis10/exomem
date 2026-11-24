@@ -2099,6 +2099,7 @@ def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
     """Probe the real older installation through production candidate admission."""
     from exomem.collection_store import authority, schema
     from exomem.governance import raw_protection
+    from exomem.install_info import distribution_probe
     from exomem.service_manager import WorkerRuntime
     from exomem.state_migration import COLLECTION_MARKER_COMPATIBILITY_ID
 
@@ -2110,8 +2111,7 @@ def inspect_unsupported_launcher(args: argparse.Namespace) -> int:
     os.environ["EXOMEM_VAULT_PATH"] = str(root)
     fresh_state = Path(args.work) / "unsupported-state"
     os.environ["EXOMEM_STATE_ROOT"] = str(fresh_state)
-    old = loop._run([args.older_python, "-I", "-c",
-                     "from importlib.metadata import version; print(version('exomem'))"],
+    old = loop._run([args.older_python, "-I", "-c", distribution_probe("release") + "print(release)"],
                     env=os.environ.copy(), cwd=Path(args.work), timeout=20).stdout.strip()
     runtime = WorkerRuntime(Path(args.work) / "unsupported.sock", host="127.0.0.1", port=0)
     target = asyncio.run(runtime.inspect({"python": args.older_python, "version": old}))

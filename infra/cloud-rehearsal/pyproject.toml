@@ -1,7 +1,7 @@
 [project]
 name = "exomem-cloud-rehearsal"
 version = "0.1.0"
-description = "P3: the Exomem Cloud local end-to-end rehearsal on disposable K3s"
+description = "P3: the Evermatter Cloud local end-to-end rehearsal on disposable K3s"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30,<1",

@@ -1,16 +1,16 @@
 <!-- authority:non-specification -->
 
-# Distribution: getting Exomem into each client
+# Distribution: getting Evermatter into each client
 
 The scaffold at `src/exomem/_scaffold/_Schema/` is the source of truth for skill
-artifacts. Generated skill copies are checked by CI; the Exomem Cloud plugin
+artifacts. Generated skill copies are checked by CI; the Evermatter Cloud plugin
 definition, hooks and fixtures are maintained by their own channel contracts.
 
 ## Distribution channels
 
 | Surface | Canonical channel | What users install or connect |
 |---|---|---|
-| Claude Code plugin | This Git repository's Claude Code plugin marketplace | `Artexis10/exomem` plugin (skills and hooks), plus a configured remote or stdio MCP route |
+| Claude Code plugin | This Git repository's Claude Code plugin marketplace | `substrate-systems/evermatter` plugin (skills and hooks), plus a configured remote or stdio MCP route |
 | Claude.ai, Desktop, Mobile, Code, and Cowork | Claude Connector Directory plus the independent public Claude plugin channel | The hosted connector; the plugin bundle adds skills where the client supports them |
 | Hosted ChatGPT and Codex | One universal OpenAI Plugin Directory entry | The hosted OpenAI plugin and its MCP connection |
 | Self-hosted/local Claude Code and Codex | `exomem setup` (or explicit `codex mcp add`) | A local or remote MCP route plus disk-installed skills and hooks |
@@ -26,7 +26,7 @@ queue. `.claude-plugin/marketplace.json` is the listing, so merging the plugin
 metadata to the default branch publishes that Git-repo channel:
 
 ```text
-/plugin marketplace add Artexis10/exomem
+/plugin marketplace add substrate-systems/evermatter
 /plugin install exomem@exomem
 ```
 
@@ -48,7 +48,7 @@ exomem package-skills --plugin-root plugins/claude-code
 
 ## Hosted Claude and OpenAI channels
 
-The Exomem Cloud release input is `plugins/cloud/definition.json`, built by
+The Evermatter Cloud release input is `plugins/cloud/definition.json`, built by
 `scripts/cloud-plugin.py`. See
 [cloud-plugin-distribution.md](cloud-plugin-distribution.md) for the packages
 and the directory preparation.
@@ -80,7 +80,7 @@ exomem package-skills --vault "/path/to/vault"
 
 Pair the client with the remote connector as described in
 [remote-quickstart.md](remote-quickstart.md). A custom instruction should only
-ask the assistant to retrieve relevant governed Exomem material, cite it, and
+ask the assistant to retrieve relevant governed Evermatter material, cite it, and
 capture durable conclusions when requested. It is not a substitute for a
 directory listing or for native client skill activation.
 

@@ -12,7 +12,7 @@
     "oauth_discovery_url": "https://exomem.example.test/.well-known/oauth-authorization-server"
   },
   "services": {
-    "exomem": "Exomem",
+    "exomem": "Evermatter",
     "cloudflared": "cloudflared"
   },
   "tunnels": {

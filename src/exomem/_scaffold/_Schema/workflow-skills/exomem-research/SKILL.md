@@ -1,8 +1,8 @@
 ---
 name: exomem-research
-description: "Run a focused research loop with Exomem: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
+description: "Run a focused research loop with Evermatter: gather sources, preserve evidence, compile attributed findings, and connect prior notes."
 metadata:
-  skill_contract: ae2e5a4556dc287788daee5b0be781557ab1db0a3dad11d43b0099cd12aea415
+  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
   version: "0.1.0"
 ---
 
@@ -41,11 +41,11 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -58,7 +58,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a
@@ -73,7 +73,7 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search Exomem first with `search_memory` for prior conclusions and related sources.
+1. Search Evermatter first with `search_memory` for prior conclusions and related sources.
 2. Gather external sources only as needed; preserve important raw sources with `save_source`, passing `files` when the client can hand over an attachment. `save_evidence`, `save_evidence`, and the `upload_files` fallback are for proof-bearing artifacts, not for raw material.
    Take a document's title, authors, year, venue and DOI from the document itself, never from a search hit, a repository match or memory. Compare what you saved with the reply's `identity` block, which shows the document's opening and the DOIs it carries. A document that cites the work is not the work. When they differ, correct the Source with `options.correction` and no `files`.
    Set `document_form`. When the full text is unavailable, save the publisher's abstract or citation record and label it so; never present it as the full text.
@@ -96,7 +96,7 @@ Return findings, cited sources, limits, saved path, and follow-up questions.
 Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.
 
 ## Mistakes to avoid
-Do not research from scratch before checking Exomem. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
+Do not research from scratch before checking Evermatter. Do not save a source list without synthesis. Do not hide uncertainty or source gaps.
 
 <!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract

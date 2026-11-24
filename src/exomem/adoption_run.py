@@ -72,7 +72,7 @@ StatusView = Literal["summary", "inventory", "selection", "plan", "outcomes", "s
 STATUS_PAGE_ITEMS = 100
 STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
-# Where Exomem Cloud stages an uploaded collection (see `cloud_import_job`).
+# Where Evermatter Cloud stages an uploaded collection (see `cloud_import_job`).
 IMPORT_STAGE_DIR = import_stage.STAGE_DIR
 # One `apply` batch holds at most this many items or bytes of originals (the
 # batch writer re-validates the whole batch per write, so cost grows with size).
@@ -1036,7 +1036,7 @@ def _handoff(run: dict) -> dict:
     work_item = capabilities.active_call_text("adoption_studio", {"action": "work-item", "run_id": run_id})
     propose = capabilities.active_call_text("adoption_studio", {"action": "propose", "run_id": run_id})
     prompt_text = (
-        f"Continue my Exomem adoption run {run_id}. "
+        f"Continue my Evermatter adoption run {run_id}. "
         f"Call {work_item} to load the bounded, "
         "read-only context, then submit structured proposals via "
         f"{propose}. Run ref: {run_ref}."

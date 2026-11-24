@@ -1,4 +1,4 @@
-"""Closed name and placement authority for Exomem's internal state families.
+"""Closed name and placement authority for Evermatter's internal state families.
 
 Logical classification is deliberately pure and existence-independent.  Physical
 classification is a second, conservative acquisition-time check; it is not a

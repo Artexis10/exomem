@@ -228,7 +228,7 @@ def _restore_files(snapshots: dict[Path, _FileSnapshot]) -> None:
 
 
 def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
-    """Return enabled Exomem plugin IDs that still declare a stdio core."""
+    """Return enabled Evermatter plugin IDs that still declare a stdio core."""
     try:
         result = run_fn([claude, "plugin", "list", "--json"], **run_kwargs)
     except Exception as exc:  # noqa: BLE001 - an unknown plugin state must fail closed
@@ -255,7 +255,7 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if not isinstance(server, dict):
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
-                "Exomem MCP inventory is missing"
+                "Evermatter MCP inventory is missing"
             )
         if server.get("command") or server.get("args"):
             legacy.append(plugin_id)
@@ -263,7 +263,7 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if server.get("type") != "http" or not isinstance(server.get("url"), str):
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
-                "Exomem MCP declaration is incomplete"
+                "Evermatter MCP declaration is incomplete"
             )
     return legacy
 
@@ -634,13 +634,13 @@ def _offer_learning_instruction(
     if pending and not choice:
         print_fn("")
         print_fn(
-            "  Learning instruction: your request to the agent to recall Exomem before a "
+            "  Learning instruction: your request to the agent to recall Evermatter before a "
             "task and save what it learns."
         )
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
-            "  Setup keeps it between Exomem markers. Delete that block, or run "
-            "`exomem install-hook --uninstall --client all`, to remove it."
+            "  Setup keeps it between the `exomem learning instruction` markers. Delete that "
+            "block, or run `exomem install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"
@@ -943,7 +943,7 @@ def run_setup(
             if legacy_plugins:
                 plugin_id = legacy_plugins[0]
                 print_fn(
-                    "  The enabled Exomem plugin still launches a full stdio core. "
+                    "  The enabled Evermatter plugin still launches a full stdio core. "
                     f"Run `claude plugin update {plugin_id}`, then `/reload-plugins` "
                     "(or restart Claude Code) before rerunning setup."
                 )
@@ -1055,7 +1055,7 @@ def run_setup(
         report("hooks", "[skipped]")
 
     # 9. learning instruction — the user's own request to recall and save, placed in
-    # the instruction file each detected client reads. Never served by Exomem itself.
+    # the instruction file each detected client reads. Never served by Evermatter itself.
     claude_root = home if home is not None else install_module.client_home("claude")
     targets: list[tuple[str, str, Path]] = []
     if which_fn("claude") or claude_root.is_dir():
@@ -1138,7 +1138,7 @@ def setup_main(argv: list[str]) -> int:
         action="store_const",
         const=True,
         dest="learning_instruction",
-        help="Add Exomem's learning instruction to the CLAUDE.md and AGENTS.md of detected "
+        help="Add Evermatter's learning instruction to the CLAUDE.md and AGENTS.md of detected "
         "clients without asking. --yes adds it only with this flag.",
     )
     learning.add_argument(
@@ -1153,7 +1153,7 @@ def setup_main(argv: list[str]) -> int:
     route = parser.add_mutually_exclusive_group()
     route.add_argument(
         "--mcp-url",
-        help="Shared Exomem service origin or exact /mcp URL (HTTPS, or loopback HTTP).",
+        help="Shared Evermatter service origin or exact /mcp URL (HTTPS, or loopback HTTP).",
     )
     route.add_argument(
         "--stdio",
@@ -1164,7 +1164,7 @@ def setup_main(argv: list[str]) -> int:
     parser.add_argument(
         "--replace-client-registration",
         action="store_true",
-        help="Replace existing Exomem MCP registrations across client scopes.",
+        help="Replace existing Evermatter MCP registrations across client scopes.",
     )
     parser.add_argument("--scope", choices=("user", "local", "project"), default="user",
                         help="claude mcp add scope (default: user — available in every project).")

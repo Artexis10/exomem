@@ -1,6 +1,6 @@
 """Stage a folder from outside the vault into `_Imports/<import_id>/<folder name>/`.
 
-This is the layout Exomem Cloud uses for an uploaded folder, so adoption scans it like any
+This is the layout Evermatter Cloud uses for an uploaded folder, so adoption scans it like any
 staged upload: the folder's name becomes the collection label and a repeat import dedupes.
 The original folder is only read, and no link in it is followed. The manifest is a journal in
 the user's state folder, not in the staged tree, so adoption sees the folder and nothing else.
@@ -553,7 +553,7 @@ def _closing_lines(result: dict) -> list[str]:
     hidden = (' Hidden files stay staged: to file them, call manage_memory with operation "imports.start" and arguments {"path": that path, "include_hidden": true}.'
               if result["include_hidden"] else "")
     lines = [f"Staged {files_phrase(staged['files'])}, {human_bytes(staged['bytes'])}, in {result['staged_folder']}.",
-             "This is a second copy of the folder on this disk. No Exomem command discards it: "
+             "This is a second copy of the folder on this disk. No Evermatter command discards it: "
              f"after adoption finishes, delete {Path(result['staged_folder']).parent} to free the space."]
     if result["ok"]:
         refused = result["refused_by_vault"]

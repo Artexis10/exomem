@@ -9,7 +9,7 @@ stable MCP URL and one connector definition, but it deliberately does **not**
 provide automatic failover or distributed consensus.
 
 Use this runbook only after installing the opt-in cold-standby tooling. A normal
-Exomem install or upgrade does not change service start mode, Cloudflare routing,
+Evermatter install or upgrade does not change service start mode, Cloudflare routing,
 OAuth, Syncthing, or any existing HA deployment.
 
 For a neutral comparison with single-host and automatic writer-lease HA, see
@@ -42,7 +42,7 @@ claim of authority. Syncthing is replication, not consensus.
 
 Before enabling the profile, have all of the following in place:
 
-- Two Windows hosts with independently installed, compatible Exomem releases and
+- Two Windows hosts with independently installed, compatible Evermatter releases and
   a replicated vault. Keep the desktop as the intended normal primary and the
   laptop as standby.
 - Syncthing working between the hosts. Its REST API key must be available through
@@ -56,7 +56,7 @@ Before enabling the profile, have all of the following in place:
   [tunnel DNS routing documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/).
 - One stable public hostname, for example `https://kb.example.com`. It remains
   the value of `EXOMEM_BASE_URL` and the existing connector URL on both hosts.
-- A local Exomem readiness response configured with a public-safe,
+- A local Evermatter readiness response configured with a public-safe,
   non-secret `EXOMEM_INSTANCE_ID` unique to each host. It is the identity used to
   prove the public hostname reached the intended origin.
 - A host-owned configuration JSON file outside the repository, plus a local
@@ -76,7 +76,7 @@ service names, distinct tunnel names and UUIDs, the stable hostname, both direct
 operational hostnames, the local
 `cloudflared` config path, Cloudflare token/zone environment-variable names,
 Syncthing folder/device/API, and paths for the journal, marker, peer manifests,
-and effective Exomem `.env` file.
+and effective Evermatter `.env` file.
 
 Keep this effective identity contract identical on both hosts:
 
@@ -101,10 +101,10 @@ pwsh -File scripts/cold-standby.ps1 Configure -ConfigPath $config -WhatIf
 pwsh -File scripts/cold-standby.ps1 Configure -ConfigPath $config
 ```
 
-`Configure` puts Exomem into demand-start mode on both hosts. The laptop remains
+`Configure` puts Evermatter into demand-start mode on both hosts. The laptop remains
 manual. On the desktop it installs a delayed, current-user logon task that runs
 the same guarded `Activate -IfUnserved` transition after the network is expected
-to be available. The task leaves Exomem stopped if the laptop, the stable endpoint,
+to be available. The task leaves Evermatter stopped if the laptop, the stable endpoint,
 Syncthing state, or replicated intent is active or ambiguous.
 
 `Configure` also verifies that the named `cloudflared` Windows service actually
@@ -266,7 +266,7 @@ the product while adopting this profile for one personal deployment.
    startup, public routing, OAuth, or HA environment yet.
 2. Back up both effective `.env` files, both tunnel configurations, service startup
    settings, the Worker/Durable Object configuration, and its secrets. Confirm both
-   vault replicas are fully converged and run compatible Exomem releases.
+   vault replicas are fully converged and run compatible Evermatter releases.
 3. Create/harden the two distinct named tunnels. Give both tunnel configs the
    stable hostname, but make each direct operational hostname health/readiness-only.
    Install the local cold-standby configuration on both hosts while the HA edge

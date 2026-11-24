@@ -2,7 +2,7 @@
 
 # K3s agent node pool
 
-Add or remove an Exomem Cloud K3s agent node (openspec
+Add or remove an Evermatter Cloud K3s agent node (openspec
 `add-cloud-node-provisioning`). One `k3s_agent_nodes` entry is one agent
 server. cellctl needs no change: it counts a node once the node's CSINode
 publishes a volume-attachment limit, and zeroes it once the Node is deleted.

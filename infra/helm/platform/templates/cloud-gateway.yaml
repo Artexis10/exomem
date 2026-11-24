@@ -1,3 +1,4 @@
+{{- include "exomem.requireDistinctAdditionalHostnames" . }}
 {{- if .Values.cloudGateway.transferTools.enabled }}
 {{- if not .Values.cloudGateway.enabled }}
 {{- fail "cloudGateway.transferTools.enabled requires cloudGateway.enabled" }}
@@ -138,6 +139,15 @@ spec:
               value: {{ .Values.cloudGateway.trustedIngressSourceValue | quote }}
             - name: EXOMEM_CLOUD_MCP_URL
               value: {{ printf "https://%s%s" .Values.cloudGateway.hostname .Values.cloudGateway.mcpPath | quote }}
+            {{- if .Values.cloudGateway.additionalHostnames }}
+            {{- /* Every resource URL the gateway accepts, in order: the first is the one discovery offers new clients. Unset, only EXOMEM_CLOUD_MCP_URL above is accepted. */}}
+            {{- $mcpUrls := list (printf "https://%s%s" .Values.cloudGateway.hostname .Values.cloudGateway.mcpPath) }}
+            {{- range .Values.cloudGateway.additionalHostnames }}
+            {{- $mcpUrls = append $mcpUrls (printf "https://%s%s" . $.Values.cloudGateway.mcpPath) }}
+            {{- end }}
+            - name: EXOMEM_CLOUD_MCP_URLS
+              value: {{ join "," $mcpUrls | quote }}
+            {{- end }}
             - name: EXOMEM_CLOUD_MCP_PATH
               value: {{ .Values.cloudGateway.mcpPath | quote }}
             # D7: the same Secret entry cellctl reads as its current cell

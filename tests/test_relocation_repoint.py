@@ -165,7 +165,7 @@ def test_a_move_whose_commit_fails_leaves_no_pointer_record(
 
 def test_a_move_rewrites_the_moved_path_in_a_records_row_and_a_planning_item(vault: Path) -> None:
     """A move that leaves a Records row or a Planning item on the old path, so it reaches the moved
-    note only through the lineage, which is the fallback for references Exomem cannot rewrite."""
+    note only through the lineage, which is the fallback for references Evermatter cannot rewrite."""
     _with_identity(vault, NOTE)
     _write(vault, PLANNING_PATH, planning_manifest())
     pages = [

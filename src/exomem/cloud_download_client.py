@@ -1,4 +1,4 @@
-"""Download one preserved original from Exomem Cloud over the owner's OAuth: verified bytes, or no file."""
+"""Download one preserved original from Evermatter Cloud over the owner's OAuth: verified bytes, or no file."""
 from __future__ import annotations
 
 import argparse

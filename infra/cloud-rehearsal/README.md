@@ -1,9 +1,9 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud local rehearsal (P3)
+# Evermatter Cloud local rehearsal (P3)
 
 `adopt-exomem-cloud-plain-cells` tasks 5.1–5.3. This is one command. It
-stands up the whole Exomem Cloud stack on one machine and runs the twelve P3
+stands up the whole Evermatter Cloud stack on one machine and runs the twelve P3
 steps from design.md in order. It then writes a JSON report with the 5.3
 measurements and tears everything down.
 

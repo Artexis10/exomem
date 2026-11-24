@@ -271,7 +271,7 @@ class TenantClient:
         return OAuthClientProvider(
             server_url=MCP_URL,
             client_metadata=OAuthClientMetadata(
-                client_name="Exomem Cloud rehearsal",
+                client_name="Evermatter Cloud rehearsal",
                 redirect_uris=[self.redirect_uri],
                 grant_types=["authorization_code", "refresh_token"],
                 response_types=["code"],

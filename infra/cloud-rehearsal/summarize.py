@@ -25,7 +25,7 @@ def main(path: str) -> None:
         catalogue_prewarm(report)
         return
     outcome = report["outcome"]
-    print("## Exomem Cloud P3 rehearsal\n")
+    print("## Evermatter Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
     print(f"- gates the node: **{outcome['gates_node']}** (steps {outcome['steps']})")
     for blocker in outcome.get("gate_blockers", []):

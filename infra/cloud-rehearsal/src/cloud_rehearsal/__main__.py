@@ -1,4 +1,4 @@
-"""`exomem-cloud-rehearsal run`: P3, the Exomem Cloud local rehearsal.
+"""`exomem-cloud-rehearsal run`: P3, the Evermatter Cloud local rehearsal.
 
 One command stands up disposable K3s, PostgreSQL with Substrate's real
 migrations and grants, Substrate, its gateway, cellctl and the real cell

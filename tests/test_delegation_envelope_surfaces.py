@@ -113,7 +113,7 @@ HOOKLESS_DOC = REPO / "docs/prominence.md"
 #: The heading each prose carrier files the teaching under. One name, so a
 #: carrier that renames its section fails the count rather than silently
 #: measuring zero lines and passing.
-TEACHING_HEADING = "## What Exomem does on its own"
+TEACHING_HEADING = "## What Evermatter does on its own"
 #: D5. Fifty TOTAL across four carriers was arithmetic that could not hold six
 #: classes, four dispositions and a protocol; per-carrier is the honest budget.
 LINE_BUDGET = 50

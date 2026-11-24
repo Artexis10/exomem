@@ -1,5 +1,5 @@
 {
-  "description": "Canonical Exomem MCP activation, governed capture and local continuation.",
+  "description": "Canonical Evermatter MCP activation, governed capture and local continuation.",
   "hooks": {
     "UserPromptSubmit": [
       {

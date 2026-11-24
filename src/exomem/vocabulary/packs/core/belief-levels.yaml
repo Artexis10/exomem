@@ -1,4 +1,4 @@
-# The belief levels Exomem ships: how strongly a holder believes a claim, said in words. A belief
+# The belief levels Evermatter ships: how strongly a holder believes a claim, said in words. A belief
 # unit's `credence` names one of these levels, or states a probability from 0 to 1 together
 # with a `credence_basis`. A vault adds levels or labels in the `belief_levels` section of
 # `_Schema/semantic-language-registry.yaml`. A level carries labels and a description and no

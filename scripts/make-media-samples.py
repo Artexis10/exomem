@@ -132,7 +132,7 @@ def _dng(source: Path, target: Path) -> None:
         (Tag.ColorMatrix1, [[1, 1], [0, 1], [0, 1], [0, 1], [1, 1], [0, 1], [0, 1], [0, 1], [1, 1]]),
         (Tag.CalibrationIlluminant1, CalibrationIlluminant.D65),
         (Tag.AsShotNeutral, [[1, 1], [1, 1], [1, 1]]), (Tag.BaselineExposure, [[0, 1]]),
-        (Tag.Make, "Exomem"), (Tag.Model, "Synthetic sample"),
+        (Tag.Make, "Evermatter"), (Tag.Model, "Synthetic sample"),
         (Tag.DNGVersion, DNGVersion.V1_4), (Tag.DNGBackwardVersion, DNGVersion.V1_2),
     ):
         tags.set(tag, value)

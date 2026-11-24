@@ -313,7 +313,7 @@ def test_an_enabled_edge_needs_an_explicit_state_storage_class() -> None:
         ("--set-string", "mediaEdge.bucket="),
         ("--set-string", "mediaEdge.bucketId="),
         ("--set-json", "mediaEdge.physicalHeadroom=0.5"),
-        ("--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem:latest"),
+        ("--set-string", "artifactBroker.image=ghcr.io/substrate-systems/evermatter:latest"),
         ("--set-json", 'cells.jobEgressExcept=["10.0.0.0/8"]'),
         ("--set-json", 'mediaEdge.cellIds=["short"]'),
         ("--set-json", 'mediaEdge.storePolicy.allowance_bytes=true'),

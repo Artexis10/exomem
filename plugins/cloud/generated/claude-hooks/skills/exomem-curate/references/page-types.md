@@ -722,7 +722,7 @@ dropping only what a filesystem or a link cannot carry; a captured Source keeps
 its dated lowercase slug name. A vault chooses a style with `filename_style` or
 `EXOMEM_FILENAME_STYLE`. Callers may pass an explicit lowercase ASCII kebab-case
 `slug` (maximum 100 characters) for a new source, note, or entity: it overrides
-the derived name under every style and does not change the stored title. Exomem
+the derived name under every style and does not change the stored title. Evermatter
 does not attempt language-aware transliteration, and it never renames existing
 pages on upgrade or reconcile.
 

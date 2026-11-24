@@ -1,11 +1,15 @@
 platformJobs:
-  image: ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  image: ghcr.io/substrate-systems/evermatter@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 scheduler:
   contractVersion: 1
 cellctl:
   enabled: true
-  image: ghcr.io/substrate-systems/exomem-cellctl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-  cellImageRepository: ghcr.io/substrate-systems/exomem-cloud-cell
+  image: ghcr.io/substrate-systems/evermatter-cellctl@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  cellImageRepositories:
+    - repository: ghcr.io/substrate-systems/evermatter
+      builder: substrate-systems/evermatter
+    - repository: ghcr.io/artexis10/exomem
+      builder: Artexis10/exomem
   b2BucketName: exomem-cloud-backups
   b2BucketId: b2-bucket-id-example
   b2Endpoint: https://s3.us-west-002.backblazeb2.com

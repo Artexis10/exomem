@@ -1740,10 +1740,10 @@ def test_a_coordinator_without_the_store_fence_names_the_release_to_upgrade_to(t
         monkeypatch.setattr("urllib.request.urlopen", urlopen)
         with library_scope(), pytest.raises(CollectionStoreError) as refused:
             preflight.preflight(root)
-    from importlib.metadata import version
+    from exomem.install_info import installed_version
 
     assert refused.value.code == preflight.UPGRADE_REQUIRED
-    assert f"upgrade it to Exomem {version('exomem')}" in str(refused.value)
+    assert f"upgrade it to Evermatter {installed_version()}" in str(refused.value)
 
 
 def test_launcher_refuses_an_actual_older_interpreter_on_a_migrated_fresh_root_copy(env, capsys, tmp_path, monkeypatch):

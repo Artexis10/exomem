@@ -48,7 +48,7 @@ ITEM_ROW_STORAGE = frozenset({"markdown-items", SQLITE_STORAGE})
 # The manifest schema fixes these field names: each recipe renders one item view, which summary mode has not.
 # Only the record_presentation tables outlive summary mode: they declare child rows, not a rendering.
 PER_ITEM_RECIPES = ("record_presentation", "item_filename", "item_presentation")
-#: The strategies whose rows Exomem writes as Markdown files; a vault with a collection store creates none of them.
+#: The strategies whose rows Evermatter writes as Markdown files; a vault with a collection store creates none of them.
 MARKDOWN_ROW_STORAGE = frozenset({"markdown-items", "markdown-log"})
 _SUPPORTED_FIELD_TYPES = frozenset(
     {
@@ -225,7 +225,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
     manifest_schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://exomem.dev/contracts/collection-manifest-v1.schema.json",
-        "title": "Exomem collection manifest frontmatter",
+        "title": "Evermatter collection manifest frontmatter",
         "type": "object",
         "required": [
             "type",
@@ -1651,7 +1651,7 @@ def plan_ref_spellings(collection_id: str, item_key: str) -> tuple[tuple[str | N
     that ``parse_plan_ref`` reads (another case, a leading space, another UUID form) differs from the
     canonical collection prefix before its end, so it sorts below or above that prefix's range.
     Not held: a spelling inside the canonical prefix that percent-encodes the key differently from
-    ``plan_ref``, which writes every reference that Exomem returns.
+    ``plan_ref``, which writes every reference that Evermatter returns.
     """
     canonical = plan_ref(collection_id, item_key)
     prefix = canonical.rpartition("/")[0] + "/"

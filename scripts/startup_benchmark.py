@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure one-shot startup costs for the Exomem CLI.
+"""Measure one-shot startup costs for the Evermatter CLI.
 
 The import profile deliberately uses the module entry point rather than a
 console-script wrapper so it is portable across development environments.

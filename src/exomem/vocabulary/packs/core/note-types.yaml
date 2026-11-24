@@ -1,4 +1,4 @@
-# The note types Exomem ships: every `type:` value the product writes or reads.
+# The note types Evermatter ships: every `type:` value the product writes or reads.
 # A vault adds its own types in `_Schema/note-types.yaml`; it never edits this
 # pack, and an overlay never changes a type defined here.
 #

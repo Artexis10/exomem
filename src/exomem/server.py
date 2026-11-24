@@ -1,4 +1,4 @@
-"""FastMCP server composition root for Exomem.
+"""FastMCP server composition root for Evermatter.
 
 The transport-specific wiring lives here. Startup/runtime setup, OAuth, public
 asset routes, transfer routes, and the REST facade are split into sibling
@@ -885,7 +885,7 @@ def _find_call_summary(message) -> str:
 
 
 #: The repository that the initialize handshake names as the source of this server (AGPL-3.0).
-SOURCE_REPOSITORY_URL = "https://github.com/Artexis10/exomem"
+SOURCE_REPOSITORY_URL = "https://github.com/substrate-systems/evermatter"
 
 #: What every MCP client is told at `initialize`. A host with lifecycle hooks
 #: injects the working set before a turn; a chat app or a generic client has no
@@ -993,6 +993,11 @@ def build_server(
         icons=server_icons(),
         lifespan=lifespan,
     )
+    # The server key stays `exomem` so clients keep matching `mcp__exomem__*`
+    # tools; the human-facing title in the initialize handshake is the product
+    # name. FastMCP 4.0.3 forwards no `title` kwarg, so set it on the low-level
+    # server the same way `_exomem_cell_traffic` is attached below.
+    mcp._mcp_server.title = "Evermatter"
     mcp.add_middleware(RefusalFloorMiddleware())
 
     upload_bridge = False
@@ -1285,7 +1290,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path,
         row = _newest_open_adoption_run(vault_root)
         if row is None:
             return (
-                "No open Exomem adoption run was found. Start one with "
+                "No open Evermatter adoption run was found. Start one with "
                 f"{capabilities.active_call_text('adoption_studio', {'action': 'start', 'path': '<folder>'})}."
             )
         try:
@@ -1294,7 +1299,7 @@ def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path,
         except Exception:  # noqa: BLE001 - fall back to a minimal, still-useful prompt
             run_id = row.get("run_id", "")
             text = (
-                f"Continue my Exomem adoption run {run_id}. Call "
+                f"Continue my Evermatter adoption run {run_id}. Call "
                 f"{capabilities.active_call_text('adoption_studio', {'action': 'work-item', 'run_id': run_id})} to load the "
                 "bounded, read-only context, then submit structured proposals via "
                 f"{capabilities.active_call_text('adoption_studio', {'action': 'propose', 'run_id': run_id})}."
@@ -1488,7 +1493,7 @@ def run(
         # to turn a remote endpoint into unauthenticated local MCP.
         # Every request starts from an empty context: uvicorn otherwise runs a
         # request in whatever context the connection's reader last kept, which
-        # can be an earlier request's (CPython issue 140947). No Exomem lifespan
+        # can be an earlier request's (CPython issue 140947). No Evermatter lifespan
         # sets a context variable, and FastMCP sets its own again per request.
         # The graceful-shutdown timeout bounds a stop: finish_responses_on_shutdown leaves
         # open streams to it, and without a timeout they would never close.
@@ -1511,7 +1516,7 @@ def run(
             middleware=http_middleware(mcp, worker_socket=worker_socket),
             # Remote clients may be routed to another replica or outlive this
             # process.  A process-local Mcp-Session-Id turns either event into
-            # a 404/reconnect cascade; each Exomem operation is already an
+            # a 404/reconnect cascade; each Evermatter operation is already an
             # independently authenticated request, so use FastMCP's transport
             # mode designed for horizontally scaled/restartable servers.
             stateless_http=True,

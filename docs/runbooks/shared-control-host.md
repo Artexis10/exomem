@@ -4,12 +4,12 @@
 
 The shared production database serves authentication, billing and several
 products. Substrate infrastructure owns its host configuration and recovery.
-Exomem owns its application migrations and consumes the published
+Evermatter owns its application migrations and consumes the published
 `shared_control` dependency. It receives no shared Terraform state or apply
 permission.
 
 The [shared handover runbook](https://github.com/substrate-systems/substrate-infra/blob/main/docs/control-host-handover.md)
-holds the operating procedure. Exomem's OpenSpec change
+holds the operating procedure. Evermatter's OpenSpec change
 `separate-shared-substrate-control-infrastructure` governs the current handover.
 The source extraction alone does not prove that remote state ownership moved.
 

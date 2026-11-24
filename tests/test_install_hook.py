@@ -2135,7 +2135,7 @@ def _codex_rollout_with_exomem_call(
     assistant_text: str,
     tool_output: str,
 ) -> Path:
-    """Write Codex 0.144.x function-call records around an Exomem note call."""
+    """Write Codex 0.144.x function-call records around an Evermatter note call."""
     call_id = "call-exomem-note"
     lines = [
         {
@@ -2222,7 +2222,7 @@ def test_capture_reads_codex_0144_rollout_transcript(tmp_path: Path) -> None:
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> None:
@@ -2241,7 +2241,7 @@ def test_capture_codex_uses_last_message_without_transcript(tmp_path: Path) -> N
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_codex_silent_after_successful_exomem_function_call(
@@ -2365,7 +2365,7 @@ def test_capture_codex_still_fires_after_failed_exomem_function_call(
 
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
 
 
 def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
@@ -2376,18 +2376,26 @@ def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
     assert r.stdout.strip() == ""
 
 
-def test_capture_silent_when_already_saved(tmp_path: Path) -> None:
+@pytest.mark.parametrize("connector", ["Exomem", "Evermatter"])
+def test_capture_silent_when_already_saved(tmp_path: Path, connector: str) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    # Real post-rename connector tool name is Exomem (not Knowledge_Base) — the guard
-    # regex must recognise it, or the nudge misfires after every real capture.
+    # A claude.ai connector's tool names carry the name the user gave it: Exomem, or Evermatter
+    # after the product rename (Knowledge_Base before that). The guard regex must recognise each,
+    # or the nudge misfires after every real capture. `maximal` nudges without a landing.
     t = _transcript(
         tmp_path,
         "q?",
         "Big conclusion. " + "x" * 450,
-        assistant_tool="mcp__claude_ai_Exomem__note",
+        assistant_tool=f"mcp__claude_ai_{connector}__create_note",
     )
-    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s3"}, home)
+    r = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(t), "session_id": "s3"},
+        home,
+        {"EXOMEM_PROMINENCE": "maximal"},
+    )
+    assert r.returncode == 0
     assert r.stdout.strip() == ""
 
 
@@ -2496,7 +2504,7 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
     )
     payload = json.loads(r.stdout)
     assert payload["decision"] == "block"
-    assert payload["reason"].startswith("[Exomem capture check]")
+    assert payload["reason"].startswith("[Evermatter capture check]")
     assert (home / ".codex" / ".cache" / "exomem-nudge" / "codex-cap").exists()
     assert (home / ".codex" / "exomem-capture-nudge.log").exists()
     assert not (home / ".claude" / "exomem-capture-nudge.log").exists()

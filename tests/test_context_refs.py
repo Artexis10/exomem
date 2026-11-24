@@ -1,4 +1,4 @@
-"""Stable Exomem context refs."""
+"""Stable Evermatter context refs."""
 
 from __future__ import annotations
 

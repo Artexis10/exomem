@@ -756,7 +756,11 @@ spec:
         - port: 53
           protocol: TCP
 ---
-{{- $repoPattern := printf "^%s@sha256:[a-f0-9]{64}$" (regexQuoteMeta .Values.cellctl.cellImageRepository) }}
+{{- $repositories := list }}
+{{- range $source := .Values.cellctl.cellImageRepositories }}
+{{- $repositories = append $repositories (regexQuoteMeta $source.repository) }}
+{{- end }}
+{{- $repoPattern := printf "^(?:%s)@sha256:[a-f0-9]{64}$" (join "|" $repositories) }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -869,13 +873,14 @@ spec:
           variables.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.35')
       message: cellctl may create or update a namespace only with its exomem.io/cloud-cell label and the restricted Pod Security labels at enforce-version v1.35.
     # 3. Every container and init container image cellctl runs must be
-    # digest-pinned from the configured cell repository.
+    # digest-pinned from one of the configured cell repositories, each matched
+    # in full.
     - expression: >-
         !(request.resource.resource in ['statefulsets', 'jobs']) || request.operation == 'DELETE' ||
         (variables.target.spec.template.spec.containers.all(c, c.image.matches({{ $repoPattern | quote }})) &&
           (!has(variables.target.spec.template.spec.initContainers) ||
             variables.target.spec.template.spec.initContainers.all(c, c.image.matches({{ $repoPattern | quote }}))))
-      message: cellctl may run only digest-pinned images from the configured cell repository.
+      message: cellctl may run only digest-pinned images from a configured cell repository.
     # 4. Every pod template cellctl runs, in a StatefulSet or a Job, must
     # set automountServiceAccountToken: false.
     - expression: >-

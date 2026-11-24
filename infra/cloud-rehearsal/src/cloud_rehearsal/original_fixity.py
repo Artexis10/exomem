@@ -1,7 +1,7 @@
 """The original-fixity mode: measure the fixity pass on a Cloud cell, then rehearse the runbook's
 "Restore one original" on it (verify-stored-originals tasks 5.1 and 5.2).
 
-After provisioning, the mode seeds stored originals and plain notes through the cell's own Exomem.
+After provisioning, the mode seeds stored originals and plain notes through the cell's own Evermatter.
 It times one table rebuild and two passes inside the runtime pod. It then takes a backup, restores
 it into a scratch namespace, damages one original in place and runs the runbook's two bash blocks
 as written. The receipt holds counts, sizes, timings, hashes and the synthetic fixture's invented

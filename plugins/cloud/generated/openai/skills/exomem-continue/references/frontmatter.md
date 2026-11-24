@@ -11,7 +11,7 @@ These appear on every page type:
 
 | Field | Required | Type | Notes |
 |---|---|---|---|
-| `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
+| `exomem_id` | new pages | UUID | immutable identity assigned by Evermatter; legacy pages gain one only through explicit ID backfill |
 | `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `procedure`, `profile`, `experiment`, `production-log`, `entity` |
 | `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |

@@ -26,7 +26,7 @@ env:
 jobs:
   watch:
     # A fork has none of the secrets, and a scheduled run there would only fail.
-    if: github.repository == 'Artexis10/exomem'
+    if: github.repository == 'substrate-systems/evermatter'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     environment: key-watcher

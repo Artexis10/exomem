@@ -202,7 +202,11 @@ function Get-ExomemInstalledVersion {
     param([string]$PythonPath)
 
     if (-not $PythonPath -or -not (Test-Path $PythonPath)) { return $null }
-    $out = & $PythonPath -c "import importlib.metadata as m; print(m.version('exomem'))" 2>$null
+    # The release installs under `evermatter` or, for installs made before the
+    # rename, `exomem`; read whichever name the interpreter has. A copy of
+    # install_info.DISTRIBUTION_NAMES, temporary: openspec rename-to-evermatter task 4.2 retires it.
+    $probe = "import importlib.metadata as m`nfor n in ('evermatter', 'exomem'):`n    try:`n        print(m.version(n))`n        break`n    except m.PackageNotFoundError:`n        continue`nelse:`n    raise SystemExit(1)"
+    $out = & $PythonPath -c $probe 2>$null
     if ($LASTEXITCODE -ne 0) { return $null }
     $version = ($out | Select-Object -First 1)
     if (-not $version) { return $null }
@@ -551,11 +555,22 @@ function Get-ExomemRepoVersion {
     return $null
 }
 
-function Test-ExomemUvToolInstall {
-    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { return $false }
+function Get-ExomemUvToolName {
+    <#
+    .SYNOPSIS
+      Return the name of the uv tool that owns the CLI, or $null.
+    .DESCRIPTION
+      The tool is `evermatter` or, for an install made before the rename, `exomem`.
+      A tool keeps upgrading under its own name: installing the other name beside
+      it would collide on the shared `exomem` and `kb` executables.
+    #>
+    if (-not (Get-Command uv -ErrorAction SilentlyContinue)) { return $null }
     $listing = & uv tool list 2>$null
-    if ($LASTEXITCODE -ne 0) { return $false }
-    return [bool]($listing | Where-Object { $_ -match '^exomem(?:\s|$)' } | Select-Object -First 1)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    foreach ($name in @("evermatter", "exomem")) {
+        if ($listing | Where-Object { $_ -match "^$name(?:\s|$)" } | Select-Object -First 1) { return $name }
+    }
+    return $null
 }
 
 function Sync-ExomemUvCli {
@@ -570,19 +585,21 @@ function Sync-ExomemUvCli {
         Write-Host "CLI sync disabled (-CliSync never)."
         return $false
     }
-    if ($Mode -eq "auto" -and -not (Test-ExomemUvToolInstall)) {
-        Write-Host "No existing uv-managed Exomem CLI; auto mode will not install one."
+    $tool = Get-ExomemUvToolName
+    if ($Mode -eq "auto" -and -not $tool) {
+        Write-Host "No uv tool named evermatter or exomem is installed; auto mode will not install one."
         return $false
     }
+    if (-not $tool) { $tool = "evermatter" }
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
         throw "uv is required for CLI sync. Install uv or pass -CliSync never."
     }
     if (-not $ServiceVersion) {
         throw "Cannot sync the CLI without a verified live service version."
     }
-    Write-Host "Aligning lean uv-tool CLI to exomem==$ServiceVersion..."
-    $code = Invoke-LoggedNative @("uv", "tool", "install", "--force", "exomem==$ServiceVersion", "--compile-bytecode")
-    if ($code -ne 0) { throw "uv tool CLI sync failed for exomem==$ServiceVersion" }
+    Write-Host "Aligning lean uv-tool CLI to $tool==$ServiceVersion..."
+    $code = Invoke-LoggedNative @("uv", "tool", "install", "--force", "$tool==$ServiceVersion", "--compile-bytecode")
+    if ($code -ne 0) { throw "uv tool CLI sync failed for $tool==$ServiceVersion" }
     return $true
 }
 
@@ -680,25 +697,27 @@ function Assert-ExomemVisibleCliVersions {
         [bool]$RequireOne = $false
     )
 
+    $tool = Get-ExomemUvToolName
+    if (-not $tool) { $tool = "evermatter" }
     $commands = @(
-        Get-Command exomem, kb -All -CommandType Application -ErrorAction SilentlyContinue |
+        Get-Command evermatter, exomem, kb -All -CommandType Application -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty Source -Unique
     )
     if ($RequireOne -and $commands.Count -eq 0) {
-        throw "CLI sync completed but neither exomem nor kb is visible on PATH. Run 'uv tool update-shell', open a new shell, and retry."
+        throw "CLI sync completed but none of evermatter, exomem or kb is visible on PATH. Run 'uv tool update-shell', open a new shell, and retry."
     }
     foreach ($executable in $commands) {
         $raw = & $executable --version --json 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $raw) {
-            throw "CLI verification failed: '$executable' does not support --version --json. Repair with: uv tool install --force exomem==$ExpectedVersion"
+            throw "CLI verification failed: '$executable' does not support --version --json. Repair with: uv tool install --force $tool==$ExpectedVersion"
         }
         try {
             $identity = ($raw -join "`n") | ConvertFrom-Json -ErrorAction Stop
         } catch {
-            throw "CLI verification failed: '$executable' returned invalid version JSON. Repair with: uv tool install --force exomem==$ExpectedVersion"
+            throw "CLI verification failed: '$executable' returned invalid version JSON. Repair with: uv tool install --force $tool==$ExpectedVersion"
         }
         if ($identity.version -ne $ExpectedVersion) {
-            throw "CLI/service split: '$executable' reports '$($identity.version)' while the live service reports '$ExpectedVersion'. Repair with: uv tool install --force exomem==$ExpectedVersion"
+            throw "CLI/service split: '$executable' reports '$($identity.version)' while the live service reports '$ExpectedVersion'. Repair with: uv tool install --force $tool==$ExpectedVersion"
         }
         Write-Host "Verified $executable -> exomem $($identity.version)"
     }

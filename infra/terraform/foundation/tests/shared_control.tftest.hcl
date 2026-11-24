@@ -23,7 +23,7 @@ run "published_dependency_preserves_consumer_coordinates" {
       output.control_db_server_ipv4 == "192.0.2.20" &&
       output.database_hostname == "db.example.test"
     )
-    error_message = "Exomem must use the published shared database coordinates."
+    error_message = "Evermatter must use the published shared database coordinates."
   }
 }
 

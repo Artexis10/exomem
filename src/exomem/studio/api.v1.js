@@ -49,7 +49,7 @@ export async function command(name, body = {}, {key = storedKey()} = {}) {
       body: JSON.stringify(body),
     });
   } catch (_error) {
-    throw new ApiError("The Exomem service could not be reached.", {code: "NETWORK_ERROR"});
+    throw new ApiError("The Evermatter service could not be reached.", {code: "NETWORK_ERROR"});
   }
   let payload;
   try {

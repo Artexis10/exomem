@@ -107,7 +107,7 @@ def test_the_review_tool_lists_each_item_with_what_the_store_lists_and_a_sentenc
     )
     assert row["file"] == {"exists": True, "sha256": item.file.sha256, "size": item.file.size}
     assert row["store"] == {"revision": item.store.revision, "sha256": item.store.sha256}
-    assert answer["outcome"].startswith("1 file changed outside Exomem and waits for a choice.")
+    assert answer["outcome"].startswith("1 file changed outside Evermatter and waits for a choice.")
     assert (row["resolvable"], row["keep_mine_possible"]) == (True, True)
     assert row["choices"] == ["keep-mine", "keep-store"]
     assert answer["total"] == 1 and answer["truncated"] is False
@@ -145,7 +145,7 @@ def test_the_repair_tool_keeps_the_stores_page_and_tells_where_the_persons_file_
     assert exported.read_bytes() == MINE
     # One canonical commit; the derivation of its rows moves the store revision past it.
     assert commits_since(stored, revision) == 1 and queue(stored) == [(ALPHA, "write")]
-    assert answer["outcome"].startswith("Kept Exomem's page for")
+    assert answer["outcome"].startswith("Kept Evermatter's page for")
     assert answer["diagnostics"] == {"revision": stored_page(stored)[0][1], "saved_copy_sha256": digest(MINE)}
     assert listed(stored)["items"] == []
 

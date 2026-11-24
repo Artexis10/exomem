@@ -10,7 +10,7 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
+| `ask` | Ask what Evermatter knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |
@@ -167,7 +167,7 @@ question and stays current as source rows change.
 
 Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
 The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
-their normal **Templates → Insert template** workflow. Exomem does not require
+their normal **Templates → Insert template** workflow. Evermatter does not require
 Obsidian or a plugin and does not edit `.obsidian`; editing a template never
 rewrites historical records.
 
@@ -291,7 +291,7 @@ wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pendi
 same identity rather than creating a new write.
 
 `MUTATION_WARMING` means the restart-time semantic corpus is still being built.
-It never holds the mutation boundary and never means the Exomem tool is disabled;
+It never holds the mutation boundary and never means the Evermatter tool is disabled;
 retry the unchanged call after `retry_after_ms`.
 
 `edit_note` is one tool. A call supplies `note` (a title), `why` and one `action`; each
@@ -317,7 +317,7 @@ carries a content hash.
 ## read_instructions
 
 **Goal:** Return a portable, versioned operating contract so generic MCP clients
-can use Exomem without relying on a client-specific skill.
+can use Evermatter without relying on a client-specific skill.
 
 ### Triggers
 - A new MCP session in ChatGPT, Cursor, Codex, Gemini, Windsurf, or another
@@ -338,7 +338,7 @@ can use Exomem without relying on a client-specific skill.
 2. Treat the returned contract as behavioural guidance for tool choice: search
    before absence claims, use compiled notes for durable conclusions, preserve raw
    evidence separately, and prefer supersession over deletion.
-3. Use diagnostics output when interpreting search latency. Do not label Exomem
+3. Use diagnostics output when interpreting search latency. Do not label Evermatter
    slow from a single CPU rerank measurement; identify whether rerank, embedding
    backend, compute mode, cache state, or cold start dominated the run.
 4. Read `active_capabilities.available_product_tools` as the commands exported
@@ -369,7 +369,7 @@ None.
   transcript → `video` with `url` set; a compiled investigation → `research-report`;
   a bill or order confirmation → `invoice-receipt`; an authority's published
   guidance → `official-guidance`; a data dump → `dataset-export`. The vocabulary
-  is **open**: if the right label is not listed, use it anyway — Exomem registers
+  is **open**: if the right label is not listed, use it anyway — Evermatter registers
   it. Ask only if genuinely ambiguous.
 - **Domain** (`domain`, optional) — what the artifact is *about*, on an axis
   independent of kind: `travel`, `health`, `finance`, `equipment`, `software`, or
@@ -612,7 +612,7 @@ cannot be undone.
 
 - **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token
-  and works on Exomem Cloud, which accepts no other upload, and on a personal server.
+  and works on Evermatter Cloud, which accepts no other upload, and on a personal server.
 
 - **Without file handles, on a personal server:** request
   `upload_files(lane="source")` for raw material, or

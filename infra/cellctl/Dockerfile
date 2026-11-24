@@ -1,4 +1,4 @@
-# cellctl, the Exomem Cloud cell controller (design D4).
+# cellctl, the Evermatter Cloud cell controller (design D4).
 #
 # Built from infra/cellctl as the context. The runtime runs as UID 1000 with
 # a read-only root filesystem (templates/cellctl.yaml): nothing is written at

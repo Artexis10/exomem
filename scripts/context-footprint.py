@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bytes Exomem injects into a coding agent's context, and a 50-turn estimate.
+"""Bytes Evermatter injects into a coding agent's context, and a 50-turn estimate.
 
 Read-only. Measures what can be measured exactly (hook text constants, the
 pinned MCP tool schemas, the plugin skills) and models the rest with the hooks'

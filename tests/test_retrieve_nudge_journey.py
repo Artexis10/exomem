@@ -55,8 +55,8 @@ TURN_THREE = "And how much depot stock does that leave us with for the run north
 TURN_FOUR = "Anything else recorded about the corridor run before I commit to it?"
 TURN_FIVE = "One more question about the depot ledger before I close this out."
 
-REMINDER_HEAD = "[Exomem retrieval check]"
-HEADER_HEAD = "[Exomem working set"
+REMINDER_HEAD = "[Evermatter retrieval check]"
+HEADER_HEAD = "[Evermatter working set"
 
 
 # --------------------------------------------------------------------------- #
@@ -387,7 +387,7 @@ def test_the_shipped_hook_walks_a_working_set_session(tmp_path: Path) -> None:
     # --- 6. with the service gone, request native activation ----------------
     fifth = _prompt(RETRIEVE_SCRIPT, _env(home, tmp_path, stub.port), TURN_FIVE)
 
-    assert fifth.startswith("[Exomem native MCP activation]")
+    assert fifth.startswith("[Evermatter native MCP activation]")
     assert "recall_context" in fifth
     assert HEADER_HEAD not in fifth
 

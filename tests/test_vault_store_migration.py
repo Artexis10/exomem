@@ -478,7 +478,7 @@ def test_a_rollback_projects_what_is_queued_and_its_dry_run_changes_nothing(
     vault, capsys, tmp_path
 ):
     """A rollback that refuses while projections are queued, which no offline step drains, or a
-    dry run that calls Exomem's own earlier bytes a person's edit, or that writes a file."""
+    dry run that calls Evermatter's own earlier bytes a person's edit, or that writes a file."""
     assert migrate_apply(vault) == 0
     alpha, gamma = b"# Alpha\n\nThe store's newer Alpha.\n", b"# Gamma\n\nA new page.\n"
     queue_writes(vault, (ALPHA, alpha), (GAMMA, gamma))
