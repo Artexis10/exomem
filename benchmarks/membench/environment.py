@@ -67,11 +67,18 @@ from membench import GENERATOR_VERSION
 
 _ENV_PREFIXES = ("EXOMEM_",)
 
-#: Distribution(s) the measured path is rooted at. Every installed
-#: distribution reachable from these through declared requirements is
-#: "runtime closure": a package the product can import, therefore a package
-#: whose version can change what the benchmark measured.
-DEFAULT_CLOSURE_ROOTS: tuple[str, ...] = ("exomem",)
+def product_distributions() -> tuple[str, ...]:
+    """The distribution names the measured path is rooted at.
+
+    Every installed distribution reachable from these through declared
+    requirements is "runtime closure": a package the product can import,
+    therefore a package whose version can change what the benchmark measured.
+    The product owns its names (it was renamed once), so this reads them
+    from the product only when a closure is computed.
+    """
+    from exomem.install_info import DISTRIBUTION_NAMES
+
+    return DISTRIBUTION_NAMES
 
 #: Tier labels. Blocking invalidates a comparison; reported never does.
 BLOCKING = "blocking"
@@ -210,7 +217,7 @@ def installed_distributions() -> dict[str, str]:
 
 
 def runtime_closure(
-    roots: Iterable[str] = DEFAULT_CLOSURE_ROOTS,
+    roots: Iterable[str] | None = None,
     installed: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Installed distributions reachable from ``roots`` by declared requires.
@@ -238,6 +245,7 @@ def runtime_closure(
     """
 
     resolved = dict(installed) if installed is not None else installed_distributions()
+    roots = product_distributions() if roots is None else roots
     seen: set[str] = set()
     frontier: list[tuple[str, frozenset[str], bool]] = [
         (normalize_distribution_name(root), frozenset(), True) for root in roots
@@ -267,7 +275,7 @@ def runtime_closure(
 def capture_environment(
     *,
     extra_repos: dict[str, Path] | None = None,
-    closure_roots: Iterable[str] = DEFAULT_CLOSURE_ROOTS,
+    closure_roots: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """The full environment a run was measured in, JSON-serialisable and sorted."""
 

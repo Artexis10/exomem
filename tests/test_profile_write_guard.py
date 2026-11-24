@@ -171,6 +171,28 @@ def test_a_connected_agent_adds_a_profile_line_with_the_review_its_preview_retur
     assert b"Prefer short sessions." in _bytes(pages, PROFILE)
 
 
+@pytest.mark.parametrize(
+    ("claim", "written"),
+    [
+        ({"action": "supersede_observation", "text": "Slow cooperative play only."}, "supersedes: [[#coop]]"),
+        ({"action": "assess_observation", "verdict": "confirmed", "kind": "claim"}, "verdict: confirmed"),
+    ],
+)
+def test_a_connected_agent_corrects_a_profile_claim_with_the_review_its_preview_returned(
+    pages: Path, mcp, claim: dict, written: str
+) -> None:
+    edit = {"note": PROFILE, "why": "the group changed", "unit": "coop", **claim}
+    assert _public(mcp, "edit_note", **edit)["error"]["code"] == "PROFILE_PREVIEW_REQUIRED"
+    before = _bytes(pages, PROFILE)
+    preview = _public(mcp, "edit_note", **edit, preview=True)["semantic"]
+    assert preview["next_action"] == semantic_writes.PROFILE_PREVIEW_NEXT_ACTION
+    assert _bytes(pages, PROFILE) == before
+
+    _public(mcp, "edit_note", **edit, review=preview["review_token"])
+
+    assert written in _bytes(pages, PROFILE).decode("utf-8")
+
+
 def test_a_connected_agent_creates_a_profile_with_the_review_its_preview_returned(vault: Path, owner_scope: None, monkeypatch) -> None:
     monkeypatch.setattr(server, "load_dotenv", lambda *_a, **_k: None)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))

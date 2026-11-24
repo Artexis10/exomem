@@ -225,7 +225,7 @@ def plan_memory(
         # surface drops the rest of `details` but must not drop that.
         raise OpError(
             code,
-            _public_error_message(code, error.reason),
+            _public_error_message(error, code),
             collection_remediation(error),
         ) from error
 
@@ -351,7 +351,7 @@ def _public_error_code(error: CollectionError) -> str:
     return error.code
 
 
-def _public_error_message(code: str, reason: str) -> str:
+def _public_error_message(error: CollectionError, code: str) -> str:
     if code == "INVALID_PLAN_RELATION":
-        return "Planning relationship is not available"
-    return reason[:512] or "Planning request could not be completed"
+        return planning.relation_refusal_message(error)[:512]
+    return error.reason[:512] or "Planning request could not be completed"

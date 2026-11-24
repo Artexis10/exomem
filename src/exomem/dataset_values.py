@@ -29,7 +29,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from . import (
     access,
@@ -37,6 +37,7 @@ from . import (
     capabilities,
     find_policy,
     find_results,
+    freshness,
     media_store,
     query_data,
     reserved_paths,
@@ -325,9 +326,18 @@ def _card_of(page: ParsedPage) -> Card | None:
     return Card(page.rel_path, original, page.snapshot_hash, sha, page)
 
 
-#: Per (vault, scope): the projection key, the qualified cards, and the card paths that gave no
-#: page when last read. The cards hold while the key holds; the unread paths are read again.
-_CARDS: dict[tuple[str, str], tuple[tuple, tuple[Card, ...], tuple[str, ...]]] = {}
+class _CardCache(NamedTuple):
+    """One (vault, scope)'s qualified cards, and what they were read at."""
+
+    version: tuple  # the projection key: the cards hold while it holds
+    checkpoint: object  # the recall checkpoint of that key, where the next delta starts
+    paths: frozenset[str]  # every card path of the projection at that key
+    cards: tuple[Card, ...]
+    unread: tuple[str, ...]  # card paths that gave no page during start-up, read again on the next search
+    missed: frozenset[str] = frozenset()  # card paths that gave no page after start-up, read again on a key move
+
+
+_CARDS: dict[tuple[str, str], _CardCache] = {}
 
 
 def _qualify(vault_root: Path, paths: Iterable[str]) -> tuple[list[Card], list[str]]:
@@ -373,23 +383,59 @@ def _cards_in_scope(
     # remembering it as absent would hide its dataset for the life of the process. Once the
     # inventory existed before the read, no wait explains a missing page (a linked, refused or
     # unparsable card), so it is not read again until the projection key moves.
-    if known is None or known[0] != version:
+    if known is None or known.version != version:
         # Reading every card on every search would cost more than the lane. The projection key
-        # moves whenever a card is added, changed or removed, or the access policy changes, so
-        # a search with no change reads no card.
-        paths = sorted(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
-        qualified, unread = _qualify(vault_root, paths)
-        _CARDS[key] = known = (version, tuple(qualified), () if settled else tuple(unread))
-    elif known[2]:
-        found, unread = _qualify(vault_root, known[2])
-        merged = tuple(sorted(known[1] + tuple(found), key=lambda card: card.card_path))
-        _CARDS[key] = known = (version, merged, () if settled else tuple(unread))
+        # moves on every write, so after one only the cards the registry names as changed, the
+        # card paths new to the projection and the cards that gave no page are read again, and
+        # every card when the registry cannot name what changed. The delta is trusted only for
+        # cards already read: a card path the cache has never seen is always read.
+        checkpoint = snapshot.recall_checkpoint(walk_scope)
+        paths = frozenset(p for p in projected if p.lower().endswith(_CARD_SUFFIXES) and p.startswith(prefix))
+        touched = None if known is None else _touched_since(vault_root, walk_scope, known, version, checkpoint)
+        if touched is None:
+            reread, kept = paths, ()
+        else:
+            reread = (paths & touched) | (paths - known.paths) | (paths & (set(known.unread) | known.missed))
+            kept = tuple(card for card in known.cards if card.card_path in paths and card.card_path not in reread)
+        found, unread = _qualify(vault_root, sorted(reread))
+        cards = tuple(sorted(kept + tuple(found), key=lambda card: card.card_path))
+        _CARDS[key] = known = _CardCache(
+            version, checkpoint, paths, cards,
+            () if settled else tuple(unread), frozenset(unread) if settled else frozenset(),
+        )
+    elif known.unread:
+        found, unread = _qualify(vault_root, known.unread)
+        merged = tuple(sorted(known.cards + tuple(found), key=lambda card: card.card_path))
+        _CARDS[key] = known = known._replace(
+            cards=merged,
+            unread=() if settled else tuple(unread),
+            missed=(known.missed | frozenset(unread)) if settled else known.missed,
+        )
     cards = {
         card.original: card
-        for card in known[1]
+        for card in known.cards
         if admit_path is None or (admit_path(card.card_path) and admit_path(card.original))
     }
-    return cards, projected, prefix, bool(known[2])
+    return cards, projected, prefix, bool(known.unread)
+
+
+def _touched_since(
+    vault_root: Path, scope: str, known: _CardCache, version: tuple, checkpoint: object
+) -> frozenset[str] | None:
+    """The paths changed or deleted since the cards were last read, or None to read every card.
+
+    A change of policy or access may change any card's admission, so it reads every card. So
+    does a history the live registry cannot bridge, and a delta that a safety-net walk
+    recorded: the walk ran off-lock, so its diff may miss a concurrent edit.
+    """
+    if known.version[1:] != version[1:]:
+        return None
+    delta = freshness.recall_delta_since_live(vault_root, scope, known.checkpoint)
+    if delta is None or not delta.complete or delta.requires_source_proof or delta.to != checkpoint:
+        return None
+    # The registry keys paths as its publishers spelled the root; recall paths are vault-relative.
+    touched = {freshness.registry_rel(vault_root, path) for path in delta.changed | delta.deleted}
+    return None if None in touched else frozenset(touched)
 
 
 def _read_original(vault_root: Path, card: Card) -> bytes | None:

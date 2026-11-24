@@ -46,7 +46,7 @@ COMPILED_DESTINATIONS = {
 }
 EXPECTED_NORMATIVE_IDENTITY = (
     12,
-    "sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9",
+    "sha256:531316a2be37ad20214f80f7a0831929be57f46105228e019e292d6ac92aafd9",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -227,7 +227,9 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
             "N or shallower; deeper headings remain in its body."
         ),
         "relation_rule": (
-            "Typed unit relations require the rich form. A `#anchor` target addresses a unit."
+            "Typed unit relations require the rich form. A `#anchor` target addresses a unit. "
+            "Entity pages admit the same unit writers as compiled pages, and a same-page "
+            "`supersedes: [[#anchor]]` edge records a claim-level supersession."
         ),
     }
     assert contract["semantic_roles"] == {

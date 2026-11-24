@@ -342,7 +342,8 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "unit_ref, using history_limit and history_continuation in options. When it carries "
             "lookup=stale, repeat the same call shortly instead of reading absence or paging "
             "on. Existing history remains "
-            "the page's operation log. Entities and legacy pages use their existing edit owner; "
+            "the page's operation log. Entity pages take the same unit writers, and other legacy "
+            "pages use their existing edit owner; "
             "Records use guarded row corrections and history. Corrections need no dated child, "
             "special user nudge, or confirmation beyond the active engagement policy."
         ),
@@ -354,7 +355,9 @@ def build_semantic_authoring_contract() -> SemanticAuthoringContract:
             "N or shallower; deeper headings remain in its body."
         ),
         "relation_rule": (
-            "Typed unit relations require the rich form. A `#anchor` target addresses a unit."
+            "Typed unit relations require the rich form. A `#anchor` target addresses a unit. "
+            "Entity pages admit the same unit writers as compiled pages, and a same-page "
+            "`supersedes: [[#anchor]]` edge records a claim-level supersession."
         ),
     }
     semantic_roles = {

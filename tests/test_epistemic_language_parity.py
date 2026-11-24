@@ -1429,7 +1429,7 @@ def test_the_census_flags_an_answer_that_points_at_a_page_with_no_question(
     assert _check(census, "answers_without_question") == (2, 1)  # CORE
 
 
-@pytest.mark.parametrize("relation", ["supports", "x.backs"])
+@pytest.mark.parametrize("relation", ["supports", "x.backs", "supersedes"])
 def test_the_census_flags_an_epistemic_relation_that_points_at_its_own_page(
     tmp_path: Path, relation: str
 ) -> None:
@@ -1437,6 +1437,14 @@ def test_the_census_flags_an_epistemic_relation_that_points_at_its_own_page(
     census = _census(tmp_path, {"a": (_row(relation, "a"), {})})
 
     assert _check(census, "same_page_epistemic") == (1, 1)  # CORE
+
+
+def test_the_census_counts_no_unit_superseding_a_unit_on_its_page(tmp_path: Path) -> None:
+    """A unit supersession inside one note is how a claim is corrected, not epistemic debt."""
+    page = _unit("Claim", "old") + _unit("Correction", "newer", "supersedes: [[#old]]")
+    census = _census(tmp_path, {"a": (page, {})})
+
+    assert _check(census, "same_page_epistemic") == (0, 0)
 
 
 def test_the_census_counts_a_plain_link_as_no_typed_page(tmp_path: Path) -> None:

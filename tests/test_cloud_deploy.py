@@ -181,16 +181,21 @@ def test_the_deploy_chart_and_release_name_the_same_cell_image_repositories() ->
     assert pairs == cloud_deploy.CELL_IMAGE_BUILDERS
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
-    (script,) = [step["run"] for job in workflow["jobs"].values() for step in job.get("steps", [])
-                 if "image_list=(" in step.get("run", "")]
-    # image_list is a bash array of "<target> <repository>:<tag> <floating tag>" strings, the
-    # closed release contract its comment names; splitting on whitespace reads it.
-    entries = [line.strip().strip('"').split() for line in script.split("image_list=(", 1)[1].split(")", 1)[0].splitlines()
-               if line.strip()]
-    published = {target: reference.rsplit(":", 1)[0] for target, reference, _ in entries}
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    # A release publishes where its build outputs push and its attestations name the subject.
+    # The build-push `outputs` value is a comma-separated key=value list fixed by the action.
+    published = {
+        field.removeprefix("name=")
+        for step in steps
+        for field in str(step.get("with", {}).get("outputs", "")).split(",")
+        if field.startswith("name=")
+    } | {
+        step["with"]["subject-name"]
+        for step in steps
+        if str(step.get("with", {}).get("subject-name", "")).startswith("ghcr.io/")
+    }
     newest = next(iter(cloud_deploy.CELL_IMAGE_BUILDERS))
-    assert published["cloud"] == newest
-    assert published["cellctl"] == f"{newest}-cellctl"
+    assert published == {newest, f"{newest}-cellctl"}
 
 
 @pytest.mark.parametrize("answer", ["substrate_error_image_seen", "substrate_error_release_older"])
@@ -369,3 +374,26 @@ def test_every_release_and_rollout_alert_has_a_runbook_step() -> None:
     assert len(rollout_alerts) == 4
     for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, *rollout_alerts):
         assert alert in rows, alert
+
+
+def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platform_gate(tmp_path, monkeypatch) -> None:
+    # Catches git's quoting of a non-ASCII path, which then matched no platform glob and raised no alert.
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    template = tmp_path / "infra/helm/platform/templates/café.yaml"
+    template.parent.mkdir(parents=True)
+    template.write_text("kind: ConfigMap\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "chart")
+    monkeypatch.setattr(cloud_deploy, "ROOT", tmp_path)
+
+    paths = cloud_deploy.git_changed_paths(base, git("rev-parse", "HEAD"))
+
+    assert paths == ["infra/helm/platform/templates/café.yaml"]
+    assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])

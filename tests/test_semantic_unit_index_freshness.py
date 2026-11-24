@@ -73,7 +73,9 @@ def test_parent_validation_accepts_a_symlink_to_the_vault_root(tmp_path: Path) -
     state = semantic_index.build_parent_index_state(root, _REL)
     expected = hashlib.sha256(path.read_bytes()).hexdigest()
     assert semantic_index.current_parent_index_state(alias, _REL).parent_source_hash == expected
-    assert activation_manifest.build_census(alias).by_path[_REL].source_hash == expected
+    assert activation_manifest.build_census(alias).by_path[_REL].source_hash == (
+        activation_manifest.baseline_hash(path.read_text(encoding="utf-8"))
+    )
     assert deferred_write_advisory._observe_fingerprint(alias, _REL) == expected
 
     validated = semantic_index.validate_parent_record(

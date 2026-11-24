@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -1212,3 +1213,98 @@ def test_a_save_between_the_heal_and_the_proof_is_caught_up_not_rebuilt(
     assert rebuilds == [], rebuilds
     assert readiness.retrieval_admission(root)["admitted"] is True
     assert lexstore.search_bm25(root, "quokkasavedinwarm", k=3, scope="kb")
+
+
+# -- a lag repair, or a slow seed, reaches the adopted catalogue before the warm --
+
+
+def test_a_lag_repair_that_reaches_the_adopted_catalogue_first_heals_it_without_a_rebuild(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A watcher batch can ask for a lag repair before the promoted warm runs its heal.
+
+    The catch-up declined the standby build's lineage for its instance, and the
+    worker rebuilt the whole catalogue instead.
+    """
+    root = older_catalogue
+    record = _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    assert record["lexical_catalogue"] == "adopted"
+    _seed_live_scopes(root)
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    lexstore.request_lag_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == [], rebuilds
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
+    assert lexstore.search_bm25(root, "quokkanewafterbuild", k=3, scope="kb")
+    assert not lexstore.search_bm25(root, f"{MARKER}3", k=3, scope="kb")
+
+
+def test_a_slow_seed_after_promotion_admits_retrieval_through_a_save_without_a_rebuild(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The promoted worker's seed outlasts the activation's wait, and a save lands during repair.
+
+    Activation used to retire the registry, so every repair was a whole pass
+    that a save refused or that could not prove itself live; retrieval stayed
+    unadmitted for as long as writes continued.
+    """
+    from exomem import server_runtime
+
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    seed_done = threading.Event()
+
+    class SlowSeedWatcher:
+        seeds_recall_projections = True
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            _seed_live_scopes(root)  # both scopes are published; the catch-up flush still runs
+            return False
+
+        def seed_outcome(self, timeout=None) -> bool | None:
+            return True if seed_done.wait(timeout) else None
+
+        def stop(self) -> None:
+            pass
+
+    saved = root / "Knowledge Base/Notes/Insights/handoff-2.md"
+    real_heal = lexstore.LexicalStore.heal_adopted_catalog
+    saves: list[Path] = []
+
+    def heal_then_save(store) -> bool:
+        healed = real_heal(store)
+        if not saves:
+            saves.append(saved)
+            _editor_save(
+                saved,
+                NOTES["Knowledge Base/Notes/Insights/handoff-2.md"] + "\nquokkasavedinrepair.\n",
+            )
+            freshness.on_files_changed(root, changed=[saved])
+        return healed
+
+    monkeypatch.setattr(lexstore.LexicalStore, "heal_adopted_catalog", heal_then_save)
+    rebuilds = _rebuild_spy(monkeypatch)
+    activation = server_runtime.LocalRuntimeActivation(root)
+    activation.file_watcher = SlowSeedWatcher()
+    try:
+        activation._wait_for_recall_seed()
+        lexstore.request_lag_repair(root)
+        assert lexstore.await_repairs_idle(root)
+        assert rebuilds == [], rebuilds
+
+        seed_done.set()
+        activation.recall_seed_follower.join(timeout=30)
+
+        assert saves == [saved]
+        assert readiness.runtime_managed()
+        assert readiness.retrieval_admission(root)["admitted"] is True
+        assert lexstore.search_bm25(root, "quokkasavedinrepair", k=3, scope="kb")
+        assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
+    finally:
+        activation._shutdown.set()
+        seed_done.set()
+        activation._join_native_workers()

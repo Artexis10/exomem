@@ -1602,18 +1602,41 @@ def query_collection(
             view = kwargs.get("view")
             if view is not None:
                 _authorize_saved_view(root, manifest, view, links)
-            result = record_formats.query_collection(
-                root,
-                manifest,
-                authorize_path=authorize_path,
-                project_values=links,
-                project_child_value=links.project_presentation_value,
-                late_link_projection=late_link_projection,
-                stage_store_projection=writer is not None and not late_link_projection,
-                **kwargs,
-            )
+            try:
+                result = record_formats.query_collection(
+                    root,
+                    manifest,
+                    authorize_path=authorize_path,
+                    project_values=links,
+                    project_child_value=links.project_presentation_value,
+                    late_link_projection=late_link_projection,
+                    stage_store_projection=writer is not None and not late_link_projection,
+                    **kwargs,
+                )
+            except collections.CollectionError as error:
+                if error.code != "INVALID_RECORD_QUERY_FIELD":
+                    raise
+                readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
+                raise _with_readable_columns(error, readable, kwargs) from error
         egress.emit_boundary_receipt(collector)
         return result
+
+
+def _with_readable_columns(
+    error: collections.CollectionError,
+    readable: collections.CollectionManifest,
+    query: Mapping[str, Any],
+) -> collections.CollectionError:
+    """The refused-field error plus the columns the caller can read, from the caller's own field plan.
+
+    `readable` is the manifest after the caller's field plan, so a withheld field never
+    appears in the list. The refusal's own details stay out: it carries only the reason.
+    A child expansion changes which columns a query may name, so it gets no list.
+    """
+    if query.get("expand_children") or query.get("expand_child") is not None:
+        return collections.CollectionError(error.code, error.reason)
+    names = collections.listed_within(record_formats.query_columns(readable))
+    return collections.CollectionError(error.code, f"{error.reason}; readable columns: {names}")
 
 
 def _authorize_saved_view(

@@ -3837,12 +3837,13 @@ def _grandfathered(
 ) -> bool:
     """Whether `page` belongs to the activation baseline, through the moves its lineage records.
 
-    A page with an exomem_id is matched by that id wherever it lives. A page without one is
-    matched by its path and bytes, and a governed move changes both: it leaves the path and
-    appends the lineage entry that names it. Removing that entry gives back the bytes the move
-    found (`page_lineage.remove_latest`), so the page still matches the entry its old path holds.
+    A page whose id the manifest holds is matched by that id wherever it lives. Any other page,
+    including one that the id backfill stamped after activation, is matched by its path and
+    bytes, and a governed move changes both: it leaves the path and appends the lineage entry
+    that names it. Removing that entry gives back the bytes the move found
+    (`page_lineage.remove_latest`), so the page still matches the entry its old path holds.
     `text` is the page's logical text when the caller has it; otherwise it is read only for an
-    unmatched page without an id that records a move.
+    unmatched page that records a move and has no entry by id.
 
     The old path's baseline passes only to the page that alone left it. A copy that stands
     beside its original, or one of two copies of a moved page, inherits nothing: no page may
@@ -3865,14 +3866,17 @@ def _grandfathered(
             status_basis=status_basis,
         )
 
-    if held(page.path, page.source_hash):
+    if held(page.path, page.baseline_hash):
         return True
     # The frozen frontmatter holds tuples, which `page_lineage.entries` refuses, so the
     # entries are parsed from the text below.
     records_lineage = any(page.frontmatter.get(name) for name in page_lineage.FIELDS)
     if (
-        exomem_id is not None or manifest is None
-        or not page.eligible_compiled or not records_lineage
+        manifest is None or not page.eligible_compiled or not records_lineage
+        # An entry that holds the page's id matches it wherever it lives, and `held` decided.
+        # A page stamped after activation has no such entry, so its path baseline travels
+        # through the lineage like an unstamped page's.
+        or activation_manifest.stable_entry(manifest, exomem_id) is not None
     ):
         return False
     if text is None:
@@ -3891,7 +3895,7 @@ def _grandfathered(
             text = page_lineage.remove_latest(text, prior)
         except page_lineage.LineageError:
             return False
-        if held(prior, vault.content_hash(text)):
+        if held(prior, activation_manifest.baseline_hash(text)):
             if vault.served_page_bytes(root, prior) is not None:
                 return False
             claimants = prior_claims.current(root).claimants(prior.removesuffix(".md"))
@@ -4797,7 +4801,7 @@ def preflight_recovery(
             and activation_manifest.is_grandfathered(
                 root,
                 after.path,
-                source_hash=after.source_hash,
+                source_hash=after.baseline_hash,
                 exomem_id=after.identity,
                 manifest=manifest,
                 census=after_corpus.activation_census,

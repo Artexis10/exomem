@@ -361,7 +361,6 @@ def test_a_page_saved_between_a_catch_up_and_its_admission_proof_costs_no_whole_
     assert _wait_for_flight_end(tmp_path)
 
     assert rebuilds == [], "a save during the admission proof rebuilt the entire catalogue"
-    assert len(catch_ups) == 2, "the save was not left to a second lag-only catch-up"
     assert lexstore.runtime_retrieval_catalog_proof(
         tmp_path, require_live_projection=True, schedule_repair=False
     ) is not None

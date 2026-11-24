@@ -1009,14 +1009,16 @@ def test_the_shipped_help_states_the_reconstruction_asymmetry_truthfully() -> No
     )
     properties = schemas["edit_note"]["inputSchema"]["properties"]
 
-    assert "`verdict`, `check_by` and the unit id persist" in section
+    assert "`verdict`, `check_by` and `as_of` persist when you omit them" in section
     assert "`tags`, `context` and `links` are replace-on-omit" in section
     assert "never discards an authored metadata row" not in section
     for replaced in ("tags", "links"):
         assert "the full list" in properties[replaced]["description"]
-    # `edit_note` takes no governed row: an observation edit leaves each one as written, so the
-    # section's "persist" is true because no argument can clear one.
-    assert not set(properties) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS)
+    # Each governed row `edit_note` accepts is one the section names as persisting on omission, so
+    # its "persist" stays true: only an argument the caller sends changes the row.
+    assert set(properties) & set(semantic_units.GOVERNED_UNIT_METADATA_KEYS) <= {
+        "verdict", "check_by", "as_of",
+    }
 
 
 # --------------------------------------------------------------------------

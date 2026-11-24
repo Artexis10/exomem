@@ -351,6 +351,25 @@ def action_argument_contract(
     return f"{action} allowed: {names}" + (f"; {action} requires: {needs}" if needs else "")
 
 
+def argument_misfit_text(
+    action: str,
+    unexpected: Iterable[str],
+    missing: Iterable[str],
+    allowed: Iterable[str],
+    required: Iterable[str],
+) -> str:
+    """The one refusal text for an action's wrong arguments: what the caller sent, then what it accepts."""
+    unexpected, missing = sorted(unexpected), sorted(missing)
+    return "; ".join(
+        [
+            *([f"unexpected for {action}: {', '.join(unexpected)}"] if unexpected else []),
+            *([f"{action} requires {', '.join(missing)}"] if missing else []),
+            # What is missing is already named, so the contract adds only what the action allows.
+            action_argument_contract(action, allowed, () if missing else required),
+        ]
+    )
+
+
 def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:
     """Find a structured semantic refusal without changing unrelated errors."""
     current: BaseException | None = exc

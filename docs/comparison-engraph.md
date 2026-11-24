@@ -29,7 +29,7 @@ The practical OSS-readiness target is not to copy engraph's architecture. It is 
 | Multimodal | PDF, Office, OCR/images, CLIP visual search, audio/video ASR, diarization hooks | No functional multimodal ingestion found in inspected source |
 | Governance | Append-only Sources/Evidence, typed note creation, supersession, audit, reconcile, attention, stale/contradiction review queues | File CRUD, archive/unarchive, health, setup/migration helpers |
 | Release posture | Release Please, GitHub release artifacts, PyPI trusted publishing wired off by default | GitHub releases with packaged binaries and Homebrew tap update |
-| License | AGPL | MIT |
+| License | FSL-1.1-ALv2 (AGPL-3.0-or-later before v0.202.0) | MIT |
 
 ## Functional comparison
 

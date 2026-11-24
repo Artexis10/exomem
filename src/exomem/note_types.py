@@ -34,6 +34,7 @@ from typing import Any
 
 import yaml
 
+from . import capabilities
 from .cli_ops import OpError
 from .vault import kb_root
 from .vocabulary import registry
@@ -120,6 +121,15 @@ def ranks_as_compiled(note_type: NoteType) -> bool:
 def compiled(note_type: NoteType) -> bool:
     """Set B: destination-bound conclusions that carry the semantic-unit obligation."""
     return note_type.role == "compiled"
+
+
+def entity_role(note_type: NoteType) -> bool:
+    return note_type.role == "entity"
+
+
+def accepts_unit_writes(note_type: NoteType) -> bool:
+    """Set J: pages `observe_memory` mutates at unit level: compiled pages and entity hubs."""
+    return compiled(note_type) or note_type.role == "entity"
 
 
 def governed_endpoint(note_type: NoteType) -> bool:
@@ -420,7 +430,8 @@ def unavailable_error(*, unassigned: bool = False) -> NoteTypeUnavailable:
     return NoteTypeUnavailable(
         "NOTE_TYPE_DEFINITION_UNAVAILABLE",
         "The note-type overlay is invalid, so the definition this write needs is unavailable.",
-        'Fix the findings that schema_memory(subject="note-types", operation="inspect") '
+        "Fix the findings that "
+        f"{capabilities.active_call_text('schema_memory', {'subject': 'note-types', 'operation': 'inspect'})} "
         "reports, or use a shipped note type.",
     )
 
