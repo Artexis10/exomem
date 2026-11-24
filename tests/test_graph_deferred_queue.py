@@ -58,6 +58,7 @@ from exomem import (
     deferred_index,
     epistemic_graph,
     file_watcher,
+    foreground_priority,
     freshness,
     graph_drain,
     graph_sync,
@@ -2722,6 +2723,40 @@ def test_stranded_quarantine_covers_only_its_exact_held_receipt(
         assert _acknowledged(vault) == before
         if change == "newer-observation":
             assert freshness.external_pending_for(vault, [vault / PAGE_A])
+
+
+def test_a_stop_ends_the_startup_source_proof_at_the_next_page(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A worker stopped for a handoff during startup validation exits in seconds, not after the proof.
+
+    On 2026-11-23 a managed upgrade stopped a worker whose startup proof was still
+    reading the vault. The worker's shutdown waited two minutes for the proof to
+    end, so the supervisor recorded its exit as unproven and needed two resumes.
+    """
+    freshness.clear()
+    epistemic_graph.clear_snapshot_proofs()
+    find_module.evict_resolver_caches(vault)
+    _seed_live_freshness(vault)
+    graph = EpistemicGraphIndex(vault)
+    stop = threading.Event()
+    reads: list[str] = []
+    read_page = EpistemicGraphIndex._read_proof_page
+
+    def stop_arrives_mid_proof(self, rel, *, fold):
+        reads.append(rel)
+        stop.set()
+        return read_page(self, rel, fold=fold)
+
+    with monkeypatch.context() as stopping:
+        stopping.setattr(EpistemicGraphIndex, "_read_proof_page", stop_arrives_mid_proof)
+        with pytest.raises(foreground_priority.BulkCancelled), foreground_priority.bulk(stop=stop):
+            graph.validate_startup_snapshot()
+    assert len(reads) == 1
+
+    # The cancelled proof left no verdict behind: the next start validates as usual.
+    assert graph.validate_startup_snapshot() is True
+    assert graph.available()
 
 
 @pytest.mark.parametrize("trusted", [True, False], ids=["trusted-generation", "untrusted-stat"])
