@@ -18,6 +18,7 @@ from collections.abc import Iterable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 
+from .. import state_paths
 from .. import structured_collections as collections
 from ..collection_store import derived_rows, governance
 from .errors import QueryError
@@ -77,6 +78,13 @@ def rows_released(session, lookup, row_ids: Iterable[int]) -> set[int]:
     wanted = sorted(set(row_ids))
     if lookup.uniform or not wanted:
         return set(wanted)
+    # Every row of the batch is decided for one reader against one host configuration, so the connector
+    # snapshot that each decision reads is taken once for the batch (`state_paths.resolution_scope`).
+    with state_paths.resolution_scope():
+        return _rows_released(session, lookup, wanted)
+
+
+def _rows_released(session, lookup, wanted: list[int]) -> set[int]:
     operation = session._authorization
     released, decided = set(), set()
     session.check()
