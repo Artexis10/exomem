@@ -181,16 +181,21 @@ def test_the_deploy_chart_and_release_name_the_same_cell_image_repositories() ->
     assert pairs == cloud_deploy.CELL_IMAGE_BUILDERS
 
     workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
-    (script,) = [step["run"] for job in workflow["jobs"].values() for step in job.get("steps", [])
-                 if "image_list=(" in step.get("run", "")]
-    # image_list is a bash array of "<target> <repository>:<tag> <floating tag>" strings, the
-    # closed release contract its comment names; splitting on whitespace reads it.
-    entries = [line.strip().strip('"').split() for line in script.split("image_list=(", 1)[1].split(")", 1)[0].splitlines()
-               if line.strip()]
-    published = {target: reference.rsplit(":", 1)[0] for target, reference, _ in entries}
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    # A release publishes where its build outputs push and its attestations name the subject.
+    # The build-push `outputs` value is a comma-separated key=value list fixed by the action.
+    published = {
+        field.removeprefix("name=")
+        for step in steps
+        for field in str(step.get("with", {}).get("outputs", "")).split(",")
+        if field.startswith("name=")
+    } | {
+        step["with"]["subject-name"]
+        for step in steps
+        if str(step.get("with", {}).get("subject-name", "")).startswith("ghcr.io/")
+    }
     newest = next(iter(cloud_deploy.CELL_IMAGE_BUILDERS))
-    assert published["cloud"] == newest
-    assert published["cellctl"] == f"{newest}-cellctl"
+    assert published == {newest, f"{newest}-cellctl"}
 
 
 @pytest.mark.parametrize("answer", ["substrate_error_image_seen", "substrate_error_release_older"])
