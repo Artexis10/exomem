@@ -1459,6 +1459,13 @@
           },
           "type": "array"
         },
+        "file_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Only these kinds, such as [\"image\", \"video\"]. Set it when the conversation is about a photo, screenshot or video. If unsure a picture is meant, search both with and without it."
+        },
         "filters": {
           "type": "object",
           "description": "Metadata filter, such as {\"page.status\": \"active\"}."

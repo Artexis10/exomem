@@ -459,6 +459,51 @@ def test_the_clip_trace_reports_the_band_and_what_it_withheld(
     assert (lane["status"], lane["band"], lane["withheld_pages"]) == ("available_nonmatching", "applied", 6)
 
 
+def test_a_search_restricted_to_images_ranks_the_photos_the_band_would_withhold(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The caller said the answer is a picture. Among pictures alone the band only hides the one
+    # the person means when the query matches it weakly, so the restricted lane runs unbanded.
+    rng = np.random.default_rng(11)
+    vectors = _unit_rows(rng, 60)
+    query = _unit_rows(rng, 1)[0]
+    library = _photo_library(vault, vectors)
+    expected = sorted(library, key=lambda sidecar: -float(vectors[library.index(sidecar)] @ query))
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query)
+    find_module.clear_cache()
+
+    hits = find_module.find(vault, query="kill switch for risky releases", mode="hybrid", file_types=["image"])
+
+    assert [h.path for h in hits] == expected
+
+
+def test_a_restriction_that_still_admits_notes_keeps_the_band(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rng = np.random.default_rng(11)
+    library = _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query)
+    find_module.clear_cache()
+
+    hits = find_module.find(
+        vault, query="kill switch for risky releases", mode="hybrid", file_types=["image", "note"]
+    )
+
+    assert not [h.path for h in hits if h.path in library]
+    assert any("kill-switch" in h.path for h in hits)
+
+
 def test_an_alpha_that_has_no_chance_level_switches_the_band_off_instead_of_failing_the_lane(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

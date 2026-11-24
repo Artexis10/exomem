@@ -246,6 +246,10 @@ class SearchMemory(Wire):
     types: list[str] | None = None
     projects: list[str] | None = None
     tags: list[str] | None = None
+    file_types: list[str] | None = Field(
+        default=None,
+        description='Only these kinds, such as ["image", "video"]. Set it when the conversation is about a photo, screenshot or video. If unsure a picture is meant, search both with and without it.',
+    )
     filters: dict[str, Any] | None = Field(
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
@@ -270,6 +274,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
         "continuation": wire.get("more"), "detail": wire.get("detail"), "projects": wire.get("projects"),
+        "file_types": wire.get("file_types"),
     }
     return "ask_memory", _leaf_call(wire, "options", ctx, "ask_memory", "search_memory", leaf)
 
