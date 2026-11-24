@@ -156,6 +156,16 @@ A maintenance job SHALL compare each free-text field value of a row (a string fi
 - **WHEN** a row's link value is an unresolved title
 - **THEN** the job does not compare that row
 
+#### Scenario: A row that links a heading is not compared
+
+- **WHEN** a row links a heading of a page, so the write stored the value as written with `LINK_ANCHORED`
+- **THEN** the job does not compare that row with the page
+
+#### Scenario: A page cited by more rows than one pass compares
+
+- **WHEN** a page has more citing rows than one pass compares
+- **THEN** the job compares the first rows that the citation reader returns and every item of that page says that only that many rows were compared
+
 ### Requirement: A duplicate-fact item names only what its reader may read
 
 The detector SHALL build its shared proposals as the owner and SHALL store no row value. It SHALL serve each item by comparing again as its reader, so a row, field, collection or page that the reader may not read SHALL be neither compared nor named, and the item SHALL read like one that does not exist.

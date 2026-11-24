@@ -5,7 +5,9 @@ says: an owner, a version, an address. The repeat is a candidate, never a findin
 things, so a person decides, and this module only finds the pairs worth that look.
 
 The walk follows resolved row-to-page links only: the rows that the inbound-citation reader returns for the
-page, at most `ROWS_PER_PAGE` of them. Its work for one page is bounded by those rows, never by the vault.
+page, paged with its `more` cursor up to `ROWS_PER_PAGE` of them. Its work for one page is bounded by those
+rows, never by the vault. A page with more citing rows than that is compared on the first ones and reported
+as incomplete (`Found.complete`), so a reader never takes the first rows for all of them.
 It reads as the current principal, and it takes the reader's word on which rows that principal may read: this
 module decides no row release itself. The caller binds the owner to build the shared proposals and a request's
 own principal to serve them, so a row, a field, a collection or a page that principal may not read is neither
@@ -23,27 +25,38 @@ import hashlib
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import page_citations, relation_registry, semantic_index
 from . import structured_collections as collections
-from .collection_store import connection, derived_rows
-from .collection_store.related_pages import subject_names
+from .collection_store import connection, derived_rows, typed_storage
+from .collection_store.related_pages import subject_fields, subject_names
 from .entity_candidates import identity_key
 from .query_engine import runtime
 from .query_engine.errors import QueryError
 
-#: Citing rows read for one page. A bound on one page's work, not a vocabulary.
-ROWS_PER_PAGE = 50
+#: Citing rows compared for one page in one pass: three reads of the citation reader's largest page. A bound on
+#: one page's work, not a vocabulary.
+ROWS_PER_PAGE = 300
 #: A value shorter than this folds to a few characters that any unit holds by chance ("3", "no").
 MIN_VALUE_CHARS = 4
 #: Store transactions one `changed_rows` call reads, so a burst of writes is read over several ticks.
 MAX_SCAN_TXNS = 64
 #: Link matches that name a page, as `reference_index.link_match` spells them.
 _PAGE_MATCH = "memory:"
+
+
+@dataclass(frozen=True, slots=True)
+class Found:
+    """The candidates of one page and how much of its citing rows they cover."""
+
+    items: list[Candidate]
+    rows: int  # citing rows compared
+    complete: bool  # False when the page has more citing rows than `ROWS_PER_PAGE`
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,32 +92,55 @@ def proposed_relation(registry: relation_registry.RelationRegistry | None = None
     return next((key for key, item in sorted(registry.core.items()) if item.family == "duplication"), None)
 
 
-def candidates(root: Path, rel_path: str, ref: str) -> list[Candidate] | None:
+def candidates(root: Path, rel_path: str, ref: str) -> Found | None:
     """The candidates of the page at `rel_path` (memory ref `ref`), as the current principal may read it.
 
-    An empty list says the page was read and nothing repeats. None says it could not be read now (the citation
+    No items says the page was read and nothing repeats. None says it could not be read now (the citation
     index is still building, or the store is busy), so the caller tries again and never takes it for empty.
     """
     root = Path(root)
     if not page_citations.applies(root):
-        return []
-    cited = page_citations.inbound_citations(ref, root, limit=ROWS_PER_PAGE)
-    if cited["state"] != "ready":
+        return Found([], 0, True)
+    cited = _citing_rows(root, ref)
+    if cited is None:
         return None
-    keys: dict[str, list[str]] = defaultdict(list)
-    for item in cited["items"]:
-        parsed = collections.parse_row_ref(item["ref"])
-        if parsed is not None and parsed[2] not in keys[parsed[1]]:
-            keys[parsed[1]].append(parsed[2])
+    keys, rows, complete = cited
     units = _units(root, rel_path)
     if not keys or not units:
-        return []
+        return Found([], rows, complete)
     try:
         with runtime.read_session(root, connection.store_path(root)) as session:
-            return [found for collection_id, item_keys in keys.items()
-                    for found in _collection_candidates(session, collection_id, item_keys, units)]
+            items = [found for collection_id, item_keys in keys.items()
+                     for found in _collection_candidates(session, collection_id, list(item_keys), units)]
     except QueryError:
         return None
+    return Found(items, rows, complete)
+
+
+def _citing_rows(root: Path, ref: str) -> tuple[dict[str, dict[str, None]], int, bool] | None:
+    """The item keys of the rows the principal may see citing `ref`, by collection id, in the reader's order.
+
+    Also the number of rows read and whether they are all of them. The reader's `more` cursor pages through
+    every visible citation; the walk stops at `ROWS_PER_PAGE` rows and says so. None when the reader
+    cannot answer now.
+    """
+    keys: dict[str, dict[str, None]] = defaultdict(dict)
+    rows, more = 0, None
+    while True:
+        cited = page_citations.inbound_citations(
+            ref, root, limit=min(page_citations.MAX_LIMIT, ROWS_PER_PAGE - rows), more=more)
+        if cited["state"] != "ready":
+            return None
+        for item in cited["items"]:
+            parsed = collections.parse_row_ref(item["ref"])
+            if parsed is not None:
+                keys[parsed[1]][parsed[2]] = None
+        rows += len(cited["items"])
+        more = cited["more"]
+        if more is None:
+            return keys, rows, True
+        if rows >= ROWS_PER_PAGE:
+            return keys, rows, False
 
 
 def changed_rows(root: Path, after: int | None) -> tuple[int, dict[int, tuple[str, ...]]] | None:
@@ -165,9 +201,8 @@ def _collection_candidates(session, collection_id: str, item_keys: Sequence[str]
         return []
     schema = manifest.schema
     # A natural key the principal may not read never names a row, as `row_label` also holds.
-    named = [name for name in (() if plan.natural_key_withheld else schema.natural_key) if name in plan.whole_fields]
-    if manifest.item_presentation is not None and manifest.item_presentation.title.field in plan.whole_fields:
-        named.append(manifest.item_presentation.title.field)
+    named = [name for name in subject_fields(manifest) if name in plan.whole_fields
+             and not (plan.natural_key_withheld and name in schema.natural_key)]
     # A free-text field: not a key, an enum, a reference or a link, which hold identities and labels, not statements.
     texts = [
         name for name, spec in schema.fields.items()
@@ -180,19 +215,20 @@ def _collection_candidates(session, collection_id: str, item_keys: Sequence[str]
     with closing(session.connection.execute(
             f"SELECT item_key, row_id FROM {lookup.source.items} "
             "WHERE collection_id=? AND item_key IN (SELECT value FROM json_each(?))",
-            (collection_id, json.dumps(list(item_keys))))) as cursor:
+            (collection_id, json.dumps(item_keys)))) as cursor:
         row_ids = dict(cursor.fetchall())
+    # The Records read path's batched reader by item key: one statement per 500 keys. It decodes whole rows, and
+    # only the fields the plan releases whole are read from them below.
+    rows = typed_storage.keyed_values(session.connection, collection_id, [key for key in item_keys if key in row_ids])
     found = []
-    for item_key in item_keys:
-        if item_key in row_ids:
-            found += _row_candidates(session, lookup, row_ids[item_key], item_key, named, texts, units)
+    for item_key, values in rows:
+        released = {name: values.get(name) for name in (*named, *texts)}
+        found += _row_candidates(lookup, row_ids[item_key], item_key, released, named, texts, units)
     return found
 
 
-def _row_candidates(session, lookup, row_id: int, item_key: str, named: Sequence[str], texts: Sequence[str],
-                    units: Sequence[tuple[str, str]]) -> list[Candidate]:
-    # The one value reader of the Records read path is a point read by row id, which no batch variant has yet.
-    values = session.lookup_values(lookup.collection_id, row_id, sorted({*named, *texts}))
+def _row_candidates(lookup, row_id: int, item_key: str, values: Mapping[str, Any], named: Sequence[str],
+                    texts: Sequence[str], units: Sequence[tuple[str, str]]) -> list[Candidate]:
     names = subject_names(lookup.manifest, {name: values.get(name) for name in named})
     folded_names = sorted({identity_key(name) for name in names} - {""}, key=len, reverse=True)
     if not folded_names:

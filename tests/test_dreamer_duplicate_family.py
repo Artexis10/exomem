@@ -14,8 +14,9 @@ from test_collection_link_values import _ready
 from test_collection_row_references import collection_text, path
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import SCOPE_ID, _external, write_rule
+from test_page_citations import publish
 
-from exomem import dreamer, dreamer_families, dreamer_store, freshness, upkeep
+from exomem import dreamer, dreamer_families, dreamer_store, duplicate_facts, freshness, upkeep
 from exomem.collection_store import connection
 from exomem.governance import egress, membership, policy
 from exomem.governance.principal import owner_principal, request_scope
@@ -47,7 +48,7 @@ def _clean():
 
 
 @pytest.fixture
-def world(store, monkeypatch, tmp_path):  # noqa: F811
+def world(store, monkeypatch, tmp_path, corpus_cache_on):  # noqa: F811
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     vault = fx.build(tmp_path)
     store.create_collection(path("Services"), collection_text(SERVICES, "Services", "name", FIELDS),
@@ -63,11 +64,12 @@ def service_page(vault, rel, title, identity, *lines):
 
 def row(store, collection, number, name, location, link):
     with request_scope(owner_principal()):
-        store.append_record(collection, item={"name": name, "location": location, "page": link},
-                            item_key=key(number), why="record")
+        return store.append_record(collection, item={"name": name, "location": location, "page": link},
+                                   item_key=key(number), why="record")
 
 
 def tick(vault):
+    publish(vault)  # a citation read borrows the corpus generation that a running service keeps current
     results = fx.run_to_quiet(vault)
     assert all(result.stop_reason != "error" for result in results), results
 
@@ -94,8 +96,8 @@ def open_candidates(vault):
 
 def test_a_restated_fact_opens_one_item_per_candidate_and_writes_nothing_else(world):
     """A job that opened an item on every tick would bury the owner in repeats, one that compared unresolved
-    rows would walk the whole collection, and one that edited the page or row would rewrite what the owner
-    wrote. A row written after the first tick must still be found with no page change."""
+    or heading-linked rows would walk the whole collection, and one that edited the page or row would rewrite
+    what the owner wrote. A row written after the first tick must still be found with no page change."""
     store, vault = world
     service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
                  "The Widget Service runs in the home office on a spare laptop.", "Backups finish before dawn.")
@@ -103,6 +105,9 @@ def test_a_restated_fact_opens_one_item_per_candidate_and_writes_nothing_else(wo
     row(store, SERVICES, 1, "Widget Service", "home office", link)   # restated: the unit holds the value and the name
     row(store, SERVICES, 2, "Gadget Service", "garage", link)        # no unit holds this value
     row(store, SERVICES, 3, "Widget", "home office", "Nowhere Page")  # the link resolves to no page
+    # A link to a heading is stored as written, never as the page's ref, so the row does not cite the page.
+    anchored = row(store, SERVICES, 5, "Service", "home office", "[[Widget Service#Backups]]")
+    assert any(text.startswith("LINK_ANCHORED") for text in anchored["warnings"])
     _ready(store, SERVICES)
     pages, rows = fx.tree_state(vault), store_state(store)
     tick(vault)
@@ -154,3 +159,30 @@ def test_a_caller_never_sees_a_hidden_row_or_page_named_in_an_item(world):
     assert len(seen) == 1 and "home office" in seen[0]["why"]
     text = json.dumps(seen)
     assert not any(secret in text for secret in ("attic", "Vault Door", "sub-basement", "Secrets"))
+
+
+def test_a_page_cited_by_more_rows_than_one_read_returns_is_walked_and_a_bound_is_reported(world, monkeypatch):
+    """A detector that kept the first page of citations would never compare the rows past it, and would say nothing."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET,
+                 "The Widget Service runs in the home office.", "The Gadget Service sits in the garage.")
+    link = f"exomem://memory/{WIDGET}"
+    row(store, SERVICES, 1, "Widget Service", "home office", link)
+    for number in (2, 3, 4):
+        row(store, SERVICES, number, f"Filler {number}", "nowhere", link)
+    row(store, SERVICES, 5, "Gadget Service", "garage", link)  # the fifth citing row, past two pages of two
+    _ready(store, SERVICES)
+    monkeypatch.setattr(duplicate_facts.page_citations, "MAX_LIMIT", 2)
+    tick(vault)
+    items = served(vault, owner_principal())
+    assert sorted("garage" in item["why"] for item in items) == [False, True]
+    assert not any("were compared" in item["why"] for item in items)
+
+    monkeypatch.setattr(duplicate_facts, "ROWS_PER_PAGE", 4)
+    fx.edit(vault, "Knowledge Base/Notes/Widget Service.md",
+            f"---\nexomem_id: {WIDGET}\ntitle: Widget Service\n---\n# Widget Service\n\n## Observations\n\n"
+            "- [finding] The Widget Service runs in the home office.\n- [finding] The Gadget Service sits in the garage.\n"
+            "- [finding] Added so that the page changes.\n")
+    tick(vault)
+    [item] = served(vault, owner_principal())
+    assert "home office" in item["why"] and "only the first 4 records that cite this page were compared" in item["why"]

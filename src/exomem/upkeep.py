@@ -180,11 +180,15 @@ def _why(row: dict[str, Any], visible_origins: int) -> str:
     if kind == dreamer_families.DUPLICATE_KIND:
         if "row_value" not in measures:
             return "a record's field repeats a statement of a page it links"
-        return (
+        why = (
             f'"{measures.get("label") or ""}" holds "{measures["row_value"]}" in {measures.get("field") or ""}, '
             f'and a unit of this page ({measures.get("unit_ref") or ""}) says "{measures.get("unit_text") or ""}"; '
             f'the proposed relation between the record and that unit is `{measures.get("relation") or ""}`'
         )
+        if measures.get("rows_complete") is False:
+            # The pass stopped at its bound, so this item is not the page's whole answer.
+            why += f"; only the first {measures.get('rows_compared')} records that cite this page were compared"
+        return why
     if kind == dreamer_families.TAG_KIND:
         return f"tag spellings in use: {measures.get('why') or ''}"
     if kind == dreamer_families.CATEGORY_KIND:

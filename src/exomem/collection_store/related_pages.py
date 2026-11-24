@@ -24,13 +24,21 @@ PER_REPLY = 30
 UNAVAILABLE = "RELATED_PAGES_UNAVAILABLE"
 
 
-def subject_names(manifest, values: Mapping[str, Any]) -> tuple[str, ...]:
-    """The text values that name what a row is about: its natural-key fields, then its presentation title field."""
+def subject_fields(manifest) -> list[str]:
+    """The fields whose text values name what a row is about: its natural-key fields, then its presentation title field.
+
+    A link field is no name: it holds a page reference, or an anchored one (`LINK_ANCHORED`) that a write kept as written.
+    """
     fields = list(manifest.schema.natural_key)
     presentation = manifest.item_presentation
     if presentation is not None and presentation.title.field not in fields:
         fields.append(presentation.title.field)
-    names = (values.get(name) for name in fields)
+    return [name for name in fields if getattr(manifest.schema.fields.get(name), "type", None) != "link"]
+
+
+def subject_names(manifest, values: Mapping[str, Any]) -> tuple[str, ...]:
+    """The text values of `subject_fields`, trimmed and without repeats."""
+    names = (values.get(name) for name in subject_fields(manifest))
     return tuple(dict.fromkeys(value.strip() for value in names if type(value) is str and value.strip()))
 
 

@@ -2637,16 +2637,16 @@ def _duplicate_views(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
     """
     from . import duplicate_facts
 
-    found = _duplicate_page(ctx, rel_path)
+    identified = _duplicate_page(ctx, rel_path)
     relation = duplicate_facts.proposed_relation()
-    if found is None or relation is None:
+    if identified is None or relation is None:
         return {}
-    page, ref = found
+    page, ref = identified
     memo = ctx.shared.setdefault("duplicates", {})
     if rel_path not in memo:
         memo[rel_path] = duplicate_facts.candidates(ctx.vault_root, rel_path, ref)
-    candidates = memo[rel_path]
-    if candidates is None:
+    found = memo[rel_path]
+    if found is None:
         raise Deferred("records_unavailable")
     return {
         item.key: {
@@ -2672,9 +2672,12 @@ def _duplicate_views(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
                 "label": item.label,
                 "row_value": item.row_value,
                 "unit_text": item.unit_text[:_DUPLICATE_UNIT_CHARS],
+                # Whether the pass compared every citing row, so an item never reads as the page's whole answer.
+                "rows_compared": found.rows,
+                "rows_complete": found.complete,
             },
         }
-        for item in candidates
+        for item in found.items
     }
 
 
