@@ -7,7 +7,9 @@ complete.
 
 It holds two kinds of field. A reference field names rows of another collection, and its state row
 names that collection. A ``link`` field names pages and rows by canonical ref, and its state row
-names no collection (``collections.LINK_TARGET``); `link_match` spells its entries.
+names no collection (``collections.LINK_TARGET``); `link_match` spells its entries, and a row that
+also holds values no ref spells carries one tally entry for them (`UNINDEXED`), which `link_counts`
+sums.
 """
 
 from __future__ import annotations
@@ -26,6 +28,9 @@ from . import typed_storage
 
 # The bounded inbound report's declaration cap; the egress validator shares it.
 INBOUND_LIMIT = 64
+# A link entry ``unindexed:<n>`` says that its row holds n values that no ref spells. No `link_match`
+# spelling starts so, and every citation read asks for an exact ref spelling, so no read finds a tally.
+UNINDEXED = "unindexed:"
 
 
 def _present(conn) -> bool:
@@ -120,16 +125,43 @@ def link_match(value: str) -> str | None:
 
 
 def _entries(declaration, target_id: str, target, values: Mapping[str, Any]) -> list[str]:
-    """The sorted, distinct match keys that one row's values give a field."""
+    """The sorted, distinct match keys that one row's values give a field, a link field's tally included."""
     found = set()
+    unindexed = 0
     for value in declaration.values(values):
         if isinstance(declaration, collections.LinkDeclaration):
             key = link_match(value)
+            unindexed += key is None
         else:
             key = match(target, target_id, value) if target is not None else None
         if key is not None:
             found.add(key)
+    if unindexed:
+        found.add(f"{UNINDEXED}{unindexed}")
     return sorted(found)
+
+
+def link_counts(conn, collection_id: str, fields) -> dict[str, tuple[int, int]]:
+    """``(indexed, not_indexed)`` of each named link field, summed from its entries in one statement.
+
+    ``indexed`` counts a row's distinct refs once each; ``not_indexed`` counts every value that no ref
+    spells. A field without entries is absent. The counts describe every row, so they answer a caller
+    only when its rows release alike.
+    """
+    # A field's tallies share one prefix, so they sort together and one range seek reads them.
+    tallies = ("FROM item_references r WHERE r.collection_id=:cid AND r.field_path=f.value"
+               " AND r.match>=:low AND r.match<:high")
+    found: dict[str, tuple[int, int]] = {}
+    for field, entries, tallied, not_indexed in conn.execute(
+            "SELECT f.value, (SELECT count(*) FROM item_references r WHERE r.collection_id=:cid"
+            f" AND r.field_path=f.value), (SELECT count(*) {tallies}),"
+            f" (SELECT coalesce(sum(CAST(substr(r.match, :skip) AS INTEGER)), 0) {tallies})"
+            " FROM json_each(:fields) f",
+            {"cid": collection_id, "fields": json.dumps(sorted(fields)), "skip": len(UNINDEXED) + 1,
+             "low": UNINDEXED, "high": UNINDEXED[:-1] + chr(ord(UNINDEXED[-1]) + 1)}).fetchall():
+        if entries:
+            found[field] = (entries - tallied, not_indexed)
+    return found
 
 
 def maintain(conn, manifest, row_id: int, values: Mapping[str, Any]) -> None:

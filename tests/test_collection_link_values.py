@@ -191,7 +191,8 @@ def test_link_entries_rebuild_exactly_from_rows_and_inspect_counts_what_is_index
     _ready(world)
     first = _entries(world)
     assert {(field, match) for _, field, match, _ in first} == {
-        ("page", f"memory:{ALPHA}"), ("pages", f"record:{LOG}/{K2}")}, "a title is not indexed"
+        ("page", f"memory:{ALPHA}"), ("pages", f"record:{LOG}/{K2}"), ("pages", "unindexed:1")}, \
+        "a title is counted, never indexed by its text"
     reference_index.rebuild(world.handle.connection, LOG)
     assert _entries(world) == []
     _ready(world)
@@ -201,6 +202,47 @@ def test_link_entries_rebuild_exactly_from_rows_and_inspect_counts_what_is_index
     assert (links["page"]["indexed"], links["page"]["not_indexed"]) == (2, 0)
     assert (links["pages"]["indexed"], links["pages"]["not_indexed"]) == (1, 1)
     assert links["page"]["relation"] == "cites" and "relation" not in links["pages"]
+
+
+def test_inspect_counts_link_values_from_the_index_with_the_same_statements_at_any_size(world, monkeypatch):
+    """A built field's counts come from the index, so a collection 100 times larger costs inspect no statement."""
+    from test_page_citations import traced_statements
+
+    _evidence(world.root)
+
+    def write(rows):
+        guards = world.inspect_collection(LOG)["lifecycle_guards"]
+        with request_scope(owner_principal()):
+            return world.bulk_upsert_records(LOG, rows=[{"item": item} for item in rows], why="import", source=EVIDENCE,
+                                             expected_container_hash=guards["expected_container_hash"])
+
+    def inspected():
+        statements.clear()
+        with request_scope(owner_principal()):
+            links = {entry["link"]: entry for entry in world.inspect_collection(LOG)["links"]}
+        return {name: (entry["state"], entry["indexed"], entry["not_indexed"]) for name, entry in links.items()}, \
+            len(statements)
+
+    ref = f"exomem://memory/{ALPHA}"
+    written = write([{"label": f"{i:03d}", "page": ref, "pages": [ref, "Elsewhere", "Gone"]} for i in range(3)])
+    _ready(world)
+    statements = traced_statements(monkeypatch)
+    small, few = inspected()
+    assert small == {"page": ("ready", 3, 0), "pages": ("ready", 3, 6)}
+    write([{"label": f"{i:03d}", "page": "Nowhere", "pages": [ref]} for i in range(3, 300)])
+    large, many = inspected()
+    assert large == {"page": ("ready", 3, 297), "pages": ("ready", 300, 6)}
+    assert many == few
+    # A rewrite and a retraction move the counts as a fresh scan of the rows would.
+    first = written["rows"][0]["item_key"]
+    container, version = world.current_guards(LOG, first)
+    with request_scope(owner_principal()):
+        world.update_record(LOG, item_key=first, changes={"pages": ["Elsewhere"]}, why="edit",
+                            expected_item_version=version, expected_container_hash=container)
+        container, version = world.current_guards(LOG, written["rows"][1]["item_key"])
+        world.retract_record(LOG, item_key=written["rows"][1]["item_key"], why="entered in error",
+                             expected_container_hash=container, expected_item_version=version)
+    assert inspected()[0] == {"page": ("ready", 2, 297), "pages": ("ready", 298, 3)}
 
 
 def test_a_derived_collections_link_fields_read_as_never_indexed_not_as_warming(store):
@@ -294,4 +336,5 @@ def test_a_heading_link_is_kept_as_written_with_a_warning_and_an_alias_alone_bec
     assert stored(world)["pages"] == ["Alpha#Launch plan", f"exomem://memory/{ALPHA}"]
     assert [text.split(":", 1)[0] for text in link_warnings(result)] == ["LINK_ANCHORED", "LINK_ANCHORED"]
     _ready(world)
-    assert {(field, match) for _, field, match, _ in _entries(world)} == {("pages", f"memory:{ALPHA}")}
+    assert {(field, match) for _, field, match, _ in _entries(world)} == {
+        ("pages", f"memory:{ALPHA}"), ("page", "unindexed:1"), ("pages", "unindexed:1")}

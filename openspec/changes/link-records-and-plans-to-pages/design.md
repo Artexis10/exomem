@@ -78,6 +78,9 @@ Alternative rejected: a new `page` field type. `link` already exists, renders th
   - It also carries the field's declared `relation`, when the manifest names one.
 - `relation` is an optional manifest attribute on a `link` field. It names a registry relation whose `origins` include `collection_link`. The shipped pack adds `collection_link` to the origins of `cites`, `evidenced_by`, `derived_from` and `links_to`, so the choice is data. Code never names a relation key.
 - A manifest `inspect` reports, per link field, the indexed count and the count of non-canonical values ("not indexed: 7 values are titles or paths"). A partial index is never shown as complete.
+  - A row whose field holds non-canonical values carries one tally entry, `unindexed:<n>`, beside its ref entries. The tally is derived like every other entry, so each write, rewrite, retraction, revise and rebuild keeps it correct. No ref spells it, so no citation read finds it.
+  - When the field is built and every row releases alike for the caller, `inspect` sums the field's entries and tallies in one statement: about 6 ms at 20,000 rows and 26 ms at 100,000, against about 200 ms and a timeout at 5,000 rows when it decoded every value. Counters in `item_reference_state` would be O(fields), but they need a schema migration, which an older release refuses, and a per-row tally to subtract a rewritten row's old values.
+  - A caller for whom rows vary, and a field that is warming or that the index never holds, still reads the visible values. For such a caller the rest of `inspect` decides each row in any case.
 
 The single-store owner accepted this seam on 2026-11-24 with four conditions, each met above:
 1. registry relation types;

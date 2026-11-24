@@ -75,16 +75,16 @@ Each citation SHALL carry the profile, the collection title, the citing row's ca
 
 ### Requirement: The citation index is derived from the rows
 
-The `item_references` index SHALL hold one entry per distinct canonical ref in each top-level `link` field value of each store-backed row. Only the canonical item transaction and the index backfill SHALL write those entries. The index SHALL be rebuildable from the rows alone. A title or path value SHALL NOT be indexed.
+The `item_references` index SHALL hold one entry per distinct canonical ref in each top-level `link` field value of each store-backed row. A row whose field also holds values that are not canonical refs SHALL have one tally entry that counts them and that no citation read can find. Only the canonical item transaction and the index backfill SHALL write those entries. The index SHALL be rebuildable from the rows alone. A title or path value SHALL NOT be indexed.
 
 #### Scenario: A rebuilt index matches the rows
 
 - **WHEN** the derived index is dropped and rebuilt
-- **THEN** every canonical link ref in the rows has its entry again, and no other entry exists
+- **THEN** every canonical link ref in the rows has its entry again, each row that holds other values has its tally again, and no other entry exists
 
 ### Requirement: Citation coverage is reported honestly
 
-While a link field's backfill is incomplete, `inbound_citations` SHALL report the state `warming`, never an empty list. A collection's `inspect` SHALL report, per link field, the number of indexed values and the number of non-canonical values that are not indexed. A link field that the index never holds, such as one of a derived collection, SHALL report the state `not_indexed` and count every value as not indexed.
+While a link field's backfill is incomplete, `inbound_citations` SHALL report the state `warming`, never an empty list. A collection's `inspect` SHALL report, per link field, the number of indexed refs (each distinct ref once per row) and the number of non-canonical values that are not indexed. A link field that the index never holds, such as one of a derived collection, SHALL report the state `not_indexed` and count every value as not indexed.
 
 #### Scenario: The index is warming
 
@@ -95,6 +95,15 @@ While a link field's backfill is incomplete, `inbound_citations` SHALL report th
 
 - **WHEN** a collection holds seven link values that are page titles
 - **THEN** its inspect reports the seven values as not indexed
+
+### Requirement: Inspect reads a built field's counts from the index
+
+When a link field is built and every row releases alike for the caller, `inspect` SHALL read both of the field's counts from the index in a fixed number of statements, whatever the number of rows.
+
+#### Scenario: Inspect counts cost the same at any size
+
+- **WHEN** an owner inspects a collection whose link fields are built, once with 3 rows and once with 300
+- **THEN** both inspections run the same number of statements, and each reports exact counts
 
 ### Requirement: A link field may declare its relation from the registry
 
