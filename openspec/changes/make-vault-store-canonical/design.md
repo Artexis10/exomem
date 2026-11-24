@@ -232,7 +232,7 @@ Recall can therefore return units with their page context, and graph edges can p
 
 *Option chosen for stage 2:* page bytes stay the source of unit text, and relationships become stored rows.
 
-*Next stage (owner decision, 2026-11-24):* the change `make-semantic-units-canonical` extends anchored identity to soft references, unit operations and embeds, and its design supersedes the plan that stood here.
+*Next stage (owner decision, 2026-11-24):* the change `extend-anchored-unit-identity` extends anchored identity to soft references, unit operations and embeds, and its design supersedes the plan that stood here.
 
 ### D11. Originals record their canonicity
 
