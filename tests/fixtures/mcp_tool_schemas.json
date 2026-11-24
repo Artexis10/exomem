@@ -398,7 +398,10 @@
             "set_fields",
             "fill_row",
             "edit_observation",
-            "remove_observation"
+            "remove_observation",
+            "supersede_observation",
+            "assess_observation",
+            "link_observation"
           ],
           "type": "string"
         },
@@ -485,17 +488,41 @@
           "type": "string",
           "description": "edit_observation, remove_observation: the unit id."
         },
+        "unit": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation: the claim's unit id or anchor."
+        },
+        "span": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation: the claim's exact text when its unit id is unknown."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted."
+        },
+        "check_by": {
+          "type": "string",
+          "description": "assess_observation: an ISO date to revisit the claim."
+        },
+        "kind": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation."
+        },
+        "as_of": {
+          "type": "string",
+          "description": "supersede_observation, edit_observation: the ISO date the claim started holding."
+        },
         "category": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "text": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "context": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "links": {
           "items": {
@@ -515,7 +542,7 @@
             "type": "object"
           },
           "type": "array",
-          "description": "edit_observation: the full list."
+          "description": "edit_observation: the full list; supersede_observation, link_observation: links to add."
         },
         "unlinked_reason": {
           "type": "string",
@@ -1490,7 +1517,7 @@
     }
   },
   "supersede_note": {
-    "description": "Replace a changed conclusion; keep the old note linked and readable.",
+    "description": "Replace a changed conclusion; keep the old note linked and readable. For one claim inside a note, use edit_note action supersede_observation.",
     "inputSchema": {
       "properties": {
         "note": {

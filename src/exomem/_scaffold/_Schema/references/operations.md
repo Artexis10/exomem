@@ -307,6 +307,11 @@ action takes its own fields, and `read_instructions(topic="edit_note")` shows th
 - `fill_row`: `row`, `take`; optional `overwrite`.
 - `edit_observation` and `remove_observation`: `observation`, the unit id from
   `read_page(part="units")`.
+- `supersede_observation`: `unit` (the unit id or `anchor` from
+  `read_page(part="units")`) or `span` (a list item's exact text); `text`,
+  `category`, `why`; optional `kind`, `as_of`, `tags`, `context`, `links`.
+- `assess_observation`: `unit`, `verdict`; optional `check_by`, `links`.
+- `link_observation`: `unit`, `links`; adds typed relations to the claim.
 
 Every action also takes `preview`, `detail` and, for a note that links nothing,
 `unlinked_reason`. The server reads the page again under the writer lease, so no call

@@ -1590,7 +1590,7 @@ def test_typed_mcp_remediations_name_tools_the_client_lists(
     assert len(f"Add a qualifying typed relation. {remediation}".encode()) <= 224
 
 
-def test_the_entity_observation_remediation_names_the_edit_tool_the_client_lists(
+def test_an_entity_page_accepts_a_compact_observation_through_the_public_route(
     vault: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1613,23 +1613,21 @@ def test_the_entity_observation_remediation_names_the_edit_tool_the_client_lists
 
     async def run():
         async with Client(server) as client:
-            listed = {tool.name for tool in await client.list_tools()}
-            refused = await client.call_tool(
-                *public_call("change_observations",
-                {"operation": {"kind": "add", "path": entity, "category": "rule", "content": "Opens at nine."}}),
-                raise_on_error=False,
-            )
-            return listed, refused.structured_content
+            return (
+                await client.call_tool(
+                    *public_call("change_observations",
+                    {"operation": {"kind": "add", "path": entity, "category": "rule", "content": "Opens at nine."}}),
+                    raise_on_error=False,
+                )
+            ).structured_content
 
     try:
-        listed, refused = asyncio.run(run())
+        result = asyncio.run(run())
     finally:
         writer_lease.reset_managers_for_tests()
 
-    text = refused["error"]["message"]
-    assert "edit_note" in listed and "edit_memory" not in listed
-    assert "edit_note(" in text
-    assert "edit_memory" not in text
+    assert result.get("code") is None
+    assert "- [rule] Opens at nine. ^" in (vault / entity).read_text(encoding="utf-8")
 
 
 def test_bound_mcp_tool_does_not_flatten_unexpected_exception(

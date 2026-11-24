@@ -148,6 +148,12 @@ def plan_entry(
     after_units = {
         unit.unit_ref: unit for unit in preflight.after.document.units if unit.unit_ref is not None
     }
+    # A unit a same-page `supersedes` edge names is affected even when its own
+    # bytes stand unchanged: the transition changed its derived superseded
+    # state, which is exactly what the entry must answer for later.
+    supersession_touched = _supersession_touched_refs(
+        preflight.before.document, preflight.after.document, preflight.path
+    )
     affected = [
         {
             "unit_ref": ref,
@@ -157,6 +163,7 @@ def plan_entry(
         for ref in sorted(before_units.keys() | after_units.keys())
         if getattr(before_units.get(ref), "fingerprint", None)
         != getattr(after_units.get(ref), "fingerprint", None)
+        or ref in supersession_touched
     ]
     metadata = provenance.parse_origin(preflight.before_source, managed=True)
     entry = {
@@ -179,6 +186,36 @@ def plan_entry(
     if "exomem_version" in token:
         entry["exomem_version"] = token["exomem_version"]
     return _new_entry_write(root, path, entry)
+
+
+def _superseded_refs(document: Any, path: str) -> set[str]:
+    """The unit_refs a page's own units mark superseded through same-page `replaces` edges."""
+    from . import relation_registry, working_set_currency
+
+    anchored = {
+        unit.anchor: unit.unit_ref
+        for unit in document.units
+        if unit.anchor and unit.unit_ref
+    }
+    refs: set[str] = set()
+    for unit in document.units:
+        targets = working_set_currency.relation_targets(
+            (
+                {"kind": relation.kind, "target": relation.target}
+                for relation in unit.relations
+            ),
+            registry=relation_registry.core_registry(),
+        )
+        for target in targets:
+            fragment = working_set_currency._target_fragment(target, path)
+            if fragment in anchored:
+                refs.add(anchored[fragment])
+    return refs
+
+
+def _supersession_touched_refs(before: Any, after: Any, path: str) -> set[str]:
+    """Units whose derived superseded state the transition changed."""
+    return _superseded_refs(before, path) ^ _superseded_refs(after, path)
 
 
 def plan_episode_entry(

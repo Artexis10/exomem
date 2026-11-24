@@ -58,6 +58,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from . import access, find_corpus, foreground_priority, indexes, temporal
 from . import audit as audit_module
@@ -351,6 +352,9 @@ class _Rewrite:
     rel: str
     write: PlannedWrite
     before_hash: str
+    #: Rewrites a human must review first apply only through a reviewed plan
+    #: (`_commit_in_chunks`); the local apply leaves the page alone.
+    reviewed_only: bool = False
 
     @property
     def after_hash(self) -> str:
@@ -474,6 +478,45 @@ def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
 
 
 
+def _facet_converted_body(
+    vault_root: Path, rel_path: str, fm: Any, body: str
+) -> tuple[str, int]:
+    """The body with each entity facet claim converted to a compact unit in place.
+
+    The enumeration is the audit check's own (`audit_module._entity_facet_claims`),
+    and the converted line is the same one the supersede span path writes
+    (`semantic_units.claim_item_unit_line`): one conversion contract.
+    """
+    from . import note_types, observe_memory, semantic_index, semantic_units
+
+    note_type = note_types.Basis(vault_root).resolve(
+        str(fm.get("type") or "") if isinstance(fm, dict) else ""
+    )
+    if not note_type.selects(note_types.entity_role):
+        return body, 0
+    try:
+        state = semantic_index.selected_parent_index_state(vault_root, rel_path)
+    except (OSError, ValueError):
+        return body, 0
+    claims = audit_module._entity_facet_claims(body, state.document)
+    if not claims:
+        return body, 0
+    existing = {unit.anchor for unit in state.document.units if unit.anchor}
+    edits: list[tuple[int, int, str]] = []
+    for item, category in claims:
+        anchor = observe_memory._generated_anchor(
+            observe_memory._COMPACT_KIND, category, item.text, (), None, (), existing
+        )
+        existing.add(anchor)
+        edits.append(
+            (item.start, item.end,
+             semantic_units.claim_item_unit_line(item, category=category, anchor=anchor))
+        )
+    for start, end, replacement in sorted(edits, key=lambda edit: edit[0], reverse=True):
+        body = body[:start] + replacement + body[end:]
+    return body, len(claims)
+
+
 def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> list[_Rewrite]:
     """Plan every content rewrite: compiled pages (passes 1 and 2) and media sidecars (pass 2b)."""
     kb = kb_root(vault_root)
@@ -507,8 +550,23 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
             new_fm_text, fm_warnings = _normalize_frontmatter_wikilinks(
                 fm_text, vault_root, resolver
             )
+        # An entity page's facet claims convert to compact units in place —
+        # only inside a reviewed plan, so the local apply never moves them.
+        try:
+            rel = _page_rel(vault_root, md)
+        except ValueError:
+            rel = md.as_posix()
+        facet_body, facet_count = _facet_converted_body(vault_root, rel, fm, body)
+        reviewed_only = facet_count > 0
+        if reviewed_only:
+            report.fixed.append(FixedFinding(
+                category="entity_facet_unaddressed",
+                path=rel,
+                detail=f"{facet_count} unaddressed facet claim(s)",
+                action="converted to compact units under their section's category",
+            ))
         new_body, _body_warnings = normalize_body_wikilinks(
-            body, vault_root, resolver=resolver
+            facet_body, vault_root, resolver=resolver
         )
 
         # ---- Pass 2: frontmatter backfill (only on this file's parsed fm) ----
@@ -575,7 +633,12 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
                     action="rewrote to full vault-rooted canonical form",
                 ))
             rewrites.append(
-                _Rewrite(rel, PlannedWrite(path=md, content=new_text, guard=original_guard), content_hash(original))
+                _Rewrite(
+                    rel,
+                    PlannedWrite(path=md, content=new_text, guard=original_guard),
+                    content_hash(original),
+                    reviewed_only=reviewed_only,
+                )
             )
             report.files_rewritten += 1
 
@@ -639,7 +702,16 @@ def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: A
     This is the local command's path: the caller holds the mutation boundary for the whole call.
     """
     # ---- Pass 3: sub-folder index refresh + top-index counts ----
-    writes = [rewrite.write for rewrite in rewrites]
+    # Rewrites a human must review first stay out of the local apply; their
+    # reported "fixed" entries move back to unapplied so the receipt stays honest.
+    withheld = [rewrite for rewrite in rewrites if rewrite.reviewed_only]
+    if withheld:
+        withheld_paths = {rewrite.rel for rewrite in withheld}
+        report.fixed = [
+            item for item in report.fixed if item.path not in withheld_paths
+        ]
+        report.files_rewritten -= len(withheld)
+    writes = [rewrite.write for rewrite in rewrites if not rewrite.reviewed_only]
     index_pages = {
         _page_key(vault_root, kb / "index.md"),
         _page_key(vault_root, kb / "Sources" / "index.md"),

@@ -922,6 +922,149 @@ def canonicalize_category(raw: str) -> str:
     return _CATEGORY_SEPARATORS_RE.sub("_", normalized).strip("_")
 
 
+@dataclass(frozen=True, slots=True)
+class ClaimItem:
+    """One top-level list-item line and the `##` section it sits in.
+
+    A claim item is any bullet line outside a code fence; whether it already
+    parses as a unit, a markdown relation, or plain facet prose is the caller's
+    distinction to make. `text` is the line's content after the bullet marker.
+    """
+
+    start: int
+    end: int
+    indent: str
+    text: str
+    heading: str | None
+
+
+_CLAIM_ITEM_RE = re.compile(r"^(?P<indent> {0,3})[-*+][ \t]+(?P<text>.*)$")
+_CLAIM_HEADING_RE = re.compile(r"^(?P<marks>#{1,6})[ \t]+(?P<title>.*?)[ \t]*#*[ \t]*$")
+_WIKILINK_RE = re.compile(r"\[\[[^\]\n]*\]\]")
+_HEADING_PUNCT_RE = re.compile(r"[^\w\s-]+")
+
+
+def claim_items(source: str) -> tuple[ClaimItem, ...]:
+    """Enumerate every top-level list item with its nearest `##` heading."""
+    items: list[ClaimItem] = []
+    heading: str | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        fence = _FENCE_RE.match(text)
+        if fence_char is not None:
+            if (
+                fence is not None
+                and fence.group("fence")[0] == fence_char
+                and len(fence.group("fence")) >= fence_length
+                and not fence.group("info").strip()
+            ):
+                fence_char = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        if fence is not None:
+            marker = fence.group("fence")
+            fence_char = marker[0]
+            fence_length = len(marker)
+            offset += len(line)
+            continue
+        match = _CLAIM_HEADING_RE.match(text)
+        if match is not None:
+            level = len(match.group("marks"))
+            if level == 1:
+                heading = None
+            elif level == 2:
+                heading = match.group("title").strip()
+            offset += len(line)
+            continue
+        item = _CLAIM_ITEM_RE.match(text)
+        if item is not None:
+            items.append(
+                ClaimItem(
+                    start=offset,
+                    end=offset + len(text),
+                    indent=item.group("indent"),
+                    text=item.group("text").strip(),
+                    heading=heading,
+                )
+            )
+        offset += len(line)
+    return tuple(items)
+
+
+def heading_category(title: str) -> str:
+    """The canonical category a `##` heading gives a claim item beneath it.
+
+    Punctuation the category grammar cannot keep folds to a space run, which
+    `canonicalize_category` collapses like any other separator; a heading with
+    no letters or digits raises ValueError the same way a bad `category` does.
+    """
+    return canonicalize_category(_HEADING_PUNCT_RE.sub(" ", title))
+
+
+def section_ranges(source: str, title: str) -> tuple[tuple[int, int], ...]:
+    """The [start, end) span of every `## <title>` section, fences excluded.
+
+    A section runs from its heading line to the next heading at level two or
+    shallower, or to the end of the source.
+    """
+    wanted = semantic_language_registry.normalize_label(title)
+    ranges: list[tuple[int, int]] = []
+    open_start: int | None = None
+    fence_char: str | None = None
+    fence_length = 0
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        text = line.rstrip("\r\n")
+        fence = _FENCE_RE.match(text)
+        if fence_char is not None:
+            if (
+                fence is not None
+                and fence.group("fence")[0] == fence_char
+                and len(fence.group("fence")) >= fence_length
+                and not fence.group("info").strip()
+            ):
+                fence_char = None
+                fence_length = 0
+            offset += len(line)
+            continue
+        if fence is not None:
+            marker = fence.group("fence")
+            fence_char = marker[0]
+            fence_length = len(marker)
+            offset += len(line)
+            continue
+        match = _CLAIM_HEADING_RE.match(text)
+        if match is not None and len(match.group("marks")) <= 2:
+            if open_start is not None:
+                ranges.append((open_start, offset))
+                open_start = None
+            if (
+                len(match.group("marks")) == 2
+                and semantic_language_registry.normalize_label(match.group("title").strip())
+                == wanted
+            ):
+                open_start = offset
+        offset += len(line)
+    if open_start is not None:
+        ranges.append((open_start, offset))
+    return tuple(ranges)
+
+
+def claim_item_has_text(item: ClaimItem) -> bool:
+    """Whether a list item says anything besides wikilinks."""
+    rest = _WIKILINK_RE.sub("", item.text)
+    return any(char.isalnum() for char in rest)
+
+
+def claim_item_unit_line(item: ClaimItem, *, category: str, anchor: str) -> str:
+    """The compact-unit line a claim item becomes when it is converted in place."""
+    return f"{item.indent}- [{category}] {item.text} ^{anchor}"
+
+
 def fingerprint_semantic_unit(
     unit: SemanticUnit,
     *,

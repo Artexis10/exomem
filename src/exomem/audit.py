@@ -202,6 +202,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "supersession_integrity",
     "entity_type_unregistered",
+    "entity_facet_unaddressed",
     "unreflected_outcomes",
     "unreflected_observations",
     "note_cohesion",
@@ -800,6 +801,9 @@ def audit(
                     vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
                 )
             )
+    with stage('entity_facet_unaddressed') as run:
+        if run:
+            findings.extend(_check_entity_facets(vault_root, pages))
     with stage('note_cohesion') as run:
         if run:
             findings.extend(_check_note_cohesion(vault_root, pages))
@@ -6706,6 +6710,91 @@ def _check_question_aging(
 
 
 # ---------------- check: note_cohesion ----------------
+
+
+def _entity_facet_claims(
+    body: str, document: Any
+) -> list[tuple[semantic_units.ClaimItem, str]]:
+    """An entity page's facet items that carry claims but parse as nothing addressable.
+
+    This is the one enumeration the audit check and the reviewed fix share, so
+    the finding and the conversion can never disagree about which lines move.
+    Items inside `## Observations` or inside any parsed unit's span are already
+    units; markdown-relation lines and link-only items are excluded by contract.
+    """
+    from . import markdown_relations
+
+    observations = semantic_units.section_ranges(body, "observations")
+    unit_spans = [
+        (unit.span.start_offset, unit.span.end_offset) for unit in document.units
+    ]
+    relation_lines = {
+        candidate.line
+        for candidate in markdown_relations.scan_markdown_relations(
+            body, include_legacy=True
+        ).candidates
+    }
+    claims: list[tuple[semantic_units.ClaimItem, str]] = []
+    for item in semantic_units.claim_items(body):
+        if any(start <= item.start < end for start, end in observations):
+            continue
+        if any(start <= item.start < end for start, end in unit_spans):
+            continue
+        if body.count("\n", 0, item.start) + 1 in relation_lines:
+            continue
+        if not semantic_units.claim_item_has_text(item):
+            continue
+        try:
+            category = semantic_units.heading_category(item.heading or "")
+        except ValueError:
+            continue
+        claims.append((item, category))
+    return claims
+
+
+def _check_entity_facets(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Entity pages whose facet bullets carry claims nothing can address.
+
+    A claim in a facet has no anchor, so no supersession, verdict or link can
+    name it; the reviewed fix converts it to a compact unit in place under its
+    `##` section's category.
+    """
+    from . import semantic_index
+
+    type_basis = note_types.Basis(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        request_budget.checkpoint()
+        if not type_basis.selects(page.page_type, note_types.entity_role):
+            continue
+        try:
+            state = semantic_index.selected_parent_index_state(
+                vault_root, page.rel_path
+            )
+        except (OSError, ValueError):
+            continue
+        for item, category in _entity_facet_claims(page.body, state.document):
+            line_no = page.body.count("\n", 0, item.start) + 1
+            findings.append(
+                AuditFinding(
+                    category="entity_facet_unaddressed",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=(
+                        f"facet {item.heading!r} holds an unaddressed claim at "
+                        f"line {line_no}: {item.text!r}"
+                    ),
+                    proposed_fix=(
+                        f"convert the item in place to a compact unit "
+                        f"- [{category}] ... ^<anchor>; a reviewed maintenance "
+                        "plan applies it"
+                    ),
+                )
+            )
+    return findings
 
 
 @call_spans.timed("audit.note_cohesion")

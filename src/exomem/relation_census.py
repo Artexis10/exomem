@@ -1529,7 +1529,9 @@ def _check_row(
             answered = reader.question_unit(dst_page, row.dst_kind)
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
-        record("same_page_epistemic", same_page)
+        # A same-page `replaces` edge is a unit supersession, not epistemic debt.
+        if not (same_page and row.has("replaces")):
+            record("same_page_epistemic", same_page)
     if row.has("opposes") and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
 

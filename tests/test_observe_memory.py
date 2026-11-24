@@ -398,6 +398,47 @@ def test_reported_hashes_are_the_guard_the_next_write_is_checked_against(
     assert removed["after_hash"] == _page_hash(page)
 
 
+def test_a_compact_to_rich_update_moves_the_block_out_of_observations(
+    tmp_path: Path,
+) -> None:
+    """A promoted compact unit cannot grow a rich block in place: the compact lines
+    after it would fall inside the new block. The line leaves and the block lands at
+    the body end under the same anchor; every other unit keeps id and text."""
+    page = _write_page(
+        tmp_path,
+        source=_page_source(
+            "# Observe\n\n## Observations\n\n"
+            "- [rule] First unit ^first\n"
+            "- [rule] Second unit ^second\n"
+        ),
+    )
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    first = next(unit for unit in state.document.units if unit.anchor == "first")
+
+    commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="update",
+        unit_ref=first.unit_ref,
+        expected_fingerprint=first.fingerprint,
+        expected_hash=_page_hash(page),
+        kind="claim",
+        category="rule",
+        content="First unit changed",
+    )
+
+    source = page.read_text(encoding="utf-8")
+    assert source.index("- [rule] Second unit ^second") < source.index("## Claim")
+    state = semantic_index.current_parent_index_state(tmp_path, PAGE)
+    units = {unit.anchor: unit for unit in state.document.units}
+    assert len(units) == 2
+    second = units["second"]
+    assert second.form == "compact" and second.content == "Second unit"
+    promoted = units[first.anchor]
+    assert promoted.form == "rich" and promoted.kind == "claim"
+    assert "- [rule] Second unit ^second" not in promoted.span.text
+
+
 @pytest.mark.parametrize("guard", ["parent", "unit"])
 def test_stale_update_guard_changes_neither_markdown_nor_indexes(
     tmp_path: Path,
@@ -846,31 +887,6 @@ def test_legacy_correction_stays_with_its_existing_edit_owner(tmp_path, path, so
 
 
 ENTITY_PAGE = "Knowledge Base/Entities/Harbour Co-op.md"
-
-
-def test_an_entity_target_is_refused_with_the_exact_edit_that_adds_the_unit(tmp_path):
-    source = (
-        "---\ntitle: Harbour Co-op\ntype: entity\nentity_type: organisation\nstatus: active\n"
-        "exomem_id: 00000000-0000-4000-8000-000000000083\nupdated: 2026-07-15\n---\n\n"
-        "# Harbour Co-op\n\nA member-owned supplier.\n"
-    )
-    page = _write_page(tmp_path, rel=ENTITY_PAGE, source=source)
-    before = page.read_bytes()
-
-    with pytest.raises(ValueError, match="OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE") as raised:
-        commands.op_observe_memory(
-            tmp_path,
-            path=ENTITY_PAGE,
-            operation="validate",
-            category="rule",
-            content="Opens at nine.",
-        )
-
-    message = str(raised.value)
-    assert capabilities.active_call_text("edit_memory", {}).split("(")[0] in message
-    for named in ("edit_section", "Observations", "create_missing", "expected_hash", ENTITY_PAGE):
-        assert named in message
-    assert page.read_bytes() == before
 
 
 @pytest.mark.parametrize(
