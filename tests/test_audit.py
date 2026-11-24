@@ -13,7 +13,7 @@ import pytest
 
 from exomem import attention as attention_module
 from exomem import audit as audit_module
-from exomem import commands, index_paths
+from exomem import capabilities, commands, index_paths
 from exomem import entity_types as entity_types_module
 from exomem import review_state as review_state_module
 from exomem.governance.principal import library_scope
@@ -169,7 +169,18 @@ def test_unregistered_type_finding_guides_to_the_full_proposal(
 
     assert "meta.proposal" in finding.proposed_fix
     assert "expected_hash" in finding.proposed_fix
+    assert "schema_memory(" in finding.proposed_fix
     assert "capture_guidance" not in meta["proposed_entry"]
+    # An agent on the public surface is sent to the tool it can call, not the grouped name.
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+    )
+    with capabilities.active_surface(public):
+        public_fix = audit_module.audit(
+            tmp_path, categories=["entity_type_unregistered"]
+        ).findings[0].proposed_fix
+    assert "manage_memory(operation='schema.save_entity_types'" in public_fix
+    assert "schema_memory" not in public_fix
     _save_proposal(
         tmp_path,
         meta["proposal"],

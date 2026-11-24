@@ -127,6 +127,8 @@ class RenderingSpec:
     tool_arguments: tuple[str, ...] = ()
     #: Wire field names that would otherwise collide with the operation discriminator.
     field_aliases: tuple[tuple[str, str], ...] = ()
+    #: `(synonym, leaf)` pairs: a second name a caller may send for a leaf field, never published.
+    field_synonyms: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,7 @@ class Rendering:
     #: Arguments the tool takes beside `operation`, from the grouped command's own signature.
     tool_arguments: tuple[str, ...] = ()
     field_aliases: tuple[tuple[str, str], ...] = ()
+    field_synonyms: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         wire = [name for name, _ in self.field_aliases]
@@ -156,10 +159,22 @@ class Rendering:
             raise ValueError("a leaf kind field needs an alias to preserve the discriminator")
         if set(wire) & fields:
             raise ValueError("a field alias collides with another leaf field")
+        if any(synonym in fields for synonym, _ in self.field_synonyms):
+            raise ValueError("a field synonym collides with a leaf field")
 
-    def leaf_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
-        """Translate wire fields without allowing an alias to overwrite a raw leaf field."""
+    def leaf_fields(self, kind: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        """Translate wire fields without allowing an alias to overwrite a raw leaf field.
+
+        A synonym renames only for an operation whose own fields take the leaf; any other
+        operation keeps the name the caller sent, so its refusal names that field.
+        """
         result = dict(fields)
+        taken = set().union(*(variant.fields for variant in self.variants if variant.kind == kind))
+        for synonym, leaf in self.field_synonyms:
+            if synonym in result and leaf in taken:
+                if leaf in result:
+                    raise ValueError(f"conflicting fields {synonym!r} and {leaf!r}; send one")
+                result[leaf] = result.pop(synonym)
         for wire, leaf in self.field_aliases:
             if leaf in fields:
                 raise ValueError(f"conflicting raw field {leaf!r}; use alias {wire!r}")
@@ -313,6 +328,7 @@ class CommandOperations:
                 variants=tuple(entry for entry in self.entries if entry.rendering == spec.name),
                 tool_arguments=spec.tool_arguments,
                 field_aliases=spec.field_aliases,
+                field_synonyms=spec.field_synonyms,
             )
             for spec in self.renderings
         )
@@ -712,6 +728,11 @@ _REMAINING = {
         _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("update", "change_observations", None, ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("remove", "change_observations", ("path", "unit", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        # A claim correction previews with validate_only, which reads like `validate`: it lands nothing and never queues.
+        _row("supersede", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), verb="saved"),
+        _row("supersede", "prepare_note", None, ("path",), kind="validate-supersede", constraints=(_literal("validate_only", True, implied=True),)),
+        _row("assess", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), destructive=True, verb="updated"),
+        _row("assess", "prepare_note", None, ("path",), kind="validate-assess", constraints=(_literal("validate_only", True, implied=True),)),
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
@@ -920,8 +941,15 @@ def _maintenance_rows():
     return "mode", tuple(rows)
 
 
-def register_operations(command: str, parameters: Iterable[Any] | None = None) -> CommandOperations | None:
-    """Read source metadata, completing and retaining signature fields when supplied."""
+def register_operations(
+    command: str,
+    parameters: Iterable[Any] | None = None,
+    field_synonyms: tuple[tuple[str, str], ...] = (),
+) -> CommandOperations | None:
+    """Read source metadata, completing and retaining signature fields when supplied.
+
+    `field_synonyms` is the command spec's `(synonym, leaf)` pairs; see `Rendering.leaf_fields`.
+    """
     if command in OPERATIONS:
         return OPERATIONS[command]
     if command == "schema_memory":
@@ -956,7 +984,8 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
             tool_arguments += ("response_detail",)
         aliases = (("unit_kind", "kind"),) if command == "observe_memory" else (("file_kind", "kind"),) if command == "manage_memory_file" else ()
         specs.append(RenderingSpec(name, variants[0].effect, title,
-                                   description + " Select one operation.kind.", tool_arguments, aliases))
+                                   description + " Select one operation.kind.", tool_arguments, aliases,
+                                   field_synonyms))
     capture_write = _REMAINING.get(command, ())[2:] == (True,)
     result = CommandOperations(command, selector, tuple(entries), tuple(specs), capture_write)
     if retain:

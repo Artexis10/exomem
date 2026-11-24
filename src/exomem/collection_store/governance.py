@@ -707,7 +707,7 @@ class ReleaseCache:
         #: the data and schema versions when it was made). A decision reads the store, those bytes and
         #: those inputs alone, so it holds until the store may have changed: every write of this connection
         #: except a collection-free one (`begin`) drops them all, and a commit of another connection moves
-        #: the versions it holds, even one that a rollback's restamp hides from `check` (`finish`).
+        #: the versions it holds.
         self.projections = OrderedDict()
         self.pending = None
         self.replacements = {}
@@ -934,7 +934,9 @@ class ReleaseCache:
         self.pending = None
         self.replacements = {}
         self.prepared = {}
-        self.observed = self.prepared_stamp if committed else self._stamp()
+        # A rollback keeps the observed data and schema versions: a commit of another connection in the
+        # window since the ROLLBACK is then seen by the next `check`, not folded in by a fresh stamp.
+        self.observed = self.prepared_stamp if committed else (self.conn.total_changes, *self.observed[1:])
         self.unmanaged = False
         self.free = False
 
@@ -1209,6 +1211,8 @@ class OperationAuthorization:
                                            self.cache.scopes(subject, self.policy))
 
     def _decision_key(self, subject: CanonicalSubject, *, connector_identity: tuple | None = None):
+        # No `mutation`: the write floor and the capture ceiling decide before the cache is read
+        # (`_subject_decision`), and the cached `decide` result reads neither.
         return (_bound(subject, "unbound").basis, self.policy.fingerprint,
                 self.who.audience_id, self.purpose,
                 connector_boundary.cache_identity(self.root, self.who, self.policy)

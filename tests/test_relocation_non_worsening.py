@@ -158,6 +158,28 @@ def test_an_older_page_keeps_its_baseline_through_its_moves_until_its_bytes_chan
     assert again.grandfathered is False and again.contract_result.should_block is True
 
 
+@pytest.mark.timeout(300)
+def test_a_moved_older_page_keeps_its_baseline_after_the_id_backfill(tmp_path: Path) -> None:
+    """The id backfill stamps pages that a relocation already moved. It catches the stamp hiding
+    the page's lineage from the baseline check, so that its next edit must clear every debt."""
+    first, moved = (f"{INSIGHTS}/{name}.md" for name in ("note-01", "kelp-survey"))
+    _older_page(tmp_path, first, "Kelp survey")
+    activation_manifest.ensure_manifest(tmp_path)
+    move_file.move_file(tmp_path, old_path=first, new_path=moved, update_wikilinks=False)
+
+    memory_refs.backfill_ids(tmp_path, dry_run=False)
+
+    stamped = (tmp_path / moved).read_text(encoding="utf-8")
+    assert "exomem_id:" in stamped
+    edit = semantic_writes.preflight_existing(
+        tmp_path, path=moved, operation="edit",
+        after_source=stamped.replace("Notes from", "Field notes from"),
+    )
+    audit = semantic_writes.evaluate_posthoc_batch(tmp_path, paths=[moved], operation="audit")
+    assert edit.grandfathered is True and edit.contract_result.should_block is False
+    assert [item.grandfathered for item in audit.evaluations] == [True]
+
+
 def _assert_refused_as_new(vault: Path, rel: str) -> None:
     text = (vault / rel).read_text(encoding="utf-8")
     edit = semantic_writes.preflight_existing(

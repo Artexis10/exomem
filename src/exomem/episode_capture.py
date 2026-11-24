@@ -29,7 +29,13 @@ import yaml
 from . import memory_refs
 from .episode_model import EpisodeError
 from .governance import scrubber
-from .vault import _FM_PATTERN, FrontmatterError, parse_frontmatter, slugify_title
+from .vault import (
+    _FM_PATTERN,
+    _YAML_SAFE_LOADER,
+    FrontmatterError,
+    parse_frontmatter,
+    slugify_title,
+)
 
 EPISODE_KEY_RE = re.compile(r"^ep-[0-9a-f]{32}$")
 CLIENT_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
@@ -188,7 +194,9 @@ def rewrite_fields(
     dumping the parsed mapping keeps every other byte, quoting and timestamp as written.
     """
     try:
-        root = yaml.compose(block, Loader=yaml.SafeLoader)
+        # libyaml reports the same spans as SafeLoader at a tenth of the cost;
+        # a corpus build drops the id line of every page through here.
+        root = yaml.compose(block, Loader=_YAML_SAFE_LOADER)
     except yaml.YAMLError:
         return None
     if not isinstance(root, yaml.MappingNode) or root.flow_style:

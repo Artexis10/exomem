@@ -96,6 +96,15 @@ SAMPLES = {
         "operation": "validate", "path": LAMP, "category": "rule",
         "content": "Keep the lighthouse lantern lit.",
     },
+    "observe_memory:supersede": {
+        "operation": "supersede", "path": LAMP, "unit": "oil", "category": "claim",
+        "content": "The lighthouse lamp burns kerosene.", "reason": "The keepers switched fuel.",
+        "validate_only": True,
+    },
+    "observe_memory:assess": {
+        "operation": "assess", "path": LAMP, "unit": "oil", "verdict": "confirmed",
+        "reason": "The cask count agrees.", "validate_only": True,
+    },
     "query_data": {"path": DATA},
     "list_directory": {"path": "Knowledge Base/Notes", "recursive": True},
     "list_trash": {},

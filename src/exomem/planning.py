@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -30,6 +30,9 @@ from .planning_values import PlanningValues, Unavailable
 from .structured_collections import CollectionError, parse_plan_ref
 
 _LIFECYCLES = frozenset({"active", "archived"})
+#: The roles a progress-evidence descriptor may carry; `plan_progress.ROLES` is this tuple.
+EVIDENCE_ROLES = ("progress", "completion")
+_RELATION_REFUSAL = "Planning relationship is not available"
 _EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
 #: The fields the narrow `triage` transition may change; plan_memory's triage action fixes them.
@@ -107,7 +110,10 @@ def normalize_item(
     _enum(values.get("lifecycle"), _LIFECYCLES, "lifecycle")
     area = values["kind"] == "area"
     if area and _AREA_FORBIDDEN & values.keys():
-        _invalid("areas cannot carry delivery state or hierarchy")
+        _invalid(
+            "areas cannot carry delivery state or hierarchy: "
+            + ", ".join(sorted(_AREA_FORBIDDEN & values.keys()))
+        )
     # The registry names the governed fields. A deliverable must declare each
     # governed field an area may not carry; any other governed field is optional.
     for name in planning_values.fields():
@@ -131,10 +137,9 @@ def _governed(
         return
     entry = _registered(planning_values, name, value)
     if entry is None:
-        if name == "kind":
-            _invalid("kind must be one of: " + ", ".join(planning_values.values("kind")))
         _invalid(
-            f"{name} is invalid; see schema_memory(operation=inspect, subject=planning-values)"
+            f"{name} must be one of: "
+            + collections.listed_within(planning_values.values(name))
         )
     if entry.status != "active":
         replacement = (entry.replaced_by or "").partition(".")[2]
@@ -1816,7 +1821,12 @@ def validate_hierarchy(
     for key, values in plans.items():
         kind = values["kind"]
         active = values["lifecycle"] == "active"
-        parent = _relation_target(manifest, values.get("parent"))
+        own = write is not None and key == write.plan_id
+        try:
+            parent = _relation_target(manifest, values.get("parent"))
+        except CollectionError:
+            # A foreign or malformed parent refuses like a missing one: no item has the id "".
+            parent = ""
         area = _relation_target(manifest, values.get("area"))
         if kind == "area":
             if parent is not None or area is not None:
@@ -1829,16 +1839,16 @@ def validate_hierarchy(
                 or target["kind"] != "area"
                 or (active and target["lifecycle"] != "active")
             ):
-                _relation_error()
+                _rule_error(own, f"area takes {'an active' if active else 'an'} item of kind area")
         definition = _kind_definition(write, key, values)
         allowed = None if definition is None else tuple(definition.attributes["parents"])
         required_parent = active and _committed(values) and bool(allowed)
         if allowed == ():
             if parent is not None:
-                _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
         elif parent is None:
             if required_parent:
-                _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
         else:
             target = plans.get(parent)
             if (
@@ -1846,7 +1856,9 @@ def validate_hierarchy(
                 or (allowed is not None and target["kind"] not in allowed)
                 or (active and target["lifecycle"] != "active")
             ):
-                _relation_error()
+                if allowed is None:
+                    _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
             if (
                 area is not None
                 and target.get("area") is not None
@@ -1941,7 +1953,33 @@ def _relation_target(manifest: collections.CollectionManifest, value: Any) -> st
 
 
 def _relation_error() -> Never:
-    raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL)
+
+
+def _parent_rule(kind: str, parents: Sequence[str], active: bool) -> str:
+    """The item's own parent rule, from the registry's `parents` for its kind."""
+    if not parents:
+        return f"kind {kind} takes no parent"
+    return f"kind {kind} takes {'an active' if active else 'a'} parent of kind: {', '.join(parents)}"
+
+
+def _rule_error(own: bool, rule: str) -> Never:
+    """Refuse a relationship and, for the item being written, state its own rule.
+
+    The rule names nothing about any target, so a missing, withheld, wrong-kind or inactive
+    target all refuse with one text. A stored item keeps the plain refusal: its rule is not
+    the caller's to fix, and a read must not blame the caller for a stored item.
+    """
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL, {"rule": rule} if own else {})
+
+
+def relation_refusal_message(error: CollectionError) -> str:
+    """The public text of an `INVALID_PLAN_RELATION`: the bounded base plus a rule it carries.
+
+    Only `_rule_error` sets a rule, so no other reason reaches the caller.
+    """
+    rule = error.details.get("rule")
+    return f"{_RELATION_REFUSAL}; {rule}" if type(rule) is str else _RELATION_REFUSAL
 
 
 def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:
@@ -2009,8 +2047,8 @@ def _validate_evidence(value: Any) -> None:
             _invalid("progress evidence descriptor is invalid")
         if memory_refs.parse_memory_ref(descriptor["collection"]) is None:
             _invalid("progress evidence collection is invalid")
-        if descriptor["role"] not in {"progress", "completion"}:
-            _invalid("progress evidence role is invalid")
+        if descriptor["role"] not in EVIDENCE_ROLES:
+            _invalid(f"progress evidence role must be one of: {', '.join(EVIDENCE_ROLES)}")
         _bounded_string(descriptor["view"], "progress evidence view", 128)
 
 
@@ -2049,7 +2087,7 @@ def _date(value: Any, name: str) -> dt.date:
 
 def _enum(value: Any, allowed: set[str] | frozenset[str], name: str) -> None:
     if type(value) is not str or value not in allowed:
-        _invalid(f"{name} is invalid")
+        _invalid(f"{name} must be one of: {', '.join(sorted(allowed))}")
 
 
 def _bounded_string(value: Any, name: str, maximum: int) -> None:

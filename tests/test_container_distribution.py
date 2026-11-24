@@ -96,7 +96,7 @@ def test_release_workflow_publishes_cuda_tags() -> None:
 
     assert "target: cuda" in text
     assert "platforms: linux/amd64" in text
-    assert '"cuda ghcr.io/substrate-systems/evermatter:$version-cuda cuda"' in text
+    assert '"cuda $image_base:$version-cuda cuda"' in text
 
 
 def test_release_builds_cloud_images_natively_without_discovery_tags() -> None:

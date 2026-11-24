@@ -751,6 +751,30 @@ def verify_build_target(image: str, name: str) -> None:
             raise ValueError(f"BuildKit target differs from {name}: {image}")
 
 
+RELEASE_CUTS = Path(__file__).resolve().parents[2] / ".github" / "release-cuts"
+
+
+def release_builder(tag: str) -> str:
+    """The repository whose release workflow built `tag`.
+
+    A release cut records the repository it ran in, and that repository's workflow signed
+    the release's images under its own name. A repository move keeps old releases signed
+    under the old name, so they verify against their builder, not against this repository.
+    A tag with no cut record is built here.
+    """
+
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?", tag):
+        raise ValueError("release tag must use v followed by a SemVer version")
+    record = RELEASE_CUTS / f"{tag}.json"
+    if not record.exists():
+        return os.environ["GITHUB_REPOSITORY"]
+    builder = json.loads(record.read_text())["evidence"]["repository"]
+    # GitHub owner/name format; the value names a repository, not a vocabulary entry.
+    if not isinstance(builder, str) or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", builder):
+        raise ValueError("release cut record names no builder repository")
+    return builder
+
+
 def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, name: str) -> str:
     envelope = json.loads(bundle.read_text())["dsseEnvelope"]
     statement = json.loads(base64.b64decode(envelope["payload"]))
@@ -763,6 +787,7 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
     digest = _digest("sha256:" + digest_hex, label="image receipt subject digest")
     _require_verified_subject(statement, repository, digest, label="release image")
     target = f"{repository}@{digest}"
+    builder = release_builder(tag)
     verified = json.loads(
         run(
             "gh",
@@ -772,9 +797,9 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
             "--bundle",
             str(bundle),
             "--repo",
-            os.environ["GITHUB_REPOSITORY"],
+            builder,
             "--signer-workflow",
-            f"{os.environ['GITHUB_REPOSITORY']}/.github/workflows/release-please.yml",
+            f"{builder}/.github/workflows/release-please.yml",
             "--signer-digest",
             commit,
             "--source-digest",
@@ -792,7 +817,7 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
         _require_verified_subject(proof, repository, digest, label="release image")
         predicate = cast(dict, proof["predicate"])
         invocation = urlsplit(predicate["runDetails"]["metadata"]["invocationId"])
-        prefix = f"/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+        prefix = f"/{builder}/actions/runs/"
         # The GitHub SLSA invocation URL is a fixed protocol, not a filename claim.
         if (
             invocation.scheme != "https"
@@ -838,7 +863,7 @@ def family_assertion(
         "predicate": {
             "family": name,
             "source": {
-                "repository": os.environ["GITHUB_REPOSITORY"],
+                "repository": release_builder(tag),
                 "ref": f"refs/tags/{tag}",
                 "commit": commit,
             },
@@ -1054,6 +1079,7 @@ def main() -> None:
             "finish-images",
             "join-image",
             "image-family",
+            "builder",
         ),
     )
     parser.add_argument("--tag", required=True)
@@ -1071,6 +1097,9 @@ def main() -> None:
         "--bundle", type=Path, help="Original image provenance bundle for family verification"
     )
     args = parser.parse_args()
+    if args.command == "builder":
+        print(release_builder(args.tag))
+        return
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.command == "qualify-python":
         if args.dry_run or not all((args.source, args.run_id, args.attempt)):

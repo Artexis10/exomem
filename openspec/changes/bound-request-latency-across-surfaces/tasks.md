@@ -159,6 +159,8 @@
 - [ ] 3.25 After installation, compare the query-encode wait of page searches before and after the query lane (design decision 13).
   - Verify: p50 and p90 of `execution_wait_us` on `embeddings.encode` in `search_memory`, with a bootstrap interval.
   - Verify: `search_memory` wall p50 and p90 with at most one other call in flight, with a bootstrap interval.
+- [ ] 3.26 After installation, compare the dataset value lane's cost on the first search after a write, before and after it rereads only changed cards.
+  - Verify: wall and own-CPU p50 and p90 of `recall.dataset_values` in `search_memory`, split by whether a write landed since the previous search, with bootstrap intervals.
 
 ## 4. Verify installed behavior and deliver
 

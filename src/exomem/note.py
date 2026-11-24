@@ -47,6 +47,7 @@ from . import (
     audit as audit_module,
 )
 from . import (
+    capabilities,
     corpus_aware,
     indexes,
     memory_refs,
@@ -504,7 +505,7 @@ def _build_write_feedback(
     if unregistered_labels:
         next_actions.append(
             "review recurring relation vocabulary with "
-            "`schema_memory(operation='infer', subject='relations')`"
+            f"`{capabilities.active_call_text('schema_memory', {'operation': 'infer', 'subject': 'relations'})}`"
         )
     if not sources_norm:
         if not body_targets:

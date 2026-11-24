@@ -116,6 +116,21 @@ _PER_PATH_LOCK = threading.Lock()
 #: stall. None records contention with an observation set too large to prove.
 _per_path_raced: dict[Path, bool | None] = {}
 
+#: When this process first saw receipts queued for each vault, on the clock that
+#: ages them (`deferred_index.time`); dropped when it sees the queue empty. A
+#: receipt older than that was queued before this process looked at it, so its
+#: wall-clock age says nothing about a stall. Scheduling state only, like
+#: `_per_path_blocked`.
+_receipts_first_seen: dict[Path, float] = {}
+
+#: Threads whose watcher batch holds a vault's read barrier as its fence, from
+#: the withdrawal until the batch's graph fan-out has queued its repair. The
+#: barrier is theirs to hand to the queue, so recovery must not rebuild it. Keyed
+#: by thread so concurrent batches release only their own entry, and a release
+#: that registered nothing is a no-op. Scheduling state only, like
+#: `_per_path_blocked`.
+_acknowledging: dict[Path, set[int]] = {}
+
 #: The external change the availability arm last saw standing, per vault, as
 #: (latest pending epoch, monotonic time first seen). Scheduling state only.
 _external_change_seen: dict[Path, tuple[int, float]] = {}
@@ -172,6 +187,27 @@ def note_graph_progress(vault_root: Path) -> None:
         _per_path_raced.pop(key, None)
     _PROGRESS.set()
     _DEBT.set()
+
+
+def observed_receipt_age(vault_root: Path, oldest_age: float | None) -> float | None:
+    """The oldest queued receipt's age, counted from when this process first saw receipts queued.
+
+    The stall escalation's clock: a receipt queued before this process looked
+    at the queue is the queue's until the process has watched it for
+    `stall_seconds`, however long it sat in the durable queue before, and
+    whichever pass drains or fails meanwhile. `oldest_age` is the queue's own
+    reading, None for an empty queue, which restarts the count.
+    """
+    from . import deferred_index
+
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        if oldest_age is None:
+            _receipts_first_seen.pop(key, None)
+            return None
+        now = deferred_index.time.time()
+        first = _receipts_first_seen.setdefault(key, now)
+    return min(oldest_age, max(0.0, now - first))
 
 
 def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
@@ -252,6 +288,31 @@ def per_path_repair_blocked(vault_root: Path) -> bool:
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
         return key in _per_path_blocked
+
+
+def note_acknowledgement_started(vault_root: Path) -> None:
+    """Record that this thread's watcher batch is about to raise the read barrier as its fence."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        _acknowledging.setdefault(key, set()).add(threading.get_ident())
+
+
+def note_acknowledgement_finished(vault_root: Path) -> None:
+    """Release this thread's entry once its batch has queued its repair or ended. Idempotent."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        threads = _acknowledging.get(key)
+        if threads is not None:
+            threads.discard(threading.get_ident())
+            if not threads:
+                del _acknowledging[key]
+
+
+def acknowledgement_in_flight(vault_root: Path) -> bool:
+    """Whether a watcher batch holds this vault's read barrier as its fence right now."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        return key in _acknowledging
 
 
 def disabled() -> bool:
@@ -656,7 +717,9 @@ def _work_once(vault_root: Path) -> int:
         # refuses it correctly; route that unknown scope through the existing
         # guarded full-marker convergence instead of leaving the barrier to
         # retry a refusal forever. A recent publication refusal keeps its
-        # established backoff rather than spending another rebuild.
+        # established backoff rather than spending another rebuild. A watcher
+        # batch holding the barrier as its fence reads as its own decline, not
+        # this one, so the barrier is left to the repair that batch queues.
         if (
             decline == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
             and not epistemic_graph.publication_refusal_active(vault_root)

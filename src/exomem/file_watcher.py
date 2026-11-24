@@ -2008,8 +2008,6 @@ class FileWatcher:
                 log.exception("file watcher: reconcile drift dispatch failed")
         if pending_epoch is not None and baselines_current:
             self._recover_external_pending(pending_epoch)
-        if baselines_current and not freshness.external_pending(self._vault_root):
-            self._recover_suspended_graph()
         remaining = (
             None
             if policy.max_reconcile_embed_files is None
@@ -2021,6 +2019,10 @@ class FileWatcher:
             index_sync.drain_deferred_work(self._vault_root, limit=drain_limit)
         except Exception:  # noqa: BLE001 - queued work remains retryable
             log.exception("file watcher: deferred index drain failed")
+        # After the drain, so covered debt gets its bounded completion before a
+        # whole-vault barrier recovery (design D3).
+        if baselines_current and not freshness.external_pending(self._vault_root):
+            self._recover_suspended_graph()
         if baselines_current:
             self._prime_inbound_if_needed()
             self._publish_census_if_needed()
@@ -2160,6 +2162,11 @@ class FileWatcher:
         rebuild_graph = epistemic_graph.graph_enabled() and graph_exists
         try:
             decline = epistemic_graph.recovery_decline_reason(self._vault_root) if rebuild_graph else None
+            if decline == epistemic_graph.RECOVERY_DECLINE_ACKNOWLEDGEMENT_IN_FLIGHT:
+                # A batch holds the barrier as its fence and retires this epoch
+                # itself once its repair is queued; withdrawing and rebuilding
+                # under it would redo the whole vault for the page it queues.
+                return
             marker_owns_repair = decline == epistemic_graph.RECOVERY_DECLINE_MARKER_OWNS_REPAIR
             if decline == epistemic_graph.RECOVERY_DECLINE_QUEUE_OWNS_REPAIR:
                 observation = freshness.external_observation_stamp()
@@ -2422,7 +2429,21 @@ class FileWatcher:
                 )
                 foreground_priority.wait_for_retry(max(0.01, min(remaining, advised)))
 
-    def _dispatch_batch(
+    def _dispatch_batch(self, *args: Any, **kwargs: Any) -> int:
+        """`_fan_out_batch`, then release the fence entry it may have registered.
+
+        The entry covers the span from the barrier's withdrawal to the end of
+        the graph fan-out, however that span ends, so the release is a `finally`
+        around the whole body rather than a step inside it.
+        """
+        from . import graph_drain
+
+        try:
+            return self._fan_out_batch(*args, **kwargs)
+        finally:
+            graph_drain.note_acknowledgement_finished(self._vault_root)
+
+    def _fan_out_batch(
         self,
         ups: list[Path],
         up_rels: list[str],
@@ -2536,7 +2557,7 @@ class FileWatcher:
         # Withdraw the graph marker before retiring observations from this
         # batch. A same-metadata edit can preserve the projection identity.
         # The graph drain owns observations that still have receipts.
-        from . import epistemic_graph
+        from . import epistemic_graph, graph_drain
 
         guarded_graph: epistemic_graph.EpistemicGraphIndex | None = None
         ack_ready = (
@@ -2550,10 +2571,15 @@ class FileWatcher:
         ):
             candidate = epistemic_graph.EpistemicGraphIndex(self._vault_root)
             if candidate.path.exists():
+                # The barrier is this batch's fence until its fan-out queues the
+                # repair; a drain poll in between must not read it as nobody's.
+                graph_drain.note_acknowledgement_started(self._vault_root)
                 try:
                     self._suspend_reads_for_acknowledgement(candidate)
                 except Exception:  # noqa: BLE001 - retain pending for periodic recovery
                     ack_ready = False
+                    # The withdrawal failed, so no fence stands and periodic recovery owns the epoch.
+                    graph_drain.note_acknowledgement_finished(self._vault_root)
                     log.exception("file watcher: graph availability withdrawal failed")
                 else:
                     guarded_graph = candidate
@@ -2760,6 +2786,9 @@ class FileWatcher:
                             _graph_incompleteness_fields(self._vault_root),
                             "paths" if scope is not None else "full",
                         )
+        # The graph fan-out is done, so the repair is queued or the barrier is
+        # lifted. The corpus warm below can run for a minute and owns no barrier.
+        graph_drain.note_acknowledgement_finished(self._vault_root)
         # After every consumer has applied the batch. Both steps may build the
         # whole corpus, and neither changes what the consumers apply: posthoc
         # reads the Markdown and the vault's own definitions, not any index.
@@ -2822,12 +2851,20 @@ class FileWatcher:
         """Wait for the startup seed's terminal result.
 
         ``False`` means either the wait timed out or at least one recall scope
-        failed to become authoritative.  Callers must then keep retrieval
-        unadmitted; they must never turn the failed seed into reader-thread
-        fallback work.
+        failed to become authoritative; `seed_outcome` tells the two apart.
+        Callers must then keep retrieval unadmitted; they must never turn the
+        failed seed into reader-thread fallback work.
+        """
+        return self.seed_outcome(timeout) is True
+
+    def seed_outcome(self, timeout: float | None = None) -> bool | None:
+        """The startup seed's terminal result, or None while it is still running.
+
+        A seed can outlast any wait while its catch-up flush queues behind the
+        catalogue barrier; only a finished seed may retire the registry.
         """
         if not self._seed_complete.wait(timeout):
-            return False
+            return None
         return self._seed_succeeded
 
     def _runs_reconcile(self) -> bool:

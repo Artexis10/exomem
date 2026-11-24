@@ -462,7 +462,7 @@ def test_the_shipped_traits_sit_on_the_kinds_the_replaced_kind_sets_named() -> N
             "assertion", "page_claim", "procedure", "outcome", "question", "credence", "dated_event",
         )
     } == {
-        "assertion": {"claim", "finding", "inference", "hypothesis", "result"},
+        "assertion": {"claim", "correction", "finding", "inference", "hypothesis", "result"},
         "page_claim": {"claim"},
         "procedure": {"procedure"},
         "outcome": {"result"},

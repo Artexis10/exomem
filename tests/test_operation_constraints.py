@@ -253,7 +253,7 @@ def test_scalar_discriminants_publish_the_same_admission_as_dispatch(
         assert validator.is_valid(operation)
         assert resolve_invocation(rendering.name, {"operation": operation}, [command])[1] == {
             "action": "run",
-            **rendering.leaf_fields(fields),
+            **rendering.leaf_fields("run", fields),
         }
     for fields in rejected:
         operation = {"kind": "run", **fields}

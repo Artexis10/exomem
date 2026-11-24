@@ -9099,6 +9099,7 @@ def op_observe_memory(
     id: str | None = None,
     unit_ref: str | None = None,
     unit: str | None = None,
+    span: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -9107,6 +9108,7 @@ def op_observe_memory(
     relation_review_reason: str | None = None,
     reason: str | None = None,
     target_fingerprints: dict[str, str] | None = None,
+    validate_only: bool = False,
 ) -> dict:
     """Check or edit one semantic unit on a compiled note.
 
@@ -9115,7 +9117,7 @@ def op_observe_memory(
 
     Args:
         path: Parent path or memory ref.
-        operation: add/update/remove/validate.
+        operation: add/update/remove/validate/supersede/assess.
         kind: Governed rich kind; omitted means compact observation.
         tags: Replaces on update.
         context: Replaces on update.
@@ -9127,6 +9129,7 @@ def op_observe_memory(
         id: Parent-unique anchor; derived on add if omitted.
         unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
         unit: Unit id from a read or a write reply, for update/remove. It stands for unit_ref and both guards.
+        span: Exact claim text for supersede/assess when the unit id is unknown; names the one list item it lies in.
         expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
         expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
@@ -9136,6 +9139,7 @@ def op_observe_memory(
         reason: Rationale kept with the prior interpretation.
         target_fingerprints: Exact corrective refs/current fingerprints.
             Omit for page/heading links; echo for episode unit leaves.
+        validate_only: Preview a supersede or assess without writing; echo its transition_token.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -9194,6 +9198,7 @@ def op_observe_memory(
             id=id,
             unit_ref=unit_ref,
             unit=unit,
+            span=span,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,
             transition_token=transition_token,
@@ -9202,6 +9207,7 @@ def op_observe_memory(
             relation_review_reason=relation_review_reason,
             reason=reason,
             target_fingerprints=target_fingerprints,
+            validate_only=validate_only,
         )
         if result.get("mutated"):
             query_log.log_write_call(
@@ -15963,7 +15969,9 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("schema_memory",),
-        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
+        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True,
+         # An operation that pages takes `more`, the typed tools' name for its `continuation` cursor.
+         "field_synonyms": (("more", "continuation"),)},
     ),
     (
         "govern_memory",
@@ -16140,10 +16148,24 @@ def _validate_rendered_arguments(name: str, action: object, arguments: Mapping[s
     matching = [entry for entry in operations.entries if entry.matches(action, arguments)]
     if not matching:
         _refuse_rendered_arguments(name, "the selected operation has invalid discriminants")
-    if not any(set(arguments) <= entry.fields and all(arguments.get(key) is not None
-                                                      for key in entry.required)
-               for entry in matching):
-        _refuse_rendered_arguments(name, "the selected operation has invalid fields")
+    from .cli_ops import argument_misfit_text
+
+    # Each candidate's own misfit: the caller's names against what that entry takes.
+    misfits = [
+        (
+            set(arguments) - entry.fields,
+            {key for key in entry.required if arguments.get(key) is None},
+            entry,
+        )
+        for entry in matching
+    ]
+    if any(not unexpected and not missing for unexpected, missing, _ in misfits):
+        return
+    # The closest candidate (fewest misfits, then table order) is the one the caller likely meant.
+    unexpected, missing, entry = min(misfits, key=lambda item: len(item[0]) + len(item[1]))
+    _refuse_rendered_arguments(
+        name, argument_misfit_text(str(action), unexpected, missing, entry.fields, entry.required)
+    )
 
 
 def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:
@@ -16304,7 +16326,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
-        operation_entries.register_operations(name, params)
+        operation_entries.register_operations(name, params, meta.get("field_synonyms", ()))
         argument_rules = _ARGUMENT_RULES.get(name)
         if argument_rules is None and name in operation_entries.OPERATIONS:
             argument_rules = ArgumentRules(

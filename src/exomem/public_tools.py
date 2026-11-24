@@ -447,8 +447,11 @@ _EDIT_ACTION_FIELDS: dict[str, tuple[frozenset[str], tuple[str, ...]]] = {  # no
     "set_tags": (frozenset({"tags"}), ("tags",)),
     "set_fields": (frozenset({"fields"}), ("fields",)),
     "fill_row": (frozenset({"row", "take", "overwrite"}), ("row", "take")),
-    "edit_observation": (frozenset({"observation", "category", "text", "tags", "context", "links"}), ("observation",)),
+    "edit_observation": (frozenset({"observation", "category", "text", "tags", "context", "links", "kind", "as_of", "verdict"}), ("observation",)),
     "remove_observation": (frozenset({"observation"}), ("observation",)),
+    "supersede_observation": (frozenset({"unit", "span", "text", "category", "kind", "as_of", "tags", "context", "links"}), ("text",)),
+    "assess_observation": (frozenset({"unit", "span", "verdict", "check_by", "links", "kind"}), ()),
+    "link_observation": (frozenset({"unit", "span", "links", "kind"}), ("links",)),
 }
 _EDIT_SHARED = frozenset({"note", "why", "action", "unlinked_reason", "review", "preview", "detail"})
 
@@ -471,10 +474,16 @@ class EditNote(Wire):
     take: str | None = Field(default=None, description="fill_row.")
     overwrite: bool | None = Field(default=None, description="fill_row: replace a filled take.")
     observation: str | None = Field(default=None, description="edit_observation, remove_observation: the unit id.")
-    category: str | None = Field(default=None, description="edit_observation.")
-    text: str | None = Field(default=None, description="edit_observation.")
-    context: str | None = Field(default=None, description="edit_observation.")
-    links: list[Link] | None = Field(default=None, description="edit_observation: the full list.")
+    unit: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation: the claim's unit id or anchor.")
+    span: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation: the claim's exact text when its unit id is unknown.")
+    verdict: str | None = Field(default=None, description="assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted.")
+    check_by: str | None = Field(default=None, description="assess_observation: an ISO date to revisit the claim.")
+    kind: str | None = Field(default=None, description="supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation.")
+    as_of: str | None = Field(default=None, description="supersede_observation, edit_observation: the ISO date the claim started holding.")
+    category: str | None = Field(default=None, description="edit_observation, supersede_observation.")
+    text: str | None = Field(default=None, description="edit_observation, supersede_observation.")
+    context: str | None = Field(default=None, description="edit_observation, supersede_observation.")
+    links: list[Link] | None = Field(default=None, description="edit_observation: the full list; supersede_observation, link_observation: links to add.")
     unlinked_reason: str | None = _UNLINKED
     review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
@@ -505,9 +514,40 @@ def _edit_note(wire: dict[str, Any], ctx: Context) -> Translated:
             **_given({
                 "category": wire.get("category"), "content": wire.get("text"), "tags": wire.get("tags"),
                 "context": wire.get("context"), "relations": _links(wire.get("links")),
+                "kind": wire.get("kind"), "as_of": wire.get("as_of"), "verdict": wire.get("verdict"),
             }),
             **_given(_unlinked(wire)), **_edit_review(wire), **guard, **detail,
         }
+        return "observe_memory", leaf
+    if action in {"supersede_observation", "assess_observation", "link_observation"}:
+        if (wire.get("unit") is None) == (wire.get("span") is None):
+            given = "both" if wire.get("unit") is not None else "neither"
+            raise Refusal(
+                "INVALID_ARGUMENT",
+                f"{action} names its claim once, as `unit` or an exact `span`; this call gives {given}.",
+            )
+        if action == "assess_observation" and all(
+            wire.get(key) is None for key in ("verdict", "check_by", "links")
+        ):
+            raise Refusal(
+                "MISSING_ARGUMENT",
+                "assess_observation needs a verdict, a check_by, or links.",
+            )
+        leaf = {
+            "operation": "supersede" if action == "supersede_observation" else "assess",
+            "path": wire["note"], "reason": wire["why"],
+            **_given({
+                "unit": wire.get("unit"), "span": wire.get("span"),
+                "content": wire.get("text"), "category": wire.get("category"),
+                "kind": wire.get("kind"), "as_of": wire.get("as_of"),
+                "tags": wire.get("tags"), "context": wire.get("context"),
+                "verdict": wire.get("verdict"), "check_by": wire.get("check_by"),
+                "relations": _links(wire.get("links")),
+            }),
+            **_given(_unlinked(wire)), **_edit_review(wire), **guard, **detail,
+        }
+        if wire.get("preview"):
+            leaf["validate_only"] = True
         return "observe_memory", leaf
     operation: dict[str, Any]
     if action == "replace_text":
@@ -590,6 +630,45 @@ def _spell_edit(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
     else:
         wire.update(_given({"row": operation.get("row_key"), "take": operation.get("take"),
                             "overwrite": operation.get("overwrite")}))
+    return wire
+
+
+#: The observe_memory fields a claim action spells, leaf name to wire name.
+_CLAIM_INVERSE = {
+    "path": "note", "reason": "why", "unit": "unit", "span": "span", "content": "text",
+    "category": "category", "kind": "kind", "as_of": "as_of", "tags": "tags", "context": "context",
+    "verdict": "verdict", "check_by": "check_by", "transition_token": "review", "response_detail": "detail",
+}
+
+
+def _spell_claim_edit(arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The edit_note call of an observe_memory supersede or assess, or None for a call edit_note cannot send.
+
+    An assess that sets a verdict or a check_by is assess_observation; one that only adds links is
+    link_observation. The page id that edit_note takes in `note` stands for `expected_hash`.
+    """
+    if arguments.get("operation") == "supersede":
+        action = "supersede_observation"
+    elif arguments.get("verdict") is not None or arguments.get("check_by") is not None:
+        action = "assess_observation"
+    else:
+        action = "link_observation"
+    wire: dict[str, Any] = {"action": action}
+    for key, value in arguments.items():
+        if value is None or key in {"operation", "expected_hash"}:
+            continue
+        if key in _CLAIM_INVERSE:
+            wire[_CLAIM_INVERSE[key]] = value
+        elif key == "relations":
+            wire["links"] = [{"relation": link.get("kind"), "page": link.get("target")} for link in value]
+        elif key == "validate_only":
+            if value:
+                wire["preview"] = True
+        elif key == "relation_disposition" and value == "reviewed_none":
+            wire["unlinked_reason"] = arguments.get("relation_review_reason")
+        elif key not in _RELATION_DECISION:
+            # A call that this tool would send without the field is another operation's call.
+            return None
     return wire
 
 
@@ -1039,13 +1118,18 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
                  derived=frozenset({"expected_hash"})),
            Route("observe_memory", when={"operation": "remove"}, add={"action": "remove_observation"},
                  inverse={"path": "note", "unit": "observation", "unit_ref": "observation", "reason": "why", **_NOTE_INVERSE},
-                 derived=frozenset({"expected_hash"}))],
+                 derived=frozenset({"expected_hash"})),
+           Route("observe_memory", when={"operation": "supersede"}, reverse=_spell_claim_edit),
+           Route("observe_memory", when={"operation": "assess"}, reverse=_spell_claim_edit)],
           destructive=True,
           example={"note": "Retry policy", "why": "Cap changed after the outage review", "action": "replace_text", "old_text": "cap at 30 s", "new_text": "cap at 10 s"},
-          claims=(("observe_memory", "update"), ("observe_memory", "remove")),
+          claims=(("observe_memory", "update"), ("observe_memory", "remove"),
+                  ("observe_memory", "supersede"), ("observe_memory", "validate-supersede"),
+                  ("observe_memory", "assess"), ("observe_memory", "validate-assess")),
           captures=True),
     _tool("supersede_note", "Supersede note",
-          "Replace a changed conclusion; keep the old note linked and readable.",
+          "Replace a changed conclusion; keep the old note linked and readable. "
+          "For one claim inside a note, use edit_note action supersede_observation.",
           SupersedeNote, "write", _supersede_note,
           [Route("replace_memory", inverse={"old_path": "note", "reason": "why", "note_type": "type", **_NOTE_INVERSE},
                  bag="fields", derived=frozenset({"draft_id", "draft_hash", "draft_token"}))],

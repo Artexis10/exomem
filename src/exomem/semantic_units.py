@@ -7,6 +7,7 @@ registry mutation, indexing, or model work.
 
 from __future__ import annotations
 
+import bisect
 import datetime as dt
 import hashlib
 import json
@@ -16,11 +17,14 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
+
+from markdown_it import MarkdownIt
 
 from . import (
     context_refs,
+    markdown_regions,
     markdown_relations,
     memory_refs,
     semantic_blocks,
@@ -920,6 +924,180 @@ def canonicalize_category(raw: str) -> str:
         )
     normalized = unicodedata.normalize("NFKC", category).casefold()
     return _CATEGORY_SEPARATORS_RE.sub("_", normalized).strip("_")
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimItem:
+    """One top-level bullet item's first line and the `##` section it sits in.
+
+    `start` and `end` bound the first line, and `line` is its 1-based number.
+    `text` is that line after the bullet marker. `wraps` is True when the
+    item's leading paragraph runs past that line, as markdown-it or the
+    line-based compact parser reads it, so a line-level conversion would
+    split the claim.
+    """
+
+    start: int
+    end: int
+    line: int
+    indent: str
+    text: str
+    heading: str | None
+    wraps: bool
+
+
+# Why a list item is no claim to convert, in the order `claim_targets` checks them.
+ClaimRefusal = Literal["relation", "links_only", "task", "inline_field", "wraps"]
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimTarget:
+    """A top-level list item as a claim: the unit it already is, or whether it converts in place."""
+
+    item: ClaimItem
+    unit: SemanticUnit | None
+    category: str | None  # what its `##` heading gives; None when the heading names no category
+    refusal: ClaimRefusal | None  # set only for an item that is no unit
+
+    @property
+    def convertible(self) -> bool:
+        return self.unit is None and self.refusal is None and self.category is not None
+
+
+_CLAIM_PARSER = MarkdownIt("commonmark")
+# Character class, not meaning: folds the punctuation the category grammar cannot keep.
+_HEADING_PUNCT_RE = re.compile(r"[^\w\s-]+")
+
+
+def claim_items(source: str) -> tuple[ClaimItem, ...]:
+    """Every top-level bullet item with its nearest `##` heading, from one markdown-it parse.
+
+    The parser decides fences, headings and nesting: an item under another item
+    or inside a block quote is not top-level. Headings are ATX ones, as
+    `markdown_relations.iter_headings` reads them; a `#` heading closes the section.
+    """
+    starts, ends = markdown_regions.line_bounds(source)
+    tokens = _CLAIM_PARSER.parse(source)
+    items: list[ClaimItem] = []
+    heading: str | None = None
+    block = ""
+    for index, token in enumerate(tokens):
+        if token.level == 0 and token.nesting == 1:
+            block = token.type
+            if token.type == "heading_open" and token.markup.startswith("#"):
+                if token.tag == "h1":
+                    heading = None
+                elif token.tag == "h2":
+                    heading = tokens[index + 1].content
+        elif (
+            token.type == "list_item_open"
+            and token.level == 1
+            and block == "bullet_list_open"
+            and token.map
+        ):
+            number = token.map[0]
+            line = source[starts[number] : ends[number]]
+            marked = line.lstrip(" ")
+            lead = tokens[index + 1]
+            one_line = lead.type == "paragraph_open" and lead.map == [number, number + 1]
+            items.append(
+                ClaimItem(
+                    start=starts[number],
+                    end=ends[number],
+                    line=number + 1,
+                    indent=line[: len(line) - len(marked)],
+                    text=marked[1:].strip(),
+                    heading=heading,
+                    # The compact parser reads lines by `str.splitlines`, which also breaks at U+2028.
+                    wraps=not one_line or line.splitlines() != [line],
+                )
+            )
+    return tuple(items)
+
+
+def heading_category(title: str) -> str:
+    """The canonical category a `##` heading gives a claim item beneath it.
+
+    Punctuation the category grammar cannot keep folds to a space run, which
+    `canonicalize_category` collapses like any other separator; a heading with
+    no letters or digits raises ValueError the same way a bad `category` does.
+    """
+    return canonicalize_category(_HEADING_PUNCT_RE.sub(" ", title))
+
+
+def claim_targets(body: str, units: Iterable[SemanticUnit]) -> tuple[ClaimTarget, ...]:
+    """Each top-level list item as a claim target: the one rule for what converts in place.
+
+    An item that starts inside a parsed unit's span is that unit. Any other
+    item converts unless it carries a markdown relation (the conversion would
+    delete its typed edge), holds only wikilinks, is a task, carries a Dataview inline
+    field, or wraps past its first line. Every comparison is by character
+    offset, so the relation scanner's line numbering cannot drift from the items'.
+    """
+    from .vault import find_body_wikilinks  # vault imports this module
+
+    ordered = sorted(units, key=lambda unit: unit.span.start_offset)
+    line_starts = {line.number: line.start_offset for line in _source_lines(body)}
+    relation_offsets = sorted(
+        line_starts[candidate.line]
+        for candidate in markdown_relations.scan_markdown_relations(
+            body, include_legacy=True
+        ).candidates
+    )
+    targets: list[ClaimTarget] = []
+    active: list[SemanticUnit] = []
+    following = 0
+    for item in claim_items(body):
+        while following < len(ordered) and ordered[following].span.start_offset <= item.start:
+            active.append(ordered[following])
+            following += 1
+        active = [unit for unit in active if item.start < unit.span.end_offset]
+        try:
+            category: str | None = heading_category(item.heading or "")
+        except ValueError:
+            category = None
+        if active:
+            # The innermost unit: a compact line inside a rich block is its own unit.
+            targets.append(ClaimTarget(item, active[-1], category, None))
+            continue
+        at = bisect.bisect_left(relation_offsets, item.start)
+        refusal: ClaimRefusal | None = None
+        if at < len(relation_offsets) and relation_offsets[at] <= item.end:
+            refusal = "relation"
+        elif not _says_more_than_links(item.text, find_body_wikilinks(item.text)):
+            refusal = "links_only"
+        elif _is_task_item(item.text):
+            # A task checkbox is no compact label (the parser skips `_TASK_LABELS`), and a
+            # converted line would stop being a task for task readers.
+            refusal = "task"
+        elif "::" in item.text:
+            # `::` is Dataview's documented inline-field separator (`key:: value`, `[key:: value]`):
+            # a converted line changes what Dataview reads.
+            refusal = "inline_field"
+        elif item.wraps:
+            refusal = "wraps"
+        targets.append(ClaimTarget(item, None, category, refusal))
+    return tuple(targets)
+
+
+def _is_task_item(text: str) -> bool:
+    """Whether a list item's text opens with a task checkbox, by the compact parser's own rule."""
+    match = _COMPACT_RE.match(f"- {text}")
+    return match is not None and match.group("label").strip() in _TASK_LABELS
+
+
+def _says_more_than_links(text: str, links: Iterable[re.Match[str]]) -> bool:
+    rest = list(text)
+    for link in links:
+        rest[link.start() : link.end()] = " " * (link.end() - link.start())
+    return any(char.isalnum() for char in rest)
+
+
+def apply_splices(text: str, splices: Iterable[tuple[int, int, str]]) -> str:
+    """Apply `(start, end, replacement)` splices given at the original text's offsets."""
+    for start, end, replacement in sorted(splices, key=lambda splice: splice[0], reverse=True):
+        text = text[:start] + replacement + text[end:]
+    return text
 
 
 def fingerprint_semantic_unit(
@@ -2134,10 +2312,15 @@ def _find_rich_metadata_line(
         line = line_by_number.get(number)
         if line is None:
             continue
-        match = _RICH_METADATA_RE.match(line.text)
-        if match is not None and semantic_blocks.normalize_label(match.group("key")) == key:
+        if rich_metadata_key(line.text) == key:
             return line
     return None
+
+
+def rich_metadata_key(line: str) -> str | None:
+    """The schema key that a rich unit's metadata row names (`- Category: x` names `category`), else None."""
+    match = _RICH_METADATA_RE.match(line)
+    return None if match is None else semantic_blocks.normalize_label(match.group("key"))
 
 
 def _normalize_rich_diagnostics(

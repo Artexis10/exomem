@@ -551,3 +551,38 @@ def test_a_refused_planning_add_writes_no_held_file(tmp_path: Path) -> None:
     assert caught.value.code == "SCHEMA_UNKNOWN_FIELD"
     assert not (tmp_path / "Knowledge Base/Planning/Work/Held").exists()
     assert plan_memory(tmp_path, "inspect", collection=collection).get("coverage") is None
+
+
+def test_a_parent_the_caller_cannot_read_is_refused_without_the_kind_rule(tmp_path: Path) -> None:
+    """The kind rule rides only on a visible graph; a withheld parent reads as the collection it hides."""
+    from test_governance_egress import _external, write_rule, write_scope
+
+    from exomem import planning
+    from exomem import structured_collections as collections
+    from exomem.governance.principal import request_scope
+    from exomem.plan_memory import plan_memory
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    collection = "Knowledge Base/Planning/Work/_collection.md"
+    planning.create_collection(tmp_path, collection, _manifest(), why="create planning collection")
+    outcome = plan_memory(
+        tmp_path, "add", collection=collection, item={"title": "Outcome", "kind": "outcome"}, why="seed"
+    )["plan_id"]
+    write_scope(tmp_path, paths="Planning/Work/Items/Outcome.md")
+    write_rule(tmp_path, ceiling=0)
+    collection_id = "2db90f18-70df-4e41-986e-2d7d7db1caca"
+
+    def refused(parent: str) -> tuple[str, str]:
+        with request_scope(_external()), pytest.raises(OpError) as raised:
+            plan_memory(
+                tmp_path, "add", collection=collection, why="probe",
+                item={"title": "Task", "kind": "work-item", "parent": parent},
+            )
+        return raised.value.code, raised.value.message
+
+    withheld = refused(collections.plan_ref(collection_id, outcome))
+    missing = refused(collections.plan_ref(collection_id, "11111111-1111-4111-8111-111111111111"))
+
+    assert withheld == missing
+    assert "initiative" not in withheld[1]

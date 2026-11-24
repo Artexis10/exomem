@@ -190,7 +190,7 @@ In store mode, Exomem SHALL write each committed file to the vault as a byte-exa
 #### Scenario: Projection catches up after a kill
 - **WHEN** the process is killed while projection intents are still queued
 - **THEN** after restart the projector writes every queued file
-- **AND** every projected file's bytes equal the store's bytes for that file
+- **AND** every projected file's bytes equal the store's bytes for that file, apart from one managed relations block
 - **AND** no temporary projection file remains
 
 #### Scenario: Exomem's own projection is not an outside edit
@@ -259,7 +259,7 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 
 #### Scenario: Keep mine adopts the person's file
 - **WHEN** an agent resolves a held edit with keep-mine and the store page is still at the revision the hold saw
-- **THEN** the stored page equals the person's current file bytes and no write to the file is queued
+- **THEN** the stored page equals the person's current file bytes with one valid relations block removed, and no write to the file is queued
 - **AND** the held record is gone and the audit row names the choice
 
 #### Scenario: Keep mine refuses after a newer Exomem change
@@ -307,7 +307,7 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
 
 ### Requirement: Semantic units are first-class store rows
-In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes and SHALL NOT write anchors into a page. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
+In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes. The store itself SHALL write an anchor only into a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
 
 #### Scenario: A link reaches the exact unit
 - **WHEN** a page links to another page's unit by the anchor that unit carries
@@ -319,9 +319,75 @@ In store mode, once stage 2 ships, each semantic unit of a page SHALL be one sto
 - **AND** the other units on the page keep their identities and verdicts
 
 #### Scenario: A unit without an anchor keeps today's identity
-- **WHEN** a governed write adds a unit that carries no authored anchor
+- **WHEN** a governed write adds a unit that carries no authored anchor and no stored relationship
 - **THEN** the unit's identity is its fingerprint-bound reference
 - **AND** the committed page bytes are exactly the bytes the write supplied
+
+### Requirement: Typed relationships are stored rows
+In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships. A store-mode answer SHALL read them from the stored rows only, in bounded pages with a keyset cursor and an exact total.
+
+#### Scenario: A first stored relationship pins the unit's identity
+- **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
+- **THEN** the same transaction writes an anchor in that unit's own anchor form and stores the relationship against that unit's store-assigned id
+- **AND** a later edit of the unit's text keeps the relationship attached
+
+#### Scenario: The far end of a first relationship is pinned too
+- **WHEN** a governed operation adds the first stored relationship whose far end is a unit without an anchor on another page
+- **THEN** the same transaction writes an anchor in that far-end unit's own anchor form on its own page
+- **AND** when the caller may see but not write that page, the operation refuses with `RELATIONSHIP_END_NOT_WRITABLE` and changes nothing
+- **AND** when the caller may not see that page, the answer is the same as for an absent far end
+
+### Requirement: A stored relationship keeps its history and two-ended visibility
+Each stored relationship SHALL record who added it, when and why, and what retired or superseded it. A caller SHALL see a stored relationship only when it may see both of its ends, and an operation SHALL answer a far end the caller may not see exactly as an absent one.
+
+#### Scenario: A restricted caller sees only relationships between visible ends
+- **WHEN** a restricted caller reads a unit whose relationship points at a page withheld from it
+- **THEN** that relationship is absent from the answer, as the withheld page is
+- **AND** the page read it receives holds no relations block
+
+### Requirement: Stored relationships project beside their page
+A page's projected file SHALL carry one bounded managed relations block that the page bytes never hold, and a relations file beside it SHALL list every stored relationship whose source unit is on that page. The importer SHALL remove the block before it imports and SHALL read relationship edits from the relations file. A rebuild from Markdown SHALL read the relations files, and a rollback to file mode SHALL project them first.
+
+#### Scenario: A unit carries more relationships than its page shows
+- **WHEN** a unit carries 500 stored relationships
+- **THEN** the page's relations block shows counts per type and a bounded number of relationships
+- **AND** the relations file beside the page lists all 500
+- **AND** a reader that pages through the unit's relationships receives all 500 and an exact total of 500
+
+#### Scenario: Adding a relationship leaves the page bytes unchanged
+- **WHEN** a governed operation adds a relationship between two units that already carry anchors
+- **THEN** the stored page bytes of both pages are unchanged
+- **AND** the same transaction queues both pages' projection intents
+- **AND** the projector updates the relations block and the relations file after the commit
+
+#### Scenario: Removing a unit keeps its stored relationships
+- **WHEN** an outside edit, a governed edit or a trash removes a unit that carries stored relationships
+- **THEN** the store keeps the relationships
+- **AND** opens a review item that names the lost unit
+
+### Requirement: The relations block never enters the stored bytes
+From stage 2, a page's projection MAY add one managed relations block, the one exception to a byte-exact projection. Import, keep-mine, the held listing and migration SHALL remove one valid block before they compare or adopt a page. An edit that leaves the block invalid SHALL be held, and the listing SHALL show that block only to the unrestricted owner. A rollback to file mode SHALL project pages without the block, and a migration SHALL load the relations files beside the pages.
+
+#### Scenario: An edit inside the relations block is held
+- **WHEN** a person edits a line inside a page's relations block outside Exomem
+- **THEN** the edit becomes a held correction and the stored page bytes are unchanged
+
+#### Scenario: Stored relationships survive a rollback and a re-migration
+- **WHEN** a store-mode vault with stored relationships reverts to file mode and is migrated back
+- **THEN** the reverted pages carry no relations block and the relationship history is exported
+- **AND** after the re-migration every current stored relationship is present again
+
+### Requirement: Held relations items resolve without leaking or storing the block
+Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.
+
+#### Scenario: Keep mine on an edited relations block keeps the block out
+- **WHEN** an agent resolves with keep-mine a held page whose person's file has an edited relations block with intact markers
+- **THEN** the stored page equals the person's file with the block removed by its markers
+- **AND** the next projection carries exactly one relations block
+
+#### Scenario: A restricted caller cannot see a held relations file
+- **WHEN** a caller without unrestricted access lists held items while a relations file is held
+- **THEN** the listing leaves that item out without a count
 
 ### Requirement: Originals record their canonicity
 In store mode, once stage 2 ships, every stored file SHALL carry a canonicity record with its origin, content hash, size, format and derivation: either original, or derived from a named content hash by a named transform. A governed write SHALL be able to supersede a file recorded as original with the true original. After it, the earlier file SHALL remain stored as derived from the true original, citations SHALL resolve to the true original, and the audit trail SHALL record the change.
@@ -337,15 +403,15 @@ In store mode, once stage 2 ships, every stored file SHALL carry a canonicity re
 - **THEN** it sees the file's origin, hash, size, format and derivation
 
 ### Requirement: Migration into the store is verified and reversible
-Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail and the canonicity records, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
+Exomem SHALL migrate a file-mode vault into store mode offline. The migration SHALL load every page's exact bytes and the current derived rows, and SHALL verify before activation that the derived rows equal a fresh derivation from the loaded bytes and that a projection of every page reproduces the original bytes. Reverting to file mode SHALL first project every queued intent, including a full projection when projection was off. It SHALL refuse while held corrections or held deletions remain, unless they are exported for review. Exporting a held item SHALL move the person's held bytes into the export and project the store's version of that file, so the rebuild does not apply the held edit. It SHALL export the audit trail, the canonicity records and the stored relationships' history, which file mode has no tables for. After those steps, stopping the store and rebuilding the file-mode sidecars from the projected Markdown SHALL restore file mode with the same pages.
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
-- **THEN** every projected file is byte-identical to the file it was migrated from
+- **THEN** every projected file is byte-identical to the file it was migrated from, apart from one managed relations block
 
 #### Scenario: Reverting rebuilds file mode from the projection
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
-- **THEN** the audit trail and the canonicity records are exported as files
+- **THEN** the audit trail, the canonicity records and the relationship history are exported as files
 - **AND** file mode rebuilds its lexical catalogue and graph from the projected Markdown
 - **AND** search and graph answers match the store's answers for the same pages
 
