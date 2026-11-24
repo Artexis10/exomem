@@ -767,8 +767,9 @@ def dispatch(
         with writer.read_snapshot():
             # A view resolves against its author's whole manifest and must also hold against the caller's.
             _manifest = writer._collection(args["collection"], facade_profile=profile)[1]
+            _plan = writer._operation.field_plan(_manifest)
             view = _collections.resolve_saved_view(
-                _manifest, args["view"], readable=writer._operation.field_plan(_manifest).manifest)
+                _manifest, args["view"], readable=None if _plan.holds_every_field(_manifest) else _plan.manifest)
         definition = view.definition
         raw_view_query = definition.get("query") if isinstance(definition, Mapping) else None
         if isinstance(raw_view_query, Mapping) and "version" in raw_view_query:

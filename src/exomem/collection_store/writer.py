@@ -628,7 +628,7 @@ class CollectionWriter:
         history.verify(self.connection, manifest.collection_id, proofs=self.handle.release_cache.history)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
         field_plan = self._operation.field_plan(manifest)
-        if not field_plan.owner and (field_plan.whole_fields != set(manifest.schema.fields)):
+        if not field_plan.holds_every_field(manifest):
             rows, snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
             diagnostics = []
             record_governance._inspection_templates(

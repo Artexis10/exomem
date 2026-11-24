@@ -28,10 +28,11 @@ def admits_member(fields, names):
     """Whether `fields` admits every value at a declared path, an array being walked through member by member."""
     chosen = fields
     for name in names:
-        if chosen is WHOLE_SUBTREE:
-            return True
+        # An array's selection wraps its members', so a whole array is a tuple around WHOLE_SUBTREE.
         while isinstance(chosen, tuple):
             chosen = chosen[0]
+        if chosen is WHOLE_SUBTREE:
+            return True
         chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
         if chosen is None:
             return False
@@ -253,6 +254,10 @@ class FieldPlan:
     @property
     def whole_fields(self):
         return frozenset(name for name, selection in self.fields.items() if whole_value(selection))
+
+    def holds_every_field(self, manifest):
+        """Whether the caller reads every field of `manifest`, the full stored manifest, whole."""
+        return self.owner or self.whole_fields == set(manifest.schema.fields)
 
     def admits_path(self, path):
         chosen = self.fields
