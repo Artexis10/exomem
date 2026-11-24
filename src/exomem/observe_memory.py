@@ -40,6 +40,7 @@ from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
 
+# nosemgrep: ep-word-set -- the closed operation set this module implements, not text
 _OPERATIONS = frozenset({"add", "update", "remove", "validate", "supersede", "assess"})
 _COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
