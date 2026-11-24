@@ -247,11 +247,12 @@ def platform_inputs(paths: list[str], include: list[str], exclude: list[str]) ->
 
 
 def git_changed_paths(base: str, head: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(ROOT), "diff", "--name-only", "--no-renames", base, head],
+    # -z: without it git quotes a non-ASCII path, which then matches no platform glob.
+    result = subprocess.run(["git", "-C", str(ROOT), "diff", "--name-only", "--no-renames", "-z", base, head],
                             capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise Stop("PLATFORM_DIFF_FAILED", ok=False)
-    return [line for line in result.stdout.splitlines() if line]
+    return [name for name in result.stdout.split("\0") if name]
 
 
 def uncrossed_barriers(release: str, deployment: dict, barriers: dict) -> list[str]:

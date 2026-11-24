@@ -72,6 +72,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+      # Before the scope step, which runs in the locked environment, so a stale lock fails here by name.
+      - name: Check the rehearsal lockfile
+        working-directory: infra/cloud-rehearsal
+        run: uv lock --check
       # The P3 rehearsal runs on a pull request only when a changed file matches a trigger path other than the
       # runbook and cloud_deploy.py. Those two trigger this workflow for the release mode's unit tests alone, and
       # the P3 rehearsal never runs them. The step reads the trigger paths from this file, so they live once.
@@ -79,8 +83,9 @@ jobs:
         id: scope
         run: |
           if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then echo "p3=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
-          uv run --no-project --with pyyaml==6.0.2 python - "$RUNNER_TEMP/changed.txt" >> "$GITHUB_OUTPUT" <<'PY'
+          # --no-renames lists a moved file under both paths; -z keeps non-ASCII paths unquoted.
+          git diff --no-renames -z --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          uv run --frozen --project infra/cloud-rehearsal python - "$RUNNER_TEMP/changed.txt" >> "$GITHUB_OUTPUT" <<'PY'
           import fnmatch
           import sys
 
@@ -90,12 +95,9 @@ jobs:
           trigger = workflow.get("on") or workflow[True]  # PyYAML reads the key `on` as True.
           release_only = {"docs/runbooks/cloud-platform-deploy.md", "infra/scripts/cloud_deploy.py"}
           paths = [path for path in trigger["pull_request"]["paths"] if path not in release_only]
-          changed = open(sys.argv[1], encoding="utf-8").read().split()
+          changed = [name for name in open(sys.argv[1], encoding="utf-8").read().split("\0") if name]
           print("p3=" + ("true" if any(fnmatch.fnmatch(name, path) for name in changed for path in paths) else "false"))
           PY
-      - name: Check the rehearsal lockfile
-        working-directory: infra/cloud-rehearsal
-        run: uv lock --check
       - name: Unit tests
         working-directory: infra/cloud-rehearsal
         run: uv run --frozen python -m pytest -q -p no:cacheprovider tests
