@@ -91,7 +91,7 @@ A writer SHALL be able to update, insert, retire, move and embed a unit by its r
 - **THEN** the move refuses with `UNIT_MOVE_TOO_WIDE`, names the count and suggests embedding the unit from the destination instead
 
 ### Requirement: A page embeds a unit of another page
-A unit SHALL live in one home page; another page SHALL show it with a block embed, not a copy. `#^x` SHALL resolve to the rich unit whose body holds a block ending with ` ^x`. A first embed SHALL name such a block id or write a new one, unique on the page, at the end of the body's first paragraph; a body with no paragraph SHALL refuse with `UNIT_EMBED_NO_PARAGRAPH`. A promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB.
+A unit SHALL live in one home page; another page SHALL show it with a block embed, not a copy. `#^x` SHALL resolve to the rich unit whose body holds a block that Obsidian names `^x`, outside code. A first embed SHALL reuse a block id or write a new one at the end of the body's first paragraph; a body with no paragraph SHALL refuse with `UNIT_EMBED_NO_PARAGRAPH`. A promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB.
 
 #### Scenario: An edit at home shows everywhere
 - **WHEN** a person edits a unit in its home page and another page embeds it
@@ -109,8 +109,16 @@ A unit SHALL live in one home page; another page SHALL show it with a block embe
 - **AND** the unit's identity, content and fingerprint stay the same
 
 #### Scenario: A person's block id is reused
-- **WHEN** a rich unit's body already holds a block that ends with `^xyz` and a write adds its first embed
+- **WHEN** a rich unit's body already holds a block that ends with `^xyz`, unique on the page, and a write adds its first embed
 - **THEN** the embed names `^xyz` and the store writes no second block id
+
+#### Scenario: A table's standalone block id names the unit
+- **WHEN** a rich unit's body holds a table followed by a standalone `^t` line
+- **THEN** `[[Page#^t]]` resolves to that unit
+
+#### Scenario: A block id inside code is text
+- **WHEN** a fenced code block in a rich unit's body holds a line that ends with `^x`
+- **THEN** `[[Page#^x]]` does not resolve to that unit
 
 #### Scenario: A new opening paragraph detaches nothing
 - **WHEN** a rich unit's block name ends its first paragraph and a person adds a new paragraph before it
@@ -136,6 +144,31 @@ A unit SHALL live in one home page; another page SHALL show it with a block embe
 #### Scenario: A promotion keeps an embed rendering
 - **WHEN** a write promotes an embedded compact unit to a rich block
 - **THEN** the rich block's first paragraph ends with the compact line's block id
+
+### Requirement: A unit name on a page names one unit
+An anchor or block name SHALL name one unit on its page. When two units share one, as two anchors, two block names, or an anchor and another unit's block name, `#^x` SHALL answer ambiguous; an anchor SHALL NOT win. A governed write that would create a shared block name SHALL refuse with `DUPLICATE_SEMANTIC_ANCHOR`. A hand edit that creates one SHALL open the review item for each reference it makes ambiguous. A first embed SHALL reuse only a block id unique on the page, the first in body order.
+
+#### Scenario: A copied block name answers ambiguous
+- **WHEN** a person copies a paragraph that ends with `^x` from one rich unit into another on the same page, and another page links to `[[Page#^x]]`
+- **THEN** the link answers ambiguous
+- **AND** a review item names the link and both units
+
+#### Scenario: A block name equal to an anchor answers ambiguous
+- **WHEN** a rich unit's body holds a block that ends with `^x` and a compact unit on the same page carries the anchor `^x`
+- **THEN** `[[Page#^x]]` answers ambiguous
+
+#### Scenario: A write that would share a name refuses
+- **WHEN** a governed write would add a block that ends with `^x` to a page where another unit already holds the name `x`
+- **THEN** the write refuses with `DUPLICATE_SEMANTIC_ANCHOR` and the page is unchanged
+
+#### Scenario: An existing clash is surfaced after the parser change
+- **WHEN** the registry pass under the new parser finds a block name that equals another unit's anchor, and a link names that anchor
+- **THEN** the link answers ambiguous
+- **AND** a review item names the link and both units
+
+#### Scenario: Only a unique block id is reused
+- **WHEN** a rich unit's body holds `^a`, which another unit also holds, and then `^b`, which is unique, and a write adds its first embed
+- **THEN** the embed names `^b`
 
 ### Requirement: A semantic write refuses to drop a referenced unit
 A semantic write SHALL check, in its preflight and with one batched query, whether a referenced unit loses its anchor or a block name that a reference uses, a unit that a same-page link names included and a unit that it moves counted as kept. It SHALL read inbound unit links by the rule that link reads do not trust rows that lag their page. Unless the write names the unit in `retire_units`, it SHALL refuse with `REFERENCED_UNIT_CHANGED` and name the unit and the ways forward.
@@ -200,7 +233,8 @@ Embed expansion, the referenced-unit refusal, the move count and review items SH
 #### Scenario: An alias to a hidden unit is ignored
 - **WHEN** a reader resolves a fingerprint-bound reference that matches nothing and whose alias names a unit on a page that the reader may not see
 - **THEN** the answer is stale, as it would be without the alias
-- **AND** a write by that reference refuses with `STALE_UNIT_REFERENCE`
+- **AND** a write by that reference refuses with `STALE_UNIT_REFERENCE`, as it would without the alias
+- **AND** an anchored reference in the same case answers missing, as it would without the alias
 
 #### Scenario: A hidden reference does not refuse a write
 - **WHEN** a write drops a unit that only a page the writer cannot see embeds
@@ -225,7 +259,7 @@ Every table and index that this change adds SHALL be an owner object under `vaul
 - **AND** when a build with them returns, the aliases resolve and the requests run
 
 ### Requirement: Aliases survive a rollback to file mode
-Before it projects, rollback to file mode SHALL rewrite, as governed writes, every embed and unit-level link that resolves only through an alias. It SHALL refuse when it cannot rewrite one, unless `--export-aliased` exports their list. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
+Before it projects, rollback to file mode SHALL rewrite, as governed writes, every embed and unit-level link that resolves only through an alias to the unit's current reference. It SHALL refuse when it cannot rewrite one, unless `--export-aliased` exports their list. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
 
 #### Scenario: A page left on an alias matches after rollback
 - **WHEN** a restricted move leaves a hidden page's embed on the alias and the vault rolls back to file mode
