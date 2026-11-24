@@ -34,6 +34,7 @@ from . import (
     media_engines,
     media_jobs,
     media_store,
+    media_types,
     preserve,
     prior_claims,
     recall_policy,
@@ -430,7 +431,7 @@ def backfill_media(
         # Images stay on has() (one row = done). Scene-frame children are excluded:
         # the parent video's per-scene vectors own visual search.
         need_clip = (
-            do_clip and clip_index is not None and media_type in ("image", "video")
+            do_clip and clip_index is not None and media_type in media_types.VISUAL_KINDS
             and not (clip_index.has_frames(rel) if media_type == "video" else clip_index.has(rel))
             and not (media_type == "image" and _is_frame_child(sidecar))
         )

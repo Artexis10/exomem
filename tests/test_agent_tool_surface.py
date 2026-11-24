@@ -67,6 +67,41 @@ def test_a_local_server_lists_exactly_the_agent_tools(build) -> None:
     assert len(names) == len(LISTED)
 
 
+def test_an_agent_restricts_a_search_to_images(build, vault) -> None:
+    from exomem import preserve
+
+    preserve.preserve_bytes(
+        vault, scope="Whiteboard", category="photos", filename="retry-board.jpg",
+        data=b"\xff\xd8\xff\x01", text="retry with a fixed interval, sketched on the whiteboard",
+    )
+
+    async def scenario(client):
+        everything = await _call(client, "search_memory", {"query": "retry fixed interval"})
+        images = await _call(client, "search_memory", {"query": "retry fixed interval", "file_types": ["image"]})
+        return everything, images
+
+    everything, images = _session(build(), scenario)
+
+    assert any(not hit.get("media_type") for hit in everything["hits"]), everything  # notes match too
+    assert images["hits"] and all(hit.get("media_type") == "image" for hit in images["hits"]), images
+
+
+def test_a_host_on_a_cached_tool_surface_can_still_restrict_a_search_through_options(build, vault) -> None:
+    from exomem import preserve
+
+    preserve.preserve_bytes(
+        vault, scope="Whiteboard", category="photos", filename="retry-board.jpg",
+        data=b"\xff\xd8\xff\x01", text="retry with a fixed interval, sketched on the whiteboard",
+    )
+
+    async def scenario(client):
+        return await _call(client, "search_memory", {"query": "retry fixed interval", "options": {"file_types": ["image"]}})
+
+    images = _session(build(), scenario)
+
+    assert images.get("hits") and all(hit.get("media_type") == "image" for hit in images["hits"]), images
+
+
 def test_an_old_tool_name_is_refused_and_the_reply_lists_the_new_ones(build) -> None:
     async def scenario(client):
         return await _call(client, "ask_memory", {"query": "x"})

@@ -246,6 +246,10 @@ class SearchMemory(Wire):
     types: list[str] | None = None
     projects: list[str] | None = None
     tags: list[str] | None = None
+    file_types: list[str] | None = Field(
+        default=None,
+        description='Kinds to keep, e.g. ["image", "video"] for a photo, screenshot or video. If unsure a picture is meant, also search without it.',
+    )
     filters: dict[str, Any] | None = Field(
         default=None, description='Metadata filter, such as {"page.status": "active"}.'
     )
@@ -259,6 +263,12 @@ class SearchMemory(Wire):
 
 
 def _search(wire: dict[str, Any], ctx: Context) -> Translated:
+    options = wire.get("options") or {}
+    if "file_types" in options and wire.get("file_types") is None:
+        # A host on a cached tool surface still sends `file_types` in `options`, where it lived
+        # before it became a field; move it rather than refuse the call.
+        wire = {**wire, "file_types": options["file_types"],
+                "options": {key: value for key, value in options.items() if key != "file_types"}}
     if (wire.get("options") or {}).get("result_level") == "passage":
         from . import passage_evidence
 
@@ -270,6 +280,7 @@ def _search(wire: dict[str, Any], ctx: Context) -> Translated:
         "query": wire.get("query"), "types": wire.get("types"), "tags": wire.get("tags"),
         "filters": wire.get("filters"), "deep": wire.get("deep"), "limit": wire.get("limit"),
         "continuation": wire.get("more"), "detail": wire.get("detail"), "projects": wire.get("projects"),
+        "file_types": wire.get("file_types"),
     }
     return "ask_memory", _leaf_call(wire, "options", ctx, "ask_memory", "search_memory", leaf)
 

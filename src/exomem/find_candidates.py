@@ -346,6 +346,7 @@ def collect_candidates(
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
     filtered: bool = False,
+    media_restricted: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -630,14 +631,22 @@ def collect_candidates(
                     clip_qvec,
                     k=candidate_k * 8,
                     allowed_paths=allowed_images,
-                    alpha=config.clip_semantic_alpha,
+                    # The caller restricted this search to pictures. The band guards mixed results
+                    # against a picture that matches only by chance; among pictures alone it only
+                    # withholds. An alpha of 0 has no chance level, so the index applies no band.
+                    alpha=0.0 if media_restricted else config.clip_semantic_alpha,
                     min_population=config.clip_semantic_min_population,
                 )
                 for img_rel, frame_ts, score in clip_search.hits:
                     if len(clip_ranking) >= candidate_k:
                         break
                     sidecar_rel = img_rel + ".md"
-                    if sidecar_rel not in clip_score_by_path and (vault_root / sidecar_rel).exists():
+                    # Inside a restriction every row comes from the indexed eligible pages, so their
+                    # sidecars exist; a stat per row would cost tens of ms at 20,000 pictures.
+                    if sidecar_rel not in clip_score_by_path and (
+                        (media_restricted and sidecar_rel in semantic_paths)
+                        or (vault_root / sidecar_rel).exists()
+                    ):
                         clip_ranking.append(sidecar_rel)
                         clip_score_by_path[sidecar_rel] = score
                         clip_frame_ts_by_path[sidecar_rel] = frame_ts
@@ -647,6 +656,7 @@ def collect_candidates(
                         "backend": type(clip_idx).__name__,
                         "model": embeddings.CLIP_MODEL_NAME,
                         "band": clip_search.band,
+                        "media_restricted": media_restricted,
                         "withheld_pages": clip_search.withheld_pages,
                         "metric": {
                             "name": "cosine_similarity",
@@ -1178,6 +1188,11 @@ def collect_candidates(
     with _span(timings, "fusion"):
         intent_label = intent or find_policy.classify_intent(query)
         weights = config.intent_weights(intent_label)
+        if media_restricted:
+            weights = tuple(
+                config.clip_media_restricted_weight if lane == "clip" else weight
+                for lane, weight in zip(LANE_ORDER, weights, strict=True)
+            )
         if shadow is not None:
             graph_ranking = shadow(graph_ranking)
             temporal_ranking = shadow(temporal_ranking)

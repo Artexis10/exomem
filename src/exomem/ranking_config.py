@@ -115,6 +115,11 @@ class RankingConfig:
     clip_semantic_alpha: float = 0.01
     # The working set's own floor: the median and MAD of fewer images are noise.
     clip_semantic_min_population: int = 50
+    # When the caller's filters admit only images and videos, the band is off and the CLIP lane
+    # takes this fusion weight in place of its intent weight: the caller has said the answer is a
+    # picture, so picture match leads and the text lanes vote among the pictures. 5.0 found the most
+    # targets in a dev sweep over 21 photos and 18 screenshots (1, 2, 3, 5, 10 and CLIP order alone).
+    clip_media_restricted_weight: float = 5.0
 
     def note_type_factor(self, role: str | None) -> float:
         """The ranking knob a note-type role takes; no role, or `evidence`, is neutral.

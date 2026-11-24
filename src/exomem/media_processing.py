@@ -713,7 +713,7 @@ def reconcile_media(
             store = media_jobs.MediaJobStore(vault)
             durable_job = store.get_by_binary(binary)
             attached = False
-            requested_clip = media_type in {"image", "video"} and not os.environ.get(
+            requested_clip = media_type in media_types.VISUAL_KINDS and not os.environ.get(
                 "EXOMEM_DISABLE_CLIP"
             )
             # A switched-off engine gets no stage, so no job bound to fail; the

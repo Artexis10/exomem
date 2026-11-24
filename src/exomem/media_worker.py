@@ -51,6 +51,7 @@ from . import (
     media_jobs,
     media_publication,
     media_slot_client,
+    media_types,
     preserve,
     prior_extraction,
     provenance,
@@ -3217,7 +3218,7 @@ class MediaWorker:
         unplaced = (item.path for item in media_processing.unplaced_originals(self._vault_root))
         for f in chain(iter_kb_files(kb), unplaced):
             mt = extract.media_type_for(f)
-            if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
+            if mt not in media_types.VISUAL_KINDS:
                 continue
             sidecar = f.with_name(f.name + ".md")
             if not self._is_automatic_media_sidecar(sidecar):

@@ -56,6 +56,8 @@ _KIND_BY_EXT: dict[str, str] = {
 }
 #: Every extraction kind this registry assigns to an extension.
 KINDS = frozenset(_KIND_BY_EXT.values())
+#: The kinds the CLIP index embeds: an image whole, a video by its keyframes.
+VISUAL_KINDS = frozenset({"image", "video"})  # nosemgrep: ep-word-set -- a subset of the closed KINDS above, not a vocabulary
 
 
 def media_type_for(path: str | Path) -> str | None:
