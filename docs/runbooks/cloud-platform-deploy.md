@@ -251,7 +251,8 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG"
 
 Expected result: the command prints `recorded the platform Deployment for <tag>` and
 `dispatched cloud-deploy.yml on main`, and the next `cloud-deploy` run ends with
-`cloud-deploy: CANARY_ON_TARGET` or `cloud-deploy: CELL_IMAGE_CURRENT`.
+`cloud-deploy: CANARY_ON_TARGET` or `cloud-deploy: CELL_IMAGE_CURRENT`. While the rollout is paused, the run ends with
+`cloud-deploy: ROLLOUT_PAUSED <code>`; follow "Read and clear a paused rollout".
 
 ### Cross the backup key conversion
 
@@ -519,7 +520,8 @@ crossed so far, not only the entries that its own upgrade crossed.
    ```
 
 Expected result: step 5 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
-or `cloud-deploy: CELL_IMAGE_CURRENT`.
+or `cloud-deploy: CELL_IMAGE_CURRENT`. While the rollout is paused, the run ends with `cloud-deploy: ROLLOUT_PAUSED <code>`;
+follow "Read and clear a paused rollout".
 
 If the upgrade failed, record nothing: the newest successful Deployment keeps naming the release the platform runs.
 

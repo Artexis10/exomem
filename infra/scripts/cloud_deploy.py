@@ -333,13 +333,14 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if not tools.attest(image, tag):
         raise Stop("ATTESTATION_UNVERIFIED", ok=False)
 
-    # D1 step 3: already the fleet's image, by digest or by release tag, before any
-    # gate, so a release the fleet runs never raises a platform alert.
+    # D1 step 3: never resume a paused fleet; only a person clears the pause. This comes
+    # first, so a re-run for the release the rollout paused on fails instead of passing.
     view = substrate.rollout()
+    refuse_paused(view)
+    # D1 step 4: already the fleet's image, by digest or by release tag, before any
+    # gate, so a release the fleet runs never raises a platform alert.
     if view.get("cell_image") == image or view.get("release") == tag:
         raise Stop("CELL_IMAGE_CURRENT", ok=True)
-    # D1 step 4: never resume a paused fleet; only a person clears the pause.
-    refuse_paused(view)
 
     # D2: the platform gate.
     deployment = github.newest_platform_deployment()
