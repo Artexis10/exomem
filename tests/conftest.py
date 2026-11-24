@@ -773,7 +773,7 @@ def _candidate_exclusion_pids() -> frozenset[int]:
 
 
 def _concurrent_process_candidates() -> tuple[str, ...]:
-    """Best-effort `/proc` scan for other live pytest/exomem processes.
+    """Best-effort `/proc` scan for other live pytest/exomem/evermatter processes.
 
     Purely diagnostic triage, never load-bearing for the assert: the state
     root is machine-global, so another worktree's pytest, a stray `-x` run,
@@ -807,7 +807,7 @@ def _concurrent_process_candidates() -> tuple[str, ...]:
 _STATE_ROOT_GUARD_TRIAGE_HINT = (
     "this also fires for cross-process interference, not just this diff: "
     "another worktree's pytest, a stray -x run, or a foreign tmpdir can "
-    "touch this same machine-global root; check for concurrent pytest/exomem "
+    "touch this same machine-global root; check for concurrent pytest/exomem/evermatter "
     "processes and rerun this file solo before attributing the failure to "
     "the code under test."
 )

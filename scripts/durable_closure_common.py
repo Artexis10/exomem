@@ -560,17 +560,28 @@ def runtime_provenance(
     expected_version: str | None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    if package == "exomem":
+        # The product was renamed; its own list names the distributions to try.
+        from exomem.install_info import DISTRIBUTION_NAMES as distributions
+    else:
+        distributions = (package,)
     probe = (
-        "import hashlib, importlib.metadata as m, json, os, pathlib, "
-        f"{package.replace('-', '_')} as p; "
-        "path=pathlib.Path(p.__file__); "
-        "deps=sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
-        'if d.metadata.get("Name")); '
-        "print(json.dumps({'version':m.version('"
-        + package
-        + "'),'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),"
-        "'dependencies':deps,'package_root':str(path.parent),"
-        "'runtime_pythonpath_root':os.environ.get('PYTHONPATH')}))"
+        "import hashlib, importlib.metadata as m, json, os, pathlib\n"
+        f"import {package.replace('-', '_')} as p\n"
+        "version = None\n"
+        f"for name in {tuple(distributions)!r}:\n"
+        "    try:\n"
+        "        version = m.version(name)\n"
+        "        break\n"
+        "    except m.PackageNotFoundError:\n"
+        "        continue\n"
+        "path = pathlib.Path(p.__file__)\n"
+        "deps = sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
+        'if d.metadata.get("Name"))\n'
+        "print(json.dumps({'version': version,"
+        "'module_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),"
+        "'dependencies': deps, 'package_root': str(path.parent),"
+        "'runtime_pythonpath_root': os.environ.get('PYTHONPATH')}))\n"
     )
     try:
         installed = json.loads(
