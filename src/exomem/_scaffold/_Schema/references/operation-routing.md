@@ -99,6 +99,16 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   original bytes are the record and a transcription is derived from them, so
   preserve the original before (or in the same call as) any transcription, and
   never save only the transcription. Send bytes, never a path: no tool takes one.
+  - **Keep proof in the turn it arrives, without being asked.** When the user shares a
+    file that proves something (a serial label, receipt, invoice, order confirmation or
+    warranty card), keep the original in that same turn, under proactive capture. A
+    caption goes in `description`. Each kept file's result carries `cite`, a wikilink to
+    the stored file; put it in the observation or note you write about the file.
+  - **Never keep a card number, a security code or a password.** If a file shows one,
+    do not save it: ask for a copy with it covered, and say why. Text you save is
+    checked for card numbers and machine credentials such as API keys: one is
+    removed before saving, and the result's `warnings` say so; tell the user. A
+    short password, PIN or security code is not detected, so never write one.
   - **File handles (ChatGPT attachments):** pass them in `files`, and put your
     transcription in
     **`save_evidence(scope="...", category="...", files=[...], options={"transcriptions": [{"file_id": "...", "text": "..."}]})`**.
@@ -111,6 +121,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     token. `--lane source` holds it for `save_source`; `--scope S --category C`
     preserves straight to Evidence.
   - **A folder to import (personal server):** the route is in [importing](importing.md).
+  - **Evidence with no file handle, in one call:** call
+    `upload_files(lane="evidence", scope="...", category="...", description="...")`. The
+    send then saves the file as Evidence on arrival and returns its `stored_path`, `hash`
+    and `cite`; no `save_evidence` call follows. From a sandbox, run the reply's `send`
+    step as below, with `expected_sha256` set when you have the digest. With no shell,
+    give the user the reply's `page` link (personal server only): they open it on the
+    device that holds the file, pick the file, and the page shows what was saved.
   - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
     local token):** only with the user's opt-in (code execution on, the Evermatter host
     allowed for network access, a fresh conversation), hold the bytes with the
@@ -154,9 +171,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     attachment limit. The handoff's `max_bytes` is the service's own limit. Pasted
     inline images never reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
     endpoint or read a credential from the user's environment.
-  - **No path for the bytes:** tell the user the original was not preserved and, on a
-    personal server, offer the browser upload form. Custody is proven only by a returned
-    `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
+  - **No path for the bytes:** on a personal server, give the user the `page` link from
+    `upload_files(lane="evidence", scope="...", category="...")`. Otherwise tell the user
+    the original was not preserved. Custody is proven only by a returned `stored_path`,
+    `size` and `hash`, never by a minted token, a link or a saved transcript.
 - **Media processing is automatic and actionable — `inspect_memory` and `manage_memory`.** Supported
   audio and video preserved through Evermatter or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.

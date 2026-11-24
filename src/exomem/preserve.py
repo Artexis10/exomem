@@ -545,6 +545,25 @@ def pools_evidence_original(vault_root: Path, artifact_name: str) -> bool:
     return pools_named_original(vault_root, artifact_name) and not is_dataset_name(artifact_name)
 
 
+def redact_capture_text(
+    *, content: str | None = None, description: str | None = None, text: str | None = None,
+) -> tuple[str | None, str | None, str | None, list[str]]:
+    """The three caller texts a capture keeps, with card numbers and credentials removed, and one warning per field."""
+    from .governance import capture_redaction
+
+    kept: list[str | None] = []
+    warnings: list[str] = []
+    for field, value in (("text", content), ("caption", description), ("extracted text", text)):
+        if not value:
+            kept.append(value)
+            continue
+        redaction = capture_redaction.redact(value)
+        kept.append(redaction.text)
+        if redaction.removed:
+            warnings.append(capture_redaction.warning(field, redaction.removed))
+    return kept[0], kept[1], kept[2], warnings
+
+
 def preserve(
     vault_root: Path,
     *,
@@ -593,6 +612,10 @@ def preserve(
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
+    # Before anything hashes or writes them: a kept text never holds a card number or a labelled credential.
+    content, description, text, redaction_warnings = redact_capture_text(
+        content=content, description=description, text=text,
+    )
     missing: list[str] = []
     reasons: list[str] = []
 
@@ -702,9 +725,9 @@ def preserve(
         artifact_bytes = None
         artifact_text = content
 
-    warnings: list[str] = folder_split_warnings(
+    warnings: list[str] = [*redaction_warnings, *folder_split_warnings(
         vault_root, evidence_folder(vault_root, scope_safe, category_safe)
-    )
+    )]
     written_artifact = False
     sidecar_rel: str | None = None
     sidecar_ref: str | None = None

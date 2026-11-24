@@ -250,6 +250,14 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
         )
         for name in ("icon.png", "icon-small.png")
     ),
+    # The session-close replay's invented images, which render_fixtures.py draws from fixed text.
+    *(
+        BinaryProvenance(
+            f"benchmarks/import_guidance/scenarios/session-close/fixtures/{name}",
+            "invented image fixture that render_fixtures.py writes from fixed text",
+        )
+        for name in ("label.png", "card.png")
+    ),
     # Each committed sample in a binary or provenance-checked format is named: a glob
     # here would also admit any file added under that folder later, and fnmatch's
     # `*` crosses directories.

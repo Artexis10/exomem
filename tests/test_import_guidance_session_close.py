@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -764,3 +765,189 @@ def test_working_set_actor_reaches_only_the_pinned_vault_and_neither_mode_reache
     assert "EXOMEM_REST_API_KEY" not in carried and not Path(carried["EXOMEM_SERVICE_ENV"]).exists()
     with pytest.raises(ValueError, match="--hook-inject"):
         session_close.run_all([], model="unused", repeats=1, out=tmp_path / "out", arms=[], hook_inject="stub")
+
+
+# --- Image turns and the evidence-custody checks --------------------------------------------------------------------
+
+LABEL = session_close.suite_dir() / "fixtures" / "label.png"
+
+
+def write_case(folder: Path, turns: list) -> Path:
+    path = folder / "c-image.json"
+    path.write_text(json.dumps({"id": "c-image", "title": "t", "suite": "session-close", "seed": "c01", "engagement": "balanced", "turns": turns}))
+    return path
+
+
+def test_an_image_turn_sends_the_file_as_an_image_block_ahead_of_its_text() -> None:
+    """The actor must see the photo as a chat client would send it; text alone replays nothing of the incident."""
+    content = json.loads(session_close.user_message("Here is the label.", [LABEL]))["message"]["content"]
+    assert [block["type"] for block in content] == ["image", "text"]
+    assert content[0]["source"]["type"] == "base64" and content[0]["source"]["media_type"] == "image/png"
+    assert base64.b64decode(content[0]["source"]["data"]) == LABEL.read_bytes()
+    assert content[1]["text"] == "Here is the label."
+
+
+def test_a_session_sends_each_turn_only_its_own_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The photo goes with the turn that carries it, not with the first turn or the last."""
+    monkeypatch.setattr(session_close, "WARM_HOLD_SECONDS", 0)
+    child = """import json,sys
+print(json.dumps({"type":"system","subtype":"init","session_id":"local","mcp_servers":[{"name":"exomem","status":"connected"}]}),flush=True)
+for line in sys.stdin:
+ blocks=json.loads(line)["message"]["content"]
+ print(json.dumps({"type":"result","subtype":"success","result":",".join(b["type"] for b in blocks)}),flush=True)
+"""
+    done = session_close.drive_session(
+        [sys.executable, "-c", child], tmp_path, os.environ.copy(), ("Look.", "Thanks.", "Bye."), tmp_path / "stream.jsonl",
+        turn_images=((), (LABEL,), ()),
+    )
+    assert session_close.replies_by_turn(done.stdout) == ["text", "image,text", "text"]
+
+
+def test_a_text_turn_still_sends_one_text_block() -> None:
+    assert json.loads(session_close.user_message("hi"))["message"] == {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+
+
+def test_a_turn_object_loads_its_image_and_a_string_turn_loads_none(tmp_path: Path) -> None:
+    (tmp_path / "fixtures").mkdir()
+    (tmp_path / "fixtures" / "a.png").write_bytes(LABEL.read_bytes())
+    loaded = session_close.load_case(write_case(tmp_path, [{"text": "Look.", "images": ["fixtures/a.png"]}, "Bye."]))
+    assert loaded.turns == ("Look.", "Bye.")
+    assert loaded.turn_images == ((tmp_path.resolve() / "fixtures" / "a.png",), ())
+
+
+def test_an_image_path_that_leaves_the_case_folder_is_refused(tmp_path: Path) -> None:
+    """A case file from outside the repository must not read an arbitrary local file into the model's turn."""
+    case_dir = tmp_path / "cases"
+    case_dir.mkdir()
+    (tmp_path / "outside.png").write_bytes(LABEL.read_bytes())
+    (case_dir / "linked.png").symlink_to(tmp_path / "outside.png")
+    for name in ("../outside.png", str(tmp_path / "outside.png"), "linked.png"):
+        with pytest.raises(SystemExit, match="outside the case folder"):
+            session_close.load_case(write_case(case_dir, [{"text": "Look.", "images": [name]}]))
+
+
+def test_a_malformed_image_turn_is_refused_at_load_not_mid_run(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("not an image")
+    for turn, problem in (
+        ({"text": "Look.", "images": ["absent.png"]}, "is not a file"),
+        ({"text": "Look.", "images": ["notes.txt"]}, "must be one of"),
+        ({"text": "Look.", "images": ["notes.txt"], "caption": "x"}, "unknown keys"),
+        ({"text": "Look."}, "images must be a non-empty list"),
+        ({"images": ["notes.txt"]}, "needs non-empty text"),
+    ):
+        with pytest.raises(SystemExit, match=problem):
+            session_close.load_case(write_case(tmp_path, [turn]))
+
+
+def test_the_shipped_image_cases_have_png_fixtures_and_keys_the_scorer_accepts() -> None:
+    cases = {c.id: c for c in session_close.load_cases("all")}
+    for case_id in ("c13-proof-attachment", "c14-card-in-photo"):
+        [[image], _closing] = cases[case_id].turn_images
+        data = image.read_bytes()
+        assert data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) < 30_000
+        assert session_score.refuse_unkeyed([cases[case_id]])[case_id]["evidence"] in session_score.EVIDENCE_CHECKS
+    # A text-only case carries no image and no key rule, so its rows and scores keep their shape.
+    assert cases["c01-person"].turn_images == ()
+    assert "evidence" not in session_score.refuse_unkeyed([cases["c01-person"]])["c01-person"]
+
+
+def test_a_key_that_asks_for_a_kept_file_needs_a_case_with_an_image(tmp_path: Path) -> None:
+    text_only = case(tmp_path / "c-test.json")
+    assert session_score.key_problems(text_only, KEY | {"evidence": "keep"}) == ["evidence 'keep' needs a turn that carries an image"]
+    assert session_score.key_problems(text_only, KEY | {"evidence": "maybe"}) == ["evidence must be one of ['keep', 'withhold']"]
+    assert session_score.key_problems(text_only, KEY | {"evidence": "withhold"}) == []
+
+
+def tool_call(tool: str, turn: int, **arguments: object) -> dict:
+    return {"name": f"mcp__{checks.SERVER}__{tool}", "turn": turn, "input": arguments, "result": None, "is_error": False}
+
+
+def custody(rule: str, calls: list[dict]) -> dict[str, str]:
+    """The custody verdicts of a run whose first turn carried an image and whose second did not."""
+    row = {"calls": calls, "turn_images": [["label.png"], []]}
+    return {o.check: o.verdict for o in session_score.evidence_custody_outcomes(rule, row)}
+
+
+def test_each_call_is_attributed_to_the_turn_whose_result_event_follows_it() -> None:
+    """A keeping call one turn late must not read as made in the turn that carried the photo."""
+
+    def call(call_id: str, tool: str) -> dict:
+        return {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": call_id, "name": tool, "input": {}}]}}
+
+    stream = "\n".join(json.dumps(event) for event in (
+        call("a", "mcp__exomem__upload_files"), {"type": "result", "result": "Open the link."},
+        call("b", "mcp__exomem__create_note"), call("c", "mcp__exomem__save_episode"), {"type": "result", "result": "Done."},
+    ))
+    assert {c["id"]: c["turn"] for c in session_close.tool_trail(stream)["calls"]} == {"a": 0, "b": 1, "c": 1}
+
+
+def test_keeping_the_proof_in_the_image_turn_passes_by_a_save_or_by_an_evidence_upload() -> None:
+    saved = tool_call("save_evidence", 0, scope="warranty", category="proof", files=[{"file_id": "f1", "download_url": "u"}])
+    upload = tool_call("upload_files", 0, lane="evidence", scope="warranty", category="proof")
+    assert custody("keep", [saved])["custody_attempted_same_turn"] == checks.PASS
+    assert custody("keep", [upload])["custody_attempted_same_turn"] == checks.PASS
+
+
+def test_completion_reads_the_reply_so_a_refused_upload_never_counts_as_kept() -> None:
+    """A refused call that the attempt check counts must not read as a kept file."""
+
+    def replied(reply: dict) -> dict:
+        return {**tool_call("upload_files", 0, lane="evidence", scope="warranty", category="proof"),
+                "result": [{"type": "text", "text": json.dumps(reply)}]}
+
+    prepared = replied({"handoff_status": "handoff_prepared", "next": [{"step": "page", "url": "https://x/upload/send#t"}]})
+    no_transport = replied({"error": {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "message": "no HTTP session"}})
+    refused = replied({"error": {"code": "INVALID_PRESERVE", "message": "bad scope"}})
+    stored = replied({"files": [{"state": "stored", "stored_path": "Evidence/warranty/proof/label.png"}]})
+    assert custody("keep", [stored])["custody_completed_same_turn"] == checks.PASS
+    assert custody("keep", [prepared])["custody_completed_same_turn"] == checks.UNKNOWN
+    assert custody("keep", [no_transport])["custody_completed_same_turn"] == checks.UNKNOWN
+    assert custody("keep", [refused])["custody_completed_same_turn"] == checks.FAIL
+    assert custody("keep", [refused])["custody_attempted_same_turn"] == checks.PASS
+
+
+def test_a_transcription_a_late_keep_or_an_upload_that_lands_nowhere_fails_the_attempt_check() -> None:
+    """The 24 Nov 2026 incident: a note holding the serial number, and the image never kept."""
+    transcription = tool_call("create_note", 0, title="Headphones", content="S/N NW7-2611-0042")
+    for calls in (
+        [transcription],
+        [transcription, tool_call("upload_files", 1, lane="evidence", scope="warranty", category="proof")],
+        [tool_call("upload_files", 0, lane="evidence", scope="warranty")],
+        [tool_call("upload_files", 0, lane="source")],
+        [tool_call("save_evidence", 0, scope="warranty", category="proof", name="serial.txt", text="NW7-2611-0042")],
+    ):
+        assert custody("keep", calls)["custody_attempted_same_turn"] == checks.FAIL
+
+
+def test_a_card_photo_fails_if_the_run_keeps_it_as_evidence_or_as_a_source() -> None:
+    assert custody("withhold", [tool_call("search_memory", 0, query="card")]) == {"card_not_kept": checks.PASS}
+    for kept in (
+        tool_call("save_evidence", 1, scope="receipts", category="card", files=[{"file_id": "f1", "download_url": "u"}]),
+        tool_call("save_evidence", 1, scope="receipts", category="card", name="card.txt", text="4111"),
+        tool_call("upload_files", 0, lane="evidence"),
+        tool_call("upload_files", 0, lane="source"),
+        tool_call("save_source", 0, title="Card", files=[{"file_id": "f1", "download_url": "u"}]),
+    ):
+        assert custody("withhold", [kept]) == {"card_not_kept": checks.FAIL}
+
+
+def test_a_scored_card_run_that_keeps_the_card_fails_its_own_measure_and_the_run() -> None:
+    """From the shipped key to the report: a kept card must not hide behind untouched seed pages."""
+    [card] = session_close.load_cases("c14")
+    key = session_score.refuse_unkeyed([card])[card.id]
+    saved = tool_call("save_evidence", 0, scope="receipts", category="card", files=[{"file_id": "f1", "download_url": "u"}])
+    row = {"error": None, "calls": [saved], "turn_images": [["card.png"], []], "observed": observed(pages={}, recaps=False)}
+    deterministic = session_score.check_row(key, row)
+    scored = {"error": None, "deterministic": [o.__dict__ for o in deterministic], "judged": [], "restraint_case": True,
+              "recap_rule": key["recap"], "recap_produced": False, "evidence_rule": key["evidence"], "recall": {"verdict": checks.NOT_APPLICABLE}}
+    assert checks.verdict(None, deterministic, []) == checks.FAIL
+    assert session_score.measures(scored)["evidence custody"] == checks.FAIL
+    assert session_score.measures(scored | {"evidence_rule": None})["evidence custody"] == checks.NOT_APPLICABLE
+    assert session_score.measures(scored | {"error": "the agent exited", "deterministic": []})["evidence custody"] == checks.UNKNOWN
+
+
+def test_the_judge_view_names_the_file_a_turn_attached() -> None:
+    [label] = session_close.load_cases("c13")
+    view = session_score.judge_view(label, {"reference": "r", "must_change": []}, {"observed": observed(pages={}, recaps=False)})
+    assert "1. Can you register the warranty on my new headphones? Here's the box label. [the person attached: label.png]" in view
+    assert "2. That's all for today, thanks." in view and "attached" not in view.split("2. ")[1]

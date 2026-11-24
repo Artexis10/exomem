@@ -63,7 +63,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # added 1,067 B on 2026-11-24 (add-unit-level-supersession): one claim inside a note now supersedes,
 # assesses and links at unit level instead of needing a whole new page. `supersede_note` gained a
 # one-line pointer to it (+73 B).
-TOTAL_BUDGET = 31_002
+# Proof files saved in one call added 166 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
+# `scope`, `category` and `description` so an evidence send saves on arrival instead of needing a held-handle save,
+# and `save_evidence` says to keep proof in the turn it arrives.
+TOTAL_BUDGET = 31_168
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -89,13 +92,13 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1300,
+    "save_evidence": 1320,
     "save_source": 1550,
     "search_memory": 1050,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
     "supersede_note": 1400,
-    "upload_files": 800,
+    "upload_files": 940,
 }
 
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
