@@ -694,6 +694,15 @@ Do not set `cell_image` back to a release before a one-way `cell` barrier that c
 refuses that move: it starts no attempt, keeps each cell on its image, and pauses the rollout with
 `UPGRADE_BACKWARD_CROSSING`. Fix forward with a new release instead, then clear the pause.
 
+### Withdraw to a release before v0.184.0
+
+A release before v0.184.0 refuses a vault that recorded the held-upload cancellation format, so a cell withdrawn to
+it does not start. Before you set `cell_image`, or a cell's own image, to such a release, stop each cell and run
+`exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations` against its vault, as
+[managed-service-upgrades.md](../managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state) describes. No
+cleanup removes shared original storage: a vault in that format never starts on a release from before it, so fix
+forward instead.
+
 ### Respond to a release or rollout alert
 
 | Alert | Meaning | Step |
