@@ -453,6 +453,38 @@ def test_a_missing_span_refuses_saying_how_to_read_unit_ids(tmp_path: Path) -> N
     assert page.read_bytes() == before
 
 
+@pytest.mark.parametrize(
+    ("item", "span", "next_step"),
+    [
+        ("- supplies [[Cedar Two]]", "supplies", "relation"),
+        ("- [[Cedar Two]], [[Winter catalog]]", "Winter catalog", "only links"),
+        ("- rating:: high", "rating", "Dataview"),
+        ("- Juniper One takes\n  preorders in November.", "Juniper One takes", "one line"),
+    ],
+)
+def test_a_span_on_an_item_that_is_no_claim_refuses_and_names_the_next_step(
+    tmp_path: Path, item: str, span: str, next_step: str
+) -> None:
+    page = _write_page(
+        tmp_path,
+        rel=ENTITY_PAGE,
+        source=_entity_source(f"# Harbour Co-op\n\n## Suppliers\n{item}\n- Sells seeds.\n"),
+    )
+    before = page.read_bytes()
+
+    with request_scope(owner_principal(surface="cli")), pytest.raises(
+        ValueError, match="SUPERSEDE_TARGET_NOT_A_CLAIM"
+    ) as raised:
+        _edit_note(
+            tmp_path, note=ENTITY_PAGE, action="supersede_observation",
+            span=span, text="Corrected.", category="vendors",
+        )
+
+    assert next_step in str(raised.value)
+    assert "Remediation:" in str(raised.value)
+    assert page.read_bytes() == before
+
+
 def test_an_already_superseded_target_names_its_successor(tmp_path: Path) -> None:
     page = _write_page(
         tmp_path,
@@ -704,8 +736,10 @@ def _facet_audit_vault(root: Path) -> Path:
             "# Harbour Co-op\n\n"
             "## Suppliers\n"
             "- Juniper One takes preorders in November.\n"
+            "  - Cedar Two ships on Mondays.\n"
             "- [[Cedar Two]], [[Winter catalog]]\n"
-            "- supplies [[Cedar Two]]\n\n"
+            "- supplies [[Cedar Two]]\n"
+            "- rating:: high\n\n"
             "## Observations\n\n- [vendors] Opens at nine. ^claim-2\n"
         ),
     )
@@ -728,6 +762,27 @@ def test_the_audit_reports_facet_prose_items_but_not_links_units_or_relations(
     assert finding.path == ENTITY_PAGE
     assert "Suppliers" in finding.detail
     assert "preorders" in finding.detail
+
+
+def test_a_line_separator_inside_an_item_does_not_shift_the_relation_lines(
+    tmp_path: Path,
+) -> None:
+    """The relation scanner splits U+2028 as a line, markdown does not; offsets keep them aligned."""
+    _write_page(
+        tmp_path,
+        rel=ENTITY_PAGE,
+        source=_entity_source(
+            "# Harbour Co-op\n\n"
+            "## Suppliers\n"
+            "- Juniper One takes\u2028preorders in November.\n"
+            "- supplies [[Cedar Two]]\n"
+            "- Sells seeds.\n"
+        ),
+    )
+
+    findings = _facet_findings(tmp_path)
+
+    assert [finding.detail.rsplit(": ", 1)[-1] for finding in findings] == ["'Sells seeds.'"]
 
 
 def test_a_dry_run_fix_lists_the_plan_and_writes_nothing(tmp_path: Path) -> None:
@@ -780,8 +835,10 @@ def test_the_reviewed_plan_converts_items_in_place(tmp_path: Path) -> None:
     text = page.read_bytes().decode("utf-8")
     # The prose item is now a compact unit under its heading's category, same text, new anchor.
     assert "- [suppliers] Juniper One takes preorders in November. ^" in text
-    # Link-only and relation items are untouched; nothing else changed.
-    assert "- [[Cedar Two]], [[Winter catalog]]" in text
-    assert "- supplies [[Cedar Two]]" in text
+    # Nested, link-only, relation and inline-field items are untouched.
+    assert "\n  - Cedar Two ships on Mondays.\n" in text
+    assert "\n- [[Cedar Two]], [[Winter catalog]]\n" in text
+    assert "\n- supplies [[Cedar Two]]\n" in text
+    assert "\n- rating:: high\n" in text
     # A later supersede can name the converted unit's anchor.
     assert _facet_findings(tmp_path) == []

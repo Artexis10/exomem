@@ -441,7 +441,7 @@ def observe_memory(
                 anchor=target_anchor,
                 as_of=normalized_as_of,
             )
-            after_body = _apply_edits(body, resolved.edits)
+            after_body = semantic_units.apply_splices(body, resolved.edits)
             after_body = _append_rich(after_body, rendered)
         else:
             # assess changes verdict, check_by, or relations — never the claim's text.
@@ -1120,17 +1120,13 @@ def _span_claim_target(
     body: str, span: str, document: Any, existing_anchors: set[str | None],
 ) -> _ResolvedClaim:
     """The claim an exact span names: a unit it sits in, or the list item it converts."""
-    rich_spans = tuple(
-        (unit.span.start_offset, unit.span.end_offset)
-        for unit in document.units
-        if unit.form == "rich"
-    )
-    items = [
-        item
-        for item in semantic_units.claim_items(body)
-        if not any(start <= item.start < end for start, end in rich_spans)
+    targets = [
+        target
+        for target in semantic_units.claim_targets(body, document.units)
+        # A rich unit's list rows are its metadata, not claims: `unit` names a rich unit.
+        if target.unit is None or target.unit.form != "rich"
     ]
-    matches = [item for item in items if span in item.text]
+    matches = [target for target in targets if span in target.item.text]
     if len(matches) > 1:
         raise ObserveMemoryError(
             "SUPERSEDE_TARGET_AMBIGUOUS",
@@ -1145,40 +1141,73 @@ def _span_claim_target(
             "Quote the exact text of one claim line, or read the page's units "
             "and pass the unit's `unit` id.",
         )
-    item = matches[0]
-    for unit in document.units:
-        if unit.span.start_offset <= item.start < unit.span.end_offset:
-            return _resolved_claim(body, unit, existing_anchors)
-    try:
-        category = semantic_units.heading_category(item.heading or "")
-    except ValueError as error:
+    target = matches[0]
+    if target.unit is not None:
+        return _resolved_claim(body, target.unit, existing_anchors)
+    if target.refusal is not None:
+        raise ObserveMemoryError("SUPERSEDE_TARGET_NOT_A_CLAIM", *_not_a_claim(target.refusal))
+    if target.category is None:
         raise ObserveMemoryError(
             "INVALID_SEMANTIC_CATEGORY",
             "the claim's `##` section names no governed category",
             "Move the claim under a section that names a category, or pass "
             "`unit` naming the unit directly.",
-        ) from error
-    anchor = _generated_anchor(
-        _COMPACT_KIND, category, item.text, (), None, (), existing_anchors,
-    )
+        )
+    anchor, conversion = claim_conversion(target, existing_anchors)
     return _ResolvedClaim(
         unit=None,
         anchor=anchor,
-        category=category,
+        category=target.category,
         kind=None,
         form="compact",
-        content=item.text,
-        span=(item.start, item.end),
-        edits=(
-            (
-                item.start,
-                item.end,
-                semantic_units.claim_item_unit_line(
-                    item, category=category, anchor=anchor
-                ),
-            ),
-        ),
+        content=target.item.text,
+        span=(target.item.start, target.item.end),
+        edits=(conversion,),
     )
+
+
+def _not_a_claim(refusal: semantic_units.ClaimRefusal) -> tuple[str, str]:
+    """Why a list item cannot become a unit in place, and the next step: one per refusal."""
+    edit = capabilities.active_tools_text("edit_memory")
+    other = "To correct a claim, quote that claim's own text or pass its `unit` id."
+    match refusal:
+        case "relation":
+            return (
+                "the span lies inside a typed relation line, which is a link, not a claim",
+                f"To change the relation, edit its line with {edit}. {other}",
+            )
+        case "links_only":
+            return (
+                "the span lies inside a list item that holds only links",
+                f"To change the links, edit the line with {edit}. {other}",
+            )
+        case "inline_field":
+            return (
+                "the span lies inside a Dataview inline field (`key:: value`); "
+                "a converted line would change what Dataview reads",
+                f"Edit the field's value with {edit}. {other}",
+            )
+        case "wraps":
+            return (
+                "the claim item runs past one line, so it cannot become a compact unit in place",
+                f"Join the item into one line with {edit}, then send this call again.",
+            )
+
+
+def claim_conversion(
+    target: semantic_units.ClaimTarget, existing_anchors: set[str | None],
+) -> tuple[str, tuple[int, int, str]]:
+    """The anchor a convertible claim item gains and the splice that makes it a compact unit.
+
+    The span path and the reviewed audit fix both convert through here: the item
+    keeps its indent and text bytes and gains `[<category>]` and `^<anchor>`. The
+    anchor joins `existing_anchors`, so a batch of conversions never collides.
+    """
+    item = target.item
+    category = str(target.category)
+    anchor = _generated_anchor(_COMPACT_KIND, category, item.text, (), None, (), existing_anchors)
+    existing_anchors.add(anchor)
+    return anchor, (item.start, item.end, f"{item.indent}- [{category}] {item.text} ^{anchor}")
 
 
 def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
@@ -1199,13 +1228,6 @@ def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
         if key == "category":
             return (position, position, f"- id: {anchor}\n")
     return (fallback, fallback, f"- id: {anchor}\n")
-
-
-def _apply_edits(body: str, edits: tuple[tuple[int, int, str], ...]) -> str:
-    """Apply splices at original body offsets, rightmost first."""
-    for start, end, replacement in sorted(edits, key=lambda edit: edit[0], reverse=True):
-        body = body[:start] + replacement + body[end:]
-    return body
 
 
 def _superseding_unit(

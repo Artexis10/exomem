@@ -6712,44 +6712,21 @@ def _check_question_aging(
 # ---------------- check: note_cohesion ----------------
 
 
-def _entity_facet_claims(
-    body: str, document: Any
-) -> list[tuple[semantic_units.ClaimItem, str]]:
-    """An entity page's facet items that carry claims but parse as nothing addressable.
+def entity_facet_claims(body: str, document: Any) -> list[semantic_units.ClaimTarget]:
+    """An entity page's facet items that carry a claim nothing can address yet.
 
-    This is the one enumeration the audit check and the reviewed fix share, so
-    the finding and the conversion can never disagree about which lines move.
-    Items inside `## Observations` or inside any parsed unit's span are already
-    units; markdown-relation lines and link-only items are excluded by contract.
+    The audit check and the reviewed fix share this list, so the finding and the
+    conversion never disagree. `semantic_units.claim_targets` decides what
+    converts; the audit's own scope is the facets, the sections other than
+    `## Observations`, where compact units already live.
     """
-    from . import markdown_relations
-
-    observations = semantic_units.section_ranges(body, "observations")
-    unit_spans = [
-        (unit.span.start_offset, unit.span.end_offset) for unit in document.units
+    return [
+        target
+        for target in semantic_units.claim_targets(body, document.units)
+        if target.convertible
+        and semantic_language_registry.normalize_label(target.item.heading or "")
+        != "observations"
     ]
-    relation_lines = {
-        candidate.line
-        for candidate in markdown_relations.scan_markdown_relations(
-            body, include_legacy=True
-        ).candidates
-    }
-    claims: list[tuple[semantic_units.ClaimItem, str]] = []
-    for item in semantic_units.claim_items(body):
-        if any(start <= item.start < end for start, end in observations):
-            continue
-        if any(start <= item.start < end for start, end in unit_spans):
-            continue
-        if body.count("\n", 0, item.start) + 1 in relation_lines:
-            continue
-        if not semantic_units.claim_item_has_text(item):
-            continue
-        try:
-            category = semantic_units.heading_category(item.heading or "")
-        except ValueError:
-            continue
-        claims.append((item, category))
-    return claims
 
 
 def _check_entity_facets(
@@ -6776,8 +6753,8 @@ def _check_entity_facets(
             )
         except (OSError, ValueError):
             continue
-        for item, category in _entity_facet_claims(page.body, state.document):
-            line_no = page.body.count("\n", 0, item.start) + 1
+        for target in entity_facet_claims(page.body, state.document):
+            item = target.item
             findings.append(
                 AuditFinding(
                     category="entity_facet_unaddressed",
@@ -6785,11 +6762,11 @@ def _check_entity_facets(
                     path=page.rel_path,
                     detail=(
                         f"facet {item.heading!r} holds an unaddressed claim at "
-                        f"line {line_no}: {item.text!r}"
+                        f"line {item.line}: {item.text!r}"
                     ),
                     proposed_fix=(
                         f"convert the item in place to a compact unit "
-                        f"- [{category}] ... ^<anchor>; a reviewed maintenance "
+                        f"- [{target.category}] ... ^<anchor>; a reviewed maintenance "
                         "plan applies it"
                     ),
                 )

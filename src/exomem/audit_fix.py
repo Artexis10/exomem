@@ -483,9 +483,9 @@ def _facet_converted_body(
 ) -> tuple[str, int]:
     """The body with each entity facet claim converted to a compact unit in place.
 
-    The enumeration is the audit check's own (`audit_module._entity_facet_claims`),
-    and the converted line is the same one the supersede span path writes
-    (`semantic_units.claim_item_unit_line`): one conversion contract.
+    The enumeration is the audit check's own (`audit_module.entity_facet_claims`),
+    and each conversion is the one the supersede span path writes
+    (`observe_memory.claim_conversion`): one conversion contract.
     """
     from . import note_types, observe_memory, semantic_index, semantic_units
 
@@ -498,23 +498,10 @@ def _facet_converted_body(
         state = semantic_index.selected_parent_index_state(vault_root, rel_path)
     except (OSError, ValueError):
         return body, 0
-    claims = audit_module._entity_facet_claims(body, state.document)
-    if not claims:
-        return body, 0
-    existing = {unit.anchor for unit in state.document.units if unit.anchor}
-    edits: list[tuple[int, int, str]] = []
-    for item, category in claims:
-        anchor = observe_memory._generated_anchor(
-            observe_memory._COMPACT_KIND, category, item.text, (), None, (), existing
-        )
-        existing.add(anchor)
-        edits.append(
-            (item.start, item.end,
-             semantic_units.claim_item_unit_line(item, category=category, anchor=anchor))
-        )
-    for start, end, replacement in sorted(edits, key=lambda edit: edit[0], reverse=True):
-        body = body[:start] + replacement + body[end:]
-    return body, len(claims)
+    claims = audit_module.entity_facet_claims(body, state.document)
+    existing: set[str | None] = {unit.anchor for unit in state.document.units if unit.anchor}
+    conversions = [observe_memory.claim_conversion(target, existing)[1] for target in claims]
+    return semantic_units.apply_splices(body, conversions), len(claims)
 
 
 def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> list[_Rewrite]:
