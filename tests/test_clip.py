@@ -504,6 +504,30 @@ def test_a_restriction_that_still_admits_notes_keeps_the_band(
     assert any("kill-switch" in h.path for h in hits)
 
 
+def test_a_filter_that_names_no_picture_kind_keeps_the_band(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The vault holds no audio, so every eligible page is a picture, but the caller did not ask for
+    # pictures only: the band stays.
+    rng = np.random.default_rng(11)
+    library = _photo_library(vault, _unit_rows(rng, 60))
+    query = _unit_rows(rng, 1)[0]
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setattr(
+        embeddings, "embed_texts",
+        lambda texts, **kw: np.zeros((len(texts), embeddings.VECTOR_DIM), dtype=np.float32),
+    )
+    monkeypatch.setattr(embeddings, "embed_clip_text", lambda q: query)
+    find_module.clear_cache()
+
+    hits = find_module.find(
+        vault, query="kill switch for risky releases", mode="hybrid",
+        filters={"page.file_type": {"$in": ["image", "audio"]}},
+    )
+
+    assert not [h.path for h in hits if h.path in library]
+
+
 def test_an_alpha_that_has_no_chance_level_switches_the_band_off_instead_of_failing_the_lane(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

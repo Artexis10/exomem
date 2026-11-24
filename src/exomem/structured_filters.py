@@ -12,6 +12,7 @@ import json
 import math
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal, Protocol, TypeAlias, cast
@@ -306,6 +307,31 @@ FOREIGN_ENTRY = _ForeignEntry()
 #: each is a selected meaning, so stored rows can only propose candidates on it.
 #: Closed filter field names that the filter schema declares, not vocabulary.
 ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
+
+
+def requires_one_of(plan: FilterPlan, field: str, allowed: AbstractSet[str]) -> bool:
+    """Whether the plan admits only pages whose `field` is one of `allowed`.
+
+    True when a top-level conjunct is an `$eq` or `$in` predicate on `field` whose values all lie
+    in `allowed`; the other conjuncts only narrow further. A disjunction or negation answers False.
+    """
+    root = plan.root
+    conjuncts = root.children if isinstance(root, AllOf) else () if root is None else (root,)
+    for node in conjuncts:
+        if not isinstance(node, Predicate) or node.field.name != field or not node.operators:
+            continue
+        values: list[object] = []
+        for operator, operand in node.operators:
+            if operator == "$eq" and isinstance(operand, TypedScalar):
+                values.append(operand.value)
+            elif operator == "$in" and isinstance(operand, tuple):
+                values.extend(scalar.value for scalar in operand)
+            else:
+                break
+        else:
+            if values and all(isinstance(value, str) and value in allowed for value in values):
+                return True
+    return False
 
 
 def compile_filter(

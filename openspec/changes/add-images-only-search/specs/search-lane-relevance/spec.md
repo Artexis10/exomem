@@ -31,7 +31,7 @@ The CLIP lane in `find` SHALL admit an image or video keyframe only when its sim
 
 ### Requirement: A Search Restricted To Pictures Ranks By Picture Match
 
-A search SHALL be restricted to pictures when the caller's own filters are active and every page they admit is an image or video sidecar. Such a search SHALL rank the CLIP lane without the chance band and SHALL give it the ranking setting `clip_media_restricted_weight` in place of its intent weight; the other lanes keep their weights. Every other search SHALL rank as it does without this requirement.
+A search SHALL be restricted to pictures when the caller's own filters require `page.file_type` to be `image` or `video`, through `file_types` or an `$eq` or `$in` filter. Such a search SHALL rank the CLIP lane without the chance band and SHALL give it the ranking setting `clip_media_restricted_weight` in place of its intent weight; the other lanes keep their weights. Every other search SHALL rank as it does without this requirement.
 
 #### Scenario: A weak picture match is ranked among pictures
 
@@ -44,6 +44,11 @@ A search SHALL be restricted to pictures when the caller's own filters are activ
 - **WHEN** the caller's filters admit images and notes
 - **THEN** the CLIP lane applies the chance band as for an unfiltered search
 
+#### Scenario: A filter that names no picture kind keeps the band
+
+- **WHEN** the caller's filters name no file kind and every page they admit happens to be a picture
+- **THEN** the CLIP lane applies the chance band as for an unfiltered search
+
 ### Requirement: Search Memory Restricts To File Kinds
 
 `search_memory` SHALL take an optional `file_types` list of file kinds, such as `image`, `video`, `audio`, `pdf` or `note`, and SHALL return only pages of those kinds. Its description SHALL tell the agent to set it when the conversation is about a photo, screenshot or video, and to search both with and without it when the agent is unsure that a picture is meant. Exomem SHALL NOT infer that a question wants a picture from the words of the query.
@@ -52,6 +57,11 @@ A search SHALL be restricted to pictures when the caller's own filters are activ
 
 - **WHEN** an agent calls `search_memory` with `file_types` set to `["image"]`
 - **THEN** every hit is an image sidecar
+
+#### Scenario: A host on an older tool surface still restricts the search
+
+- **WHEN** a host sends `file_types` inside `options`
+- **THEN** the search treats it as the `file_types` parameter
 
 #### Scenario: Omitting the restriction changes nothing
 

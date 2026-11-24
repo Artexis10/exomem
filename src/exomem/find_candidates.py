@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .embedding_index import ChunkRef
 
-from . import find_policy, find_results, find_types, media_types
+from . import find_policy, find_results, find_types
 from .find_types import FindTimings, GraphProvenance, ParsedPage, RankingPage
 from .ranking_config import LANE_ORDER, RankingConfig
 
@@ -346,6 +346,7 @@ def collect_candidates(
     lexical_repair: bool = True,
     eligible_paths: set[str] | None = None,
     filtered: bool = False,
+    media_restricted: bool = False,
     admitted_paths: set[str] | None = None,
     capture_trace: bool = False,
     query_vector_provider: Callable[[], Any] | None = None,
@@ -393,14 +394,6 @@ def collect_candidates(
     )
     semantic_paths = (
         recall_paths if eligible_paths is None else (recall_paths & eligible_paths)
-    )
-    # The caller restricted this search to pictures: their own filters admit only the sidecars of
-    # images and videos. A chance band guards mixed results against a picture that matches only by
-    # chance; among pictures alone it only withholds, so the CLIP lane runs unbanded here.
-    media_restricted = (
-        filtered
-        and bool(eligible_paths)
-        and all(media_types.is_visual(path.removesuffix(".md")) for path in eligible_paths or ())
     )
 
     def _eligible(ranking: list[str]) -> list[str]:
@@ -638,7 +631,9 @@ def collect_candidates(
                     clip_qvec,
                     k=candidate_k * 8,
                     allowed_paths=allowed_images,
-                    # An alpha of 0 has no chance level, so the index applies no band.
+                    # The caller restricted this search to pictures. The band guards mixed results
+                    # against a picture that matches only by chance; among pictures alone it only
+                    # withholds. An alpha of 0 has no chance level, so the index applies no band.
                     alpha=0.0 if media_restricted else config.clip_semantic_alpha,
                     min_population=config.clip_semantic_min_population,
                 )
@@ -646,7 +641,12 @@ def collect_candidates(
                     if len(clip_ranking) >= candidate_k:
                         break
                     sidecar_rel = img_rel + ".md"
-                    if sidecar_rel not in clip_score_by_path and (vault_root / sidecar_rel).exists():
+                    # Inside a restriction every row comes from the indexed eligible pages, so their
+                    # sidecars exist; a stat per row would cost tens of ms at 20,000 pictures.
+                    if sidecar_rel not in clip_score_by_path and (
+                        (media_restricted and sidecar_rel in semantic_paths)
+                        or (vault_root / sidecar_rel).exists()
+                    ):
                         clip_ranking.append(sidecar_rel)
                         clip_score_by_path[sidecar_rel] = score
                         clip_frame_ts_by_path[sidecar_rel] = frame_ts

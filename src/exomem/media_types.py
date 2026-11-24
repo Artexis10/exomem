@@ -58,17 +58,6 @@ _KIND_BY_EXT: dict[str, str] = {
 KINDS = frozenset(_KIND_BY_EXT.values())
 #: The kinds the CLIP index embeds: an image whole, a video by its keyframes.
 VISUAL_KINDS = frozenset({"image", "video"})  # nosemgrep: ep-word-set -- a subset of the closed KINDS above, not a vocabulary
-_VISUAL_SUFFIXES = frozenset(ext[1:] for ext, kind in _KIND_BY_EXT.items() if kind in VISUAL_KINDS)
-
-
-def is_visual(path: str) -> bool:
-    """Whether a binary's path names a kind the CLIP index embeds.
-
-    `media_type_for` builds a `Path` per call; a filter can admit 20,000 pages per search, so this
-    reads the suffix with string operations.
-    """
-    _stem, dot, suffix = path.rpartition(".")
-    return bool(dot) and "/" not in suffix and suffix.lower() in _VISUAL_SUFFIXES
 
 
 def media_type_for(path: str | Path) -> str | None:

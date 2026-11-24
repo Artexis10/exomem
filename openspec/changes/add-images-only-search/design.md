@@ -10,11 +10,11 @@ Sources consulted: Anthropic, "Writing effective tools for agents" (2025), for p
 
 `page.file_type` is already an indexed scalar axis, filled from the sidecar's `media_type`, and the leaf's `file_types` shortcut compiles to it. A new `page.media_type` field would duplicate it. The public parameter exposes the shortcut under the same name.
 
-### D2. The restriction is read from the eligible set, not the filter expression
+### D2. The restriction is the caller's own kind filter
 
-The lane treats a search as restricted to pictures when the caller's filters are active and every eligible page is the sidecar of an image or video. Reading the eligible set covers every spelling: `file_types`, `filters` with `$eq` or `$in`, and combinations with other axes. "Image or video" comes from the extension registry in `media_types` (`VISUAL_KINDS`, the kinds the CLIP index embeds). That set is closed and fixed by the extraction schema.
+A search is restricted to pictures when the caller's compiled filter plan requires `page.file_type` to be `image` or `video`: the `file_types` parameter, or a top-level `$eq` or `$in` predicate on that field. Only an explicit kind restriction counts. A tag or project filter whose pages happen to all be pictures keeps today's ranking, so a search without the option ranks as before. "Image or video" is `media_types.VISUAL_KINDS`, the kinds the CLIP index embeds. That closed set is fixed by the extraction schema, and the CLIP queueing sites read the same set.
 
-Cost: one suffix check per eligible page. At 20,000 eligible pages it measured 3.6 ms in the worst case, where every page is a picture. The skipped band saves 2.7 ms at 100,000 CLIP rows in that same case. A mixed set stops at its first non-picture page.
+The check reads the plan once per search, so it costs nothing per page. Inside the restriction, the CLIP lane skips the per-row sidecar check for rows that come from the indexed eligible pages. At 20,000 pictures that check would cost tens of milliseconds.
 
 ### D3. Band off and a dedicated CLIP weight inside the restriction
 
