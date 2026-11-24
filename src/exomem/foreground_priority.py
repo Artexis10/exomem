@@ -16,6 +16,8 @@ that a maintenance job dispatches from its own thread (`background_job()`): that
 is bulk work. Every wait for and hold of a mutation boundary is a foreground
 request: a drain or publication that holds the boundary keeps every writer
 queued behind it waiting.
+A store-mode warm-up's semantic step is foreground work too: writes are
+refused until it ends (`warmup.warm_all`).
 
 The rule that keeps this sound: no foreground thread ever waits on a parked
 bulk pass. Two mechanisms keep it.

@@ -44,17 +44,20 @@ from exomem import (
     epistemic_graph,
     extract,
     extraction_parts,
+    freshness,
     graph_drain,
     media_jobs,
     media_replicas,
     media_store,
     media_worker,
     mutation_lock,
+    readiness,
     relation_review,
     reserved_paths,
     scene_frames,
     schema,
     server_runtime,
+    warmup,
     writer_lease,
 )
 from exomem.collection_store import connection, runtime
@@ -850,6 +853,62 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     assert [r.getMessage() for r in caplog.records if "graph rebuild" in r.getMessage()] == []
     assert deferred_index.graph_full_rebuild_pending(stored) is None
     assert epistemic_graph.EpistemicGraphIndex(stored).available()
+
+
+def test_a_save_after_a_restart_is_not_held_behind_a_graph_snapshot_proof(
+    stored, service, monkeypatch
+):
+    """A restart whose graph snapshot proof takes minutes, as it took 100 s over 17,000 pages.
+    Store mode keeps its graph rows in the store, yet every save was refused as warming until the
+    proof of file mode's sidecar ended."""
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    release = threading.Event()
+    real = epistemic_graph.EpistemicGraphIndex.adopt_published_snapshot
+
+    def slow_proof(self, *arguments, **keywords):
+        release.wait(120)
+        return real(self, *arguments, **keywords)
+
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "adopt_published_snapshot", slow_proof)
+    readiness.reset()
+    readiness.begin_warm()
+    warm = threading.Thread(target=warmup.warm_all, args=(stored,), daemon=True)
+    warm.start()
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                call(stored, "remember", **QUOKKA)
+                break
+            except Exception as error:  # noqa: BLE001 - the dispatcher's error type varies
+                if getattr(error, "code", None) != "MUTATION_WARMING" or time.monotonic() > deadline:
+                    raise
+                assert error.details.get("warming_component") != "graph_handoff", str(error)
+                time.sleep(0.25)
+    finally:
+        release.set()
+        warm.join(120)
+        readiness.reset()
+
+
+def test_a_store_mode_recall_seed_reads_the_store_once_per_scope_not_once_per_page(stored, service):
+    """The seed that a store-mode start pays before it admits a write read each stored page from
+    the store on its own: 110 s of a restart over 17,000 pages."""
+    opened = []
+    real = read.snapshot
+
+    @contextmanager
+    def counted(root, *arguments, **keywords):
+        opened.append(root)
+        with real(root, *arguments, **keywords) as view:
+            yield view
+
+    pages = len(store_rows(stored, "SELECT path FROM store_pages"))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(read, "snapshot", counted)
+        assert all(freshness.rebaseline(stored).values())
+    assert len(opened) < pages, f"{len(opened)} store reads for {pages} stored pages"
 
 
 def test_the_media_workers_own_frame_write_commits_through_the_served_door(stored, service):
