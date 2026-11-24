@@ -1,4 +1,4 @@
-"""Exomem's own file opens leave this process's SQLite locks in place.
+"""Evermatter's own file opens leave this process's SQLite locks in place.
 
 Closing any ordinary descriptor for a file drops every POSIX record lock that
 the process holds on that file. A WAL reader whose locks are gone no longer

@@ -27,7 +27,7 @@ When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief,
 
 ## Make correct agent behaviour the default
 
-When an agent misuses Exomem output or tells the user too much, fix Exomem first. Do not close the defect as agent error alone.
+When an agent misuses Evermatter output or tells the user too much, fix Evermatter first. Do not close the defect as agent error alone.
 
 - Lead every tool result with a short outcome that the agent can repeat to the user as is.
 - Put error codes, request ids, fingerprints, retry history and indexing state in a clearly marked diagnostics part.
@@ -51,7 +51,7 @@ to an allowlist.
 **Pin every install line.** Public-skill reviewers reject instructions that
 install or run code from a mutable source. A shipped doc that shows an install
 or run command for the package writes `<exomem-release>` where the version goes
-(`pip install exomem==<exomem-release>`, `uvx exomem@<exomem-release>`); every
+(`pip install evermatter==<exomem-release>`, `uvx evermatter@<exomem-release>`); every
 packaging and install path fills it with the release it ships, from
 `package_skills.release_version()`. Never write `exomem@latest`, an unversioned
 `uvx exomem`, or `pip install exomem` without that placeholder — the OpenAI

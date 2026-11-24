@@ -1155,7 +1155,7 @@ def _install(vault: Path, row: Row, hashed: _Hashed, staged: Path, cause: str, *
                     if kept is None:
                         trashed.append(_trash_changed(vault, filesystem, parent, damaged_name, written, row, hashed,
                                                       cause))
-                    unchanged()  # A write outside Exomem since the first check keeps its bytes.
+                    unchanged()  # A write outside Evermatter since the first check keeps its bytes.
                     _rename(filesystem, parent, restored_name, written, parent, target.name, replace=True)
                     filesystem.flush_directory(parent).require()
                     with _open(vault, row) as placed:
@@ -1374,8 +1374,8 @@ def _fix(state: str) -> str:
                 "in Trash. This item clears when the check verifies the original again, which takes up to one "
                 f"verification cycle ({cycle_seconds() / 86400:g} days).")
     if state == MISSING:
-        return ("Each route entry is a candidate copy that Exomem has not read. Check that its SHA-256 matches, "
-                "then copy it back to the path, or restore the file from a backup. Exomem does not restore a "
+        return ("Each route entry is a candidate copy that Evermatter has not read. Check that its SHA-256 matches, "
+                "then copy it back to the path, or restore the file from a backup. Evermatter does not restore a "
                 "deleted original itself, because the deletion may be deliberate.")
     return ("Restore the file from a backup, or copy a candidate from the route after checking its SHA-256. "
             "A replica entry names an encrypted object in a store: decrypt it with the identity of its key version. "
@@ -1384,7 +1384,7 @@ def _fix(state: str) -> str:
             "with a code verified but could not be put in place, and the next pass tries it again from a copy that "
             "it keeps (kept_copy), so it downloads nothing twice. "
             "A vault_store entry is the store's own page: settle the held item with keep-store. "
-            "The original is as Exomem found it.")
+            "The original is as Evermatter found it.")
 
 
 def attention_findings(vault: Path) -> tuple[list[Any], str | None]:

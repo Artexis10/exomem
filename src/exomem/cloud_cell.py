@@ -1,4 +1,4 @@
-"""Environment-only configuration for Exomem Cloud cell mode (design D1).
+"""Environment-only configuration for Evermatter Cloud cell mode (design D1).
 
 Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a thin seam over the standalone server:
 only authentication, logging, tool surface and read-only enforcement change.
@@ -145,7 +145,7 @@ def parse_service_notice(value: object) -> dict[str, object] | None:
 
 
 class CloudConfigError(RuntimeError):
-    """Raised when Exomem Cloud cell environment configuration is invalid."""
+    """Raised when Evermatter Cloud cell environment configuration is invalid."""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
@@ -168,16 +168,16 @@ def hosted_mode_enabled(env: Mapping[str, str] | None = None) -> bool:
 
 
 def store_identity(env: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Which Exomem this process serves: its `kind` and the `name` to give a person.
+    """Which Evermatter this process serves: its `kind` and the `name` to give a person.
 
     One home for the answer, so the bootstrap and the write summary cannot disagree. Two
     connectors can present the same display name; this tells their stores apart.
     """
     if cloud_mode_enabled(env):
-        return {"kind": "cloud", "name": "Exomem Cloud"}
+        return {"kind": "cloud", "name": "Evermatter Cloud"}
     if hosted_mode_enabled(env):
-        return {"kind": "hosted", "name": "Exomem Hosted"}
-    return {"kind": "personal", "name": "personal Exomem"}
+        return {"kind": "hosted", "name": "Evermatter Hosted"}
+    return {"kind": "personal", "name": "personal Evermatter"}
 
 
 def cloud_read_only_enabled(env: Mapping[str, str] | None = None) -> bool:

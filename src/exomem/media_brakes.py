@@ -1,4 +1,4 @@
-"""Memory brakes for media work in an Exomem Cloud cell (`cloud-multimodal-processing` D2).
+"""Memory brakes for media work in an Evermatter Cloud cell (`cloud-multimodal-processing` D2).
 
 Three brakes keep media from taking the serving process down. Each reads the cell's
 own cgroup v2 files at run time:

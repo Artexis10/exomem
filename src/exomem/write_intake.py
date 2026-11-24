@@ -1237,7 +1237,7 @@ def _receipt(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
         "state": QUEUED,
         "committed": False,
         "user_summary": (
-            "Queued, not saved yet: Exomem was busy, so it is holding this save durably and will "
+            "Queued, not saved yet: Evermatter was busy, so it is holding this save durably and will "
             f"apply it in arrival order (position {position}). Do not resend it; check its outcome "
             "with the route below."
         ),

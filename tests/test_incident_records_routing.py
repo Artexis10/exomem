@@ -587,7 +587,7 @@ def test_balanced_asks_one_domain_question_once_per_signal(
     assert first is not None and first["disposition"] == "ask"
     question = first["question"]
     assert question.endswith("?") and "Widget incidents" in question
-    for jargon in ("Records", "collection", "record_memory", "Exomem", "routing"):
+    for jargon in ("Records", "collection", "record_memory", "Evermatter", "routing"):
         assert jargon not in question
     assert again is not None and again["disposition"] == "hold" and "question" not in again
 

@@ -1,7 +1,7 @@
 [project]
 name = "exomem-cellctl"
 version = "0.1.0"
-description = "Stateless controller that converges Exomem Cloud cell rows onto Kubernetes"
+description = "Stateless controller that converges Evermatter Cloud cell rows onto Kubernetes"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30,<1",

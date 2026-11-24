@@ -45,7 +45,7 @@ CEILINGS = {
     "retrieval reminder": (retrieve.REMINDER, 332),
     "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
     # 1210 -> 1450 (1428 in use at balanced): the activation head gains the
-    # disconnect sentence, so a session whose Exomem tools vanished is told to say
+    # disconnect sentence, so a session whose Evermatter tools vanished is told to say
     # so rather than stay silent (2026-11-23 Cloud disconnect went unnoticed for
     # hours); it is gated on tool discovery so deferred ToolSearch reads connected.
     # Sent on every substantive MCP-mode turn, so growth costs every turn.
@@ -100,9 +100,9 @@ def test_the_activation_texts_keep_the_disconnect_sentence(monkeypatch):
 def test_the_short_capture_check_uses_rules_available_without_a_vault_copy():
     """Installed clients use their skill; tool-only clients use the portable contract.
 
-    A vault reference can be absent even when Exomem is connected and can capture.
+    A vault reference can be absent even when Evermatter is connected and can capture.
     """
-    assert "Exomem skill" in capture.REMINDER_SHORT
+    assert "Evermatter skill" in capture.REMINDER_SHORT
     assert "read_instructions" in capture.REMINDER_SHORT
     assert "read_memory" not in capture.REMINDER_SHORT
 
@@ -113,7 +113,7 @@ def test_the_checkpoint_context_is_capped_at_two_kib():
 
 def test_the_short_capture_check_keeps_the_incident_rules_by_name():
     text = capture.REMINDER_SHORT
-    assert text.startswith("[Exomem capture check]")
+    assert text.startswith("[Evermatter capture check]")
     for rule in (
         "live policy",
         "no chat transcripts",

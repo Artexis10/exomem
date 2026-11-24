@@ -2,7 +2,7 @@
 
 # Records
 
-Records are Exomem's human-owned layer for observed events and current state:
+Records are Evermatter's human-owned layer for observed events and current state:
 training sessions, symptoms, measurements, transactions, maintenance, inventory,
 operational logs, and other longitudinal data. They complement Notes and Planning.
 
@@ -219,10 +219,10 @@ rewrites history, and inserting one never requires an agent, Obsidian, or a
 plugin.
 
 The intended ordinary Obsidian template root is `Knowledge Base/Templates/`.
-Users keep the normal **Templates → Insert template** workflow. Exomem does not
+Users keep the normal **Templates → Insert template** workflow. Evermatter does not
 mutate `.obsidian`. When the Knowledge Base directory is the Obsidian vault,
 `.obsidian/templates.json` names the relative folder `Templates`, which is exactly
-that Exomem path. A parent-directory Obsidian configuration is a different vault
+that Evermatter path. A parent-directory Obsidian configuration is a different vault
 and does not override the Knowledge Base setting.
 
 For collections with file authority, fresh structured queries read canonical files,
@@ -236,7 +236,7 @@ repairs only derived state.
 ## Compatibility, safety, and retrieval
 
 Existing `type: tracker` material stays usable. Without an adjacent reviewed
-manifest, it is discovered and inspected at collection level only; Exomem does
+manifest, it is discovered and inspected at collection level only; Evermatter does
 not guess its grammar or parse its items. Adding an adjacent manifest explicitly
 enables query/mutation while leaving the tracker body, notation, legend, archive,
 and templates intact. New agent-authored log items get prospective stable markers;

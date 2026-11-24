@@ -28,6 +28,7 @@ from exomem.governance import (
     schema_v4,
     store,
 )
+from exomem.install_info import distribution_probe
 from exomem.lease_coordinator import create_app
 
 OLD_V3_PYTHON_ENV = "EXOMEM_OLD_V3_PYTHON"
@@ -51,7 +52,7 @@ def _old_python() -> Path:
         [
             str(executable),
             "-c",
-            "import importlib.metadata; print(importlib.metadata.version('exomem'))",
+            distribution_probe("release") + "print(release)",
         ],
         check=True,
         capture_output=True,

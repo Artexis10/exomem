@@ -32,7 +32,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           path-to-signatures: signatures/v1/cla.json
-          path-to-document: https://github.com/Artexis10/exomem/blob/main/CLA.md
+          path-to-document: https://github.com/substrate-systems/evermatter/blob/main/CLA.md
           branch: cla-signatures
           # The action's default locks every pull request that closes, merged or not.
           lock-pullrequest-aftermerge: false

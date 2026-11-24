@@ -23,7 +23,7 @@ def test_release_please_keeps_root_package_version_locked() -> None:
     assert {"type": "generic", "path": "uv.lock"} in extra_files
 
     match = re.search(
-        r'\[\[package\]\]\nname = "exomem"\n'
+        r'\[\[package\]\]\nname = "evermatter"\n'
         r'version = "(?P<version>[^"]+)"(?P<suffix>[^\n]*)',
         _read("uv.lock"),
     )

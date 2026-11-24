@@ -42,7 +42,7 @@ def test_continue_adoption_soft_fails_with_no_runs(
     prompt = asyncio.run(mcp.get_prompt("continue_adoption", {}))
     rendered = asyncio.run(prompt.render({}))
     text = rendered.messages[0].content.text
-    assert "No open Exomem adoption run" in text
+    assert "No open Evermatter adoption run" in text
     assert "manage_memory(operation='imports.start'" in text
 
 
@@ -82,7 +82,7 @@ def test_continue_adoption_skips_done_and_cancelled_runs(
     prompt = asyncio.run(mcp.get_prompt("continue_adoption", {}))
     rendered = asyncio.run(prompt.render({}))
     text = rendered.messages[0].content.text
-    assert "No open Exomem adoption run" in text
+    assert "No open Evermatter adoption run" in text
 
 
 def test_adoption_runs_resource_lists_open_runs(

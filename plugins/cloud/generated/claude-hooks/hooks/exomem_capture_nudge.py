@@ -118,9 +118,11 @@ import time
 from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
-# The server-name token that marks an Exomem tool; a host fixes it, a vault does not.
-_KB_SERVER = r"(?:exomem|knowledge[_-]?base)"
-# Every Exomem call that lands durable work: a typed write tool by its name, a door write as
+# The server-name token that marks an Evermatter tool; a host fixes it, a vault does not. A host
+# builds tool names from the server key or the connector name, and a connector carries the product's
+# name: Evermatter now, Exomem or Knowledge Base from before the renames.
+_KB_SERVER = r"(?:evermatter|exomem|knowledge[_-]?base)"
+# Every Evermatter call that lands durable work: a typed write tool by its name, a door write as
 # `manage_memory:<area>.<action>`. Stamped from `exomem.public_surface.write_selectors()`; the hook
 # cannot import the package, and `tests/test_single_purpose_guidance.py` fails when the two drift.
 # A read tool and a read door operation are absent, so discovery leaves the check armed.
@@ -167,15 +169,15 @@ _KB_WRITES = (
 #: A connected vault need not contain a readable copy of the shipped references.
 #: The hook is structural; it does not carry the doctrine.
 REMINDER_SHORT = (
-    "[Exomem capture check] Per live policy: no chat transcripts; supersede_note supersedes a "
+    "[Evermatter capture check] Per live policy: no chat transcripts; supersede_note supersedes a "
     "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
     "no transient code/test/CI; nothing durable: stop. "
-    'Rules: Exomem skill or read_instructions.'
+    'Rules: Evermatter skill or read_instructions.'
 )
 
 #: The episode ask. `{key}` is the session's episode key.
 EPISODE_ASK = (
-    "[Exomem episode check] If live policy permits capture at a durable stop, "
+    "[Evermatter episode check] If live policy permits capture at a durable stop, "
     'save_episode once: episode="{key}", subject, summary, '
     "decided. Compile or dismiss every Decided item before citing it from updated "
     "compiled notes. Otherwise do nothing."
@@ -183,7 +185,7 @@ EPISODE_ASK = (
 #: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
 COVERAGE_ASK = (
-    "[Exomem episode coverage] Episode {key} is not covered through its current "
+    "[Evermatter episode coverage] Episode {key} is not covered through its current "
     "input; its ledger's next step is {next}. A committed note "
     'does not cover it. Read inspect_memory operation="episodes.candidates" and continue: '
     'decide each candidate, resume the routed ones, or make the final pass '
@@ -1188,7 +1190,7 @@ def _exomem_tool_seen(tools: list[dict]) -> bool:
     only ever used to answer "did the client restart yet".
     """
     return any(
-        re.search(r"exomem|knowledge[_-]?base", str(tool.get("name") or ""), re.I)
+        re.search(_KB_SERVER, str(tool.get("name") or ""), re.I)
         for tool in tools
     )
 
@@ -1278,7 +1280,7 @@ def _log(text: str, outcome: str = "fired") -> None:
 
 def _capture_reason(reason: str) -> str:
     if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
-        return "If Exomem is not connected or cannot capture, tell the user nothing is saved and to reconnect Exomem in the app's MCP or connector settings. Run read_instructions first if no contract.\n" + reason
+        return "If Evermatter is not connected or cannot capture, tell the user nothing is saved and to reconnect it in the app's MCP/connector settings. Run read_instructions first if no contract.\n" + reason
     return reason
 
 

@@ -120,7 +120,7 @@ def test_directory_census_allows_a_long_form_write_from_a_short_root_alias(
     vault: Path,
 ) -> None:
     """The actual 8.3/case split must not reject a graph-admitted write."""
-    root = vault.with_name("Exomem Vault Alias Regression")
+    root = vault.with_name("Evermatter Vault Alias Regression")
     vault.rename(root)
     notes = root / "Knowledge Base" / "Notes"
     notes.mkdir(parents=True, exist_ok=True)
@@ -150,7 +150,7 @@ def test_recall_projection_identity_survives_short_root_restart(
     vault: Path, isolated_windows_writer_state: Path
 ) -> None:
     """A published long-root graph remains current after a short-root restart."""
-    root = vault.with_name("Exomem Vault Freshness Alias Regression")
+    root = vault.with_name("Evermatter Vault Freshness Alias Regression")
     vault.rename(root)
     note = root / "Knowledge Base" / "Notes" / "alias.md"
     note.parent.mkdir(parents=True, exist_ok=True)
@@ -186,7 +186,7 @@ def test_reserved_short_name_junction_and_reparse_races_fail_closed(
     """Actual NTFS short names never turn private file/tree identities ordinary."""
 
     del isolated_windows_writer_state
-    root = tmp_path / "Exomem Reserved Alias Regression"
+    root = tmp_path / "Evermatter Reserved Alias Regression"
     governance = root / "Knowledge Base" / "_Governance"
     notes = root / "Knowledge Base" / "Notes"
     governance.mkdir(parents=True)

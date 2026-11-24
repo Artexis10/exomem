@@ -127,8 +127,8 @@ def test_plain_version_is_a_single_stable_line() -> None:
     assert result.stderr == ""
 
 
-def _run_unix_sync(mode: str, *, tool_present: bool) -> subprocess.CompletedProcess[str]:
-    listed = "printf '%s\\n' 'exomem v0.4.1'" if tool_present else ":"
+def _run_unix_sync(mode: str, *, tool: str | None) -> subprocess.CompletedProcess[str]:
+    listed = f"printf '%s\\n' '{tool} v0.4.1'" if tool else ":"
     common_script = "./scripts/_service-common.sh"
     command = (
         "uv() { "
@@ -159,16 +159,22 @@ def _require_bash(result: subprocess.CompletedProcess[str]) -> None:
         pytest.skip("sandbox blocked Git Bash startup")
 
 
-def test_unix_auto_syncs_existing_uv_tool_to_exact_service_release() -> None:
-    result = _run_unix_sync("auto", tool_present=True)
+@pytest.mark.parametrize("tool", ["evermatter", "exomem"])
+def test_unix_auto_syncs_existing_uv_tool_to_exact_service_release_under_its_name(
+    tool: str,
+) -> None:
+    # Installing the other name beside the existing tool would leave two
+    # distributions owning the same commands.
+    result = _run_unix_sync("auto", tool=tool)
 
     _require_bash(result)
     assert result.returncode == 0, result.stderr
-    assert "UV_CALL tool install --force exomem==1.2.3" in result.stdout
+    assert f"UV_CALL tool install --force {tool}==1.2.3" in result.stdout
+    assert result.stdout.count("UV_CALL tool install") == 1
 
 
 def test_unix_auto_never_installs_an_absent_uv_tool() -> None:
-    result = _run_unix_sync("auto", tool_present=False)
+    result = _run_unix_sync("auto", tool=None)
 
     _require_bash(result)
     assert result.returncode == 0, result.stderr
@@ -176,13 +182,13 @@ def test_unix_auto_never_installs_an_absent_uv_tool() -> None:
 
 
 def test_unix_always_may_install_and_never_skips() -> None:
-    always = _run_unix_sync("always", tool_present=False)
-    never = _run_unix_sync("never", tool_present=True)
+    always = _run_unix_sync("always", tool=None)
+    never = _run_unix_sync("never", tool="exomem")
 
     _require_bash(always)
     _require_bash(never)
     assert always.returncode == 0, always.stderr
-    assert "UV_CALL tool install --force exomem==1.2.3" in always.stdout
+    assert "UV_CALL tool install --force evermatter==1.2.3" in always.stdout
     assert never.returncode == 0, never.stderr
     assert "UV_CALL tool install" not in never.stdout
 
@@ -211,11 +217,70 @@ def test_upgrade_scripts_defer_cli_sync_until_live_version_is_verified() -> None
     assert unix.index("Serving version:") < unix.index('exomem_sync_uv_cli "$CLI_SYNC" "$SERVED"')
 
 
-def test_bootstrap_upgrades_an_existing_uv_tool_instead_of_leaving_it_stale() -> None:
-    install = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+_BOOTSTRAPS = [
+    pytest.param(
+        [shutil.which("sh") or "sh", "scripts/install.sh"],
+        id="install.sh",
+        marks=pytest.mark.skipif(
+            sys.platform == "win32" or shutil.which("sh") is None,
+            reason="install.sh is the macOS and Linux bootstrap",
+        ),
+    ),
+    pytest.param(
+        [shutil.which("pwsh") or "pwsh", "-NoProfile", "-File", "scripts/install.ps1"],
+        id="install.ps1",
+        marks=pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is not available"),
+    ),
+]
 
-    assert "uv tool list" in install
-    assert "uv tool upgrade exomem" in install
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake uv is a POSIX script")
+@pytest.mark.parametrize("bootstrap", _BOOTSTRAPS)
+@pytest.mark.parametrize(
+    ("listed", "expected"),
+    [
+        (None, "tool install evermatter"),
+        ("evermatter", "tool upgrade evermatter"),
+        ("exomem", "tool upgrade exomem"),
+    ],
+)
+def test_bootstrap_upgrades_an_existing_uv_tool_under_its_name(
+    tmp_path: Path, bootstrap: list[str], listed: str | None, expected: str
+) -> None:
+    # A rerun must upgrade the CLI the user already has, never install the other
+    # distribution name beside it.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "uv-calls"
+    fake_uv = bin_dir / "uv"
+    listing = f"printf '%s\\n' '{listed} v0.4.1' '- exomem' '- kb'" if listed else ":"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "tool list" ]; then ' + listing + "; exit 0; fi\n"
+        'if [ "$1" = "--version" ]; then echo "uv 0.0.0"; exit 0; fi\n'
+        f'echo "$*" >> "{calls}"\n'
+    )
+    fake_uv.chmod(0o755)
+    environment = {
+        "PATH": os.pathsep.join([str(bin_dir), "/usr/bin", "/bin"]),
+        "HOME": str(tmp_path),
+        "USERPROFILE": str(tmp_path),
+    }
+
+    result = subprocess.run(
+        bootstrap,
+        cwd=ROOT,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls.read_text().splitlines()
+    assert [call.rsplit(" --compile-bytecode", 1)[0] for call in recorded] == [expected]
 
 
 def test_editable_project_root_comes_from_a_valid_direct_url(

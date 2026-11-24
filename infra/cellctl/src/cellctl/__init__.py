@@ -1,1 +1,1 @@
-"""cellctl: converges Exomem Cloud cell rows onto Kubernetes."""
+"""cellctl: converges Evermatter Cloud cell rows onto Kubernetes."""

@@ -1,8 +1,9 @@
-# The released Exomem image the platform's own jobs run on: the scheduler
+# The released Evermatter image the platform's own jobs run on: the scheduler
 # requests, the scheduler collector and alert evaluator. Each job runs a
 # script the chart mounts, so set the current
-# Cloud cell image, ghcr.io/artexis10/exomem@sha256:<digest>. Always a digest,
-# never a tag.
+# Cloud cell image, ghcr.io/substrate-systems/evermatter@sha256:<digest>. The
+# schema also accepts ghcr.io/artexis10/exomem@sha256:<digest>, the name of every
+# release cut before the repository moved. Always a digest, never a tag.
 platformJobs:
   image: ""
 
@@ -119,7 +120,7 @@ traefik:
       port: 8000
       exposedPort: 80
     websecure:
-      # D11: the Exomem Cloud MCP hostname is served here, exposed only
+      # D11: the Evermatter Cloud MCP hostname is served here, exposed only
       # through this entrypoint on the node's real port 443 via hostPort.
       # servicelb stays disabled and no trustedIPs are set, so Traefik
       # overwrites X-Real-Ip with the peer address hostPort preserves; the
@@ -145,7 +146,7 @@ traefik:
   accessLog:
     enabled: false
 
-# --- Exomem Cloud (adopt-exomem-cloud-plain-cells) ---
+# --- Evermatter Cloud (adopt-exomem-cloud-plain-cells) ---
 #
 # Cloud cellctl and its gateway run in their own namespace (exomem-cloud)
 # with their own StorageClass, separate from the `storage` block above.
@@ -179,14 +180,21 @@ cellctl:
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"
-  # ghcr.io/artexis10/exomem-cellctl@sha256:<digest>, built from
+  # ghcr.io/substrate-systems/evermatter-cellctl@sha256:<digest>, built from
   # infra/cellctl/Dockerfile and recorded in the release notes on each release
   # tag (release-please.yml). Always a digest, never a tag.
   image: ""
-  # <cell repository>@sha256:<digest> the ValidatingAdmissionPolicy pins
-  # cellctl's own writes to (D4). cellctl itself resolves the per-cell image
-  # to run from the database, not from this value.
-  cellImageRepository: ""
+  # The cell image repositories the ValidatingAdmissionPolicy pins cellctl's
+  # own writes to (D4), each as <repository>@sha256:<digest> and matched in
+  # full. Each entry pairs a repository with the GitHub repository (owner/name)
+  # whose release workflow built it; the image admission profile
+  # (operatorDeploy) checks that pairing. List every repository a running cell
+  # or a rollback target uses: releases cut before the repository moved stay in
+  # ghcr.io/artexis10/exomem, built by Artexis10/exomem, and later ones are in
+  # ghcr.io/substrate-systems/evermatter, built by substrate-systems/evermatter.
+  # cellctl itself resolves the per-cell image to run from the database, not
+  # from this value.
+  cellImageRepositories: []
   namespace: exomem-cloud
   replicas: 1
   # The founder-account bucket of the cells created before D9 (those with a stored
@@ -495,6 +503,29 @@ cloudGateway:
   image: ""
   replicas: 1
   hostname: ""
+  # Further public hostnames that the gateway serves and accepts, after `hostname`.
+  # Each gets the same routes and a place in the certificate and the DNS-01 solver, and
+  # the gateway accepts its MCP URL (EXOMEM_CLOUD_MCP_URLS: `hostname` first, then these in
+  # order). `hostname` stays the one that discovery offers new clients and that
+  # EXOMEM_CLOUD_MCP_URL names. Empty renders exactly as with one hostname.
+  # A token is bound to the resource URL it was issued for, so a host change keeps
+  # the old host served and accepted until its tokens are gone:
+  #   Before cutover: hostname = the old host, additionalHostnames = [the new host].
+  #     The new host is served and accepted; the old one is still offered.
+  #   At cutover: swap them. hostname = the new host, additionalHostnames = [the old host].
+  #     The new host is offered first; the old one is still served and accepted.
+  # cloudIngress.hostname must equal `hostname`. The Cloudflare DNS-01 token
+  # (cloudIngress.cloudflareApiTokenSecretName) must be able to edit the DNS zone of
+  # every listed hostname, and every listed hostname's DNS record must be DNS-only
+  # (not proxied), as the primary's is.
+  # Before setting this list, the gateway image and the Substrate web app must both run
+  # a release that reads EXOMEM_CLOUD_MCP_URLS, with the same list on both. An older
+  # gateway reads only EXOMEM_CLOUD_MCP_URL, so the swap would make it refuse every token
+  # issued for the old host and sign out every connected client.
+  # One certificate covers every listed name, and cert-manager renews none of them while
+  # any one fails DNS-01. After each change, check that the Certificate is Ready with every
+  # name; remove a name that fails.
+  additionalHostnames: []
   # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
   # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
   publicBaseUrl: ""
@@ -704,6 +735,9 @@ cert-manager:
 operatorDeploy:
   enabled: false
   group: exomem:deploy
+  # The GitHub repository (owner/name) whose release workflow built the
+  # workload images below (cellctl.image). Cell images take their builder from
+  # cellctl.cellImageRepositories.
   sourceRepository: ""
   workflow: .github/workflows/release-please.yml
   cellFamily: cloud

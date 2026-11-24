@@ -1,6 +1,6 @@
 ---
 k3s_version: "v1.35.6+k3s1"
-# The pinned K3s binary for each node architecture Exomem Cloud images run on,
+# The pinned K3s binary for each node architecture Evermatter Cloud images run on,
 # keyed by the Ansible `architecture` fact. Each sha256 is the entry in that
 # release's sha256sum-<arch>.txt. One cluster runs one architecture.
 k3s_binaries:

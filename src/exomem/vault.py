@@ -163,7 +163,7 @@ _EXCLUDED_FIELD_REMEDIES: Mapping[str, str] = {
         "belief\" in the skill's page-types reference)."
     ),
     "decay_at": (
-        "Exomem decays no material on a schedule; supersede or archive the page explicitly "
+        "Evermatter decays no material on a schedule; supersede or archive the page explicitly "
         "when it no longer holds."
     ),
     "expires_at": (
@@ -4433,7 +4433,7 @@ def read_disk_bytes_without_pinning(path: Path) -> bytes:
 
 
 def _is_registered_internal_state_artifact(relative: str) -> bool:
-    """Whether one full vault-relative entry is private Exomem state."""
+    """Whether one full vault-relative entry is private Evermatter state."""
     return _classified_reserved(relative, managed_root_rel(), id(reserved_paths._REGISTRY))
 
 
@@ -10374,7 +10374,7 @@ def split_wikilink_target(target: str) -> tuple[str, str]:
 def obsidian_uses_kb_root(vault_root: Path) -> bool:
     """Whether Obsidian opens the managed KB directory as its vault root.
 
-    Exomem's API paths stay vault-rooted (``Knowledge Base/...``). Markdown
+    Evermatter's API paths stay vault-rooted (``Knowledge Base/...``). Markdown
     targets must instead be relative to the directory containing ``.obsidian``
     or Obsidian interprets the KB prefix as a nested folder.
     """

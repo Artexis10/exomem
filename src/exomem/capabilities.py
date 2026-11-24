@@ -1,4 +1,4 @@
-"""Immutable, context-local descriptions of Exomem's active command surface."""
+"""Immutable, context-local descriptions of Evermatter's active command surface."""
 
 from __future__ import annotations
 

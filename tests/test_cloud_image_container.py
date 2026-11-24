@@ -1,4 +1,4 @@
-"""Task 2.8: a committed container test for the Exomem Cloud cell image.
+"""Task 2.8: a committed container test for the Evermatter Cloud cell image.
 
 Builds (or reuses, via `CLOUD_IMAGE_TAG`) the real `cloud` Dockerfile target
 and drives it under production-shaped constraints -- `--read-only`, a `/tmp`

@@ -1,4 +1,4 @@
-"""FastMCP adapter for durable Exomem-owned OAuth sessions."""
+"""FastMCP adapter for durable Evermatter-owned OAuth sessions."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class SessionStoreUnavailableMiddleware:
 
 
 class ExomemSessionOAuthProxy(OAuthProxy):
-    """Use GitHub once for identity, then issue and validate Exomem sessions."""
+    """Use GitHub once for identity, then issue and validate Evermatter sessions."""
 
     def __init__(
         self,
@@ -215,7 +215,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        """Load only an Exomem-owned refresh grant, never FastMCP legacy state."""
+        """Load only an Evermatter-owned refresh grant, never FastMCP legacy state."""
         if client.client_id is None:
             return None
         # Whether the client even attempts a refresh is the other half of the
@@ -243,7 +243,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        """Rotate an Exomem refresh token through the shared session authority."""
+        """Rotate an Evermatter refresh token through the shared session authority."""
         if client.client_id is None:
             raise TokenError("invalid_client", "Client ID is required")
         normalized_scopes = list(dict.fromkeys(scopes))
@@ -314,7 +314,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         txn_id: str,
         transaction: dict[str, Any],
     ) -> str:
-        """Keep Exomem protocol scopes out of the GitHub identity request."""
+        """Keep Evermatter protocol scopes out of the GitHub identity request."""
         upstream = super()._build_upstream_authorize_url(
             txn_id,
             {**transaction, "scopes": []},
@@ -327,7 +327,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
 
     @override
     def _prepare_scopes_for_token_exchange(self, scopes: list[str]) -> list[str]:
-        """GitHub proves identity only; downstream Exomem scopes stay local."""
+        """GitHub proves identity only; downstream Evermatter scopes stay local."""
         del scopes
         return []
 

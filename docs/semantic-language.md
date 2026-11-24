@@ -2,7 +2,7 @@
 
 # First-class semantic language
 
-Exomem keeps Markdown readable while making small observations, richer typed
+Evermatter keeps Markdown readable while making small observations, richer typed
 units, retrieval filters, ranking evidence, and authored graph relations
 addressable through the public product commands. Markdown remains the source of
 truth; lexical, vector, and graph stores are rebuildable sidecars.
@@ -269,12 +269,12 @@ a fabricated per-hit zero.
 
 Unit-level recall returns an exact `unit_ref`. Pass it to `read_page` (in `options`) to read
 the current unit with bounded parent context. Missing, stale, ambiguous, and
-superseded references are explicit statuses; Exomem never substitutes a nearby
+superseded references are explicit statuses; Evermatter never substitutes a nearby
 unit.
 
 `connect_memory(operation="graph-context")` accepts an exact `unit_ref` or
 registry-resolved `categories`/`kinds` filters. Compact and rich units appear as
-derived graph nodes, but traversal follows authored edges only. Exomem does not
+derived graph nodes, but traversal follows authored edges only. Evermatter does not
 infer a typed edge from a compact observation's category or prose.
 
 ## Reviewed creation and adoption

@@ -12,13 +12,13 @@ conversation context is assumed.
 
 ## The task
 
-Exomem records note `created` / `updated` as bare calendar dates. Move to
+Evermatter records note `created` / `updated` as bare calendar dates. Move to
 **second-granularity, timezone-aware timestamps going forward**, without
 rewriting history.
 
 ## Why this matters
 
-Exomem's differentiator is bitemporal reasoning — world time × knowledge time.
+Evermatter's differentiator is bitemporal reasoning — world time × knowledge time.
 It currently records its own **knowledge time to the day**. The recording
 granularity sits below the capability being claimed.
 

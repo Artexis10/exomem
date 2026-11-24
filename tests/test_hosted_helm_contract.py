@@ -105,7 +105,9 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
     assert platform_schema["properties"]["runtime"] is False
     jobs_image = platform_schema["properties"]["platformJobs"]["properties"]["image"]
-    assert jobs_image["pattern"] == "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"
+    assert jobs_image["pattern"] == (
+        "^ghcr\\.io/(substrate-systems/evermatter|artexis10/exomem)@sha256:[0-9a-f]{64}$"
+    )
     assert "platformJobs" in platform_schema["required"]
     assert "@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f" in json.dumps(
         values["hcloud-csi"]
@@ -189,7 +191,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
             "/opt/exomem-hosted/scheduler_runtime.py",
             "request",
         ]
-        assert container["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+        assert container["image"] == "ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64
         assert pod["automountServiceAccountToken"] is False
         assert {volume["name"] for volume in pod["volumes"]} == {"runtime", "kube-api"}
         projected = next(volume for volume in pod["volumes"] if volume["name"] == "kube-api")
@@ -353,7 +355,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     assert {
         item["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
         for item in scheduler_jobs
-    } == {"ghcr.io/artexis10/exomem@sha256:" + "a" * 64}
+    } == {"ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64}
     scheduler_text = json.dumps(scheduler_jobs)
     runtime = _find(documents, "ConfigMap", "exomem-hosted-scheduler-runtime")
     runtime_source = runtime["data"]["scheduler_runtime.py"]
@@ -366,7 +368,7 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     collector = _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
     for deployment in (collector, evaluator):
         assert deployment["spec"]["template"]["spec"]["containers"][0]["image"] == (
-            "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+            "ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64
         )
     evaluator_env = {
         item["name"]: item.get("value")

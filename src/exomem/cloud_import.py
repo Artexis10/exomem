@@ -1,4 +1,4 @@
-"""Validating streaming unpacker for Exomem Cloud imports (design D6).
+"""Validating streaming unpacker for Evermatter Cloud imports (design D6).
 
 An import archive is the most sensitive object Cloud handles: someone's whole
 set of notes. This module turns a tar stream into a directory without ever
@@ -559,7 +559,7 @@ def _set_mtime(path: Path, mtime: float) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="cloud_import",
-        description="Validate and unpack an Exomem Cloud import stream from stdin.",
+        description="Validate and unpack an Evermatter Cloud import stream from stdin.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
     unpack = commands.add_parser("unpack", help="unpack a tar stream into a new staging dir")

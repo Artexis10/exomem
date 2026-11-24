@@ -1,7 +1,7 @@
 """Durable media jobs, cache identities and authoritative offload protections.
 
 The ledger is deliberately stdlib-only so the long-lived server and resource-status
-paths can inspect media work without importing torch, MLX, CTranslate2, or Exomem's
+paths can inspect media work without importing torch, MLX, CTranslate2, or Evermatter's
 model modules. Jobs and cache rows are rebuildable. Pending offload protections
 are authoritative until a durable sidecar reference replaces them; keep this database.
 """
@@ -454,7 +454,7 @@ def is_guarded_sidecar_sharing_violation(
     error: PermissionError | str,
     sidecar_path: Path,
 ) -> bool:
-    """Match only Exomem's staged atomic replacement of this existing sidecar."""
+    """Match only Evermatter's staged atomic replacement of this existing sidecar."""
     paths = _sharing_error_paths(error)
     if paths is None:
         return False

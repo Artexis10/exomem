@@ -1,9 +1,9 @@
-"""Prominence level — one knob that governs how much Exomem speaks up.
+"""Prominence level — one knob that governs how much Evermatter speaks up.
 
 Where `mode` answers "how much of this machine may exomem use?", prominence answers
-the orthogonal question: **"how much should Exomem participate in a conversation?"**
+the orthogonal question: **"how much should Evermatter participate in a conversation?"**
 The two are deliberately separate. A laptop on battery can still want maximal recall;
-a workstation can still want Exomem to stay out of the way.
+a workstation can still want Evermatter to stay out of the way.
 
 Four canonical levels, over three behavioural axes — recall, capture, narration:
 
@@ -158,7 +158,7 @@ _CONFIG_KEY = "prominence"
 #: (`client_config.place_learning_instruction`), the hosted-client guides show it as
 #: paste-in text, and `tests/test_prominence.py` fails when a guide's copy differs.
 LEARNING_INSTRUCTION = (
-    "Use Exomem as the memory for my work. Before you start a task, recall what Exomem "
+    "Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter "
     "holds about the systems, projects or topics it touches. As you work, save each "
     "reusable fact you establish (how something is structured, a pitfall, a method that "
     "worked) as one concise observation, and update an existing note when one covers it, "
@@ -725,7 +725,7 @@ def resolve_context(context: str) -> dict[str, str]:
         # An unreadable record must never hand a user MORE proactivity than they
         # last chose. The client default is `maximal` on hookless surfaces, so
         # falling through to it turned an identity that may well have saved `off`
-        # into the eagerest level Exomem has. The generic default is the honest
+        # into the eagerest level Evermatter has. The generic default is the honest
         # floor: the record is gone, so the client's own default cannot be the
         # thing that widens it. `effective_capture_level` withholds proactive
         # writes on top, in every projection that speaks about capture authority.
@@ -993,7 +993,7 @@ def custom_instructions_route() -> str:
     deletes any served string that mentions one the active surface lacks, and a
     route that vanished on the surface it exists for would be no route at all.
     """
-    return "Paste the level block from the Exomem prominence guide into this client's custom instructions."
+    return "Paste the level block from the Evermatter prominence guide into this client's custom instructions."
 
 
 def _active_source(surface: str | None = None) -> str:

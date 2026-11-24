@@ -1,4 +1,4 @@
-# The verdicts Exomem ships: how a claim about the world turned out. A unit's `verdict` and an
+# The verdicts Evermatter ships: how a claim about the world turned out. A unit's `verdict` and an
 # experiment page's `outcome` draw from this one registry, plus any verdict a vault adds in
 # `_Schema/semantic-language-registry.yaml`. A verdict is state: it carries labels and a
 # description and no behaviour, and it changes no lifecycle, standing or rank. `labels` maps a

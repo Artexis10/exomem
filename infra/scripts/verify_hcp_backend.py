@@ -432,7 +432,7 @@ def run_live_proof(*, evidence_path: Path, hold_seconds: int) -> None:
         if locked_version == baseline_version:
             raise BackendProofError("lock-holder apply did not publish a new state version")
 
-        client.lock(workspace.workspace_id, "Exomem backend recovery proof")
+        client.lock(workspace.workspace_id, "Evermatter backend recovery proof")
         rollback = client.rollback(workspace.workspace_id, baseline_version)
         rollback_version = _state_version_id(rollback)
         current_version = _state_version_id(

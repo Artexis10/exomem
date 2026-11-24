@@ -1,8 +1,8 @@
 ---
 name: exomem-ingest
-description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Exomem while preserving raw evidence before compiling conclusions.
+description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Evermatter while preserving raw evidence before compiling conclusions.
 metadata:
-  skill_contract: 33833d893d41be9edba9791cab661a4873c3b174b5b03009a8c90255477e569f
+  skill_contract: a49a82d41c1ebdd847dae14babcaa9b9540ba7b49756f2d8ed6fc39e9cb2119a
   version: "0.1.0"
 ---
 
@@ -43,11 +43,11 @@ identity after an uncertain commit.
 Tell the user the user_summary. Speak of the user's things in their words, never of
 collections, Records, Planning, schemas, entities or paths. A change with no
 user_summary needs no mention unless asked. Give codes, ids, hashes, retries and
-sync state only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+sync state only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -60,7 +60,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a

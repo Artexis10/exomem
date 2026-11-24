@@ -1,4 +1,4 @@
-"""Markdown-readable semantic blocks for Exomem notes.
+"""Markdown-readable semantic blocks for Evermatter notes.
 
 This module is deliberately small: normal ATX headings name semantic blocks,
 optional leading ``- key: value`` bullets carry metadata, and the rest of the

@@ -1,6 +1,6 @@
 """recall_parity end to end: sample, capture over MCP on HTTP, packet, score.
 
-Two real Exomem servers run in this process on loopback, each over its own
+Two real Evermatter servers run in this process on loopback, each over its own
 vault, so the arms return different rankings through the real MCP client. The
 queries are invented and the judge is a fixed table, so every number can be
 recomputed here without trusting the scorer.

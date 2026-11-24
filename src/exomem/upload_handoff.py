@@ -233,10 +233,10 @@ def prepare_upload(
             # A Cloud cell takes an import as an encrypted archive from `exomem cloud import`; this unpacker is not on that path.
             raise ValueError(
                 "UPLOAD_LANE_UNAVAILABLE: lane import is for a personal server. "
-                "A folder reaches Exomem Cloud with `exomem cloud import <folder>` on the person's computer")
+                "A folder reaches Evermatter Cloud with `exomem cloud import <folder>` on the person's computer")
         if who.client_binding is None or who.origin_session is None:
             if cloud:
-                raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Exomem Cloud request has no verified gateway origin")
+                raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this Evermatter Cloud request has no verified gateway origin")
             raise ValueError("UPLOAD_HANDOFF_UNAVAILABLE: this transport has no verified HTTP session; use a personal HTTP MCP connection")
         configured = int(os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(MAX_BYTES)))
         limit = min(configured, MAX_BYTES, fetch_budget().max_file_bytes)

@@ -27,7 +27,7 @@ first-class, in this priority order:
    contradiction, stale-review, unprocessed sources, weak connectivity),
    relation queue, and audit categories, with triage (dismiss/snooze/reopen)
    bound to signal fingerprints exactly as `triage_memory` does.
-4. **Uncertainty, honestly** — Exomem deliberately has no confidence floats;
+4. **Uncertainty, honestly** — Evermatter deliberately has no confidence floats;
    the TUI must render trust signals it actually has (citation count,
    recency, dispute/contradiction flags, authority of sources) and must not
    invent scores.

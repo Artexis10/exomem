@@ -1,8 +1,8 @@
 """The delegation envelope — per-action-class authority under hard ceilings.
 
-Where `prominence` answers "how much should Exomem participate in a
+Where `prominence` answers "how much should Evermatter participate in a
 conversation?", the envelope answers the question underneath it: **"what is
-Exomem allowed to do on its own, for this KIND of action?"**
+Evermatter allowed to do on its own, for this KIND of action?"**
 
 Three things are deliberately separate, and keeping them separate is the whole
 design:

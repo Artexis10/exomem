@@ -1,4 +1,4 @@
-"""What Exomem Cloud Home reads and sets on a cell, through the cell's own `/mcp`.
+"""What Evermatter Cloud Home reads and sets on a cell, through the cell's own `/mcp`.
 
 Home has no route of its own: it calls the same stateless MCP endpoint as every
 assistant, with the bearer the gateway derives. These cases send requests the

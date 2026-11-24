@@ -608,7 +608,7 @@ def test_seed_row_now_takes_conditions_the_comparison_can_read() -> None:
 def stream(
     answer: str, *, model: str = "m", tool: tuple[str, str] | None = None, cost: float = 0.25
 ) -> str:
-    """One turn's ``claude -p`` stream: the init event, an optional Exomem tool call with its result, the result."""
+    """One turn's ``claude -p`` stream: the init event, an optional Evermatter tool call with its result, the result."""
     events = [
         {
             "type": "system",

@@ -13,12 +13,14 @@
 # trivy's default `restricted` list, which holds GPL too; a licence listed in
 # two categories gets either one at random, so GPL stays out of it.
 #
-# The `exomem` distribution is this repository's own code, not third-party code.
-# Its licence follows the repository's licence declarations, so this check skips it.
+# The `evermatter` distribution, published also as `exomem`, is this repository's
+# own code, not third-party code. Its licence follows the repository's licence
+# declarations, so this check skips it under either name.
 scan:
   scanners:
     - license
   skip-files:
+    - "**/evermatter-*.dist-info/METADATA"
     - "**/exomem-*.dist-info/METADATA"
 pkg:
   types:

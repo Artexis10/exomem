@@ -1,7 +1,7 @@
 """Built-in knowledge-pack definitions and selected-pack persistence.
 
 Knowledge packs are product-level routing hints: small, declarative bundles that
-make common domains feel like first-class Exomem primitives without changing the
+make common domains feel like first-class Evermatter primitives without changing the
 storage engine. Suggestions are deterministic measurements over vault structure;
 selection is durable guidance stored under the governed Knowledge Base layer.
 """
@@ -200,7 +200,7 @@ def validate_pack_dict(
     """Validate a declarative knowledge-pack mapping and return a typed pack.
 
     Validation is intentionally strict: unknown fields are rejected so a custom
-    pack cannot silently depend on metadata this version of Exomem ignores.
+    pack cannot silently depend on metadata this version of Evermatter ignores.
     """
     if not isinstance(raw, dict):
         raise PackValidationError("INVALID_PACK", "pack must be a mapping")
@@ -302,7 +302,7 @@ def validate_pack_dict(
     def _taxonomy_tuple(field: str) -> tuple[str, ...]:
         """Validate suggested labels as canonical taxonomy keys.
 
-        A pack may name a label Exomem does not ship — the vocabulary is open —
+        A pack may name a label Evermatter does not ship — the vocabulary is open —
         but it may not name one that could never become a canonical key, because
         an unusable suggestion is only ever noise.
         """

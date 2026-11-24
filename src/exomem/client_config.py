@@ -1,4 +1,4 @@
-"""Write Exomem's entries into agent clients' own files.
+"""Write Evermatter's entries into agent clients' own files.
 
 Two entries live here: the MCP server registration, and the learning instruction
 in each client's user-level instruction file. The setup wizard has always shelled
@@ -29,7 +29,7 @@ SERVER_NAME = "exomem"
 
 
 def normalize_mcp_url(raw: str) -> str:
-    """Return one safe, canonical Exomem MCP endpoint.
+    """Return one safe, canonical Evermatter MCP endpoint.
 
     Public clear-text HTTP is rejected because native clients send OAuth tokens
     to this endpoint. Plain HTTP remains useful for literal loopback addresses.
@@ -268,7 +268,7 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
 
 
 # The learning instruction sits between these two lines, so a re-run replaces only
-# that span and uninstall removes only it. They are protocol tokens Exomem owns.
+# that span and uninstall removes only it. They are protocol tokens Evermatter owns.
 LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
 LEARNING_END = "<!-- END exomem learning instruction -->"
 
@@ -303,7 +303,7 @@ def _learning_span(lines: list[str], path: Path) -> tuple[int, int] | None:
         return begins[0], ends[0]
     # Guessing which marker is stray could delete the user's own lines, so refuse.
     raise ValueError(
-        f"{path} does not hold exactly one Exomem learning-instruction span. "
+        f"{path} does not hold exactly one Evermatter learning-instruction span. "
         f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line, "
         "or delete every marker line, then run the command again."
     )
@@ -376,7 +376,7 @@ def remove_learning_instruction(path: Path) -> dict:
     except (FileNotFoundError, IsADirectoryError):
         return absent
     # Placing refuses a file it cannot decode, so a file without either marker holds
-    # nothing of Exomem's: report it absent rather than fail an unrelated uninstall.
+    # nothing of Evermatter's: report it absent rather than fail an unrelated uninstall.
     if LEARNING_BEGIN.encode() not in raw and LEARNING_END.encode() not in raw:
         return absent
     original = _read_user_text(path)

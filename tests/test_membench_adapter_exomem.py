@@ -1,4 +1,4 @@
-"""Exomem adapter end-to-end on T00: leaf CI gate + wire smoke.
+"""Evermatter adapter end-to-end on T00: leaf CI gate + wire smoke.
 
 Drives the real product through its public boundaries against an isolated
 temp vault (EXOMEM_VAULT_PATH is mandatory with no fallback, so a real vault

@@ -87,7 +87,7 @@ _REMEDIATION = (
 
 
 class StatePlacementConflict(RuntimeError):
-    """State exists on two authorities and Exomem cannot choose for the user."""
+    """State exists on two authorities and Evermatter cannot choose for the user."""
 
     code = "STATE_PLACEMENT_CONFLICT"
 
@@ -132,7 +132,7 @@ class StateMigrationOfflineRequired(RuntimeError):
         super().__init__(
             "STATE_MIGRATION_OFFLINE_REQUIRED: machine-local state is not ready; "
             "stop every legacy writer and run `exomem maintain --migrate-state "
-            "--offline` before starting Exomem"
+            "--offline` before starting Evermatter"
         )
 
 

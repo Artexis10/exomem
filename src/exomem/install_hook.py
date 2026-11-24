@@ -1254,9 +1254,9 @@ def check_hooks(
                     f"config.{event}",
                     "pass" if configured and not legacy else "fail",
                     (
-                        f"{event} points at current Exomem hook"
+                        f"{event} points at current Evermatter hook"
                         if configured and not legacy
-                        else f"{event} does not point cleanly at current Exomem hook"
+                        else f"{event} does not point cleanly at current Evermatter hook"
                     ),
                     {"entries": entries},
                 )
@@ -1330,7 +1330,7 @@ def check_hooks(
                     (
                         "Codex SessionEnd must remain unsupported for pinned 0.144.3"
                         if configured
-                        else "Codex 0.144.3 has no Exomem SessionEnd registration"
+                        else "Codex 0.144.3 has no Evermatter SessionEnd registration"
                     ),
                 )
 
@@ -2795,7 +2795,7 @@ def render_uninstall_human(report: dict) -> str:
         lines.append(f"  ! left {row['path']}: {row['error']}")
     instruction = report["instruction"]
     if instruction["changed"]:
-        lines.append(f"Removed the Exomem learning instruction from {instruction['path']}.")
+        lines.append(f"Removed the Evermatter learning instruction from {instruction['path']}.")
     elif instruction["error"]:
         lines.append(f"Could not update {instruction['path']}: {instruction['error']}")
     lines.append(f"Restart {label} to stop running the hooks it already loaded.")

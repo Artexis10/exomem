@@ -2,7 +2,7 @@
 
 # Epistemic Inbox
 
-The Epistemic Inbox is Exomem's daily, review-only answer to "what deserves my
+The Epistemic Inbox is Evermatter's daily, review-only answer to "what deserves my
 attention?" It composes deterministic measurements into one ranked list:
 
 - close active conclusions that may restate, refine, or contradict each other;
@@ -11,7 +11,7 @@ attention?" It composes deterministic measurements into one ranked list:
 - active compiled notes with no durable outbound Markdown connections;
 - open Planning items that recorded events already join to.
 
-None of these signals is a judgment. Exomem does not decide that a conclusion
+None of these signals is a judgment. Evermatter does not decide that a conclusion
 is wrong, infer a relationship as fact, decay memory, or edit a note. The agent
 or user inspects the evidence and chooses what to do.
 
@@ -93,7 +93,7 @@ return to the open inbox.
 ## Repairing relation debt
 
 Relation debt means an active compiled note has no outbound wikilinks or typed
-relations. It does not mean Exomem should invent edges.
+relations. It does not mean Evermatter should invent edges.
 
 1. Inspect the note and nearby context.
 2. Run `connect_memory(operation="suggest-relations")` or `suggest-links`.

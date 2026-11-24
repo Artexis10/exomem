@@ -97,7 +97,7 @@ Each record contains exactly `key` and `text`:
 
 A capture accepts 1–2,000 passages. Keys must be unique within the capture and contain 1–128 UTF-8 bytes.
 Text must be nonempty UTF-8, without edge whitespace, carriage returns or blank lines. Validation refuses invalid declarations before writing.
-Exomem preserves the text exactly. Keys and text participate in identity reconciliation; a changed key conflicts with an existing identity.
+Evermatter preserves the text exactly. Keys and text participate in identity reconciliation; a changed key conflicts with an existing identity.
 
 The canonical Source body holds a JSON key block before its Capture section. Frontmatter holds only the passage count.
 File mode and store mode use those same canonical bytes. Keys never contribute to lexical text, vectors or scores.
@@ -140,7 +140,7 @@ The hash covers the complete declared passage as UTF-8, including when a hit cov
 Several passages from one Source can rank. Hits contain no passage text; callers resolve their own records through the opaque key.
 The reply identifies the embedding `recall_space`, its opaque `recall_space_id` and the backend actually used in `scoring_mode`.
 It counts `withheld_chunks` whose indexed text no longer matches their Source.
-Exomem does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.
+Evermatter does not refill withheld hits. A request reads at most `limit` distinct selected Sources; terminal checks can reread those Sources.
 
 `EXOMEM_PASSAGE_MATRIX_BYTES` configures the process-wide numerical ceiling for optional passage matrices and replacement scratch.
 Its default is zero. A positive ceiling permits background loading after declared passages are published.
@@ -157,7 +157,7 @@ A service caller erases one captured Source incarnation with `manage_memory` ope
 Agents do not see this operation. It runs only in the service tier and requires the `captured_source_erasure` capability.
 The arguments are `operation_id`, `source_identity`, `expected_source_ref` and `expected_source_hash`.
 
-Exomem erases per incarnation, not per identity. Each revision and each capture after an earlier erase is its own incarnation.
+Evermatter erases per incarnation, not per identity. Each revision and each capture after an earlier erase is its own incarnation.
 To erase everything for one record, do these steps:
 
 1. List the record with `inspect_memory` operation `sources.inventory`, giving `system` and `record_id`.
@@ -183,7 +183,7 @@ The call refuses with a code that names what to change:
 - `SOURCE_ERASURE_DEPENDENT`: another page cites or links the Source. Remove that dependency first.
 - `SOURCE_ERASURE_OPERATION_CONFLICT`: the `operation_id` already targets another incarnation.
 
-Before its cutoff, the call answers `unknown` with a `failure.code` when Exomem cannot prove the erase is safe.
+Before its cutoff, the call answers `unknown` with a `failure.code` when Evermatter cannot prove the erase is safe.
 The codes are `custody_missing`, `coverage_incomplete`, `dependency_uncertain`, `canonical_page_unavailable` and `inbound_references_unavailable`.
 An `unknown` component names its `reason`. A reason that a repeat can clear, such as a store that could not be read this time (`page_unreadable`, `heat_unreadable`, `copy_unreadable`, `native_ledger_unreadable`, `generation_unwritable`), leaves the answer unsettled, so the caller repeats. Any other reason settles the answer until something outside the call changes.
 Without content-private logging, `host_logs` stays `unknown` with reason `logs_not_content_private`, because process logs can name the page.

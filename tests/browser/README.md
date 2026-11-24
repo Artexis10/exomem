@@ -1,7 +1,7 @@
 # Browser acceptance
 
 This is an opt-in development lane, not a Python or runtime dependency. Start an
-Exomem service from the checkout, then run:
+Evermatter service from the checkout, then run:
 
 ```sh
 cd tests/browser

@@ -2,7 +2,7 @@
 
 # Ranking auto-tune - the closed feedback loop
 
-Exomem's hybrid ranker (`RankingConfig` in `src/exomem/ranking_config.py`) self-tunes from
+Evermatter's hybrid ranker (`RankingConfig` in `src/exomem/ranking_config.py`) self-tunes from
 your own usage. (The `graph` fusion lane reads the typed epistemic-graph sidecar
 when available — typed/provenance edges rank ahead of plain wikilinks and
 annotate the hits they surface — falling back to wikilink expansion otherwise;

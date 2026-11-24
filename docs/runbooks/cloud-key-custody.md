@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud key custody
+# Evermatter Cloud key custody
 
 Each cell reads and writes its backups with one object-store key. The key custodian creates
 that key. `cellctl` holds no credential that creates or deletes keys. In the founder account it holds no credential that
@@ -216,7 +216,8 @@ An export or import object left in the old bucket is orphaned.
 The key custodian is in release 0.157.0 and later. The cell-deletion purge is in release 0.171.0 and later.
 Take the `cellctl.image` digest from the cellctl attestation asset of the release that you choose.
 The asset is named `exomem-image-cellctl-<commit>-<digest>-<run>-<attempt>.sigstore.json`. Check the digest with
-`gh attestation verify oci://ghcr.io/artexis10/exomem-cellctl@sha256:<digest> --owner artexis10 --source-ref refs/tags/v<version>`.
+`gh attestation verify oci://ghcr.io/substrate-systems/evermatter-cellctl@sha256:<digest> --owner substrate-systems --source-ref refs/tags/v<version>`.
+A release cut before the repository moved published its image as `ghcr.io/artexis10/exomem-cellctl`; verify it with `--owner artexis10`.
 Use that one digest in both releases, because the key custodian runs the `cellctl` image.
 
 | Release | Content | `keyCustodian.enabled` |
@@ -264,7 +265,7 @@ each new cell. Run release B right after release A.
 15. Set `cellData.backupBucketName`, `cellData.backupBucketId` and `cellData.stagingBucketName` from the `infra/terraform/cell-data` outputs.
     The staging bucket must differ from the backup bucket.
 16. Set `cellData.endpoint` to the account's S3 endpoint, the value `s3ApiUrl` in the `b2_authorize_account` response.
-17. Set `cellctl.image` to `ghcr.io/artexis10/exomem-cellctl@sha256:<digest>`, the digest from "Choose the releases". The schema refuses a tag while `cellctl` is on.
+17. Set `cellctl.image` to `ghcr.io/substrate-systems/evermatter-cellctl@sha256:<digest>` (`ghcr.io/artexis10/exomem-cellctl` for a release cut before the repository moved), the digest from "Choose the releases". The schema refuses a tag while `cellctl` is on.
 18. Keep `cellctl.b2BucketName`, `cellctl.b2BucketId` and `cellctl.b2Endpoint`. A cell made before the switch still backs up to the old bucket with its stored key.
 19. If the file sets `cellStorage.local.maxCellGib`, set a whole number, never `null`. Helm deletes a `null` key, and the schema then refuses the render.
     If `cellStorage.maxCellGib` is also set, use the same number, or the render fails with `must agree`.

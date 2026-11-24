@@ -126,7 +126,7 @@ if exomem_service_is_managed "$UNIT_FILE"; then
         || die "managed service did not report a verified active release"
     PORT="$(exomem_service_port "$UNIT_FILE")"
     CLI_REQUIRED=0
-    if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
+    if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_name >/dev/null; }; then
         CLI_REQUIRED=1
     fi
     exomem_write_owned_managed_manifest "$UNIT_FILE" "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"
@@ -367,9 +367,9 @@ exomem_update_transition_receipt \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" started
 
 # The verified live process is the release authority.  Keep the daily CLI lean:
-# align its Exomem release, not the service's optional ML/media dependency set.
+# align its Evermatter release, not the service's optional ML/media dependency set.
 CLI_REQUIRED=0
-if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_has_exomem; }; then
+if [[ "$CLI_SYNC" == "always" ]] || { [[ "$CLI_SYNC" == "auto" ]] && exomem_uv_tool_name >/dev/null; }; then
     CLI_REQUIRED=1
 fi
 exomem_write_owned_managed_manifest "$UNIT_FILE" "$VENV_PYTHON" "$SERVED" "$PROFILE" "http://127.0.0.1:$PORT"

@@ -1,7 +1,7 @@
-"""Durable, Exomem-owned MCP session records.
+"""Durable, Evermatter-owned MCP session records.
 
 GitHub proves identity before this module is called.  Session validation is
-deliberately local to Exomem and never retains or revalidates an upstream token.
+deliberately local to Evermatter and never retains or revalidates an upstream token.
 """
 
 from __future__ import annotations
@@ -697,7 +697,7 @@ class _LocalFileBackend:
 
 
 class SessionAuthority:
-    """Authoritative encrypted store for durable Exomem MCP sessions."""
+    """Authoritative encrypted store for durable Evermatter MCP sessions."""
 
     def __init__(
         self,

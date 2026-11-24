@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud cell deletion
+# Evermatter Cloud cell deletion
 
 Each destructive live operation requires explicit operator approval.
 

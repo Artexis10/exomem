@@ -56,7 +56,7 @@ meaningless.
    per case. "A case for which A5 does not beat A1 SHALL be struck from
    the report and never scored against the compiler" — striking unwinnable
    cases here means every later step's denominator is honest.
-3. **A1 floor.** The no-Exomem control, per case.
+3. **A1 floor.** The no-Evermatter control, per case.
 4. **A2/A4.** Raw recall, then nudged recall. If A4 already clears the
    pre-registered bar, that is the cheapest possible falsification of the
    compiler's claim (no A3 session needed to reach a verdict).
@@ -68,7 +68,7 @@ meaningless.
 
 ## Quiesced-cell and nonce rules
 
-Two Exomem services may be live on this host (a personal cell and the second
+Two Evermatter services may be live on this host (a personal cell and the second
 client cell). Before any measurement against either:
 
 - **Check the cell is quiet first.** Read instantaneous CPU from
@@ -150,7 +150,7 @@ implement):
 uv run python -m pytest tests/test_context_activation_fixtures.py tests/test_context_activation_audit.py tests/test_context_activation_product_corpus.py -q
 ```
 
-The public synthetic corpus is a real initialized Exomem vault. Its fixture
+The public synthetic corpus is a real initialized Evermatter vault. Its fixture
 keys resolve under `Knowledge Base/` to governed entity and note pages,
 Records collections and items, Planning collections and items, product/system
 resources, and tagged hub notes. Construction uses the same typed writers as

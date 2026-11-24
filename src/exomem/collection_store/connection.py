@@ -144,7 +144,7 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
     if mode is None or str(mode[0]).lower() != "wal":
         raise CollectionStoreUnavailable(
             "wal_unavailable",
-            "WAL journaling did not take effect on the state root. Keep the Exomem "
+            "WAL journaling did not take effect on the state root. Keep the Evermatter "
             "state root on a local filesystem (not a network or synced share).",
         )
     conn.execute("PRAGMA synchronous=FULL")
@@ -752,7 +752,7 @@ def _recorded_version(conn: sqlite3.Connection) -> int:
     """The schema version a store records, read from ``store_meta`` alone so a head reader may ask.
 
     A lend checks this number only, where a fresh open also checks the alembic revision: a migration
-    changes both in one transaction, so only an edit from outside Exomem can set them apart.
+    changes both in one transaction, so only an edit from outside Evermatter can set them apart.
     """
     rows = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchall()
     try:
