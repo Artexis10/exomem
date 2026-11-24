@@ -1299,6 +1299,7 @@ def _retire_covered_full_marker(vault_root: Path, observed: tuple[int, int] | No
 
 #: Every reason `recover_suspended_graph` can decline, as a stable token.
 RECOVERY_DECLINE_QUEUE_OWNS_REPAIR = "queue_owns_repair"
+RECOVERY_DECLINE_ACKNOWLEDGEMENT_IN_FLIGHT = "acknowledgement_in_flight"
 RECOVERY_DECLINE_MARKER_OWNS_REPAIR = "marker_owns_repair"
 RECOVERY_DECLINE_EXTERNAL_PENDING = "external_change_pending"
 RECOVERY_DECLINE_GRAPH_DISABLED = "graph_disabled"
@@ -1342,8 +1343,13 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
     one receipt that never drains, behind writes that do, held the barrier for
     good, because their progress restarts the stall escalation's clock. A queue
     that only loses races to live commits stays the queue's, whatever its age.
+
+    A watcher batch between raising the barrier as its fence and queueing its
+    repair owns the barrier next, ahead of an external mark: the mark is
+    retired before the repair is queued, so for that window the barrier has
+    neither receipts nor a mark and would read as nobody's.
     """
-    from . import freshness
+    from . import freshness, graph_drain
 
     details = deferred_index.graph_full_rebuild_details(vault_root)
     if details is not None and details.fatal_family is not None:
@@ -1351,6 +1357,8 @@ def recovery_decline_reason(vault_root: Path) -> str | None:
         return RECOVERY_DECLINE_MARKER_OWNS_REPAIR
     if _graph_receipts_own_repair(vault_root):
         return RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
+    if graph_drain.acknowledgement_in_flight(vault_root):
+        return RECOVERY_DECLINE_ACKNOWLEDGEMENT_IN_FLIGHT
     if freshness.external_pending(vault_root):
         return RECOVERY_DECLINE_EXTERNAL_PENDING
     if not graph_enabled():
@@ -1375,6 +1383,10 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     not refused by the epoch or by an unready vault. The oldest receipt's age
     bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
     that never drains ages past the threshold however much drains around it.
+    That age counts only from this process's first per-path attempt
+    (`graph_drain.per_path_repair_attempted_for`): a receipt queued before it,
+    by a worker that never drained it, is untried here, and its age across
+    process lifetimes is not a stall.
     The age does not bound a queue whose latest pass cleared nothing only
     because live commits won the race for it
     (`graph_drain.per_path_repair_raced`): that queue is old because writes keep
@@ -1388,6 +1400,8 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
         return False
     try:
         oldest_age = deferred_index.graph_oldest_receipt_age(vault_root)
+        if oldest_age is not None:
+            oldest_age = min(oldest_age, graph_drain.per_path_repair_attempted_for(vault_root))
         return (
             oldest_age is not None
             and (
