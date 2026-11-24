@@ -1165,6 +1165,7 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
 
 
 def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    from .name_drift import KIND as name_drift_kind
     from .note_cohesion import KIND as note_cohesion_kind
     from .ownership_review import KIND as ownership_kind
 
@@ -1175,6 +1176,8 @@ def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str,
         return _note_cohesion_projection(value)
     if kind == ownership_kind:
         return _ownership_projection(value)
+    if kind == name_drift_kind:
+        return _rename_projection(value)
     return None
 
 
@@ -1269,6 +1272,35 @@ def _ownership_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "id": item_id({"ref": ref, "fingerprint": fingerprint}),
         "question": question,
     }
+
+
+#: Bounds of the rename suggestion's text fields: a file name is at most 255 bytes, and the call
+#: and the outcome sentence each hold one short statement.
+_MAX_RENAME_NAME_CHARS = 255
+_MAX_RENAME_TEXT_CHARS = 800
+
+
+def _rename_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The rename a retitling write suggests: the outcome, the names and the spelled call."""
+    from .name_drift import KIND
+
+    fields = {
+        name: value.get(name)
+        for name in ("outcome", "ref", "current_name", "planned_name", "call")
+    }
+    limits = {
+        "outcome": _MAX_RENAME_TEXT_CHARS,
+        "call": _MAX_RENAME_TEXT_CHARS,
+        "ref": _MAX_RENAME_TEXT_CHARS,
+        "current_name": _MAX_RENAME_NAME_CHARS,
+        "planned_name": _MAX_RENAME_NAME_CHARS,
+    }
+    if any(
+        not isinstance(fields[name], str) or not 0 < len(fields[name]) <= limits[name]
+        for name in fields
+    ):
+        return None
+    return {"kind": KIND, **fields}
 
 
 def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:

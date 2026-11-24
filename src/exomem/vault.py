@@ -917,7 +917,7 @@ def ensure_canonical_h1(content: str, title: str) -> str:
 
 def authored_title(frontmatter: Any, body: str) -> str | None:
     """The title that a page's own bytes give: frontmatter `title`, else the first H1, else None."""
-    title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
+    title = frontmatter.get("title") if isinstance(frontmatter, Mapping) else None
     if title is not None and str(title).strip():
         return str(title).strip()
     h1 = _H1_PATTERN.search(body or "")
@@ -976,6 +976,8 @@ def unique_path(
     *,
     vault_root: Path | None = None,
     title_held: Callable[[str], bool] | None = None,
+    excluding: str | None = None,
+    folders: dict[Path, Callable[[str], bool]] | None = None,
 ) -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision.
 
@@ -999,24 +1001,45 @@ def unique_path(
     `title_held` says whether a stem is another live page's title. A page named by that stem
     would take over every bare link to the title, because a stem match beats a title match, so
     such a stem counts as taken even when no file has the name.
+
+    `excluding` names the vault path of a page being renamed: its own name in `directory` is
+    free for it, so a page that already holds its numbered name keeps it. `folders` memoises
+    each directory's taken names for a caller that names many pages over one unchanging vault.
     """
-    reserved: frozenset[str] = frozenset()
     if vault_root is not None:
-        from . import prior_claims
         from .governance import connector_boundary
 
         connector_boundary.require_create(
             vault_root, (directory / f"{stem}{suffix}").relative_to(vault_root).as_posix()
         )
+    name_taken = folders.get(directory) if folders is not None else None
+    if name_taken is None:
+        name_taken = _names_taken(directory, f"{stem}{suffix}", vault_root)
+        if folders is not None:
+            folders[directory] = name_taken
+    if excluding is not None and vault_root is not None:
+        own = PurePosixPath(excluding)
+        if own.parent.as_posix() == relative_posix(directory, vault_root):
+            own_key, taken_elsewhere = vault_name_key(own.name), name_taken
+            name_taken = lambda name: (  # noqa: E731
+                vault_name_key(name) != own_key and taken_elsewhere(name)
+            )
+    return directory / _first_free_name(stem, suffix, name_taken, title_held)
+
+
+def _names_taken(directory: Path, name: str, vault_root: Path | None) -> Callable[[str], bool]:
+    """Whether a file name in `directory` is taken, by the tests `unique_path` documents."""
+    reserved: frozenset[str] = frozenset()
+    if vault_root is not None:
+        from . import prior_claims
+
         reserved = prior_claims.reserved_names(
             vault_root, directory.relative_to(vault_root).as_posix()
         )
-        stored = _stored_folder_keys(vault_root, directory, f"{stem}{suffix}")
+        stored = _stored_folder_keys(vault_root, directory, name)
         if stored is not None:
             held = stored | reserved
-            return directory / _first_free_name(
-                stem, suffix, lambda name: vault_name_key(name) in held, title_held
-            )
+            return lambda candidate: vault_name_key(candidate) in held
     try:
         taken = {vault_name_key(entry.name) for entry in directory.iterdir()} | reserved
     except OSError:
@@ -1025,15 +1048,10 @@ def unique_path(
         # available without a listing, and it must still be applied rather than
         # assumed to pass, or an unlistable-but-populated directory would hand
         # back a path that already holds another note.
-        return directory / _first_free_name(
-            stem,
-            suffix,
-            lambda name: (directory / name).exists() or vault_name_key(name) in reserved,
-            title_held,
+        return lambda candidate: (
+            (directory / candidate).exists() or vault_name_key(candidate) in reserved
         )
-    return directory / _first_free_name(
-        stem, suffix, lambda name: vault_name_key(name) in taken, title_held
-    )
+    return lambda candidate: vault_name_key(candidate) in taken
 
 
 def numbered_stem(stem: str, number: int, suffix: str = ".md") -> str:

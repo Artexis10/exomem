@@ -66,7 +66,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # to `add_record` on 2026-11-23 (let-agents-manage-structure): a user-designed collection keeps the width the user
 # chose, and the hint is where an agent learns to say so. Merged with relocate-pages-in-one-curation-call on
 # 2026-11-24, the wire measures 30,028 B, `add_record` 1,044 B and `manage_memory` 2,607 B.
-TOTAL_BUDGET = 30_028
+# The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
+# their title,
+# added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
+# Merged with let-agents-manage-structure on 2026-11-24, the wire measures 30,053 B.
+TOTAL_BUDGET = 30_053
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -80,7 +84,8 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_note": 2700,
     "edit_plan_item": 750,
     "edit_record": 850,
-    "inspect_memory": 2200,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
+    "inspect_memory": 2230,
     "list_review_items": 750,
     "manage_memory": 2620,
     "query_plan_items": 1050,

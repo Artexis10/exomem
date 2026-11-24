@@ -1908,8 +1908,8 @@ _GUESSED = "quartz-ledger"
 
 
 def _withheld_linkers(target: str) -> dict[str, tuple[str, str]]:
-    """Withheld pages linking `target`: one the move cannot rewrite cleanly
-    because its contract refuses, one in an append-only tree, and one it can."""
+    """Withheld pages linking `target`: one with debt from before the contract (no semantic
+    units), one in an append-only tree, and one that complies."""
     return {
         "non-compliant": (
             f"{INSIGHTS}/Withheld/w.md",
@@ -2048,23 +2048,36 @@ def test_a_restricted_file_delete_counts_the_links_it_may_see(
         assert answers["C"] == answers["B"], detail
 
 
-def test_the_owner_is_still_refused_a_linker_it_cannot_rewrite(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("linker", "rewritten"), [("non-compliant", True), ("sources", False)])
+def test_the_owner_gets_no_skip_for_a_withheld_linker(
+    tmp_path: Path, linker: str, rewritten: bool
+) -> None:
+    """A restricted writer's move leaves a withheld linker as it is and commits. The owner may
+    write a page withheld from others, so it gets no such skip. Its move rewrites a linker that
+    keeps its old debt. A linker in an append-only tree, which the move cannot rewrite, refuses
+    the move. Catches: the restricted writer's skip reaching the owner, and an owner's move
+    refused for a linker's old debt."""
     base = {
         f"{INSIGHTS}/alpha.md": _typed("Alpha", "A.", f"{INSIGHTS}/zeta"),
         f"{INSIGHTS}/zeta.md": _typed("Zeta", "Z.", f"{INSIGHTS}/alpha"),
     }
-    for linker in ("non-compliant", "sources"):
-        hidden, text = _withheld_linkers(f"{INSIGHTS}/zeta")[linker]
-        vault = _materialize(
-            tmp_path / linker / "vault", {**base, hidden: text}, "external",
-            scope="Notes/Insights/Withheld/**, Sources/Withheld/**",
-        )
-        answer = _call(
-            vault, None, "manage_memory_file", operation="move",
-            old_path=f"{INSIGHTS}/zeta.md", new_path=f"{INSIGHTS}/zeta-x.md",
-            update_wikilinks=True,
-        )
-        assert answer.get("__error__"), (linker, answer)
+    hidden, text = _withheld_linkers(f"{INSIGHTS}/zeta")[linker]
+    vault = _materialize(
+        tmp_path / "vault", {**base, hidden: text}, "external",
+        scope="Notes/Insights/Withheld/**, Sources/Withheld/**",
+    )
+
+    answer = _call(
+        vault, None, "manage_memory_file", operation="move",
+        old_path=f"{INSIGHTS}/zeta.md", new_path=f"{INSIGHTS}/zeta-x.md",
+        update_wikilinks=True,
+    )
+
+    if rewritten:
+        assert "__error__" not in answer, answer
+        assert page_bytes(vault, hidden).decode() == text.replace("zeta]]", "zeta-x]]")
+    else:
+        assert answer.get("__error__"), answer
         assert page_bytes(vault, hidden).decode() == text
 
 

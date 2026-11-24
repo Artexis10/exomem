@@ -129,11 +129,15 @@ def configured_overlays(root: Path) -> frozenset[str] | None:
     return frozenset(instances.storage(spec, binding)[0] for spec in specs for binding in bindings)
 
 
-def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
-    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+def changes_overlay(root: Path, paths: Iterable[str]) -> bool:
+    """Whether a change of ``paths`` changes an overlay source (`is_overlay_source`)."""
     overlays = functools.cache(lambda: configured_overlays(root))
-    if any(is_overlay_source(root, rel, overlays=overlays) for rel in paths):
-        _set(tx, OVERLAY_REVISION, str(revision))
+    return any(is_overlay_source(root, rel, overlays=overlays) for rel in paths)
+
+
+def record_overlay_change(tx: Connection, revision: int) -> None:
+    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+    _set(tx, OVERLAY_REVISION, str(revision))
 
 
 def record_derived_from_files(tx: Connection, revision: int) -> None:

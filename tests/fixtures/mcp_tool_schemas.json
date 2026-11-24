@@ -651,6 +651,7 @@
             "plans.validate",
             "plans.history",
             "writer.status",
+            "maintenance.name_drift",
             "settings.inspect",
             "graph.map",
             "files.overview",

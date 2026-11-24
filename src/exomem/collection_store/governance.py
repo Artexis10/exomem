@@ -704,6 +704,12 @@ class ReleaseCache:
         #: the proof holds only at that exact pair: this connection's writes, another connection's commit, a
         #: schema change and a changed policy, access file or tombstone each move it.
         self.render_proofs = OrderedDict()
+        #: (path, sha256 of its bytes or None, the operation's release inputs) -> (projection decision,
+        #: the data and schema versions when it was made). A decision reads the store, those bytes and
+        #: those inputs alone, so it holds until the store may have changed: every write of this connection
+        #: except a collection-free one (`begin`) drops them all, and a commit of another connection moves
+        #: the versions it holds, even one that a rollback's restamp hides from `check` (`finish`).
+        self.projections = OrderedDict()
         self.pending = None
         self.replacements = {}
         #: Collections whose replacement state predates a row this transaction touched after building it.
@@ -711,6 +717,7 @@ class ReleaseCache:
         self.observed = self._stamp()
         self.accounted = conn.total_changes
         self.unmanaged = False
+        self.free = False
 
     def _stamp(self):
         return (self.conn.total_changes, self.conn.execute("PRAGMA data_version").fetchone()[0],
@@ -718,6 +725,10 @@ class ReleaseCache:
 
     def check(self):
         if self.pending is not None:
+            if self.free and not self.pending:
+                # Every change of a collection-free transaction so far is taken as the vault store's own
+                # (`begin`), so `finish`'s accounting guard trips only on a change made after `prepare`.
+                self.accounted = self.conn.total_changes
             stamp = self._stamp()
             if stamp[0] != self.accounted or stamp[1:] != self.observed[1:] or self.unmanaged:
                 self.unmanaged = True
@@ -739,6 +750,7 @@ class ReleaseCache:
         self.memberships.clear()
         self.decisions.clear()
         self.render_proofs.clear()
+        self.projections.clear()
         self.replacements.clear()
         self.outdated.clear()
         self.observed = self._stamp()
@@ -817,10 +829,20 @@ class ReleaseCache:
     def queued_history_sweep(self):
         return self.history_sweep_next if self.history_sweep_staged else self.history_sweep
 
-    def begin(self):
+    def begin(self, *, collection_free=False):
+        """Open a transaction's accounting; ``collection_free`` explains each change it makes.
+
+        A collection-free transaction writes only the vault store's own tables (its pages, manifest,
+        queues and holds), never a row that a collection's release reads. So the cached releases and
+        kept projection decisions hold across it, and a collection read inside it may use them. The
+        flag is trusted: `check` and `prepare` take every change of such a transaction as explained, so
+        a raw write to a collection table inside one goes unseen. Only a writer statement (`account`)
+        or mutation (`touch`) restores the ordinary accounting and drops the kept decisions at `finish`.
+        """
         self.check()
         self.pending = {}
         self.unmanaged = False
+        self.free = collection_free
         self.replacements = {}
         self.outdated = set()
         self.accounted = self.conn.total_changes
@@ -831,6 +853,12 @@ class ReleaseCache:
 
     def account(self, changes):
         if self.pending is not None:
+            if changes and self.free:
+                # A writer statement changed a collection table: what came before it was the vault store's
+                # own (`begin`), and from here the ordinary accounting holds, so `finish` drops the kept
+                # decisions even when the statement's caller skipped `touch`.
+                self.accounted = self.conn.total_changes - changes
+                self.free = False
             self.accounted += changes
 
     def touch(self, cid, identity=None):
@@ -851,6 +879,10 @@ class ReleaseCache:
 
     def finish(self, committed):
         changed = self.conn.total_changes != self.observed[0]
+        free = (committed and self.free and not self.pending and not self.unmanaged
+                and self.conn.total_changes == self.accounted)
+        if (changed or self.unmanaged) and not free:
+            self.projections.clear()
         if committed and not self.unmanaged and self.conn.total_changes == self.accounted:
             for cid, identities in self.pending.items():
                 state = self.replacements.get(cid) or self.states.get(cid)
@@ -914,6 +946,7 @@ class ReleaseCache:
         self.prepared = {}
         self.observed = self.prepared_stamp if committed else self._stamp()
         self.unmanaged = False
+        self.free = False
 
     @staticmethod
     def _remember(cache, key, value, maximum):
@@ -1040,6 +1073,8 @@ class OperationAuthorization:
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
+        # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
+        self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
         self.undecided = 0
         self.grants_loaded = False
@@ -1980,76 +2015,155 @@ class OperationAuthorization:
 
     def projection_decision(self, path: str, *, content: bytes | None = None,
                             manifest_for=None) -> Decision | None:
-        """Authorize canonical subjects, then prove any bytes are their current render."""
-        try:
-            targets = self.projection_subjects(path)
-            if targets is None:
-                return None
-            if not targets:
-                return Decision(0)
-            manifest = self.field_manifest(targets[0].collection_id)
-            plan = self.field_plan(manifest)
-            projection_kind = self.conn.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
-            if not plan.owner and projection_kind == ("summary",):
-                # The stored page carries private stamps; direct reads use the canonical released overview instead.
-                return Decision(0)
-            if not self.holds_every_field(manifest):
-                # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
-                return Decision(0)
-            decisions = tuple(self.decision(subject) for subject in targets)
-            if path != targets[0].basis.identity:
-                if decisions[0].level < 6:
-                    return Decision(0)
-                decisions = decisions[1:]
-            decision = egress._meet_decisions(decisions)
-            if decision.level == 0:
-                return decision
-            history_page = None
-            if projection_kind == ("history",):
-                from . import history
+        """Authorize canonical subjects, then prove any bytes are their current render.
 
-                if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
-                    return Decision(0)
-                # Read before the context reads the store, so a commit that lands meanwhile can only make a later
-                # proof lookup miss.
-                stamp = self.cache._stamp()
-                context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
-                if not context.exists(path):
-                    # A retired page must not disclose a raw-history boundary through an empty matching header.
-                    return Decision(0)
-                history_page = context, stamp
-            if content is not None:
-                cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
-                row = cursor.fetchone()
-                if row is None:
-                    return Decision(0)
-                projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
-                # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-                if projection["kind"] not in {"manifest", "item", "held", "summary", "log", "history"}:
-                    return Decision(0)
-                if projection["kind"] == "item" and not any(
-                    subject.row_id == projection["row_id"] for subject in targets[1:]
-                ):
-                    return Decision(0)
-                manifest = manifest_for(projection["collection_id"])
-                digest = hashlib.sha256(content)
-                if not self._bytes_are_current_render(projection, manifest, content, digest.digest(),
-                                                      history_page=history_page):
-                    return Decision(0)
-                parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
-                if parsed is None:
-                    return Decision(0)
-                extra = set(membership.evaluate_snapshot(
-                    parsed, self.policy, content_hash=digest.hexdigest(),
-                )) - set(decision.scope_ids)
-                if extra:
-                    decision = egress._meet_decisions((decision,
-                        connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy),
-                        decide(extra, audience=self.who.audience_id, purpose=self.purpose,
-                               policy=self.policy, active_grants=self.policy.grants)))
-            return decision
+        The decision is kept on the release cache under the path, the bytes' digest and this
+        operation's release inputs (`_kept_projection_key`), which with the store are all it reads.
+        The cache drops it when the store may have changed (`ReleaseCache.finish`), so a save that
+        writes only vault pages decides no view again.
+        """
+        digest = None if content is None else hashlib.sha256(content)
+        key = self._kept_projection_key(path, digest)
+        cache = self.cache
+        # Another connection's commit, or a write of this one that nothing accounted, drops every kept decision.
+        cache.check()
+        # A write transaction that changed a collection has not dropped the kept decisions yet (`finish`).
+        served = cache.pending is None or (cache.free and not cache.pending)
+        if (key is not None and served and (kept := cache.projections.get(key)) is not None
+                and kept[1] == cache._stamp()[1:]):
+            cache.projections.move_to_end(key)
+            return kept[0]
+        # Read before deciding, so a write that lands meanwhile leaves this decision unkept.
+        stamp, undecided = cache._stamp(), self.undecided
+        try:
+            decision, keepable = self._projection_decision(path, content, digest, manifest_for)
         except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
+        # None is kept mid-write, from an unreadable input, or unless the decision began at the checked
+        # stamp and the store, this connection's or another's, stayed there throughout.
+        if (key is not None and keepable and self.undecided == undecided and cache.pending is None
+                and not cache.unmanaged and stamp == cache.observed == cache._stamp()):
+            cache._remember(cache.projections, key, (decision, stamp[1:]), _MAX_CACHED_SUBJECTS)
+        return decision
+
+    def _kept_projection_key(self, path, digest):
+        """The key that a kept projection decision holds under, or None where none is kept.
+
+        A session reads time and its own grants, and a failed snapshot decides nothing, so neither
+        keeps one; nor does an operation on a caller's own ownership proof. The inputs are this
+        operation's own snapshot: the caller, the policy, the access file, the tombstones, the
+        purpose, the connector ceiling, the registry assignment and the caller's unrestricted access.
+        Two more live outside the store: the Planning values that a manifest parse reads
+        (`field_manifest`), and the ownership binding and admitted collections, which the enrollment
+        and the coordinator's fence decide.
+        """
+        if (self.context is not None or self.failed or self.authority is not None
+                or self._ownership_proof is not None):
+            return None
+        if self._kept_inputs is None:
+            from ..cli_ops import OpError
+
+            try:
+                proof = self.projection_ownership()
+                inputs = (self.who, self._release_dependency(), membership.subject_inputs(self.root, self.policy),
+                          PlanningValues(self.root, server_side=True).admitted_dependency(),
+                          proof.binding, proof.admitted,
+                          # A quarantined hold, or one whose item is unreadable, is the unrestricted owner's.
+                          raw_protection.has_unrestricted_access(self.root, self.who))
+                hash(inputs)
+            except (connector_boundary.BoundaryUnavailable, OpError, TypeError):
+                # The decision itself meets the same input and refuses as before; only keeping stops here.
+                return None
+            self._kept_inputs = inputs
+        return path, None if digest is None else digest.digest(), self._kept_inputs
+
+    def _projection_decision(self, path, content, digest, manifest_for):
+        """`(decision, keepable)`: keepable when the decision read only the store and its key's inputs."""
+        targets = self.projection_subjects(path)
+        if targets is None:
+            return None, True
+        if not targets:
+            return Decision(0), True
+        manifest = self.field_manifest(targets[0].collection_id)
+        plan = self.field_plan(manifest)
+        projection_kind = self.conn.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
+        if not plan.owner and projection_kind == ("summary",):
+            # The stored page carries private stamps; direct reads use the canonical released overview instead.
+            return Decision(0), True
+        if not self.holds_every_field(manifest):
+            # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
+            return Decision(0), True
+        decisions = tuple(self.decision(subject) for subject in targets)
+        if path != targets[0].basis.identity:
+            if decisions[0].level < 6:
+                return Decision(0), True
+            decisions = decisions[1:]
+        decision = egress._meet_decisions(decisions)
+        if decision.level == 0:
+            return decision, True
+        history_page = None
+        keepable = True
+        if projection_kind == ("history",):
+            from . import history
+
+            if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
+                return Decision(0), True
+            # Read before the context reads the store, so a commit that lands meanwhile can only make a later
+            # proof lookup miss.
+            stamp = self.cache._stamp()
+            context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
+            # The page renders from the context's own read of the file-held inputs: a decision is kept only
+            # where that read is this operation's, which its key names.
+            keepable = context.inputs == self._history_inputs()
+            if not context.exists(path):
+                # A retired page must not disclose a raw-history boundary through an empty matching header.
+                return Decision(0), keepable
+            history_page = context, stamp
+        if content is not None:
+            cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
+            row = cursor.fetchone()
+            if row is None:
+                return Decision(0), keepable
+            projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
+            # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+            if projection["kind"] not in {"manifest", "item", "held", "summary", "log", "history"}:
+                return Decision(0), keepable
+            if projection["kind"] == "item" and not any(
+                subject.row_id == projection["row_id"] for subject in targets[1:]
+            ):
+                return Decision(0), keepable
+            manifest = manifest_for(projection["collection_id"])
+            # A relationship label reads vault files, which no key here names.
+            presentation = manifest.item_presentation
+            keepable = keepable and (presentation is None or not presentation.relationships)
+            if not self._bytes_are_current_render(projection, manifest, content, digest.digest(),
+                                                  history_page=history_page):
+                return Decision(0), keepable
+            parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
+            if parsed is None:
+                return Decision(0), keepable
+            extra = set(membership.evaluate_snapshot(
+                parsed, self.policy, content_hash=digest.hexdigest(),
+            )) - set(decision.scope_ids)
+            if extra:
+                try:
+                    ceiling = connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy,
+                                                               strict=True)
+                except connector_boundary.UNDECIDED:
+                    # Withheld for this operation only, as the unstrict call answers; nothing keeps it.
+                    self.undecided += 1
+                    ceiling = Decision(policy.DISCLOSURE_MIN)
+                decision = egress._meet_decisions((decision, ceiling,
+                    decide(extra, audience=self.who.audience_id, purpose=self.purpose,
+                           policy=self.policy, active_grants=self.policy.grants)))
+        return decision, keepable
+
+    def _history_inputs(self):
+        """The `history.release_inputs` digest of this operation's own policy, access file and tombstones."""
+        from . import history
+
+        return history.inputs_of(self.policy, self.tombstones, self.access_fingerprint, self.access,
+                                 self.access_blocked).digest
 
     def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes, *,
                                   history_page=None) -> bool:
