@@ -1409,7 +1409,7 @@ def finish_responses_on_shutdown() -> None:
     a stopping server, such as a Cloud cell at an upgrade, cut its in-flight
     calls; a proxy in front answered them with a 502. With that drain off,
     uvicorn's graceful shutdown refuses new connections and lets the calls in
-    flight finish within its timeout (FastMCP's 2 s), then cancels the rest.
+    flight finish within its timeout (2 s, set in run()), then cancels the rest.
     """
     from sse_starlette.sse import AppStatus
 
@@ -1490,7 +1490,9 @@ def run(
         # request in whatever context the connection's reader last kept, which
         # can be an earlier request's (CPython issue 140947). No Exomem lifespan
         # sets a context variable, and FastMCP sets its own again per request.
-        uvicorn_config: dict[str, object] = {"reset_contextvars": True}
+        # The graceful-shutdown timeout bounds a stop: finish_responses_on_shutdown leaves
+        # open streams to it, and without a timeout they would never close.
+        uvicorn_config: dict[str, object] = {"reset_contextvars": True, "timeout_graceful_shutdown": 2}
         if worker_socket is not None:
             from .service_ingress import WORKER_KEEP_ALIVE_SECONDS
 

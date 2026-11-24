@@ -226,6 +226,22 @@ class Context:
                 headers={"authorization": f"Bearer {token}"},
             )
 
+    async def admin_capacity(self) -> dict[str, Any]:
+        """Substrate's admission count, as GET /api/exomem/admin/capacity serves it to the operator."""
+
+        async with self.resolver.async_client() as client:
+            response = await client.get(
+                f"{PUBLIC_BASE_URL}/api/exomem/admin/capacity",
+                headers={"authorization": f"Bearer {self.substrate.secrets.admin_token}"},
+            )
+        if response.status_code != 200:
+            raise CrossLaneDefect(
+                f"GET /api/exomem/admin/capacity answered {response.status_code}",
+                component="Substrate admin capacity route", owner=SUBSTRATE_REPO,
+                evidence={"status": response.status_code, "body": _safe_body(response)},
+            )
+        return response.json()["capacity"]
+
     async def admin_release(self, payload: dict[str, Any]) -> dict[str, Any]:
         response = await self.release_request(self.substrate.secrets.admin_token, payload)
         if response.status_code != 200:

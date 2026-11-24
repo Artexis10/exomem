@@ -58,10 +58,22 @@ jobs:
     name: rehearsal unit tests and pinned ruff
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      p3: ${{ steps.scope.outputs.p3 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          fetch-depth: 2
+      # The runbook and cloud_deploy.py trigger this workflow only for the release mode's unit tests: the P3
+      # rehearsal never runs them, so a pull request that changes nothing else skips it. These are the two
+      # release-only paths of the trigger list above.
+      - name: Decide whether the P3 rehearsal runs
+        id: scope
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then echo "p3=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          others="$(git diff --name-only HEAD^1 HEAD | grep -v -x -e docs/runbooks/cloud-platform-deploy.md -e infra/scripts/cloud_deploy.py || true)"
+          if [ -n "$others" ]; then echo "p3=true" >> "$GITHUB_OUTPUT"; else echo "p3=false" >> "$GITHUB_OUTPUT"; fi
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -82,7 +94,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import')
+    if: needs.checks.outputs.p3 == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import'))
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:

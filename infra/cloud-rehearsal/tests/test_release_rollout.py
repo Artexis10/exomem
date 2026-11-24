@@ -214,28 +214,38 @@ def test_the_stage_stops_before_a_redemption_that_substrate_would_refuse() -> No
 
     from cloud_rehearsal import report as report_module
 
-    async def fetchrow(_sql):
-        return {"published_slots": 0, "live_cells": 1, "cell_gib": '{"abc": 10}'}
+    async def admin_capacity():
+        return {"freePlaces": 1, "freePlacesUnknownReason": None, "observedSlots": 3, "liveCells": 1,
+                "outstandingInvitations": 1, "newestObservationAt": "2026-11-24T09:00:00Z"}
 
-    ctx = SimpleNamespace(fetchrow=fetchrow)
+    async def fetchrow(_sql):
+        return {"cell_gib": '{"abc": 10}'}
+
+    ctx = SimpleNamespace(admin_capacity=admin_capacity, fetchrow=fetchrow)
     record = report_module.StepRecord(13, "provision_disposable_cells")
     with pytest.raises(report_module.StepFailure) as stopped:
         asyncio.run(require_admission_room(ctx, record, "B and C", room=2, timeout=0))
-    assert "published 0 slot(s) for 1 live cell(s)" in str(stopped.value)
-    assert record.evidence["admission"]["B and C"] == {"published_slots": 0, "live_cells": 1, "cell_gib": {"abc": 10}, "room": -1}
+    assert "1 free place(s) from 3 published slot(s), 1 live cell(s) and 1 outstanding invitation(s)" in str(stopped.value)
+    assert record.evidence["admission"]["B and C"]["cell_gib"] == {"abc": 10}
 
 
-def test_admission_with_room_records_the_published_slots_and_goes_on() -> None:
+def test_unobserved_capacity_is_reported_as_unknown_not_as_room() -> None:
     import asyncio
 
     from cloud_rehearsal import report as report_module
 
+    async def admin_capacity():
+        return {"freePlaces": None, "freePlacesUnknownReason": "capacity_not_observed", "observedSlots": 0,
+                "liveCells": 0, "outstandingInvitations": 0, "newestObservationAt": None}
+
     async def fetchrow(_sql):
-        return {"published_slots": SLOTS_AT_REST, "live_cells": 1, "cell_gib": '{"abc": 4}'}
+        return {"cell_gib": None}
 
     record = report_module.StepRecord(13, "provision_disposable_cells")
-    asyncio.run(require_admission_room(SimpleNamespace(fetchrow=fetchrow), record, "B and C", room=2, timeout=0))
-    assert record.evidence["admission"]["B and C"]["published_slots"] == SLOTS_AT_REST
+    with pytest.raises(report_module.StepFailure) as stopped:
+        asyncio.run(require_admission_room(SimpleNamespace(admin_capacity=admin_capacity, fetchrow=fetchrow), record,
+                                           "C", room=1, timeout=0))
+    assert "an unknown number of free places (capacity_not_observed)" in str(stopped.value)
 
 
 def test_a_step_that_never_provisioned_blocks_the_poll_check_and_every_proof_after_it() -> None:

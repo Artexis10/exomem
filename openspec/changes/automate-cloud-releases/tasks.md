@@ -185,6 +185,7 @@
   - The forced readiness failure paused the rollout with `UPGRADE_READINESS_TIMEOUT`, and cellctl logged `cloud-rollout-paused` once. The workflow's paused path printed `cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT` and exited 1.
   - The deploy token's pause clear got `403 OPERATOR_SCOPE_DENIED`, and the pause stayed until the admin token cleared it.
 - [ ] 2.2 Measure each stop on real cells after phase 1: the stop, the pull, the init and the cold start, per cell. Verify: design.md replaces each "est." stop figure with the measured median and range, and names the run. It catches a "seamless" claim that rests on estimates.
+- [ ] 2.3 Set the production gateway hold budget (`cloudGateway.hold.budgetSeconds`) to its first value, 40 s (D5, migration step 5), through the platform upgrade command, once 2.2's stop figures show that a cell restarts within it. The chart ships 0, which turns the hold off. Verify: the production gateway's rendered environment shows `EXOMEM_CLOUD_HOLD_BUDGET_SECONDS` at the new value, and the next rolled cell's stop shows held calls answered. It catches a change that archives with the hold still off.
 
 ## 3. Phase 2: restore point (D6)
 

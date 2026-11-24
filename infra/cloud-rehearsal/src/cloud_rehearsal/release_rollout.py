@@ -623,24 +623,20 @@ async def size_cell(ctx: Context, tenant: Tenant) -> None:
     await ctx.execute("UPDATE exomem_cloud_cells SET storage_gib = $2 WHERE cell_id = $1", tenant.cell_id, CELL_GIB)
 
 
-# Substrate's own count (cloud-capacity.ts): the slots of the observations from the last five minutes, and
-# the cells whose deletion has not finished. cell_gib is the size each cell's claim is rendered at.
-ADMISSION_SQL = """
-SELECT
-  (SELECT COALESCE(SUM(cell_slots), 0) FROM exomem_cloud_capacity
-   WHERE observed_at > statement_timestamp() - interval '5 minutes'
-     AND observed_at <= statement_timestamp()) AS published_slots,
-  (SELECT COUNT(*) FROM exomem_cloud_cells AS cell WHERE NOT exomem_cloud_cell_deletion_finished(cell)) AS live_cells,
-  (SELECT jsonb_object_agg(cell_id, GREATEST(storage_gib, COALESCE(grown_storage_gib, 0)))
-   FROM exomem_cloud_cells) AS cell_gib
+# Each cell's volume size, for the failure message only; the admission count itself is Substrate's.
+CELL_GIB_SQL = """
+SELECT jsonb_object_agg(cell_id, GREATEST(storage_gib, COALESCE(grown_storage_gib, 0))) AS cell_gib
+FROM exomem_cloud_cells
 """
 
 
 async def admission_state(ctx: Context) -> dict[str, Any]:
-    row = await ctx.fetchrow(ADMISSION_SQL) or {}
+    """Substrate's own admission count, from its operator capacity route, and each cell's volume size."""
+
+    capacity = await ctx.admin_capacity()
+    row = await ctx.fetchrow(CELL_GIB_SQL) or {}
     gib = row.get("cell_gib")
-    return {"published_slots": int(row.get("published_slots") or 0), "live_cells": int(row.get("live_cells") or 0),
-            "cell_gib": json.loads(gib) if isinstance(gib, str) else (gib or {})}
+    return {**capacity, "cell_gib": json.loads(gib) if isinstance(gib, str) else (gib or {})}
 
 
 async def require_admission_room(ctx: Context, record: StepRecord, label: str, *, room: int, timeout: float = 60.0) -> None:
@@ -650,15 +646,19 @@ async def require_admission_room(ctx: Context, record: StepRecord, label: str, *
     deadline = time.monotonic() + timeout
     while True:
         state = await admission_state(ctx)
-        state["room"] = state["published_slots"] - state["live_cells"]
         record.evidence.setdefault("admission", {})[label] = state
-        if state["room"] >= room:
+        free = state.get("freePlaces")
+        if free is not None and free >= room:
             return
         if time.monotonic() > deadline:
+            places = "an unknown number of free places" if free is None else f"{free} free place(s)"
+            reason = f" ({state['freePlacesUnknownReason']})" if free is None and state.get("freePlacesUnknownReason") else ""
             raise StepFailure(
-                f"admission has no room for {label}: cellctl published {state['published_slots']} slot(s) for "
-                f"{state['live_cells']} live cell(s), and {room} more cell(s) need room. The pool holds {SLOTS_AT_REST} "
-                f"slot(s) at rest for {CELL_GIB} GiB cells; cell volume sizes in GiB: {state['cell_gib']}")
+                f"admission has no room for {label}: Substrate counts {places}{reason} from "
+                f"{state.get('observedSlots')} published slot(s), {state.get('liveCells')} live cell(s) and "
+                f"{state.get('outstandingInvitations')} outstanding invitation(s), and {room} more cell(s) need room. "
+                f"The pool holds {SLOTS_AT_REST} slot(s) at rest for {CELL_GIB} GiB cells; cell volume sizes in GiB: "
+                f"{state['cell_gib']}")
         await asyncio.sleep(2)
 
 

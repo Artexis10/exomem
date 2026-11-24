@@ -119,6 +119,15 @@ def test_every_route_to_the_cloud_gateway_closes_idle_connections_before_the_gat
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["0s", "6s", "1m"])
+def test_the_edge_idle_timeout_refuses_a_value_that_brings_the_race_back(value: str) -> None:
+    # 0s keeps idle connections forever; 6 s and more outlive the gateway's own idle close.
+    result = _helm_template_result("--set-string", f"cloudIngress.gatewayIdleConnTimeout={value}")
+    assert result.returncode != 0, value
+    assert "/cloudIngress/gatewayIdleConnTimeout" in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_cloud_mode_keeps_lifecycle_and_sign_in_delivery_running() -> None:
     documents = _helm_template()
     suspension = {

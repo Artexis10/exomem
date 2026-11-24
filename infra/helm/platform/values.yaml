@@ -474,8 +474,8 @@ cloudGateway:
   # body, every intervalMs plus up to jitterMs, for budgetSeconds. It then
   # answers 503 CELL_NOT_READY with Retry-After: retryAfterSeconds. Held
   # requests count against max and maxPerTenant, not the in-flight caps.
-  # budgetSeconds: 0 turns the hold off; the first value follows the client
-  # timeout measurement.
+  # budgetSeconds: 0 turns the hold off. Task 1.4 measured the clients; production
+  # sets the first value (40 s) as a values change, automate-cloud-releases task 2.3.
   hold:
     budgetSeconds: 0
     intervalMs: 500
