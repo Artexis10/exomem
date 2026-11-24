@@ -151,7 +151,8 @@ def test_feedback6_publish_is_exclusive_bounded_nonblocking_and_resource_clean(
     finally:
         sock.close()
         held.close()
-    assert _fd_snapshot() == baseline
+    # A leak leaves a new descriptor open. Other work in this worker may close its own meanwhile.
+    assert _fd_snapshot() <= baseline
 
 
 def test_feedback6_recursive_retirement_enforces_entry_and_depth_limits(tmp_path: Path) -> None:
@@ -226,7 +227,8 @@ def test_feedback6_review_failed_child_binding_closes_attempt_descriptors(
     try:
         with pytest.raises(CustodyBindingLost):
             root.open_dir("child", logical_ref=Path("root/child"))
-        assert _fd_snapshot() == baseline
+        # A leak leaves a new descriptor open. Other work in this worker may close its own meanwhile.
+        assert _fd_snapshot() <= baseline
     finally:
         root.close()
 

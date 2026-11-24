@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/evermatter.svg)](https://pypi.org/project/evermatter/)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/evermatter/)
 [![CI](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml/badge.svg)](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 
 Durable memory with sources, proof, history, and review for MCP-capable agents.
 
@@ -571,8 +571,13 @@ operations.
 
 ## License
 
-The server, CLI and everything not listed below are AGPL-3.0-or-later. See
-[LICENSE](LICENSE).
+The server, CLI and everything not listed below, except third-party files that carry their own
+licence, are source-available under the
+[Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2).
+Self-hosting is free, and so is every other use except a commercial product or service that
+competes with it or with a service we offer using it. Each version becomes Apache-2.0 two
+years after it is published. Earlier versions stay AGPL-3.0-or-later;
+[the licence change](docs/licensing/licence-change.md) says what changed and from which release.
 
 | Path | Licence |
 |---|---|
@@ -581,7 +586,7 @@ The server, CLI and everything not listed below are AGPL-3.0-or-later. See
 | `infra/topolvm/` | Apache-2.0, upstream's own licence |
 
 The plugin hooks under `plugins/claude-code/hooks/` are copies of `src/exomem/_hooks/`. The
-source stays AGPL-3.0-or-later; the copies the plugin ships are Apache-2.0.
+source stays FSL-1.1-ALv2; the copies the plugin ships are Apache-2.0.
 
 Evermatter Cloud offers its source from the app and from the MCP handshake, which names the
 running release and this repository. The names Evermatter and Substrate Systems follow

@@ -90,7 +90,7 @@ disposable.
 
 ## Hosted boundary
 
-The open-source runtime remains single-vault. Hosted service turns that existing
+The self-hosted runtime remains single-vault. Hosted service turns that existing
 boundary into the tenant isolation unit: one private process/container, one
 vault mount, one state root, one log root, and unique service credentials per
 opaque cell ID. Cells may share immutable images and model caches, but never

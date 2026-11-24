@@ -25,7 +25,7 @@ The `cloud-deploy` workflow SHALL run on a dispatch on `main`. The release workf
 
 #### Scenario: The newest release is already the cell image
 
-- **WHEN** the rollout view's `cell_image` equals the newest release's digest
+- **WHEN** the rollout is not paused, and the rollout view's `cell_image` equals the newest release's digest or its `release` equals the newest release's tag
 - **THEN** the workflow sets nothing and succeeds
 
 ### Requirement: Substrate never sets a digest twice for the deploy principal

@@ -214,6 +214,16 @@ def test_a_paused_rollout_sets_nothing_and_fails_with_the_pause_code(capsys) -> 
     assert log.splitlines()[-1] == "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT"
 
 
+def test_a_rerun_for_the_release_the_rollout_paused_on_fails_with_the_pause_code(capsys) -> None:
+    # Catches a re-run that reports success while the fleet is paused on this very release.
+    recorded = Recorded(["substrate_rollout_paused_on_the_release"])
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT"
+
+
 def test_a_pause_during_the_poll_fails_with_the_pause_code(capsys) -> None:
     recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_behind", "substrate_rollout_paused"])
 
@@ -359,3 +369,26 @@ def test_every_release_and_rollout_alert_has_a_runbook_step() -> None:
     assert len(rollout_alerts) == 4
     for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, *rollout_alerts):
         assert alert in rows, alert
+
+
+def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platform_gate(tmp_path, monkeypatch) -> None:
+    # Catches git's quoting of a non-ASCII path, which then matched no platform glob and raised no alert.
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    template = tmp_path / "infra/helm/platform/templates/café.yaml"
+    template.parent.mkdir(parents=True)
+    template.write_text("kind: ConfigMap\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "chart")
+    monkeypatch.setattr(cloud_deploy, "ROOT", tmp_path)
+
+    paths = cloud_deploy.git_changed_paths(base, git("rev-parse", "HEAD"))
+
+    assert paths == ["infra/helm/platform/templates/café.yaml"]
+    assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])

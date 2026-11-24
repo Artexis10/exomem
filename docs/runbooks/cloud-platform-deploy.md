@@ -251,7 +251,8 @@ uv run --frozen python infra/scripts/platform_upgrade.py "$TAG"
 
 Expected result: the command prints `recorded the platform Deployment for <tag>` and
 `dispatched cloud-deploy.yml on main`, and the next `cloud-deploy` run ends with
-`cloud-deploy: CANARY_ON_TARGET` or `cloud-deploy: CELL_IMAGE_CURRENT`.
+`cloud-deploy: CANARY_ON_TARGET` or `cloud-deploy: CELL_IMAGE_CURRENT`. While the rollout is paused, the run ends with
+`cloud-deploy: ROLLOUT_PAUSED <code>`; follow "Read and clear a paused rollout".
 
 ### Cross the backup key conversion
 
@@ -519,7 +520,8 @@ crossed so far, not only the entries that its own upgrade crossed.
    ```
 
 Expected result: step 5 prints `success`, and the next `cloud-deploy` run ends with `cloud-deploy: CANARY_ON_TARGET`
-or `cloud-deploy: CELL_IMAGE_CURRENT`.
+or `cloud-deploy: CELL_IMAGE_CURRENT`. While the rollout is paused, the run ends with `cloud-deploy: ROLLOUT_PAUSED <code>`;
+follow "Read and clear a paused rollout".
 
 If the upgrade failed, record nothing: the newest successful Deployment keeps naming the release the platform runs.
 
@@ -691,6 +693,20 @@ Do one of these:
 Do not set `cell_image` back to a release before a one-way `cell` barrier that cells already run past. cellctl
 refuses that move: it starts no attempt, keeps each cell on its image, and pauses the rollout with
 `UPGRADE_BACKWARD_CROSSING`. Fix forward with a new release instead, then clear the pause.
+
+### Never withdraw below a cell's state floor
+
+A cell's vault can record a format that older releases refuse, and no withdrawal clears it:
+
+- A cell created on v0.188.0 or later records shared original storage at its first start. No release before v0.188.0
+  starts it, and no cleanup removes the format.
+- A cell that cancelled a held upload on v0.184.0 or later records the held-upload cancellation format. No release
+  before v0.184.0 starts it.
+
+A withdrawal below a cell's floor fails that cell's attempt: the cell misses readiness, cellctl restores it from its
+restore point, and the rollout pauses. Fix forward with a new release instead. The offline cleanup of the
+cancellation format in [managed-service-upgrades.md](../managed-service-upgrades.md#a-supervisor-older-than-the-vaults-state)
+is for a stopped self-hosted server; this runbook has no Cloud procedure for it.
 
 ### Respond to a release or rollout alert
 

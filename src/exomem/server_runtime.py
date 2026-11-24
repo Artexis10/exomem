@@ -230,6 +230,9 @@ class LocalRuntimeActivation:
             from .catalogue_prewarm import adopt_at_boot
 
             self._start_component("staged catalogue", adopt_at_boot)
+        # Before the waits below: HTTP serves saves before activation ends, and these waits can
+        # last minutes after an upgrade. A busy save is queued only while the drainer runs.
+        self._start_component("write intake", self._start_write_intake)
         self._start_component("derived drain", self._start_derived_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
@@ -290,10 +293,6 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("maintenance jobs", self._recover_maintenance_jobs)
-        if self._shutdown.is_set():
-            self._stop_background_workers()
-            return
-        self._start_component("write intake", self._start_write_intake)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
