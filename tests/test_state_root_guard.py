@@ -273,7 +273,7 @@ def test_guard_never_prints_raw_argv_in_candidates(tmp_path, monkeypatch):
         if line.startswith("(+") and line.endswith(" more)"):
             continue  # the capped-overflow summary line, not a process line
         assert line.startswith("pid "), line
-        assert "matched: pytest|exomem" in line, line
+        assert "matched: pytest|exomem|evermatter" in line, line
         assert "cwd: " in line, line
         # A raw cmdline would routinely contain "/", multiple words, and
         # flags; the basename slot must not carry a full path.

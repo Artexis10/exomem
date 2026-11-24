@@ -9,15 +9,17 @@ on:
       - ".github/actions/substrate-test-contract/**"
       - ".github/actions/free-runner-disk/**"
       - ".github/workflows/cloud-rehearsal.yml"
+      - "docs/runbooks/cloud-platform-deploy.md"
+      - "infra/scripts/cloud_deploy.py"
   # The live rehearsal (P3) is the node gate; run it by hand before P4 and
   # after any change to cellctl, the platform chart, the cell image or the
   # pinned Substrate commit.
   workflow_dispatch:
     inputs:
       mode:
-        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity)."
+        description: "full: P3. full-coexistence: P3 with TopoLVM. owner-export: C6 after steps 1-2. operator-restore-abort: interrupted recovery. local-storage-drill: node-loss recovery. large-import: a large agent-led import into a local-storage cell that cannot hold two copies. raw-import: messy generated notes into a new and an existing vault, compared item by item with the same journey run locally. original-fixity: time the fixity pass on a cell after steps 1-2, then restore one damaged original by the restore runbook. catalogue-prewarm: after steps 1-2, three upgrade scenarios for the staged catalogue build (adopted, cancelled unfinished, yielded for capacity). release: the cloud-release rollout on three local-storage cells (the deploy token sets the image, upgrade windows and idle rules order the rolls, a failed canary pauses the rollout and is restored, only the admin token clears the pause); a partial proof that never gates a node."
         type: choice
-        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity, catalogue-prewarm]
+        options: [full, full-coexistence, owner-export, operator-restore-abort, local-storage-drill, large-import, raw-import, original-fixity, catalogue-prewarm, release]
         default: full
       large_import_files:
         description: "large-import only: files in both folders (default 70000). The byte total shrinks before the count does."
@@ -56,10 +58,13 @@ jobs:
     name: rehearsal unit tests and pinned ruff
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      p3: ${{ steps.scope.outputs.p3 }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          fetch-depth: 2
       - name: Load the pinned tool versions
         run: grep -E '^[A-Z0-9_]+=' infra/tool-versions.env >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -67,6 +72,27 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+      # The P3 rehearsal runs on a pull request only when a changed file matches a trigger path other than the
+      # runbook and cloud_deploy.py. Those two trigger this workflow for the release mode's unit tests alone, and
+      # the P3 rehearsal never runs them. The step reads the trigger paths from this file, so they live once.
+      - name: Decide whether the P3 rehearsal runs
+        id: scope
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ]; then echo "p3=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          uv run --no-project --with pyyaml==6.0.2 python - "$RUNNER_TEMP/changed.txt" >> "$GITHUB_OUTPUT" <<'PY'
+          import fnmatch
+          import sys
+
+          import yaml
+
+          workflow = yaml.safe_load(open(".github/workflows/cloud-rehearsal.yml", encoding="utf-8"))
+          trigger = workflow.get("on") or workflow[True]  # PyYAML reads the key `on` as True.
+          release_only = {"docs/runbooks/cloud-platform-deploy.md", "infra/scripts/cloud_deploy.py"}
+          paths = [path for path in trigger["pull_request"]["paths"] if path not in release_only]
+          changed = open(sys.argv[1], encoding="utf-8").read().split()
+          print("p3=" + ("true" if any(fnmatch.fnmatch(name, path) for name in changed for path in paths) else "false"))
+          PY
       - name: Check the rehearsal lockfile
         working-directory: infra/cloud-rehearsal
         run: uv lock --check
@@ -80,7 +106,7 @@ jobs:
   rehearsal:
     name: P3 local rehearsal on disposable K3s
     needs: checks
-    if: github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import')
+    if: needs.checks.outputs.p3 == 'true' && (github.event_name != 'workflow_dispatch' || (inputs.mode != 'local-storage-drill' && inputs.mode != 'large-import' && inputs.mode != 'raw-import'))
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -118,12 +144,13 @@ jobs:
           RESTORE_ABORT: ${{ inputs.mode == 'operator-restore-abort' && '--operator-restore-abort --steps 1,2 --harness-check' || '' }}
           OWNER_EXPORT: ${{ inputs.mode == 'owner-export' && '--owner-export --steps 1,2 --harness-check' || '' }}
           ORIGINAL_FIXITY: ${{ inputs.mode == 'original-fixity' && '--original-fixity' || '' }}
+          RELEASE: ${{ inputs.mode == 'release' && '--release' || '' }}
           ORIGINAL_FIXITY_ORIGINALS: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_originals || '' }}
           ORIGINAL_FIXITY_MEAN_KIB: ${{ inputs.mode == 'original-fixity' && inputs.original_fixity_mean_kib || '' }}
           CATALOGUE_PREWARM: ${{ inputs.mode == 'catalogue-prewarm' && '--catalogue-prewarm' || '' }}
           CATALOGUE_PREWARM_NOTES: ${{ inputs.mode == 'catalogue-prewarm' && inputs.catalogue_prewarm_notes || '' }}
         run: |
-          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} ${ORIGINAL_FIXITY} ${CATALOGUE_PREWARM} \
+          uv run --frozen exomem-cloud-rehearsal run ${HARNESS_CHECK} ${COEXISTENCE} ${RESTORE_ABORT} ${OWNER_EXPORT} ${ORIGINAL_FIXITY} ${CATALOGUE_PREWARM} ${RELEASE} \
             ${ORIGINAL_FIXITY_ORIGINALS:+--original-fixity-originals "$ORIGINAL_FIXITY_ORIGINALS"} \
             ${ORIGINAL_FIXITY_MEAN_KIB:+--original-fixity-mean-kib "$ORIGINAL_FIXITY_MEAN_KIB"} \
             ${CATALOGUE_PREWARM_NOTES:+--catalogue-prewarm-notes "$CATALOGUE_PREWARM_NOTES"} \

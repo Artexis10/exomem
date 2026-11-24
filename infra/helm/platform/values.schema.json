@@ -668,7 +668,8 @@
         "hostname": {"type": "string"},
         "acmeEmail": {"type": "string"},
         "cloudflareApiTokenSecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
-        "cloudflareApiTokenSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+        "cloudflareApiTokenSecretKey": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+        "gatewayIdleConnTimeout": {"type": "string", "pattern": "^([1-5]s|[1-9][0-9]{2}ms|[1-4][0-9]{3}ms|5000ms)$", "description": "100 ms to 5 s: 0 keeps idle connections forever, and 6 s or more outlives the gateway's own idle close, which brings back the plain 502 on a POST."}
       },
       "if": {"properties": {"enabled": {"const": true}}},
       "then": {"properties": {

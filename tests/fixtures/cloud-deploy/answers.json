@@ -176,5 +176,21 @@
         "held": 0
       }
     }
+  },
+  "substrate_rollout_paused_on_the_release": {
+    "success": true,
+    "requestId": "req-0009",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "release": "v0.171.0",
+      "paused": true,
+      "error_code": "UPGRADE_READINESS_TIMEOUT",
+      "canary_on_target": false,
+      "cells": {
+        "on_target": 40,
+        "behind_target": 0,
+        "held": 1
+      }
+    }
   }
 }
