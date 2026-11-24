@@ -721,7 +721,8 @@ class ReleaseCache:
     def check(self):
         if self.pending is not None:
             if self.free and not self.pending:
-                # Every change of a collection-free transaction so far is one of the vault store's own.
+                # Every change of a collection-free transaction so far is taken as the vault store's own
+                # (`begin`), so `finish`'s accounting guard trips only on a change made after `prepare`.
                 self.accounted = self.conn.total_changes
             stamp = self._stamp()
             if stamp[0] != self.accounted or stamp[1:] != self.observed[1:] or self.unmanaged:
@@ -827,8 +828,10 @@ class ReleaseCache:
 
         A collection-free transaction writes only the vault store's own tables (its pages, manifest,
         queues and holds), never a row that a collection's release reads. So the cached releases and
-        kept projection decisions hold across it, and a collection read inside it may use them. One
-        that touches a collection all the same keeps the ordinary accounting.
+        kept projection decisions hold across it, and a collection read inside it may use them. The
+        flag is trusted: `check` and `prepare` take every change of such a transaction as explained, so
+        a raw write to a collection table inside one goes unseen. Only a writer statement (`account`)
+        or mutation (`touch`) restores the ordinary accounting and drops the kept decisions at `finish`.
         """
         self.check()
         self.pending = {}
@@ -843,6 +846,12 @@ class ReleaseCache:
 
     def account(self, changes):
         if self.pending is not None:
+            if changes and self.free:
+                # A writer statement changed a collection table: what came before it was the vault store's
+                # own (`begin`), and from here the ordinary accounting holds, so `finish` drops the kept
+                # decisions even when the statement's caller skipped `touch`.
+                self.accounted = self.conn.total_changes - changes
+                self.free = False
             self.accounted += changes
 
     def touch(self, cid, identity=None):
@@ -2003,7 +2012,11 @@ class OperationAuthorization:
         digest = None if content is None else hashlib.sha256(content)
         key = self._kept_projection_key(path, digest)
         cache = self.cache
-        if key is not None and (kept := cache.projections.get(key)) is not None:
+        # Another connection's commit, or a write of this one that nothing accounted, drops every kept decision.
+        cache.check()
+        # A write transaction that changed a collection has not dropped the kept decisions yet (`finish`).
+        served = cache.pending is None or (cache.free and not cache.pending)
+        if key is not None and served and (kept := cache.projections.get(key)) is not None:
             cache.projections.move_to_end(key)
             return kept[0]
         # Read before deciding, so a write that lands meanwhile leaves this decision unkept.
@@ -2012,9 +2025,10 @@ class OperationAuthorization:
             decision, keepable = self._projection_decision(path, content, digest, manifest_for)
         except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
-        # Like a render proof: none is kept mid-write, past an unseen write, or from an unreadable input.
+        # None is kept mid-write, from an unreadable input, or unless the decision began at the checked
+        # stamp and the store, this connection's or another's, stayed there throughout.
         if (key is not None and keepable and self.undecided == undecided and cache.pending is None
-                and not cache.unmanaged and stamp[0] == cache.observed[0]):
+                and not cache.unmanaged and stamp == cache.observed == cache._stamp()):
             cache._remember(cache.projections, key, (decision,), _MAX_CACHED_SUBJECTS)
         return decision
 
@@ -2022,19 +2036,28 @@ class OperationAuthorization:
         """The key that a kept projection decision holds under, or None where none is kept.
 
         A session reads time and its own grants, and a failed snapshot decides nothing, so neither
-        keeps one; nor does an operation on a caller's own ownership proof, which the key does not
-        name. The inputs are this operation's own snapshot: the caller, the policy, the access
-        file, the tombstones, the purpose, the connector ceiling and the registry assignment.
+        keeps one; nor does an operation on a caller's own ownership proof. The inputs are this
+        operation's own snapshot: the caller, the policy, the access file, the tombstones, the
+        purpose, the connector ceiling and the registry assignment. Two more live outside the store:
+        the Planning values that a manifest parse reads (`field_manifest`), and the ownership binding
+        and admitted collections, which the enrollment and the coordinator's fence decide.
         """
         if (self.context is not None or self.failed or self.authority is not None
                 or self._ownership_proof is not None):
             return None
         if self._kept_inputs is None:
+            from ..cli_ops import OpError
+
             try:
-                self._kept_inputs = (self.who, self._release_dependency(),
-                                     membership.subject_inputs(self.root, self.policy))
-            except connector_boundary.BoundaryUnavailable:
+                proof = self.projection_ownership()
+                inputs = (self.who, self._release_dependency(), membership.subject_inputs(self.root, self.policy),
+                          PlanningValues(self.root, server_side=True).admitted_dependency(),
+                          proof.binding, proof.admitted)
+                hash(inputs)
+            except (connector_boundary.BoundaryUnavailable, OpError, TypeError):
+                # The decision itself meets the same input and refuses as before; only keeping stops here.
                 return None
+            self._kept_inputs = inputs
         return path, None if digest is None else digest.digest(), self._kept_inputs
 
     def _projection_decision(self, path, content, digest, manifest_for):
@@ -2106,8 +2129,14 @@ class OperationAuthorization:
                 parsed, self.policy, content_hash=digest.hexdigest(),
             )) - set(decision.scope_ids)
             if extra:
-                decision = egress._meet_decisions((decision,
-                    connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy),
+                try:
+                    ceiling = connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy,
+                                                               strict=True)
+                except connector_boundary.UNDECIDED:
+                    # Withheld for this operation only, as the unstrict call answers; nothing keeps it.
+                    self.undecided += 1
+                    ceiling = Decision(policy.DISCLOSURE_MIN)
+                decision = egress._meet_decisions((decision, ceiling,
                     decide(extra, audience=self.who.audience_id, purpose=self.purpose,
                            policy=self.policy, active_grants=self.policy.grants)))
         return decision, keepable

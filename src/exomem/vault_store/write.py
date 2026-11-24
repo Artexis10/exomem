@@ -935,8 +935,10 @@ def commit(
         )
     # Close the transaction before releasing capacity, including on rollback. The
     # source lookup and admission run before the first canonical mutation. A commit writes only the
-    # vault store's tables (`_require_owned`), so the collections' release cache holds across it.
-    transaction = writer.handle.transaction(before_commit=before_move_commit, collection_free=True)
+    # vault store's tables (`_require_owned`), so the collections' release cache holds across it,
+    # unless it changes a registry or the access policy, which a collection's release also reads.
+    overlay = rederive.changes_overlay(writer.root, change.paths)
+    transaction = writer.handle.transaction(before_commit=before_move_commit, collection_free=not overlay)
     with ExitStack() as allocations, transaction as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
         if row is None or row[0] != mode.STORE_MODE:
@@ -965,8 +967,9 @@ def commit(
             _delete_binary(tx, binary, audit)
         for move in change.binary_moves:
             _move_binary(tx, move, revision, audit)
-        # The overlay job settles the rows that the registries under ``_Schema`` derive.
-        rederive.record_overlay_change(tx, writer.root, change.paths, revision)
+        if overlay:
+            # The overlay job settles the rows that the registries under ``_Schema`` derive.
+            rederive.record_overlay_change(tx, revision)
         _enqueue(tx, audit.intents, revision, now)
         _enqueue_folders(tx, change.vacated_folders, revision, now)
         # An original's rows, and those of the path that a move of one vacates, draw on the floor.
