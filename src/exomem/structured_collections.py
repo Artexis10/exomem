@@ -1330,6 +1330,10 @@ def discover_collections(
     return manifests
 
 
+#: The code a sweep gives a collection that the collection store owns but this call cannot read.
+STORE_UNAVAILABLE = "COLLECTION_STORE_UNAVAILABLE"
+
+
 def discover_collections_with_errors(
     vault_root: Path,
     *,
@@ -1407,7 +1411,7 @@ def discover_collections_with_errors(
         if writer is not None and entry["collection_id"] in proof.admitted:
             continue  # The writer already assessed release; an omitted manifest is withheld, not unreadable.
         if notice(entry["manifest_path"]):
-            unreadable.append(UnreadableManifest(entry["manifest_path"], "COLLECTION_STORE_UNAVAILABLE",
+            unreadable.append(UnreadableManifest(entry["manifest_path"], STORE_UNAVAILABLE,
                                                  UNSERVED, entry["semantic_profile"]))
     if len(stored) + len(unreadable) > max_raw_candidates:
         raise CollectionError("COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect")
