@@ -161,6 +161,8 @@
   - Verify: `search_memory` wall p50 and p90 with at most one other call in flight, with a bootstrap interval.
 - [ ] 3.26 After installation, compare the dataset value lane's cost on the first search after a write, before and after it rereads only changed cards.
   - Verify: wall and own-CPU p50 and p90 of `recall.dataset_values` in `search_memory`, split by whether a write landed since the previous search, with bootstrap intervals.
+- [x] 3.27 Keep the page statistics base for a vault-sized corpus: raise `_ADMITTED_BASE_TERMS_MAX` to 12 million references and add `_ADMITTED_BASE_WORDS_MAX` (design decision 11).
+  - Verify: on a synthetic 15,600-page corpus of 4.5 million references with about 62,000 units, an activation after a write costs less CPU with the base kept than past the old bound; a corpus past the word bound keeps no base and ranks exactly (`tests/test_working_set_carry_bounds.py`).
 
 ## 4. Verify installed behavior and deliver
 

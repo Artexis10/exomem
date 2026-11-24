@@ -204,7 +204,7 @@ Some data exists only in the store: the audit trail, queued projection intents, 
 
 ### D9. What store mode retires
 
-For writes that Exomem commits, store mode does not need the modules that keep sidecars in step with files: `graph_sync` (4,153 lines), `graph_drain` (844), `derived_drain` (1,066), `derived_receipts` (3,408), `deferred_index` (2,733), `freshness` (2,468), `index_sync` (2,439), `pending_recall` (934), `graph_publication` (155), and the repair, witness and catch-up paths inside `lexstore` (12,289 lines in total) and `epistemic_graph` (14,880 in total). The watcher (2,564 lines) shrinks to the manifest importer. File mode keeps them until it retires; deleting them is the last phase. After the graph readers moved to the store (task 3.1), the sidecar read path (`_open_read_snapshot`'s file branch, `_open_published_read`, `graph_read_publication`, `graph_lag`) and the whole in-memory inbound-link index (its build, patch, catch-up and recovery functions) serve file mode only.
+For writes that Exomem commits, store mode does not need the modules that keep sidecars in step with files: `graph_sync` (4,153 lines), `graph_drain` (844), `derived_drain` (1,066), `derived_receipts` (3,408), `deferred_index` (2,733), `freshness` (2,468), `index_sync` (2,439), `pending_recall` (934), `graph_publication` (155), and the repair, witness and catch-up paths inside `lexstore` (12,289 lines in total) and `epistemic_graph` (14,880 in total). The watcher (2,564 lines) shrinks to the manifest importer. File mode keeps them until it retires; deleting them is the last phase. After the graph readers moved to the store (task 3.1), the sidecar read path (`_open_read_snapshot`'s file branch, `_open_published_read`, `graph_read_publication`, `graph_lag`) and the whole in-memory inbound-link index (its build, patch, catch-up and recovery functions) serve file mode only. So a store-mode service start does not adopt the graph sidecar, and its writes do not wait for a graph handoff; rollback rebuilds the sidecar. A standby that prepares a store-mode cutover still proves the sidecar, and the cutover waits for that proof.
 
 ### D10. Semantic units are first-class rows; their relationships are stored rows
 
@@ -232,7 +232,7 @@ Recall can therefore return units with their page context, and graph edges can p
 
 *Option chosen for stage 2:* page bytes stay the source of unit text, and relationships become stored rows.
 
-*Planned next stage: units as the source (owner decision, 2026-11-24).* After stage 2, the store becomes the source of units and composes each page from them, so a page can be composed from units, one unit can appear in several pages, and a page can be a generated view. It is planned for December 2026 or January 2027 and gets its own change when its work starts, informed by a measurement of byte-exact page reassembly. It assumes that agents write nearly every change. A hand edit of a projected page stays allowed and takes a simple, safe path: an edited unit is replaced by a new unit, and the old unit's stored relationships go to a review item. No similarity matching decides which old unit an edited paragraph was. Stage 2 carries over unchanged: relationship rows and anchored identities stay.
+*Next stage (owner decision, 2026-11-24):* the change `extend-anchored-unit-identity` extends anchored identity to soft references, unit operations and embeds, and its design supersedes the plan that stood here.
 
 ### D11. Originals record their canonicity
 

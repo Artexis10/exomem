@@ -6445,7 +6445,8 @@ class LeaseManager:
         # a write admitted before its delta origin exists does not merely run
         # slower, it registers a whole-vault rebuild for a lineage it could
         # have adopted in the first seconds of the warm. Both refusals are the
-        # same retryable shape, and reads are untouched either way.
+        # same retryable shape, and reads are untouched either way. A store-mode
+        # warm settles the handoff at once (`warmup.warm_all`): it has no origin.
         # One clock for every wait this write makes before it runs: warm-up here,
         # then a busy boundary, so neither restarts the bound or under-reports it.
         wait_started = time.monotonic()

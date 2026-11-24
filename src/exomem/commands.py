@@ -16035,9 +16035,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("schema_memory",),
-        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True,
-         # An operation that pages takes `more`, the typed tools' name for its `continuation` cursor.
-         "field_synonyms": (("more", "continuation"),)},
+        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
     ),
     (
         "govern_memory",
@@ -16392,7 +16390,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
-        operation_entries.register_operations(name, params, meta.get("field_synonyms", ()))
+        operation_entries.register_operations(name, params)
         argument_rules = _ARGUMENT_RULES.get(name)
         if argument_rules is None and name in operation_entries.OPERATIONS:
             argument_rules = ArgumentRules(

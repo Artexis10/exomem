@@ -508,6 +508,24 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     }
 
 
+def test_a_corpus_past_the_word_bound_keeps_no_base_and_its_figures_stay_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corpus of mostly unique tokens keeps no base, so its word maps do not stay in memory; it still ranks exactly."""
+    from exomem import bm25
+
+    monkeypatch.setattr(lexstore, "_ADMITTED_BASE_WORDS_MAX", 4)
+    texts = {"b.md": "f3a9 77c1 beta", "a.md": "alpha 09de beta"}
+    statistics, _postings, retained = lexstore._admitted_corpus(
+        texts, {path: lexstore._text_digest(text) for path, text in texts.items()}, None
+    )
+    oracle = bm25.CorpusStatistics.of({path: texts[path].split() for path in sorted(texts)})
+
+    assert retained is None
+    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    assert statistics.idf_floor == oracle.idf_floor
+
+
 def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_and_renames() -> None:
     """Each corpus built from the previous one's base equals `CorpusStatistics.of` over its texts, bit for bit.
 

@@ -30,6 +30,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from . import foreground_priority, runtime_resources
@@ -200,6 +201,10 @@ def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool
 
     if not epistemic_graph.graph_enabled():
         return False
+    if _store_serves(vault_root):
+        # Store mode writes and reads graph rows in the store and skips the sidecar fan-out
+        # (`vault.post_commit_batch_fanout`), so no write advances the lineage this would adopt.
+        return False
     if service_standby.in_standby():
         # A standby runs this step itself, after the same seed and resolver, so
         # that it can report the residue and reason in its cutover readiness.
@@ -214,6 +219,20 @@ def _adopt_graph_snapshot(vault_root: Path, durations: dict[str, float]) -> bool
         adoption.reason,
     )
     return adoption.adopted
+
+
+def _store_serves(vault_root: Path) -> bool:
+    """Whether the store serves this vault. A mode that cannot be read counts as file mode, whose
+    warm-up does every step.
+    """
+    import sqlite3
+
+    from . import find_corpus
+
+    try:
+        return find_corpus.store_serves(vault_root)
+    except (RuntimeError, OSError, sqlite3.Error):
+        return False
 
 
 def _run_step(durations: dict[str, float], name: str, fn) -> None:
@@ -479,6 +498,8 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     exists to remove. The rebuild was then still in flight when adoption ran
     and declined its proof against a sidecar being rewritten under it. Adoption
     is sub-second to a few seconds; it belongs in the first seconds of the warm.
+    A store-mode warm settles the handoff first and adopts nothing: its commits
+    write graph rows in the store and leave no sidecar lineage to adopt.
     Each stage soft-fails; a failed model preload leaves its component
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
@@ -502,6 +523,11 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     # cold start reads an empty set and runs all of it.
     carried = service_standby.carried_warm_components()
     durations["carried_from_standby"] = float(len(carried))
+    store_serves = _store_serves(vault_root)
+    if store_serves:
+        # The handoff settles the delta origin of file mode's graph fan-out, which a store-mode
+        # commit skips, so settle it now rather than after the catalogue step ahead of it.
+        readiness.mark_ready("graph_handoff")
     foreground_priority.check_cancelled()
     try:
         catalog_ready = warm_retrieval_catalog(vault_root)
@@ -555,23 +581,33 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         readiness.mark_ready("graph_handoff")
     foreground_priority.check_cancelled()
     semantic_started = time.perf_counter()
-    try:
-        if "semantic_corpus" in carried:
-            log.info("semantic corpus carried from standby; re-proving after watcher seed")
-        from . import semantic_contract
+    # Writes wait for this step. In file mode a write parks for it, and the parked write holds bulk
+    # passes back; a store-mode write is refused instead, so the step holds them back itself.
+    with foreground_priority.foreground() if store_serves else nullcontext():
+        try:
+            if "semantic_corpus" in carried:
+                log.info("semantic corpus carried from standby; re-proving after watcher seed")
+            from . import semantic_contract
 
-        # Carry the cold build, not its pre-watcher checkpoint. The existing
-        # warmer reuses unchanged pages and reconciles edits made while unwatched.
-        semantic_contract.warm_corpus_context(vault_root)
-        _run_step(durations, "writer_resolver", lambda: prime_writer_resolver(vault_root))
-        readiness.mark_ready("semantic_corpus")
-    except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
-        log.warning("semantic corpus warm-up failed", exc_info=True)
-    finally:
-        durations["semantic_corpus"] = round(
-            (time.perf_counter() - semantic_started) * 1000.0,
-            1,
-        )
+            # Carry the cold build, not its pre-watcher checkpoint. The existing
+            # warmer reuses unchanged pages and reconciles edits made while unwatched.
+            semantic_contract.warm_corpus_context(vault_root)
+            # The writer's preflight reads the enriched corpus; built here, the first write does not
+            # enrich every page, and in store mode does not do it on the one store thread.
+            _run_step(
+                durations,
+                "corpus_enrichment",
+                lambda: semantic_contract.warm_writer_enrichment(vault_root),
+            )
+            _run_step(durations, "writer_resolver", lambda: prime_writer_resolver(vault_root))
+            readiness.mark_ready("semantic_corpus")
+        except Exception:  # noqa: BLE001 — semantic warm-up remains rebuildable
+            log.warning("semantic corpus warm-up failed", exc_info=True)
+        finally:
+            durations["semantic_corpus"] = round(
+                (time.perf_counter() - semantic_started) * 1000.0,
+                1,
+            )
     if catalog_ready and "lexical" in carried:
         # Same process, same caches: `service_standby.warm` calls `warm_caches`
         # with this process's own mode and preload policy.

@@ -39,7 +39,7 @@ INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
 
 def _listed_tool(command: str, effect: Effect | None = None) -> str:
     """The tool the serving surface lists for a command, or the command when it lists none."""
-    return capabilities.active_tools_text(command, effect) or command
+    return "/".join(capabilities.active_tools(command, effect)) or command
 
 
 def backfill_ids_route() -> tuple[str, str]:

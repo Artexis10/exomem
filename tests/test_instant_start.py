@@ -26,12 +26,14 @@ after), regardless of whether the test itself also calls finish_warm().
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import threading
 from pathlib import Path
 
 import pytest
+from test_connector_boundary import SCOPE, configured_boundary  # noqa: F401
 
 from exomem import (
     bm25,
@@ -41,6 +43,7 @@ from exomem import (
     freshness,
     lexstore,
     readiness,
+    semantic_contract,
     server,
     warmup,
 )
@@ -1802,3 +1805,62 @@ def test_degraded_find_never_cached_even_without_degraded_out(
     find_module.find(vault, query="metabolism", mode="hybrid")
     with find_module._FIND_CACHE_LOCK:
         assert find_module._FIND_CACHE, "post-warm results must cache normally"
+
+
+def test_a_warm_start_leaves_an_armed_vaults_first_create_and_edit_no_corpus_to_enrich(
+    vault, configured_boundary, corpus_cache_on, monkeypatch  # noqa: F811
+):
+    """Warm-up runs on a thread with no caller. In an armed vault such a caller may not load the
+    public registries, and its build withholds pages, so warm-up kept no enrichment. The first create
+    and the first edit then each enriched every page, in store mode on the one store thread."""
+    from exomem import commands, schema, state_migration, writer_lease
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.vocabulary import registry_specs
+
+    config, _authenticate = configured_boundary
+    written = 20
+    for number in range(written):
+        (vault / f"Knowledge Base/Notes/Page {number}.md").write_text(
+            f"---\nproject: public-project\n---\nPage {number} links [[Page {(number + 1) % written}]].\n"
+        )
+    data = json.loads(config.read_text())
+    # Arming requires the host to assign every definition that already exists.
+    overrides = {spec.stem: {"overlay": spec.overlay(vault).relative_to(vault).as_posix(), "history": spec.stem}
+                 for spec in registry_specs().values()}
+    data["vocabulary"] = {
+        "public": {"namespace": "Knowledge Base/_Schema/public", "history": "public", "overrides": overrides},
+        "private": {SCOPE: {"namespace": "Knowledge Base/_Schema/private", "history": "private"}},
+        "destinations": {}, "selections": {},
+    }
+    config.write_text(json.dumps(data))
+    state_migration.arm_connector_boundary_offline(
+        vault, authority=state_migration.assert_offline_migration_authority(source="warm armed vault"),
+    )
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    warmup.warm_all(vault)
+    enriched = []
+    real = semantic_contract.enrich_page_state
+
+    def counting(root, state, *arguments, **keywords):
+        enriched.append(state.path)
+        return real(root, state, *arguments, **keywords)
+
+    monkeypatch.setattr(semantic_contract, "enrich_page_state", counting)
+
+    def owner_call(tool, **arguments):
+        command = next(c for c in commands.product_commands_for("mcp") if c.name == tool)
+        injected = (vault, schema.load_source_schema(vault)) if command.needs_schema else (vault,)
+        with request_scope(owner_principal(surface="mcp")):
+            return writer_lease.invoke_command(command, *injected, **arguments)
+
+    owner_call(
+        "remember", title="Quokka census", status="draft", summary="A census finding.",
+        content="## Observations\n\n- [finding] The quokka population grew near [[Page 1]].\n",
+    )
+    assert len(enriched) < written, f"the first create enriched {len(enriched)} pages"
+    enriched.clear()
+    owner_call(
+        "edit_memory", path="Knowledge Base/Notes/Page 2.md", why="Clarify the page.",
+        operation={"kind": "replace_string", "old_string": "Page 2 links", "new_string": "Page two links"},
+    )
+    assert len(enriched) < written, f"the first edit enriched {len(enriched)} pages"

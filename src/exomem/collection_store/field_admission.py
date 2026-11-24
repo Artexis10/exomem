@@ -326,9 +326,11 @@ def resolve(operation, manifest):
 
     selected = {name: value for name, spec in manifest.schema.fields.items()
                 if (value := select(spec, (name,), _dependency(manifest, mapped, inferred, name))) is not None}
+    # A child table is named by its field, so a withheld field takes its table with it.
     visible = replace(manifest, schema=replace(manifest.schema,
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
-                      natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))
+                      natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)),
+                      child_tables=tuple(table for table in manifest.child_tables if table.field in selected))
     # A false refusal hides the unresolved field from recipients; accepting could disclose a private subtree.
     # The store records the scheme; a manifest parsed from its text carries the default.
     scheme = operation.conn.execute("SELECT item_key_scheme FROM collections WHERE collection_id=?",

@@ -1602,10 +1602,12 @@ def query_collection(
             view = kwargs.get("view")
             if view is not None:
                 _authorize_saved_view(root, manifest, view, links)
+            readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
             try:
                 result = record_formats.query_collection(
                     root,
                     manifest,
+                    readable=readable,
                     authorize_path=authorize_path,
                     project_values=links,
                     project_child_value=links.project_presentation_value,
@@ -1616,7 +1618,6 @@ def query_collection(
             except collections.CollectionError as error:
                 if error.code != "INVALID_RECORD_QUERY_FIELD":
                     raise
-                readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
                 raise _with_readable_columns(error, readable, kwargs) from error
         egress.emit_boundary_receipt(collector)
         return result

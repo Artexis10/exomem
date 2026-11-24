@@ -4191,6 +4191,31 @@ def warm_corpus_context(vault_root: Path) -> None:
         publish_capture_inventory(root, witness, census=not witness.seeded)
 
 
+def warm_writer_enrichment(vault_root: Path) -> None:
+    """Fill the enrichment memo under each key that a writer's preflight reads.
+
+    Without it the first write after a start enriches every page itself. A creation's structural
+    check supplies no registries. An edit and a creation's relation review supply
+    `corpus_registry_overrides`, which only an armed vault fills, so an armed vault needs two builds.
+    """
+    if not corpus_context_cache_enabled():
+        return  # With no memo to fill, a build would enrich every page and keep nothing.
+    from .governance.principal import library_scope
+
+    root = Path(vault_root)
+    # An owner-local warm-up. Unbound, an armed vault's caller may not load the public registries,
+    # and its build withholds pages, so it keeps no memo.
+    with library_scope():
+        registry, language = corpus_registry_overrides(
+            root,
+            relation_registry.load_registry(root),
+            semantic_language_registry.load_registry(root),
+        )
+        build_corpus_context_with_census(root)
+        if registry is not None or language is not None:
+            build_corpus_context_with_census(root, registry=registry, language_registry=language)
+
+
 def build_corpus_context_with_census(
     vault_root: Path,
     *,
@@ -4580,8 +4605,10 @@ def _build_corpus_context_with_census(
             completed = flight.done.is_set()
             if not completed:
                 if warm:
-                    # Startup owns the build lifetime, not an interactive budget.
-                    completed = flight.done.wait()
+                    # Startup owns the build lifetime, not an interactive budget. A store-mode warm
+                    # runs as foreground work (`warmup.warm_all`), and a bulk pass may own the flight.
+                    with foreground_priority.outside_foreground():
+                        completed = flight.done.wait()
                 else:
                     assert join_deadline is not None
                     # Recursive handoffs share one interactive waiting budget.

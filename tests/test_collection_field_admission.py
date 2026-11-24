@@ -831,3 +831,61 @@ def test_a_refused_query_column_is_named_and_the_list_holds_only_columns_the_cal
     assert {"place", "label", "context"} <= set(
         refused(OWNER, "absent").split("readable columns: ")[1].split(", ")
     )
+
+
+def test_a_withheld_query_column_refuses_like_a_missing_one_whichever_argument_names_it(store):
+    """A caller that sends column names must not learn from the reply which of them the collection declares."""
+    create(store)
+    shapes = {
+        "columns": lambda name: {"columns": [name]},
+        "filter": lambda name: {"filters": [{"column": name, "op": "eq", "value": "x"}]},
+        "sort": lambda name: {"sort_by": name},
+        "aggregate": lambda name: {"aggregate": f"sum:{name}"},
+    }
+
+    def refused(name, shape):
+        with pytest.raises(Exception, match="INVALID_RECORD_QUERY_FIELD") as raised:
+            tool(store, "record_memory", who=GUEST, action="query", collection=CID, **shapes[shape](name))
+        return str(raised.value)
+
+    for shape in shapes:
+        # Only the name the caller sent differs; the reply names no other field.
+        assert refused("place", shape).replace("'place'", "'absent'") == refused("absent", shape), shape
+    # The owner reads the field the guest is refused.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, columns=["place"])
+    assert all("place" in row for row in owner["rows"])
+
+
+def create_with_child_tables(store):
+    """Three child tables: `measurements` is classified location, `steps` and `checks` are not."""
+    front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    rows = {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}}}}
+    front["item_schema"]["fields"].update({
+        "measurements": {**rows, "classification": "location"}, "steps": rows, "checks": rows})
+    front["record_presentation"] = {"version": 1, "summary": ["title"], "tables": [
+        {"field": name, "label": name.title(), "columns": [{"field": "name", "type": "string"}]}
+        for name in ("measurements", "steps", "checks")]}
+    text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
+    store.create_collection(manifest_path(), text, why="declare child tables", scaffold=False)
+    store.append_record(CID, item={"title": KEY, **{name: [{"name": "invented"}] for name in ("measurements", "steps", "checks")}},
+                        item_key=KEY, why="record invented values")
+
+
+def test_a_withheld_child_table_refuses_like_a_missing_one_and_is_never_named(store):
+    """A caller that picks a child table must not learn from the reply which tables the collection declares."""
+    create_with_child_tables(store)
+
+    def refused(**child):
+        with pytest.raises(Exception, match="INVALID_RECORD_QUERY") as raised:
+            tool(store, "record_memory", who=GUEST, action="query", collection=CID, **child)
+        return str(raised.value)
+
+    # Only the name the caller sent differs; the reply names no other table.
+    assert refused(expand_child="measurements").replace("measurements", "absent") == refused(expand_child="absent")
+    # Two readable tables stay ambiguous, and the refusal lists only those.
+    ambiguous = refused(expand_children=True)
+    assert "measurements" not in ambiguous
+    assert "checks" in ambiguous and "steps" in ambiguous
+    # The owner reads the table the guest is refused.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, expand_child="measurements")
+    assert "measurements" in str(owner)

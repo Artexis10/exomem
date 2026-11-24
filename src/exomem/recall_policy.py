@@ -12,6 +12,7 @@ import os
 import stat
 import threading
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -434,6 +435,19 @@ def _held_pages(root: Path) -> Callable[[str], bool | None]:
     from .vault_store import read
 
     return read.served_lookup(root)
+
+
+@contextmanager
+def held_pass(vault_root: Path) -> Iterator[None]:
+    """Decide every `is_recall_candidate` call inside with one read of the pages the store holds.
+
+    For a pass over a whole scope: without it each stored page costs its own store read.
+    """
+    token = _HELD_PASS.set(_held_pages(Path(vault_root)))
+    try:
+        yield
+    finally:
+        _HELD_PASS.reset(token)
 
 
 def recall_policy_identity(vault_root: Path) -> tuple[str, str]:
