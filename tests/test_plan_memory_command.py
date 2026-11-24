@@ -569,20 +569,26 @@ def test_a_parent_the_caller_cannot_read_is_refused_without_the_kind_rule(tmp_pa
     outcome = plan_memory(
         tmp_path, "add", collection=collection, item={"title": "Outcome", "kind": "outcome"}, why="seed"
     )["plan_id"]
-    write_scope(tmp_path, paths="Planning/Work/Items/Outcome.md")
+    area = plan_memory(
+        tmp_path, "add", collection=collection, item={"title": "Field", "kind": "area"}, why="seed"
+    )["plan_id"]
+    write_scope(tmp_path, paths='Planning/Work/Items/Outcome.md", "Planning/Work/Items/Field.md')
     write_rule(tmp_path, ceiling=0)
     collection_id = "2db90f18-70df-4e41-986e-2d7d7db1caca"
 
-    def refused(parent: str) -> tuple[str, str]:
+    def refused(**relation: str) -> tuple[str, str]:
         with request_scope(_external()), pytest.raises(OpError) as raised:
             plan_memory(
                 tmp_path, "add", collection=collection, why="probe",
-                item={"title": "Task", "kind": "work-item", "parent": parent},
+                item={"title": "Task", "kind": "work-item", **relation},
             )
         return raised.value.code, raised.value.message
 
-    withheld = refused(collections.plan_ref(collection_id, outcome))
-    missing = refused(collections.plan_ref(collection_id, "11111111-1111-4111-8111-111111111111"))
+    absent = collections.plan_ref(collection_id, "11111111-1111-4111-8111-111111111111")
+    withheld = refused(parent=collections.plan_ref(collection_id, outcome))
+    missing = refused(parent=absent)
 
     assert withheld == missing
     assert "initiative" not in withheld[1]
+    # A withheld area reads as a missing one.
+    assert refused(area=collections.plan_ref(collection_id, area)) == refused(area=absent)

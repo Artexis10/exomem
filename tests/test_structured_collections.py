@@ -587,3 +587,10 @@ def test_a_long_list_of_names_is_summarised_whole_names_first() -> None:
     assert len(shown) <= collections.LISTED_BUDGET
     assert more == f"{100 - len(shown.split(', '))} more"
     assert collections.listed_within(names[:3]) == ", ".join(names[:3])
+
+
+def test_a_first_name_longer_than_the_budget_is_counted_not_listed() -> None:
+    long_name = "x" * (collections.LISTED_BUDGET + 1)
+
+    assert collections.listed_within([long_name, "short", "other"]) == "3 items"
+    assert collections.listed_within([long_name]) == "1 item"
