@@ -62,27 +62,24 @@ you must operate on the primary.
 
 ## Merging through the merge queue
 
-Once main requires the `merge queue` status, every pull request into main lands
-through the queue. The queue runs every core and harness shard on main plus the
-queued pull requests before any of them lands, because a pull request's own CI
-runs only its changed tests and the guard modules.
+Main's ruleset requires GitHub's merge queue (squash), and the repository allows
+auto-merge, which `gh pr merge` needs to join the queue. The queue runs every
+core and harness shard on main plus the queued pull requests before any of them
+lands, because a pull request's own CI runs only its changed tests and the guard
+modules. The push run on main then skips those shards for the commit the queue
+tested.
 
 1. Wait until the review note approves the pull request's current patch.
-2. Run `gh pr merge <number> --squash --auto --match-head-commit <head SHA>`, with the head that the review approved.
-3. Read the `merge queue` status on the pull request. "testing" means a queue run is in progress.
-4. If the status is "failed: conflicts with main", rebase onto main and push.
-5. If the status is "failed", fix the cause and push. The queue takes the new head.
-6. If the failure was a flake, run `gh pr merge <number> --disable-auto`, then step 2 again.
+2. Run `gh pr merge <number> --squash --auto --match-head-commit <head SHA>`, with the head that the review approved. The pull request joins the queue once its checks pass.
+3. Wait for the queue. If its checks pass, GitHub merges the pull request.
+4. If the queue removes the pull request, read the failed `merge_group` run.
+5. If the failure is real, fix the cause and push, then repeat from step 1.
+6. If the failure was a flake, repeat step 2.
 
 If a pull request fails on a test that also fails on main, main itself is red.
 The fix for main must land first. If main is red for two separate reasons, each
-fix fails alone. Re-queue a fix whose status is "failed" with step 6. Then run
-`gh run cancel <id>` on the running `merge-queue/` run. Its members go back to
-the queue, and the next batch can hold both fixes.
+fix fails alone. Queue both: the queue tests main plus both together and merges
+them together when that passes.
 
-A pull request from a fork cannot join the queue, because its code would run
-with this repository's write token before it lands. Push its branch to this
-repository and open the pull request from there.
-
-A plain `gh pr merge` without `--auto` is refused while the status is missing.
-Auto-merge lands the pull request when the queue passes it.
+The release bot merges release reconcile pull requests with `--admin`, which the
+ruleset allows for that bot only, so a release cut does not wait for a queue run.
