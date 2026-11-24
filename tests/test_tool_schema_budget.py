@@ -58,7 +58,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
 # their title,
 # added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
-TOTAL_BUDGET = 29_935
+# Proof files saved in one call added 135 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
+# `scope`, `category` and `description` so an evidence send saves on arrival instead of needing a held-handle save,
+# and `save_evidence` says to keep proof in the turn it arrives.
+TOTAL_BUDGET = 30_070
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -82,11 +85,11 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1300,
+    "save_evidence": 1320,
     "save_source": 1550,
     "search_memory": 1050,
     "supersede_note": 1300,
-    "upload_files": 800,
+    "upload_files": 940,
 }
 
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only

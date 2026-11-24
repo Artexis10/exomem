@@ -956,6 +956,8 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
                     secret=(upload_handoff.hold_secret(ticket["nonce"])
                             if ticket["lane"] == held_uploads.IMPORT_LANE else None),
                 )
+                if "destination" in ticket:
+                    return 201, await run_in_threadpool(_save_on_arrival, vault_root, held, ticket["destination"])
         return 201, held
     except (MultiPartException, HTTPException, ClientDisconnect, ValueError):
         return 413, {"code": "TOO_LARGE", "reason": "upload exceeds the handoff limit or is malformed"}
@@ -967,6 +969,85 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         return {"TOO_LARGE": 413, "HELD_UPLOAD_NO_SPACE": 507}.get(exc.code, http_status_for(exc.code)), {
             "code": exc.code, "reason": exc.reason,
         }
+
+
+_SEND_PAGE_SCRIPT = """
+const ticket = decodeURIComponent(location.hash.slice(1));
+history.replaceState(null, "", location.pathname);
+const out = document.getElementById("out");
+const form = document.getElementById("f");
+if (!ticket.startsWith("exomem-upload:")) {
+  out.textContent = "This link has no upload ticket. Ask the assistant for a new link.";
+  form.hidden = true;
+}
+form.onsubmit = async (event) => {
+  event.preventDefault();
+  const file = form.elements.file.files[0];
+  if (!file) return;
+  const body = new FormData();
+  body.append("lane", "evidence");
+  body.append("hold", "1");
+  body.append("file", file, file.name);
+  form.hidden = true;
+  out.textContent = "Saving...";
+  try {
+    const reply = await fetch("../upload", {method: "POST", body, headers: {Authorization: "Bearer " + ticket}});
+    const receipt = await reply.json();
+    out.textContent = receipt.stored_path
+      ? "Saved as " + receipt.stored_path + "\nSHA-256 " + receipt.hash + "\nYou can close this page."
+      : "Not saved: " + (receipt.reason || reply.status) + "\nAsk the assistant for a new link.";
+  } catch (error) {
+    out.textContent = "Not saved: the server did not answer. Ask the assistant for a new link.";
+  }
+};
+"""
+
+SEND_PAGE_HTML = f"""<!doctype html><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Save a file</title>
+<style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
+input,button{{font:inherit;margin-top:1rem}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
+<h1>Save a file as evidence</h1>
+<p>Pick the file the assistant asked for. Cover any card number, security code or password first.</p>
+<form id=f><input type=file name=file required><br><button type=submit>Save</button></form>
+<div id=out></div>
+<script>{_SEND_PAGE_SCRIPT}</script>"""
+
+#: The page runs only its own script and talks only to this server; nothing caches it or leaks its URL.
+SEND_PAGE_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; script-src 'sha256-"
+        + base64.b64encode(hashlib.sha256(_SEND_PAGE_SCRIPT.encode("utf-8")).digest()).decode("ascii") + "'"
+    ),
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+def _save_on_arrival(vault_root: Path, held: dict, destination: dict) -> dict:
+    """Save a just-held evidence upload where its ticket says, with the same command `save_evidence` runs.
+
+    Runs under the ticket's principal, which owns the hold. A save that fails leaves the hold in place, so the
+    reply carries the held handle and the refusal, and the agent can still redeem it with `save_evidence`.
+    """
+    from . import commands
+    from .cli_ops import OpError
+
+    try:
+        result = commands.op_preserve_artifacts(
+            vault_root, scope=destination["scope"], category=destination["category"],
+            files=[held["file"]], description=destination.get("description"),
+        )
+        row = dict(result["files"][0])
+    except (OpError, ValueError, OSError) as exc:
+        row = {"state": "failed", "code": getattr(exc, "code", type(exc).__name__), "reason": str(exc)[:300]}
+    if row.get("state") not in ("stored", "already_stored"):
+        return {**held, "save": {key: row.get(key) for key in ("state", "code", "reason")},
+                "next": "save_evidence with this `file` in `files` keeps it before the hold expires"}
+    row.pop("file_id", None)
+    return {**row, "lane": held["lane"]}
 
 
 def _handoff_unavailable() -> JSONResponse:
@@ -1745,6 +1826,11 @@ def register_transfer_routes(
         return Response(
             status_code=204, headers=_tus_headers(session, **{"Upload-Offset": str(new_offset)})
         )
+
+    @mcp_app.custom_route("/upload/send", methods=["GET"])
+    async def _upload_send_page(request: Request) -> HTMLResponse:
+        # The page is the same bytes for every ticket: the ticket stays in the URL fragment, which no request carries.
+        return HTMLResponse(SEND_PAGE_HTML, headers=SEND_PAGE_HEADERS)
 
     @mcp_app.custom_route("/upload", methods=["GET"])
     async def _upload_form(request: Request) -> HTMLResponse:

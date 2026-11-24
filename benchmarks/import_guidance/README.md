@@ -50,6 +50,17 @@ Layout:
 - `scenarios/session-close/answer-keys/<case-id>.json` contains the independent scorer-only object. A missing, null or malformed key refuses scoring.
 - Each key has `reference`, `must_change`, `must_not_change`, `recap` and `new_pages`. The scorer rejects page paths outside the seed. `new_pages: none` still permits the recap Source.
 
+Image turns:
+
+- A turn is a string, or an object `{"text": "...", "images": ["fixtures/label.png"]}`. The loader refuses unknown keys, a missing file, a file that is not a PNG, JPEG, GIF or WebP image, and a path that leaves the case folder.
+- The actor receives each image as a base64 image block ahead of the text. It still runs with `--tools ""`: it has no shell and cannot send file bytes, as in a chat client with no code execution.
+- `scenarios/session-close/fixtures/render_fixtures.py` rebuilds the two invented images (`label.png`, `card.png`) with the standard library only.
+- `c13-proof-attachment` shares a product box label to register a warranty. `c14-card-in-photo` shares a payment card to keep with a receipt. Both replay the incident of 24 Nov 2026, where the agent transcribed a shared photo and never kept the image as Evidence.
+- A key may add `evidence`: `keep` (c13) or `withhold` (c14). The scorer then reads the recorded tool calls, each with the turn that made it, and adds these checks to the run:
+  - `proof_kept_same_turn` (`keep`): the image turn holds a `save_evidence` call with `files`, or an `upload_files` call with lane `evidence`, a scope and a category.
+  - `card_not_kept` (`withhold`): the run holds no `save_evidence` call and no Evidence-lane `upload_files` call.
+- The report adds an `evidence custody` measure. It is not applicable to every other case.
+
 `--client-mode plugin` is the default. It appends the arm's skill and installs its Stop and UserPromptSubmit hooks. Omitting `--hook-turn` keeps those hooks; that flag adds a separate synthetic close ask. `--client-mode tool-only` keeps the same strict real MCP server, stages no plugin hooks, and appends no skill. It requests `disableAllHooks: true` in the supplied settings file. Combining tool-only with `--hook-turn` is rejected before launch.
 
 The [official hook setting](https://code.claude.com/docs/en/settings-reference#disableallhooks) does not override managed hooks or force-enabled managed plugin hooks. Settings record the requested configuration. A complete connected tool-only trace must report zero observed hook starts and completed invocations. Observed hooks or unavailable observations leave no-hook acceptance unknown; capture and fresh counts remain separate. Raw evidence stays available, and the harness does not retry automatically. Real-model evidence must establish the observed client behavior.

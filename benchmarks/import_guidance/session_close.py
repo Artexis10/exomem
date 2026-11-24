@@ -11,6 +11,7 @@ measured session never writes or sees the key.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import hashlib
 import importlib.util
@@ -24,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,6 +75,9 @@ HOOK_EVENTS = ("Stop", "UserPromptSubmit")
 HOOK_INJECTS = ("mcp", "working_set")
 DEFAULT_HOOK_INJECT = "mcp"
 SKILL_FILES = ("SKILL.md", "references/engagement.md")
+#: The keys of a turn that carries images, and the image types a model accepts: the provider's documented set.
+TURN_KEYS = ("text", "images")
+IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,8 @@ class Case:
     turns: tuple[str, ...]
     path: Path
     recall_turn: str | None = None
+    #: The image files each turn carries, in the order of `turns`; empty when no turn carries one.
+    turn_images: tuple[tuple[Path, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +124,44 @@ def suite_dir() -> Path:
     return SCENARIO_DIR / SUITE
 
 
+def parse_turns(raw: object, folder: Path) -> tuple[tuple[str, ...], tuple[tuple[Path, ...], ...], list[str]]:
+    """The turns of a case: each a non-empty string, or a `{"text", "images"}` object whose images are files inside
+    `folder`. Returns the texts, the image paths of each turn (empty when no turn has one) and the problems found."""
+    if not (isinstance(raw, list) and raw):
+        return (), (), ["turns must be a non-empty list of strings or {text, images} objects"]
+    texts: list[str] = []
+    images: list[tuple[Path, ...]] = []
+    problems: list[str] = []
+    root = folder.resolve()
+    for number, turn in enumerate(raw, start=1):
+        listed: object = ()
+        if isinstance(turn, dict):
+            if unknown := sorted(set(turn) - set(TURN_KEYS)):
+                problems.append(f"turn {number} has unknown keys {unknown}")
+            turn, listed = turn.get("text"), turn.get("images")
+            if not (isinstance(listed, list) and listed and all(isinstance(name, str) and name.strip() for name in listed)):
+                problems.append(f"turn {number}: images must be a non-empty list of file names")
+                listed = ()
+        if not (isinstance(turn, str) and turn.strip()):
+            problems.append(f"turn {number} needs non-empty text")
+            turn = ""
+        texts.append(turn)
+        found = []
+        for name in listed:
+            # `resolve` follows links, so a fixture cannot point out of the case folder.
+            path = (root / name).resolve()
+            if not path.is_relative_to(root):
+                problems.append(f"turn {number}: image {name!r} is outside the case folder")
+            elif not path.is_file():
+                problems.append(f"turn {number}: image {name!r} is not a file")
+            elif path.suffix.lower() not in IMAGE_MEDIA_TYPES:
+                problems.append(f"turn {number}: image {name!r} must be one of {sorted(IMAGE_MEDIA_TYPES)}")
+            else:
+                found.append(path)
+        images.append(tuple(found))
+    return tuple(texts), tuple(images) if any(images) else (), problems
+
+
 def load_case(path: Path) -> Case:
     """One case file. `session_of` takes the seed and the turns of another case, so two cases differ in one field."""
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -132,9 +176,8 @@ def load_case(path: Path) -> Case:
         problems.append(f"suite must be {SUITE!r}")
     if raw.get("engagement") not in ENGAGEMENTS:
         problems.append(f"engagement must be one of {ENGAGEMENTS}")
-    turns = base.get("turns")
-    if not (isinstance(turns, list) and turns and all(isinstance(t, str) and t.strip() for t in turns)):
-        problems.append("turns must be a non-empty list of strings")
+    turns, turn_images, turn_problems = parse_turns(base.get("turns"), path.parent)
+    problems += turn_problems
     # The case folder's own `seeds/` comes first: a seed of that name there is the case's data, not a shipped seed.
     candidates = (path.parent / "seeds" / str(base.get("seed")), suite_dir() / "seeds" / str(base.get("seed")))
     seed = next((folder for folder in candidates if folder.is_dir()), candidates[-1])
@@ -147,9 +190,7 @@ def load_case(path: Path) -> Case:
         problems.append("recall_turn must be a non-empty string when supplied")
     if problems:
         raise SystemExit(f"{path.name}: " + "; ".join(problems))
-    return Case(
-        raw["id"], raw["title"], seed, raw["engagement"], tuple(turns), path, recall_turn
-    )
+    return Case(raw["id"], raw["title"], seed, raw["engagement"], turns, path, recall_turn, turn_images)
 
 
 #: A case folder's judged criteria for the context-replay suite (`replay_cases.py`). The name is part of the case-folder
@@ -413,9 +454,21 @@ def agent_env(work: Path, case: Case, inject: str = DEFAULT_HOOK_INJECT, pinned:
     return floor | cli | hook_env(work, case.engagement, inject)
 
 
-def user_message(text: str) -> str:
+def user_message(text: str, images: Sequence[Path] = ()) -> str:
+    """One stream-json user turn: each image as a base64 block, then the text, as a chat client sends an attachment."""
+    blocks = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": IMAGE_MEDIA_TYPES[image.suffix.lower()],
+                "data": base64.b64encode(image.read_bytes()).decode("ascii"),
+            },
+        }
+        for image in images
+    ]
     return json.dumps(
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+        {"type": "user", "message": {"role": "user", "content": [*blocks, {"type": "text", "text": text}]}}
     )
 
 
@@ -426,10 +479,14 @@ def drive_session(
     turns: tuple[str, ...],
     stream_path: Path,
     hook_turn: Callable[[str], str] | None = None,
+    turn_images: Sequence[Sequence[Path]] = (),
 ) -> SimpleNamespace:
     """Start the agent, hold the first turn for the index warm, then send each turn after the previous one's `result`
-    event. With `hook_turn`, one more turn follows the last: its text is built from the session id of the stream.
+    event. `turn_images` lists the image files of each turn, in the order of `turns`. With `hook_turn`, one more turn
+    follows the last: its text is built from the session id of the stream.
     Returns the whole stream, the exit code and why it stopped early, if it did."""
+    # Every message is encoded before the agent starts, so an unreadable image stops the run with no process to clean up.
+    messages = [user_message(text, turn_images[index] if turn_images else ()) for index, text in enumerate(turns)]
     lines: queue.Queue[str | None] = queue.Queue()
     proc = subprocess.Popen(  # noqa: S603
         argv,
@@ -453,11 +510,11 @@ def drive_session(
     stream, finished, eof_seen = [], 0, False
     time.sleep(WARM_HOLD_SECONDS)
 
-    def exchange(number: int, turn: str, sink: TextIO) -> str | None:
-        """One user turn and the agent's answer to it; the reason the session stopped, or None."""
+    def exchange(number: int, message: str, sink: TextIO) -> str | None:
+        """One user turn, already encoded, and the agent's answer to it; the reason the session stopped, or None."""
         nonlocal finished, eof_seen
         try:
-            proc.stdin.write(user_message(turn) + "\n")
+            proc.stdin.write(message + "\n")
             proc.stdin.flush()
         except OSError:
             return f"the agent closed its input before turn {number}"
@@ -483,13 +540,13 @@ def drive_session(
 
     stopped, hook_text = None, None
     with stream_path.open("w", encoding="utf-8") as sink:
-        for number, turn in enumerate(turns, start=1):
-            stopped = exchange(number, turn, sink)
+        for number, message in enumerate(messages, start=1):
+            stopped = exchange(number, message, sink)
             if stopped:
                 break
         if not stopped and hook_turn is not None:
             hook_text = hook_turn(str(init_field("".join(stream), "session_id")))
-            stopped = exchange(len(turns) + 1, hook_text, sink)
+            stopped = exchange(len(turns) + 1, user_message(hook_text), sink)
         try:
             proc.stdin.close()
         except OSError:
@@ -557,10 +614,27 @@ def hook_ask(arm: Arm, session_id: str) -> str:
     return module.EPISODE_ASK.replace("{key}", module.episode_key("claude", session_id))
 
 
+def call_turns(stdout: str) -> dict[str, int]:
+    """The turn (counted from 0) each tool call was made in, by call id: the number of `result` events, one per
+    finished turn, that came before the call."""
+    turn, by_id = 0, {}
+    for event in stream_events(stdout):
+        if event.get("type") == "result":
+            turn += 1
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        for block in blocks if event.get("type") == "assistant" and isinstance(blocks, list) else ():
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                by_id[str(block.get("id"))] = turn
+    return by_id
+
+
 def tool_trail(stdout: str) -> dict:
-    """The tool calls in order, each with its reply, read from the stream. `compile` holds the `compile` block of each
-    `record_episode` reply, and `warming` counts the replies that said the index was still warming."""
-    calls = tool_calls(stdout)
+    """The tool calls in order, each with its reply and the turn it was made in, read from the stream. `compile` holds
+    the `compile` block of each `record_episode` reply, and `warming` counts the replies that said the index was still
+    warming."""
+    turns = call_turns(stdout)
+    calls = [{**call, "turn": turns.get(str(call["id"]))} for call in tool_calls(stdout)]
     compile_blocks: list[object] = []
     warming = 0
     for call in calls:
@@ -762,6 +836,8 @@ def run_session(
         "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest() if "skill" in files else None,
         "engagement": case.engagement,
         "turns": list(case.turns),
+        # Which turns carried images, as file names; left out when none did, so the row of a text-only case keeps its shape.
+        **({"turn_images": [[path.name for path in images] for images in case.turn_images]} if case.turn_images else {}),
         "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
         "recall_enabled": case.recall_turn is not None,
@@ -781,6 +857,7 @@ def run_session(
             case.turns,
             work / "stream.jsonl",
             hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
+            **({"turn_images": case.turn_images} if case.turn_images else {}),
         )
         after = snapshot(work / "vault")
         row.update(session_result(done, len(case.turns) + hooked, client_mode))

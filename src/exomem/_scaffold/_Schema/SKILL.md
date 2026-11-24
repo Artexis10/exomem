@@ -2,7 +2,7 @@
 name: exomem
 description: Use Evermatter for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Evermatter (formerly Exomem), KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Evermatter's to govern.
 metadata:
-  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
+  skill_contract: 8ae30f75a7f976d2b08c479f65bb57e85cccfe0fb941d473cab45cc7c8e161a0
   version: "0.32.0"
 ---
 
@@ -12,7 +12,8 @@ MCP calls use the typed tools shown by discovery; each takes its own fields.
 `inspect_memory` (reads) and `manage_memory` (writes) take `operation`, named
 `<area>.<action>`, and `arguments`. Call `read_instructions(topic=<tool or operation>)`
 for the arguments and one example. REST and CLI calls keep their grouped command
-selectors. Keep file attachments in the top-level `files` field.
+selectors. Keep file attachments in the top-level `files` field. Keep a proof file the user
+shares (a label, receipt, invoice or warranty) as Evidence in the turn it arrives.
 
 Evermatter is the connector/MCP; the Knowledge Base is the governed layer inside a
 markdown vault (Obsidian optional). Keep temporary working context in the current

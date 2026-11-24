@@ -11,6 +11,10 @@ Refuses to score while any selected case has no key. An independent writer suppl
       "new_pages":        "none" (no page besides the recap) or "allowed"
     }
 
+A case that hands the agent a file, as an image in a turn, adds one optional field: `"evidence": "keep"` (the file is
+proof the agent keeps as Evidence in that turn) or `"withhold"` (the file shows a card number or a code the agent never
+keeps). `evidence_custody_outcomes` checks it against the call log.
+
 The recap is cited, not linked: a Source that a live compiled page names in `sources:` counts as compiled. The check
 `recap_cited` needs no key field, because it reads the pages the run changed.
 
@@ -50,6 +54,9 @@ KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages
 #: Fields a method-activation key adds: the skill pages the trigger turn should be served, where the durable outcome
 #: belongs and which turn triggers it. The model-free method check reads them; this scorer only checks their shape.
 METHOD_KEY_FIELDS = {"methods", "destination", "trigger_turn"}
+#: The optional field of a key for a case that hands the agent a file, and the check each of its values reports.
+CUSTODY_KEY_FIELDS = {"evidence"}
+EVIDENCE_CHECKS = {"keep": "proof_kept_same_turn", "withhold": "card_not_kept"}
 RECAP_RULES = ("required", "forbidden", "optional")
 NEW_PAGE_RULES = ("none", "allowed")
 #: The criterion IDs and key rules are the fixed scoring contract, not vault vocabulary.
@@ -106,8 +113,12 @@ def refuse_unkeyed(cases: Sequence[Case]) -> dict[str, dict]:
 
 def key_problems(case: Case, key: object) -> list[str]:
     problems = []
-    if not isinstance(key, dict) or not KEY_FIELDS <= set(key) <= KEY_FIELDS | METHOD_KEY_FIELDS:
-        return [f"fields must be exactly {sorted(KEY_FIELDS)}, optionally with {sorted(METHOD_KEY_FIELDS)}"]
+    if not isinstance(key, dict) or not KEY_FIELDS <= set(key) <= KEY_FIELDS | METHOD_KEY_FIELDS | CUSTODY_KEY_FIELDS:
+        return [f"fields must be exactly {sorted(KEY_FIELDS)}, optionally with {sorted(METHOD_KEY_FIELDS)} or {sorted(CUSTODY_KEY_FIELDS)}"]
+    if "evidence" in key and key["evidence"] not in EVIDENCE_CHECKS:
+        problems.append(f"evidence must be one of {sorted(EVIDENCE_CHECKS)}")
+    elif key.get("evidence") == "keep" and not case.turn_images:
+        problems.append("evidence 'keep' needs a turn that carries an image")
     if set(key) & METHOD_KEY_FIELDS:
         if set(key) & METHOD_KEY_FIELDS != METHOD_KEY_FIELDS:
             problems.append(f"a method key carries all of {sorted(METHOD_KEY_FIELDS)}")
@@ -158,7 +169,52 @@ def check_row(key: dict, row: dict) -> list[checks.Outcome]:
             key["new_pages"] == "allowed" or not other_pages,
             f"pages besides the recap: {other_pages}" if other_pages else "none besides the recap",
         ),
+        *(evidence_custody_outcomes(key["evidence"], row) if "evidence" in key else []),
     ]
+
+
+def tool_of(call: dict) -> str:
+    return str(call.get("name")).removeprefix(f"mcp__{checks.SERVER}__")
+
+
+def arguments_of(call: dict) -> dict:
+    return call["input"] if isinstance(call.get("input"), dict) else {}
+
+
+def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
+    """Call-log checks of what the agent does with a file the person shares. They replay the 24 Nov 2026 incident: a
+    person shared a photo of a product box label to register a warranty, and the agent wrote a text transcription and
+    never kept the image as Evidence. A call counts by its tool name and argument keys; no reply or word is read.
+
+    `keep` reports `proof_kept_same_turn`: every turn that carried an image holds a `save_evidence` call with `files`, or
+    an Evidence-lane `upload_files` call with a scope and a category. `withhold` reports `card_not_kept`: the run holds no
+    `save_evidence` call and no Evidence-lane `upload_files`. Whether text cites the kept file is not checked here: this
+    suite's actor has no shell, so the file is kept only after the person uses the page link, outside the run."""
+    calls = row.get("calls") or []
+
+    def evidence_upload(call: dict) -> bool:
+        # The tool names and the upload lane are fixed wire tokens of the product's public tools.
+        return tool_of(call) == "upload_files" and arguments_of(call).get("lane") == "evidence"
+
+    if rule == "withhold":
+        kept = [c for c in calls if tool_of(c) == "save_evidence" or evidence_upload(c)]
+        return [checks.Outcome("card_not_kept", checks.FAIL if kept else checks.PASS, f"{len(kept)} keeping call(s) in the run")]
+
+    def keeps_proof(call: dict) -> bool:
+        args = arguments_of(call)
+        return (tool_of(call) == "save_evidence" and bool(args.get("files"))) or (
+            evidence_upload(call) and bool(args.get("scope")) and bool(args.get("category"))
+        )
+
+    image_turns = [n for n, names in enumerate(row.get("turn_images") or []) if names]
+    unkept = [n + 1 for n in image_turns if not any(c.get("turn") == n and keeps_proof(c) for c in calls)]
+    if not image_turns:
+        proof = checks.Outcome("proof_kept_same_turn", checks.UNKNOWN, "the run records no turn that carried an image")
+    elif unkept:
+        proof = checks.Outcome("proof_kept_same_turn", checks.FAIL, f"no keeping call in turn(s) {unkept}")
+    else:
+        proof = checks.Outcome("proof_kept_same_turn", checks.PASS, f"a keeping call in turn(s) {[n + 1 for n in image_turns]}")
+    return [proof]
 
 
 def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str, str]:
@@ -173,7 +229,11 @@ def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str
 def judge_view(case: Case, key: dict, row: dict) -> str:
     """The same view for every arm: the person's turns, the reference, and what happened to the pages."""
     seen = row["observed"]
-    turns = "\n".join(f"{n}. {t}" for n, t in enumerate(case.turns, start=1))
+    shared = [[p.name for p in paths] for paths in case.turn_images] or [[]] * len(case.turns)
+    turns = "\n".join(
+        f"{n}. {t}" + (f" [the person attached: {', '.join(names)}]" if names else "")
+        for n, (t, names) in enumerate(zip(case.turns, shared, strict=True), start=1)
+    )
     changes = [f"### Changed: {p}\n{diff}" for p, diff in seen["changed"].items()]
     changes += [f"### Removed: {p}" for p in seen["removed"]]
     changes += [
@@ -547,6 +607,7 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
                 "order": (row.get("observed") or {}).get("order"),
                 "restraint_case": not key["must_change"],
                 "recap_rule": key["recap"],
+                "evidence_rule": key.get("evidence"),
                 "recap_produced": bool((row.get("observed") or {}).get("recaps")) if capture_error is None else None,
                 "recall_enabled": row.get("recall_enabled", False),
                 "recall_error": recall_error,
@@ -573,6 +634,9 @@ def measures(row: dict) -> dict[str, str]:
         "restraint": joined(("must_not_change", "new_pages", "J2")) if row["restraint_case"] else checks.NOT_APPLICABLE,
         "citation adherence": outcomes["recap_cited"].verdict if "recap_cited" in outcomes else checks.UNKNOWN,
         "fresh recall": row["recall"]["verdict"],
+        "evidence custody": (
+            checks.NOT_APPLICABLE if row.get("evidence_rule") is None else joined((EVIDENCE_CHECKS[row["evidence_rule"]],))
+        ),
     }
     for rule in RECAP_RULES:
         result[f"recap production ({rule})"] = (

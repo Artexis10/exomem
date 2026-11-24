@@ -859,11 +859,16 @@ def _attach_handoff(args, *, transport=None) -> int:
         payload = None
     if response.status_code not in (200, 201) or not isinstance(payload, dict):
         return _attach_refused(response, payload)
-    if (payload.get("state") != "held" or payload.get("lane") != descriptor["lane"]
+    # A ticket that names its destination saves on arrival and returns the stored receipt instead of a held handle.
+    saved = isinstance(descriptor.get("saves_to"), dict)
+    if (payload.get("lane") != descriptor["lane"]
             or payload.get("hash_algorithm") != "sha256" or payload.get("hash") != digest
             or type(payload.get("size")) is not int or payload["size"] != len(data)
-            or not isinstance(payload.get("file"), dict)
-            or not held_uploads.is_held_reference(payload["file"].get("download_url"))):
+            or (saved and (payload.get("state") not in ("stored", "already_stored")
+                           or not isinstance(payload.get("stored_path"), str)))
+            or (not saved and (payload.get("state") != "held"
+                               or not isinstance(payload.get("file"), dict)
+                               or not held_uploads.is_held_reference(payload["file"].get("download_url"))))):
         print("attach: the upload receipt does not match the file bytes", file=sys.stderr)
         return 1
     print(json.dumps(payload, ensure_ascii=False))

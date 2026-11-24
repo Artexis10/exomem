@@ -2259,12 +2259,13 @@ def op_bootstrap(
                     if profile != "compact"
                     else {}
                 ),
-                "when": "the client can supply temporary file handles",
-                "custody": "original first; transcription beside, never instead",
+                "when": "the user shares a proof file (label, receipt, invoice, order, warranty): keep it that turn",
+                "custody": "original first; transcription beside, never instead; put the returned `cite` wikilink in your text",
+                "secrets": "never keep card numbers, codes or passwords; ask for a covered copy and say why",
                 "fallback": {
                     "tool": "transfer_artifact",
-                    "args": {"operation": "upload", "hold": True},
-                    "when": "the client cannot supply file handles",
+                    "args": {"operation": "upload", "lane": "evidence", "scope": "<scope>", "category": "<category>"},
+                    "when": "no file handles: the send saves on arrival; with no shell, give the person the page link",
                 },
             },
             "original_recovery": {
@@ -5654,6 +5655,11 @@ def op_preserve(
     preserve_module = _preserve_module()
     from .cli_ops import OpError
 
+    # Before the duplicate lookup hashes it: the kept text never holds a card number or a labelled credential.
+    kept_content, description, _text, redaction_warnings = preserve_module.redact_capture_text(
+        content=content, description=description,
+    )
+    content = content if kept_content is None else kept_content
     # Validated, never normalised: a separator in `scope` used to be deleted and
     # the artifact written somewhere else, which forks one case across two trees.
     for field, value in (("scope", scope), ("category", category)):
@@ -5700,6 +5706,7 @@ def op_preserve(
             # must not yield two content types for one set of bytes.
             content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
         )
+        receipt["warnings"] = [*redaction_warnings, *receipt.get("warnings", ())]
         if duplicate.family_added:
             # The page gained a family: that edit is a committed write.
             mark_active_mutation_committed()
@@ -5719,6 +5726,7 @@ def op_preserve(
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
     payload = result.as_dict()
+    payload["warnings"] = [*redaction_warnings, *payload.get("warnings", ())]
     if not held.available:
         from . import duplicates as duplicates_module
 
@@ -9925,6 +9933,7 @@ def op_preserve_artifacts(
     transcriptions: _OptionalClientTranscriptions = (),  # noqa: B006 - read-only
     raw_protection: bool = False,
     archive: Literal["members"] | None = None,
+    description: str | None = None,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -9939,6 +9948,7 @@ def op_preserve_artifacts(
         adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Keep originals owner-only until whole-artifact release.
         archive: Keep a held zip as members; path is an import source_ref.
+        description: One caption for every file, kept on each new original's page.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -9955,6 +9965,7 @@ def op_preserve_artifacts(
             transcriptions=transcriptions,
             raw_protection=raw_protection,
             archive=archive,
+            description=description,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,
@@ -9976,6 +9987,9 @@ def op_transfer_artifact(
     uploads: list[str] | None = None,
     import_identity: str | None = None,
     size_bytes: int | None = None,
+    scope: str | None = None,
+    category: str | None = None,
+    description: str | None = None,
 ) -> dict:
     """Prepare a file transfer or cancel owned waiting uploads.
 
@@ -9994,6 +10008,9 @@ def op_transfer_artifact(
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
         uploads: Cancellation only: held-upload references owned by this authenticated session.
+        scope: Evidence upload only: with category, the send saves the file there on arrival.
+        category: Evidence upload only: with scope, the send saves the file there on arrival.
+        description: Evidence upload with scope and category only: one caption for the saved file.
     """
     from . import cloud_cell
     from .cli_ops import OpError
@@ -10010,6 +10027,14 @@ def op_transfer_artifact(
     ):
         raise ValueError("INVALID_MODE: size_bytes needs a Source upload with expected_sha256")
     held_only = hold
+    destination = None
+    if scope is not None or category is not None or description is not None:
+        if (operation != "upload" or lane != "evidence" or scope is None or category is None
+                or artifact is not None or artifacts is not None or uploads is not None
+                or import_identity is not None or size_bytes is not None):
+            raise ValueError("INVALID_MODE: scope and category save an evidence upload on arrival; "
+                             "pass both with lane evidence and no artifact")
+        destination = {"scope": scope, "category": category, "description": description}
 
     if operation == "cancel":
         from . import held_uploads
@@ -10074,6 +10099,13 @@ def op_transfer_artifact(
         # The digest binds a held upload and nothing else takes one with a digest, so it implies the hold
         # the way lane `import` does, instead of falling into download recovery's INVALID_MODE.
         hold = True
+    if destination is not None:
+        from . import upload_handoff
+
+        # A ticket that saves on arrival is the held route with its destination fixed now; the digest is optional.
+        return upload_handoff.prepare_upload(
+            vault_root, lane=lane, expected_sha256=expected_sha256, destination=destination,
+        )
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
         if operation != "download" or not artifact:

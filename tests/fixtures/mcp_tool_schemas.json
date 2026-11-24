@@ -1268,7 +1268,7 @@
     }
   },
   "save_evidence": {
-    "description": "Keep proof as append-only evidence: text with a name, or attached files.",
+    "description": "Keep proof as append-only evidence in the turn it arrives: text with a name, or attached files.",
     "inputSchema": {
       "properties": {
         "scope": {
@@ -1584,7 +1584,7 @@
     }
   },
   "upload_files": {
-    "description": "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
+    "description": "Get a file handoff. Follow its next step. Evidence with scope and category saves on arrival; else held files go to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
@@ -1612,6 +1612,15 @@
         "hold": {
           "type": "boolean",
           "description": "Hold bytes for a later save."
+        },
+        "scope": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
         },
         "detail": {
           "enum": [

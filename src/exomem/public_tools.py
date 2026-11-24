@@ -660,10 +660,8 @@ def _save_evidence(wire: dict[str, Any], ctx: Context) -> Translated:
     if text == files or (text and wire.get("name") is None):
         raise Refusal("INVALID_ARGUMENT", "save_evidence takes `text` with `name`, or `files`, and not both.")
     if files:
-        if wire.get("description") is not None:
-            raise Refusal("INVALID_ARGUMENT", "description applies to `text` evidence only.")
         leaf = {"scope": wire["scope"], "category": wire["category"], "files": wire["files"],
-                "response_detail": wire.get("detail")}
+                "description": wire.get("description"), "response_detail": wire.get("detail")}
         return "preserve_artifacts", _leaf_call(wire, "options", ctx, "preserve_artifacts", "save_evidence", leaf)
     leaf = {"scope": wire["scope"], "category": wire["category"], "filename": wire["name"],
             "content": wire["text"], "description": wire.get("description"), "response_detail": wire.get("detail")}
@@ -695,6 +693,9 @@ class UploadFiles(Wire):
     size_bytes: int | None = Field(default=None, strict=True, ge=0, description="Exact Source bytes.")
     import_identity: str | None = Field(default=None, description="Held Source import ID.")
     hold: bool | None = Field(default=None, description="Hold bytes for a later save.")
+    scope: str | None = None
+    category: str | None = None
+    description: str | None = None
     detail: Detail | None = _DETAIL
 
 
@@ -705,6 +706,7 @@ def _upload_files(wire: dict[str, Any], ctx: Context) -> Translated:
         "lane": wire["lane"], "expected_sha256": wire.get("expected_sha256"), "hold": held,
         "import_identity": wire.get("import_identity"),
         "size_bytes": wire.get("size_bytes"),
+        "scope": wire.get("scope"), "category": wire.get("category"), "description": wire.get("description"),
         "response_detail": wire.get("detail")})}
 
 
@@ -1047,7 +1049,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           meta=_FILES_META,
           captures=True),
     _tool("save_evidence", "Save evidence",
-          "Keep proof as append-only evidence: text with a name, or attached files.",
+          "Keep proof as append-only evidence in the turn it arrives: text with a name, or attached files.",
           SaveEvidence, "write", _save_evidence,
           [Route("preserve_evidence", inverse={"filename": "name", "content": "text", "response_detail": "detail"}),
            Route("preserve_artifacts", inverse={"response_detail": "detail"}, bag="options")],
@@ -1060,7 +1062,7 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
           claims=(("episode_memory", "record"),),
           captures=True),
     _tool("upload_files", "Upload files",
-          "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
+          "Get a file handoff. Follow its next step. Evidence with scope and category saves on arrival; else held files go to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
           [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
     _tool("download_files", "Download files",

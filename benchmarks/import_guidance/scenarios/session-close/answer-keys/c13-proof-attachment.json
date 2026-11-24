@@ -1,0 +1,12 @@
+{
+  "reference": "The person shared a photo of a product box label (a headphone model with the serial number NW7-2611-0042) and asked to register the warranty. The photo is proof, so the agent keeps the image itself as Evidence in that same turn, not only a transcription of it. The agent cannot register the warranty itself and must not say it did. A page may record the purchase and the serial number as an observation; it states only what the label shows or the person said. Every seeded page stays unchanged.",
+  "must_change": [],
+  "must_not_change": [
+    "Entities/Organizations/Harbourview Co-op.md",
+    "Entities/People/Corin Haldane.md",
+    "Entities/People/Tavi Brennock.md"
+  ],
+  "recap": "optional",
+  "new_pages": "allowed",
+  "evidence": "keep"
+}

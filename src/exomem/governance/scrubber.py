@@ -554,7 +554,7 @@ def _may_contain_credential(text: str) -> bool:
     return bool(_active_alternatives(text.lower()))
 
 
-def _scrub_canonical_authorization_bearers(text: str) -> tuple[str, int]:
+def _scrub_canonical_authorization_bearers(text: str, notice: str = NOTICE) -> tuple[str, int]:
     """Replace canonical bearers at every literal start, without boundaries.
 
     Each parser call receives one fixed 70-character window. Advancing past an
@@ -566,7 +566,7 @@ def _scrub_canonical_authorization_bearers(text: str) -> tuple[str, int]:
     copied_through = 0
     replacements = 0
     for start, end in authorization_sessions.iter_credential_spans(text):
-        parts.extend((text[copied_through:start], NOTICE))
+        parts.extend((text[copied_through:start], notice))
         copied_through = end
         replacements += 1
     if not replacements:
@@ -575,7 +575,7 @@ def _scrub_canonical_authorization_bearers(text: str) -> tuple[str, int]:
     return "".join(parts), replacements
 
 
-def _scrub_explicit(text: str) -> tuple[str, int]:
+def _scrub_explicit(text: str, notice: str = NOTICE) -> tuple[str, int]:
     """Run only the alternatives this text can possibly match."""
     indices = _active_alternatives(text.lower())
     if not indices:
@@ -588,7 +588,7 @@ def _scrub_explicit(text: str) -> tuple[str, int]:
     )
     if authorization_indices:
         text, authorization_replacements = _scrub_canonical_authorization_bearers(
-            text
+            text, notice
         )
         replacements += authorization_replacements
     ordinary_indices = tuple(
@@ -597,9 +597,20 @@ def _scrub_explicit(text: str) -> tuple[str, int]:
         if CREDENTIAL_PATTERNS[index].name != "authorization_bearer"
     )
     if ordinary_indices:
-        text, ordinary_replacements = _union_for(ordinary_indices).subn(NOTICE, text)
+        # A callable replacement keeps the notice literal: `subn` reads backslashes in a string as escapes.
+        text, ordinary_replacements = _union_for(ordinary_indices).subn(lambda _match: notice, text)
         replacements += ordinary_replacements
     return text, replacements
+
+
+def scrub_labelled(text: str, *, notice: str = NOTICE) -> tuple[str, int]:
+    """Replace only the labelled and prefixed credential shapes, without the entropy heuristic.
+
+    For text a capture keeps (`capture_redaction`), where hashes and serial numbers must survive.
+    """
+    if not text:
+        return text, 0
+    return _scrub_explicit(text, notice)
 
 
 def _scrub_plain_text(text: str) -> tuple[str, bool]:
