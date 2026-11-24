@@ -110,13 +110,13 @@ def for_hits(refs: Sequence[str | None], caller: Path) -> dict[str, dict[str, An
     if not wanted or not applies(caller):
         return {}
     found = {}
-    for ref, reply in inbound_citations_batch(wanted, caller, per_ref=RECALL_CITATIONS).items():
-        if reply["state"] != "ready":
-            found[ref] = {"cited_by_state": reply["state"]}
+    for ref, answer in inbound_citations_batch(wanted, caller, per_ref=RECALL_CITATIONS).items():
+        if answer["state"] != "ready":
+            found[ref] = {"cited_by_state": answer["state"]}
             continue
-        found[ref] = {"cited_by_count": reply["count"]}
-        if reply["items"]:
-            found[ref]["cited_by"] = [{key: item[key] for key in _HIT_ITEM} for item in reply["items"]]
+        found[ref] = {"cited_by_count": answer["count"]}
+        if answer["items"]:
+            found[ref]["cited_by"] = [{key: item[key] for key in _HIT_ITEM} for item in answer["items"]]
     return found
 
 

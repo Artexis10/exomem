@@ -36,7 +36,8 @@ _ORIGINS = {
     "semantic_unit",
     "frontmatter",
     "wikilink",
-    # A Records or Planning `link` field declares the relation its values carry (`structured-collections`).
+    # A Records or Planning `link` field declares the relation its values carry
+    # (`structured-collections`).
     "collection_link",
 }
 #: The origin that marks a relation a Records or Planning `link` field may declare.
