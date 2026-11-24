@@ -495,6 +495,22 @@ cloudGateway:
   image: ""
   replicas: 1
   hostname: ""
+  # Further public hostnames that the gateway serves and accepts, after `hostname`.
+  # Each gets the same routes and a place in the certificate and the DNS-01 solver, and
+  # the gateway accepts its MCP URL (EXOMEM_CLOUD_MCP_URLS: `hostname` first, then these in
+  # order). `hostname` stays the one that discovery offers new clients and that
+  # EXOMEM_CLOUD_MCP_URL names. Empty renders exactly as with one hostname.
+  # A token is bound to the resource URL it was issued for, so a host change keeps
+  # the old host served and accepted until its tokens are gone:
+  #   Before cutover: hostname = the old host, additionalHostnames = [the new host].
+  #     The new host is served and accepted; the old one is still offered.
+  #   At cutover: swap them. hostname = the new host, additionalHostnames = [the old host].
+  #     The new host is offered first; the old one is still served and accepted.
+  # cloudIngress.hostname must equal `hostname`. The Cloudflare DNS-01 token
+  # (cloudIngress.cloudflareApiTokenSecretName) must be able to edit the DNS zone of
+  # every listed hostname, and every listed hostname's DNS record must be DNS-only
+  # (not proxied), as the primary's is.
+  additionalHostnames: []
   # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
   # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
   publicBaseUrl: ""

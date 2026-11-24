@@ -1344,6 +1344,51 @@ def test_the_download_route_reaches_the_gateway_for_selected_cells() -> None:
     assert download["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
 
 
+# --- Additional hostnames: the gateway serves and accepts a second host while the first keeps working ---
+
+OLD_HOST, NEW_HOST = "mcp.example.test", "mcp.new.example.test"
+# Uploads and the functional health route are optional routes; turn both on so every route renders.
+EVERY_ROUTE_ARGS = (*UPLOAD_ARGS, "--set", "cloudIngress.functionalHealthEnabled=true")
+
+
+def _cloud_route_matches(documents: list[dict[str, Any]]) -> list[str]:
+    routes = _find(documents, "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    assert len(routes) == 6, "the test must cover every route the chart can render"
+    return [route["match"] for route in routes]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_without_additional_hostnames_every_route_matches_the_one_hostname_and_no_url_list_is_set() -> None:
+    documents = _helm_template(*EVERY_ROUTE_ARGS)
+    assert all(match.startswith(f"Host(`{OLD_HOST}`) && ") for match in _cloud_route_matches(documents))
+    assert "EXOMEM_CLOUD_MCP_URLS" not in _container_env(documents, "exomem-cloud-gateway")
+    assert _helm_template(*EVERY_ROUTE_ARGS, "--set-json", "cloudGateway.additionalHostnames=[]") == documents
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_an_additional_hostname_is_routed_certified_solved_and_accepted_after_the_primary() -> None:
+    documents = _helm_template(*EVERY_ROUTE_ARGS, "--set-json", f'cloudGateway.additionalHostnames=["{NEW_HOST}"]')
+    # Every route admits both hosts; the path and method conditions that follow are untouched.
+    for match in _cloud_route_matches(documents):
+        assert match.startswith(f"(Host(`{OLD_HOST}`) || Host(`{NEW_HOST}`)) && "), match
+    # The certificate and the DNS-01 solver cover both names, so the new host gets a valid certificate.
+    certificate = _find(documents, "Certificate", "exomem-cloud-gateway")
+    assert certificate["spec"]["dnsNames"] == [OLD_HOST, NEW_HOST]
+    solver = _find(documents, "ClusterIssuer", "exomem-cloud-dns01")["spec"]["acme"]["solvers"][0]
+    assert solver["selector"]["dnsNames"] == [OLD_HOST, NEW_HOST]
+    # The primary stays the one discovery offers; the list accepts both, primary first.
+    env = _container_env(documents, "exomem-cloud-gateway")
+    assert env["EXOMEM_CLOUD_MCP_URL"]["value"] == f"https://{OLD_HOST}/mcp"
+    assert env["EXOMEM_CLOUD_MCP_URLS"]["value"] == f"https://{OLD_HOST}/mcp,https://{NEW_HOST}/mcp"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_additional_hostnames_refuse_the_primary_hostname() -> None:
+    result = _helm_template_result("--set-json", f'cloudGateway.additionalHostnames=["{OLD_HOST}"]')
+    assert result.returncode != 0
+    assert "cloudGateway.additionalHostnames must not contain cloudGateway.hostname" in result.stderr, result.stderr
+
+
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_uploads_add_no_network_edge_and_leave_cellctl_admission_unchanged() -> None:
     # Uploads ride the existing gateway-to-cell edge on 8765, so no policy may widen.
