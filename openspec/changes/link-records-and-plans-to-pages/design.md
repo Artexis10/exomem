@@ -43,6 +43,7 @@ Primary-source basis. The roster rows used are "The model keeps misusing a tool/
 
 - On create, update, bulk upsert and import, each `link` value goes through the read-side link projector with the writer's visibility.
 - When the value names exactly one visible page, the stored value becomes that page's `exomem://memory/<uuid>`. A value that is already a canonical memory, record or plan ref is kept.
+- A value that names a heading or a block of a page is stored as written, with a warning. A page ref names the whole page, and no ref names a heading or a unit that reads and the index can follow yet, so converting it would drop the anchor. A display alias alone is dropped, because the ref names the same page.
 - A value that names no page, or more than one, is stored unchanged. The write commits and returns a warning that names the field, the value and at most three visible candidates.
 - Writes never refuse on an unresolved link. This is the same rule as row references ("A write warns … and never refuses for an unresolved value").
 - Reads keep today's projection, extended so that a canonical record or plan ref resolves under the reader's visibility of that row.
@@ -128,7 +129,7 @@ The single-store owner accepted this seam on 2026-11-24 with four conditions, ea
 ## Risks / Trade-offs
 
 - **Recall gets heavier.** Each recall adds one index probe and one indexed range read. The proof is a query-count test (the same two citation statements per response, however many hits) and a before/after latency run on a generated vault of 100,000 rows and 10,000 pages. The bounds are the Records load target and warm public p95 under 1 s.
-- **Canonicalising on write changes stored bytes.** A title the agent wrote becomes a ref. The reply shows the resolved title, and history keeps the value as written.
+- **Canonicalising on write changes stored bytes.** A title the agent wrote becomes a ref. The write reply reports each changed value as supplied and as stored; the row keeps only the ref, so the title the agent wrote is not kept anywhere else.
 - **A page that many rows cite under a policy that varies by row costs one decision per citing row.** The rows are decided in one batch per collection, so the statement count stays fixed, but each decision costs what governance's decision costs. At 20,000 citing rows on one page the read takes about 1.3 s (tasks 1.9).
 - **Legacy title values stay unindexed until someone converts them.** Inspect reports how many there are, and D8 converts them on request.
 - **The literal detector misses paraphrases.** The candidate rule is precise enough that its review items stay small. A semantic pass would need a model call per pair, and an evaluation has to show it pays before it is added.

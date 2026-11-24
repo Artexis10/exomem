@@ -1,6 +1,6 @@
 ## 1. Typed links and the citation seam (Batch B)
 
-- [x] 1.1 Canonicalise `link` values on create, append, update, bulk upsert and import through the read-side link projector with the writer's visibility; warn on unresolved or ambiguous values; keep the supplied value in history.
+- [x] 1.1 Canonicalise `link` values on create, append, update, bulk upsert and import through the read-side link projector with the writer's visibility; warn on unresolved or ambiguous values; keep a link to a heading or a block as written, with a warning; report each changed value as supplied and as stored in the write reply.
   - Evidence: `collection_store/link_values.py`, hooks in `record_inputs.py` (append, update) and `bulk_inputs.py` (bulk upsert and import), `_LinkProjector.resolve` in `record_governance.py`. Tests: `tests/test_collection_link_values.py` (rename-proof ref, ambiguous title, withheld equals missing, withheld twin, append, update, bulk upsert and import).
 - [x] 1.2 Index canonical link refs in `item_references` from the canonical item transaction and the existing backfill. Seed `item_reference_state` for link fields, and report title and path values as not indexed in `inspect`.
   - Evidence: `collection_store/reference_index.py` (`link_match`, link entries in `maintain_many`, `backfill`, `unseeded`, `revise`), `query_engine/reference_report.py` (`check_links`), `structured_collections.py` (`LinkDeclaration`, `indexed_fields`). Test: `test_link_entries_rebuild_exactly_from_rows_and_inspect_counts_what_is_indexed` in `tests/test_collection_link_values.py`.
@@ -21,9 +21,10 @@
   - `warming` is never shown as empty;
   - `results` with `no_result_linked`;
   - `cited_by` paging;
-  - a query-count test of one citation query per recall response.
+  - a query-count test of a fixed number of citation statements per recall response.
   - Evidence (each bullet in order, tests at the writer, `read_page`, `search_memory` and `recall_context` entry points):
     - Title to ref and rename: `test_a_title_is_stored_as_the_ref_that_survives_a_page_rename`, `test_every_write_path_stores_the_ref_and_reports_it_as_supplied_and_stored` in `tests/test_collection_link_values.py`.
+    - A link to a heading keeps its anchor: `test_a_heading_link_is_kept_as_written_with_a_warning_and_an_alias_alone_becomes_the_ref` in the same file.
     - Ambiguous title: `test_an_ambiguous_title_is_kept_and_the_commit_warns_with_at_most_three_candidates` and `test_a_withheld_twin_neither_makes_a_title_ambiguous_nor_appears_in_a_warning` in the same file.
     - Withheld equals missing, rows: `test_a_row_is_cited_by_the_rows_that_link_to_it_and_a_withheld_row_answers_like_a_missing_one` and `test_a_withheld_row_of_a_collection_the_caller_can_read_is_absent_from_items_and_count` in `tests/test_page_citations.py`. Pages: `test_a_withheld_page_answers_exactly_like_a_missing_one` there, `test_a_continuation_for_a_withheld_page_answers_exactly_like_one_for_a_missing_page` in `tests/test_read_page_cited_by.py`, and `test_a_withheld_page_warns_exactly_like_a_missing_one`. Collections: `test_a_row_in_a_collection_the_caller_cannot_read_leaves_a_page_as_if_no_row_cited_it` in `tests/test_recall_citations.py` (same `cited_by` on a page read and the same recall hit as a page nothing cites), and `test_a_row_of_a_collection_the_caller_cannot_read_is_absent_from_items_and_count` in `tests/test_page_citations.py`.
     - Warming is never empty: `test_a_warming_index_never_reads_as_an_empty_list` (`tests/test_page_citations.py`), `test_a_warming_index_reads_as_warming_never_as_no_citations` (`tests/test_read_page_cited_by.py`), `test_a_warming_index_says_so_on_the_hit_instead_of_a_zero_count` (`tests/test_recall_citations.py`).

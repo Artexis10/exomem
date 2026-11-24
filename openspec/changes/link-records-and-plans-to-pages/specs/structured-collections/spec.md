@@ -4,7 +4,7 @@
 
 ### Requirement: Link values are canonicalised on write
 
-A create, append, update, bulk upsert or import that stores a `link` value SHALL resolve it with the writer's visibility, through the projection that reads use. A value naming exactly one visible page SHALL be stored as that page's `exomem://memory/<uuid>`. A canonical memory, record or plan ref SHALL be kept as given, and so SHALL a link field that is part of the natural key. The write reply SHALL report each changed value as supplied and as stored.
+A create, append, update, bulk upsert or import that stores a `link` value SHALL resolve it with the writer's visibility, through the projection that reads use. A value naming exactly one visible page SHALL be stored as that page's `exomem://memory/<uuid>`. A canonical memory, record or plan ref SHALL be kept as given, and so SHALL a link field that is part of the natural key. The write reply SHALL report each changed value as supplied and as stored; the row SHALL keep only the stored value.
 
 #### Scenario: A title becomes a stable ref
 
@@ -13,12 +13,17 @@ A create, append, update, bulk upsert or import that stores a `link` value SHALL
 
 ### Requirement: An unresolved link value commits with a warning
 
-A link value that names no visible page, or more than one, SHALL be stored unchanged, and the write SHALL commit with a warning naming the field, the value and at most three visible candidates. A withheld page SHALL produce the same result as a missing one.
+A link value that names no visible page, or more than one, SHALL be stored unchanged, and the write SHALL commit with a warning naming the field, the value and at most three visible candidates. A withheld page SHALL produce the same result as a missing one. A value that names a heading or a block of a page SHALL also be stored unchanged with a warning, because a page ref names the whole page.
 
 #### Scenario: An ambiguous title is kept and warned
 
 - **WHEN** a link value matches two visible pages
 - **THEN** the row commits with the value unchanged and a warning listing both candidates
+
+#### Scenario: A link to a heading keeps its anchor
+
+- **WHEN** an agent appends a row whose `page` link names a heading of a visible page
+- **THEN** the row stores the value as written, the write warns, and the citation index holds no entry for it
 
 ### Requirement: Collection creation suggests extending an overlapping collection
 

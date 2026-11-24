@@ -273,3 +273,14 @@ def test_a_row_ref_resolves_to_the_label_of_a_row_the_reader_may_read_and_to_not
     assert resolve(_external(), refs[1]) == resolve(_external(), refs[2]) == LinkResolution("none")
     # A projector made without a session cannot read rows, so it withholds a row ref as it did before.
     assert _LinkProjector.create(world.root, manifest).resolve(refs[0]) == LinkResolution("none")
+
+
+def test_a_heading_link_is_kept_as_written_with_a_warning_and_an_alias_alone_becomes_the_ref(world):
+    """A stored page ref names a whole page, so storing one for a link to a heading would drop the heading."""
+    result = append(world, {"page": "[[Alpha#Launch plan]]", "pages": ["Alpha#Launch plan", "[[Alpha|the plan]]"]})
+    assert result["outcome"] == "committed"
+    assert stored(world)["page"] == "[[Alpha#Launch plan]]"
+    assert stored(world)["pages"] == ["Alpha#Launch plan", f"exomem://memory/{ALPHA}"]
+    assert [text.split(":", 1)[0] for text in link_warnings(result)] == ["LINK_ANCHORED", "LINK_ANCHORED"]
+    _ready(world)
+    assert {(field, match) for _, field, match, _ in _entries(world)} == {("pages", f"memory:{ALPHA}")}

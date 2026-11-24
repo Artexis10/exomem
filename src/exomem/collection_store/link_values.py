@@ -3,8 +3,8 @@
 A ``link`` field holds a page by title, path or ref, and only the ref survives a rename. A write stores
 ``exomem://memory/<id>`` when the value names exactly one page the writer may read and that page has an
 identity, and the reply reports each such value as supplied and as stored. A value that names no such
-page, or several, is stored as written and the write warns, so a write never fails on a link. A page the
-writer may not read answers exactly as a missing one.
+page, or several, or a heading or a block of a page, is stored as written and the write warns, so a write
+never fails on a link. A page the writer may not read answers exactly as a missing one.
 
 The writer resolves through the projector that reads use, with the writer's own visibility, so a stored
 ref and a later read cannot disagree. The projector borrows the published corpus generation and never
@@ -17,13 +17,15 @@ from collections.abc import Mapping
 from itertools import islice
 from typing import Any
 
-from .. import memory_refs
+from .. import memory_refs, vault
 from .. import structured_collections as collections
 from ..record_governance import _LinkProjector
 
-#: The warning codes: a value that names no readable page with a stable ref, and one that names several.
+#: The warning codes: a value that names no readable page with a stable ref, one that names several, and one
+#: that names a heading or a block of a page.
 UNRESOLVED = "LINK_UNRESOLVED"
 AMBIGUOUS = "LINK_AMBIGUOUS"
+ANCHORED = "LINK_ANCHORED"
 #: Visible candidate pages one ambiguity warning names.
 _CANDIDATES = 3
 #: Warnings one request carries; a bulk request with many unresolved values reports the first ones and a total.
@@ -102,6 +104,10 @@ class LinkValues:
         if found.kind == "ambiguous":
             return value, AMBIGUOUS, found.candidates[:_CANDIDATES]
         if found.kind == "page":
+            # A page ref names the whole page, and no ref names a heading or a unit that a read or the index can
+            # follow yet, so a link to one stays as written rather than lose its anchor.
+            if vault.split_wikilink_target(raw)[1]:
+                return value, ANCHORED, ()
             identity = memory_refs.read_reference_owner(self._root, self._root / found.path)
             # The identity must read back as this page for this writer: a duplicate identity names no page.
             if identity is not None and projector.page_with_identity(identity) == found.path:
@@ -133,5 +139,8 @@ def _warning(name: str, value: str, code: str, candidates: tuple[str, ...]) -> s
     if code == AMBIGUOUS:
         return (f"{AMBIGUOUS}: field {name!r} value {value!r} names several pages you can read "
                 f"({', '.join(candidates)}); it was stored as written. Use a page ref or a path.")
+    if code == ANCHORED:
+        return (f"{ANCHORED}: field {name!r} value {value!r} names a heading or a block of a page; it was stored as "
+                "written, as a page ref would drop the anchor. Write the page alone to store its ref.")
     return (f"{UNRESOLVED}: field {name!r} value {value!r} names no page you can read that has a stable ref; "
             "it was stored as written.")
