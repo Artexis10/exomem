@@ -107,7 +107,7 @@ The store thread SHALL select pages for the unit derivation from the version log
 - **THEN** the unit derivation takes them in transactions of at most 32 pages
 
 ### Requirement: Unit identity follows the light rule
-For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes after link normalisation; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by its target's page key as the vault stood at the version's revision, keeping fragment and alias. It SHALL NOT match across pages or by similarity.
+For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes after link normalisation; the same anchor on exactly one record; the same slot, with only whitespace or one run of at most 12 characters without whitespace changed, a link counting as one. It SHALL compare a wikilink by its target's page key as of the version's revision, keeping fragment and alias. It SHALL NOT match across pages or by similarity.
 
 #### Scenario: A typo keeps the unit
 - **WHEN** a person fixes one letter in a unit that has no anchor
@@ -138,7 +138,7 @@ A writer SHALL be able to send, with a page's bytes, a declaration of the unit i
 #### Scenario: An invalid declaration does not freeze the page
 - **WHEN** a writer's declaration names a unit that its bytes do not hold
 - **THEN** the page's identity and rows still derive, by the light rule
-- **AND** status counts one declaration mismatch and names the page
+- **AND** status counts one declaration mismatch, and only the owner's status names the page
 
 ### Requirement: A retired referenced unit keeps its references
 When a derivation retires a unit that a stored relationship, an embed or a unit-level link names, or keeps such a unit without its anchor, the store SHALL keep those references and open one review item. The repair tool SHALL resolve it by restoring the anchor, attaching the references to a named unit, or retiring them. Retiring SHALL leave embeds and links as text.
