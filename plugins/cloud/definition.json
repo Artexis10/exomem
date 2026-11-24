@@ -12,7 +12,7 @@
     "What have we decided, and what evidence supports it?",
     "Review this work and preserve the conclusions that matter."
   ],
-  "resource": "https://exomem.substratesystems.io/mcp",
+  "resource": "https://mcp.evermatter.ai/mcp",
   "profile": "product-cloud",
   "author": {
     "name": "Substrate Systems OÜ",
@@ -20,9 +20,9 @@
   },
   "homepage": "https://evermatter.ai",
   "repository": "https://github.com/substrate-systems/evermatter",
-  "privacy": "https://substratesystems.io/exomem/privacy",
-  "terms": "https://substratesystems.io/exomem/terms",
-  "support": "https://substratesystems.io/exomem/support",
+  "privacy": "https://evermatter.ai/privacy",
+  "terms": "https://evermatter.ai/terms",
+  "support": "https://evermatter.ai/support",
   "documentation": "https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md",
   "license": "Apache-2.0",
   "keywords": [

@@ -9,10 +9,10 @@
   },
   "homepage": "https://evermatter.ai",
   "repository": "https://github.com/substrate-systems/evermatter",
-  "privacyPolicyUrl": "https://substratesystems.io/exomem/privacy",
-  "supportUrl": "https://substratesystems.io/exomem/support",
+  "privacyPolicyUrl": "https://evermatter.ai/privacy",
+  "supportUrl": "https://evermatter.ai/support",
   "documentationUrl": "https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md",
-  "termsOfServiceUrl": "https://substratesystems.io/exomem/terms",
+  "termsOfServiceUrl": "https://evermatter.ai/terms",
   "icon": "./assets/icon.png",
   "license": "Apache-2.0",
   "keywords": [

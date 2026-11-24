@@ -34,9 +34,9 @@
           "Write"
         ],
         "websiteURL": "https://evermatter.ai",
-        "supportURL": "https://substratesystems.io/exomem/support",
-        "privacyPolicyURL": "https://substratesystems.io/exomem/privacy",
-        "termsOfServiceURL": "https://substratesystems.io/exomem/terms",
+        "supportURL": "https://evermatter.ai/support",
+        "privacyPolicyURL": "https://evermatter.ai/privacy",
+        "termsOfServiceURL": "https://evermatter.ai/terms",
         "composerIcon": "./assets/icon-small.png",
         "logo": "./assets/icon.png"
       },

@@ -3,7 +3,7 @@
   "mcpServers": {
     "exomem": {
       "type": "streamable-http",
-      "url": "https://exomem.substratesystems.io/mcp"
+      "url": "https://mcp.evermatter.ai/mcp"
     }
   }
 }

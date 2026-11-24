@@ -32,7 +32,7 @@ Updates the Dot E branding and memory workflow guidance. Trusted lifecycle hooks
 
 Publisher: Substrate Systems OÜ.
 
-[Documentation](https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md) · [Privacy policy](https://substratesystems.io/exomem/privacy) · [Terms of service](https://substratesystems.io/exomem/terms) · [Support](https://substratesystems.io/exomem/support)
+[Documentation](https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md) · [Privacy policy](https://evermatter.ai/privacy) · [Terms of service](https://evermatter.ai/terms) · [Support](https://evermatter.ai/support)
 
 ## Claude lifecycle hooks
 

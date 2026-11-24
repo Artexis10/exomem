@@ -99,7 +99,7 @@ Normalize observations without changing arguments, results or user turns:
   "surface": "codex",
   "conversation_id": "native-session-id",
   "observed_at": "2026-09-30T12:00:00Z",
-  "identity": {"version": "source-release", "skill_contract": "digest", "corpus_digest": "digest", "profile": "product-cloud", "resource": "https://exomem.substratesystems.io/mcp"},
+  "identity": {"version": "source-release", "skill_contract": "digest", "corpus_digest": "digest", "profile": "product-cloud", "resource": "https://mcp.evermatter.ai/mcp"},
   "package_sha256": "installed-archive-digest",
   "marker": "unique-synthetic-marker",
   "plugin_enabled": true,
