@@ -66,12 +66,14 @@ Measured on 2026-11-23 on the laptop, corpus cache on, with the fixture vault pl
 | Sealed plan | 700 KB, 67% of the bound | 706 KB, 67% of the bound |
 | Estimate over sealed size | 1.08 | 1.07 |
 
+The eight refused fixture notes lacked semantic units from before the contract. Since judge-relocations-by-what-they-change, a relocation refuses a page only for a contract error that the move adds, so these notes now move.
+
 A move seals about 920 bytes plus six copies of its old and new paths, 1.7 to 2.0 KB with its summary row. A referring page seals about 600 bytes, and a link about 300. The page estimate is set at 2.2 KB, so paths longer than the measured ones still fit. With the 75% share, a batch seals unhalved until the estimate under-counts by a third.
 
 ## Risks / Trade-offs
 
 - The stored row lags a rename or a retitle made outside a curation run until the next reconcile or renaming run. The retitle's own response carries the rename call, and `inspect_name_drift` and the batch resolver always read the vault again.
-- A move that the semantic write contract refuses (a page without semantic units, or a referrer without a relation disposition) stays drifted and is counted as refused. Each refused page costs one preparation pass when it is first tried.
+- A move that the semantic write contract refuses stays drifted and is counted as refused. The contract refuses a move only for an error that the move adds to the page or a referrer, such as a page without semantic units whose name had a breadth suffix that exempted it. Each refused page costs one preparation pass when it is first tried.
 - A later batch's link rewrite changes the bytes of a refused page that links to a renamed page, or of one of its referrers. That page is tried once more and refused again, which costs one pass.
 - A refusal does not bind a referrer that names the page only in prose, one outside the Knowledge Base root, or one the scanning caller cannot read. The scan reads none of them, so it cannot tell a deletion from an absence. An edit to such a referrer does not let the page back in; an edit to the page does.
 - Each move step of a relocation prepares its own semantic preflight, so a batch of about 100 pages took 28 to 38 s to prepare on a 3,000-page vault (decision 9). A slower vault prepares over several calls, each answering `preparing`, and one approval still covers the sealed plan.

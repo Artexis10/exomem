@@ -163,6 +163,17 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
     # backlog take several batches, which is the loop under test.
     monkeypatch.setattr(name_drift, "BATCH_PAGES", 3)
     _invent(vault)
+    # A page without semantic units whose name ends in a breadth suffix, which exempts it from the
+    # semantic minimum. The name its title gives drops the suffix, so the rename would add a
+    # missing-unit error that the page never had, and the move contract refuses it.
+    breadth = f"{AREA}/harbour-architecture.md"
+    _put(
+        vault,
+        breadth,
+        "---\ntitle: Harbour layout\ntype: research-note\nproject: harbour\nstatus: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000007\nupdated: 2026-08-15\n---\n\n"
+        "Berths and cranes, quay by quay.\n",
+    )
     kept = {rel: (vault / rel).read_bytes() for rel in KEPT}
     due_state.reconcile(vault)
     batches: list[tuple[dict, dict[str, bytes]]] = []
@@ -223,14 +234,12 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
         listing = name_drift.listing(vault, limit=200)
 
     assert len(batches) >= 3
-    # The fixture vault's own legacy notes lack a semantic unit, so the move contract refuses them.
-    legacy = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
-    assert refused[legacy] == "SEMANTIC_CONTRACT_BLOCKED"
+    assert refused[breadth] == "SEMANTIC_CONTRACT_BLOCKED"
     assert listing["total_drifted"] == 0
     assert listing["refused"] == len(refused)
     assert sum(listing["refused_codes"].values()) == len(refused)
     rows = {row["current_name"]: row for row in listing["pages"] if row["state"] == "refused"}
-    assert rows["retry-with-fixed-interval.md"]["code"] == "SEMANTIC_CONTRACT_BLOCKED"
+    assert rows["harbour-architecture.md"]["code"] == "SEMANTIC_CONTRACT_BLOCKED"
     assert "rename_next_batch" not in listing
     for before, after in RENAMED.items():
         assert not (vault / before).exists()
@@ -253,13 +262,13 @@ def test_the_items_call_renames_the_backlog_batch_by_batch_until_the_item_closes
     assert {rel: (vault / rel).read_bytes() for rel in snapshot} == snapshot
 
     # Repairing a refused page lets it back into the batches.
-    page = vault / legacy
+    page = vault / breadth
     page.write_text(
         page.read_text(encoding="utf-8")
-        + "\n## Observations\n\n- [operating constraint] Keep retries bounded #reliability\n",
+        + "\n## Observations\n\n- [finding] Each quay holds two cranes. #harbour\n",
         encoding="utf-8",
     )
-    assert legacy in {drifted.path for drifted in name_drift._corpus_scan(vault).drifted}
+    assert breadth in {drifted.path for drifted in name_drift._corpus_scan(vault).drifted}
 
 
 def test_a_refused_link_rewrite_leaves_its_page_out_until_the_referrer_changes(
