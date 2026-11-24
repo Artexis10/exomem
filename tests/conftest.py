@@ -716,7 +716,7 @@ def _best_effort_proc_cwd(pid: int) -> str:
 
 def _matching_processes(exclude: frozenset[int]) -> tuple[tuple[int, str], ...]:
     """All ``(pid, cmdline)`` for live processes outside ``exclude`` whose
-    cmdline contains "pytest" or "exomem".
+    cmdline contains "pytest", "exomem" or "evermatter".
 
     Uncapped and unredacted -- :func:`_concurrent_process_candidates` applies
     the cap and redaction on top of this. Split out so ancestor-exclusion and
@@ -747,7 +747,8 @@ def _matching_processes(exclude: frozenset[int]) -> tuple[tuple[int, str], ...]:
                 cmdline = raw.replace(b"\x00", b" ").strip().decode("utf-8", "replace")
                 if not cmdline:
                     continue
-                if "pytest" in cmdline or "exomem" in cmdline:
+                # The product runs as `evermatter` from a checkout of that name, and its package keeps the `exomem` import name.
+                if any(name in cmdline for name in ("pytest", "exomem", "evermatter")):
                     found.append((pid, cmdline))
             except Exception:  # noqa: BLE001 -- one entry's failure must not discard matches already found; this scan is best-effort triage, never load-bearing for the assert.
                 continue
@@ -797,7 +798,7 @@ def _concurrent_process_candidates() -> tuple[str, ...]:
         argv0 = cmdline.split(" ", 1)[0]
         basename = argv0.rsplit("/", 1)[-1] or argv0
         cwd = _best_effort_proc_cwd(pid)
-        found.append(f"pid {pid}: {basename} (matched: pytest|exomem, cwd: {cwd})")
+        found.append(f"pid {pid}: {basename} (matched: pytest|exomem|evermatter, cwd: {cwd})")
     if len(matches) > _CONCURRENT_CANDIDATE_CAP:
         found.append(f"(+{len(matches) - _CONCURRENT_CANDIDATE_CAP} more)")
     return tuple(found)

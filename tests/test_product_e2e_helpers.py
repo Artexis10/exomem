@@ -4,6 +4,7 @@ import json
 import socket
 import subprocess
 import sys
+import tomllib
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,7 +29,9 @@ def test_successful_installed_journey_preserves_read_recovery_evidence(tmp_path,
 
     def run(command, **_options):
         if command[:2] == ["uv", "build"]:
-            (tmp_path / "dist" / "exomem-fixture.whl").write_bytes(b"controlled wheel boundary")
+            # `uv build` names the wheel after the project, which the loop reads from pyproject.toml.
+            project = tomllib.loads((e2e_product_loop.REPO_ROOT / "pyproject.toml").read_text())["project"]["name"]
+            (tmp_path / "dist" / f"{project}-fixture.whl").write_bytes(b"controlled wheel boundary")
         stdout = ""
         if any(Path(part).name == "e2e_s1_summary_journey.py" for part in command):
             stdout = "\n".join((first, recovered, summary)) + "\n"
