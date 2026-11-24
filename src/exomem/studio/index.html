@@ -4,16 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Exomem Review Studio</title>
+  <title>Evermatter Review Studio</title>
   <link rel="icon" href="/studio/assets/studio-icon.v1.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/studio/assets/styles.v3.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to review workspace</a>
   <header class="masthead">
-    <a class="brand" href="/studio/" aria-label="Exomem Review Studio home">
+    <a class="brand" href="/studio/" aria-label="Evermatter Review Studio home">
       <img src="/studio/assets/studio-icon.v1.svg" alt="" width="36" height="36">
-      <span><strong>Exomem</strong><small>Epistemic Review Studio</small></span>
+      <span><strong>Evermatter</strong><small>Epistemic Review Studio</small></span>
     </a>
     <p id="connection-status" class="connection" role="status">Not connected</p>
   </header>
@@ -23,12 +23,12 @@
     <button type="button" class="area-tab" data-view="adopt" aria-current="false">Import</button>
   </nav>
 
-  <noscript><p class="fatal">The Review Studio needs JavaScript. Core Exomem commands remain available through MCP, REST, and CLI.</p></noscript>
+  <noscript><p class="fatal">The Review Studio needs JavaScript. Core Evermatter commands remain available through MCP, REST, and CLI.</p></noscript>
 
   <main>
     <section id="auth-panel" class="auth-card" aria-labelledby="auth-title">
       <p class="eyebrow">Private, same-origin session</p>
-      <h1 id="auth-title">Connect to your Exomem</h1>
+      <h1 id="auth-title">Connect to your Evermatter</h1>
       <p>Use your personal REST key, or continue through a deployment already protected by Cloudflare Access. The key stays in this browser tab session.</p>
       <form id="auth-form">
         <label for="api-key">REST bearer key</label>
@@ -116,7 +116,7 @@
     </section>
 
     <section id="adoption" class="adoption" hidden aria-label="Import">
-      <p id="adopt-guarantee" class="guarantee">Copies only — your original files stay exactly where they are. Exomem never moves, edits, or deletes them.</p>
+      <p id="adopt-guarantee" class="guarantee">Copies only — your original files stay exactly where they are. Evermatter never moves, edits, or deletes them.</p>
       <ol id="adopt-stepper" class="stepper" aria-label="Steps">
         <li data-step="1" aria-current="false">Look around</li>
         <li data-step="2" aria-current="false">What we found</li>
@@ -132,8 +132,8 @@
 
       <section id="adopt-start" class="adopt-step" hidden>
         <p class="eyebrow">Import</p>
-        <h1>Bring your notes and files into Exomem</h1>
-        <p>Point Exomem at a folder. It looks through what's there and shows you what it found. Nothing is copied or changed by looking.</p>
+        <h1>Bring your notes and files into Evermatter</h1>
+        <p>Point Evermatter at a folder. It looks through what's there and shows you what it found. Nothing is copied or changed by looking.</p>
         <label for="adopt-path">Folder to look through</label>
         <input id="adopt-path" name="path" type="text" autocomplete="off" spellcheck="false" placeholder="(your whole folder)">
         <p class="contract-line">Looking is read-only.</p>
@@ -221,7 +221,7 @@
 
       <section id="adopt-handoff" class="adopt-step" hidden>
         <h2>Want help organizing? (optional)</h2>
-        <p>If an AI assistant (like Claude or Codex) is connected to this Exomem, it can look at what you just brought in and suggest titles, groups, and connections. You approve every suggestion before anything changes.</p>
+        <p>If an AI assistant (like Claude or Codex) is connected to this Evermatter, it can look at what you just brought in and suggest titles, groups, and connections. You approve every suggestion before anything changes.</p>
         <textarea id="adopt-prompt" class="prompt-block" readonly rows="6" aria-label="Prompt for your assistant"></textarea>
         <div class="step-actions">
           <button id="adopt-copy" type="button">Copy prompt</button>
@@ -253,7 +253,7 @@
         <p>Your files are in. Try asking something they should be able to answer.</p>
         <div id="adopt-chips" class="chips"></div>
         <div class="field-row">
-          <input id="adopt-ask" type="text" autocomplete="off" aria-label="Ask your Exomem">
+          <input id="adopt-ask" type="text" autocomplete="off" aria-label="Ask your Evermatter">
           <button id="adopt-ask-btn" type="button">Ask</button>
         </div>
         <div id="adopt-answers" class="answers"></div>
@@ -261,7 +261,7 @@
 
       <section id="adopt-done" class="adopt-step" hidden>
         <h2>You're set up</h2>
-        <p>Exomem keeps working quietly in the background.</p>
+        <p>Evermatter keeps working quietly in the background.</p>
         <div class="step-actions">
           <button id="adopt-go-review" type="button">Go to Review</button>
         </div>

@@ -2264,11 +2264,12 @@ def event_records(
         return []
     records: list[dict[str, Any]] = []
     candidates = []
-    for path in root.iterdir():
-        if checkpoint is not None:
-            checkpoint()
-        if path.is_dir():
-            candidates.append(path)
+    with os.scandir(root) as entries:
+        for entry in entries:
+            if checkpoint is not None:
+                checkpoint()
+            if entry.is_dir():
+                candidates.append(Path(entry.path))
     for candidate in sorted(candidates):
         if checkpoint is not None:
             checkpoint()

@@ -47,7 +47,7 @@ def _may_see(vault_root: Path) -> Callable[[str], bool]:
        alone cannot decide it, since a scope that reads frontmatter, such as a tag, leaves a
        path-only level at the minimum for every caller.
     3. With no stored page, the file the person left is judged the same way. This is a page that
-       Exomem deleted or moved while the person's edit stayed.
+       Evermatter deleted or moved while the person's edit stayed.
     4. With neither, the path alone decides. A binary has no Markdown to read, so it ends here.
     """
     from .governance import egress
@@ -141,10 +141,10 @@ def listing(vault_root: Path, limit: int | None = None) -> dict[str, Any]:
         parts = []
         if pages:
             parts.append(
-                f"{_count(pages, 'file', 'files')} changed outside Exomem and "
+                f"{_count(pages, 'file', 'files')} changed outside Evermatter and "
                 f"{'waits' if pages == 1 else 'wait'} for a choice. "
                 f"Keep the person's file with {held.KEEP_MINE}, "
-                f"or keep Exomem's page with {held.KEEP_STORE}."
+                f"or keep Evermatter's page with {held.KEEP_STORE}."
             )
         # One sentence for each reason, in the order the items list them.
         for reason in dict.fromkeys(blocked):
@@ -202,19 +202,19 @@ def resolve(
     if choice == held.KEEP_MINE:
         sentence = (
             f"Kept the person's file as the stored page of {path}. "
-            "Exomem writes nothing to the file."
+            "Evermatter writes nothing to the file."
             if result.person_file_existed
             else f"Removed {path} from the store, as the person deleted its file."
         )
     elif copy is not None:
         sentence = (
-            f"Kept Exomem's page for {path}. The person's file is saved first as {copy} in this "
-            "vault's state folder, outside the vault, and Exomem now writes its page to the file."
+            f"Kept Evermatter's page for {path}. The person's file is saved first as {copy} in this "
+            "vault's state folder, outside the vault, and Evermatter now writes its page to the file."
         )
     else:
         sentence = (
-            f"Kept Exomem's page for {path}. "
-            "The person had deleted its file, so Exomem writes the page back."
+            f"Kept Evermatter's page for {path}. "
+            "The person had deleted its file, so Evermatter writes the page back."
         )
     return {
         "outcome": sentence,

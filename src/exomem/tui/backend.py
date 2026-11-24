@@ -1,4 +1,4 @@
-"""Thin synchronous facade between TUI screens and Exomem's product services.
+"""Thin synchronous facade between TUI screens and Evermatter's product services.
 
 Every knowledge read/write goes through `product_invoke` — the same seam the
 CLI drives — so TUI semantics cannot drift from CLI/MCP/REST. The handful of
@@ -431,7 +431,11 @@ class ExomemBackend:
         # Mutating specialized ops return the commit envelope; the human-facing
         # report lives under `diagnostics` when present (CLI renderer parity).
         diagnostics = result.get("diagnostics")
-        return diagnostics if isinstance(diagnostics, dict) else result
+        if not isinstance(diagnostics, dict):
+            return result
+        from ..mutation_terminal import reply_leaf
+
+        return dict(reply_leaf(diagnostics))
 
     @property
     def vault_root(self) -> Path | None:
@@ -586,6 +590,13 @@ class ExomemBackend:
         from .. import install_hook
 
         return install_hook.check_hooks(clients=install_hook.SUPPORTED_CLIENTS)
+
+    @staticmethod
+    def holds_vault(folder: Path) -> bool:
+        """Whether a folder already holds a Knowledge Base, by the check `resolve_vault` uses."""
+        from .. import vault as vault_module
+
+        return folder.is_dir() and vault_module._is_vault(folder)
 
     @staticmethod
     def scaffold_file_count() -> int:

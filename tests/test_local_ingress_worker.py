@@ -56,7 +56,7 @@ class _NeverExternalVerifier:
     required_scopes: list[str] = []
 
     async def verify_token(self, token: str) -> None:
-        raise AssertionError("durable Exomem sessions must not call the provider")
+        raise AssertionError("durable Evermatter sessions must not call the provider")
 
 
 def _probe_app(vault: Path, *, auth: Any, middleware: list | None = None) -> Any:

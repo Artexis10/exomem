@@ -219,7 +219,7 @@ def _worker_stopped(request_id: object) -> bytes:
     """The JSON-RPC answer for a call whose worker died before it could answer."""
     return _jsonrpc_error(
         request_id,
-        "The Exomem worker stopped before this call finished. Retry the identical call now: "
+        "The Evermatter worker stopped before this call finished. Retry the identical call now: "
         "a memory write retried this way returns its committed result, or says that its "
         "outcome needs checking, and is not applied twice.",
         {"status": "retryable"},

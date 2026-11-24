@@ -48,7 +48,7 @@ The frozen stance verifier (claim polarity on the contradiction review queue) wa
 - **Refusal degrades to absence.** A gate that is unset, a digest mismatch, missing weights, a missing dependency or a red fixture set means no reading. It never means a differently produced label wearing the instrument's name.
 - **Recorded, not decided.** Each judgement is appended to the per-vault readings ledger. The deterministic dreamer models over the readings. Readings never enter note canon, decisions, retrieval, ranking, policy or any synchronous write path, except through a governed write the agent authors and that cites the reading.
 
-The admitted local checkpoint is multilingual, but Exomem's acceptance claim is deliberately narrower than its model card. The production fixture set checks English, German, French, Estonian, and mixed English/Estonian pairs. The neutral fallback means only that the NLI head did not establish contradiction or entailment at the reviewed thresholds. It does not establish topical unrelatedness.
+The admitted local checkpoint is multilingual, but Evermatter's acceptance claim is deliberately narrower than its model card. The production fixture set checks English, German, French, Estonian, and mixed English/Estonian pairs. The neutral fallback means only that the NLI head did not establish contradiction or entailment at the reviewed thresholds. It does not establish topical unrelatedness.
 
 ## What the Cloud placement must measure before the NLI pin serves cells
 

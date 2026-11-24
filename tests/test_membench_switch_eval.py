@@ -581,7 +581,7 @@ with open(sys.argv[1], "wb") as capture:
 @pytest.mark.parametrize(
     ("servers", "outcome"),
     [([], OK), ([{"name": "exomem", "status": "connected"}], "abort")],
-    ids=["no server", "a leaked Exomem server"],
+    ids=["no server", "a leaked Evermatter server"],
 )
 def test_an_arm_with_no_exomem_runs_without_a_server_and_stops_on_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, servers: list[dict], outcome: str
@@ -648,7 +648,7 @@ def test_prepare_runs_the_development_arm_only_beside_development_cases(
         prepare("heldout-run", protocol.SPLIT_HELDOUT, "M,N")
     assert prepare("dev-run", protocol.SPLIT_DEV, "M,N") == 0
     assert json.loads((tmp_path / "dev-run" / "inputs.json").read_text())["arms"] == ["M", "N"]
-    # An arm with no Exomem needs no state: its stage builds nothing and its hash is already whole.
+    # An arm with no Evermatter needs no state: its stage builds nothing and its hash is already whole.
     assert prepare("n-run", protocol.SPLIT_DEV, "N") == 0
     assert cli.main(["state", "--run", str(tmp_path / "n-run")]) == 0
     assert not json.loads((tmp_path / "n-run" / "arm-hashes.json").read_text())["N"]["arm_hash"].startswith("pending")

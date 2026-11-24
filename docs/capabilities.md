@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 42
-- Tier 1 commands: 37
+- Product commands: 43
+- Tier 1 commands: 38
 - Tier 2 commands: 5
-- Public MCP tools: 34
-- REST commands: 39
-- CLI commands: 39
+- Public MCP tools: 35
+- REST commands: 40
+- CLI commands: 40
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -24,13 +24,13 @@ exactly one cell from server-side state, checks provider-neutral entitlements, a
 forwards a compatible registry command. Public callers cannot select a tenant, cell,
 private endpoint, credential, or vault path.
 
-Exomem cells own command execution, mutation safety, private readiness, bounded feature
+Evermatter cells own command execution, mutation safety, private readiness, bounded feature
 enforcement, and canonical export/restore. They do not own accounts, public sessions,
 Paddle, provisioning, encrypted backup retention, KMS, or destructive external deletion.
 Paddle is never a cell request-path or package runtime dependency; Substrate projects its
 billing state into internal provider-neutral capabilities before routing.
 
-See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the
+See the Evermatter Cloud runbooks in [runbooks/](runbooks/) and the
 [Substrate control-plane contract](substrate-control-plane-contract.md).
 
 ## Public MCP Tools
@@ -53,6 +53,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | episode_memory | Direct inputs | episode_memory |
 | govern_memory | Direct inputs | govern_memory |
 | import_memory | file, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adoption_studio |
+| inspect_name_drift | Direct inputs | inspect_name_drift |
 | maintain_memory | Direct inputs | maintain_memory |
 | manage_memory_file | Direct inputs | manage_memory_file |
 | observe_memory | Direct inputs | observe_memory |
@@ -80,12 +81,13 @@ REST and CLI calls keep the grouped commands in the following registry.
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
 | served_context | 2 | REST, CLI | read | no | - | served_context | served_context_id | Inspect retained composed response metadata with verified owner authority. |
-| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect or change saved Exomem engagement for this vault. |
+| configure_memory | 1 | MCP, REST, CLI | write | yes | - | configure_memory | action, prominence, expected_revision, context, response_detail | Inspect or change saved Evermatter engagement for this vault. |
 | inspect_captured_sources | 1 | MCP, REST, CLI | read | no | - | inspect_captured_sources | system*, record_id, cursor, limit | List canonical captured revisions with complete-publication and exact-index observations. |
 | inspect_capture_erasure_policy | 1 | MCP, REST, CLI | read | no | - | - | system* | Read whether current host policy enables erasure for one opaque identity system. |
 | erase_captured_source | 1 | MCP, REST, CLI | write | no | - | - | operation_id*, source_identity*, expected_source_ref*, expected_source_hash*, response_detail | Advance retirement of one captured Source incarnation and report each component's progress. |
+| inspect_name_drift | 1 | MCP, REST, CLI | read | no | - | inspect_name_drift | cursor, limit | List pages whose file name no longer follows their title, with the name each would get today. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Read writer-lease health during outages. |
-| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Exomem's contract and live settings when missing or changed; reuse while current. |
+| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Evermatter's contract and live settings when missing or changed; reuse while current. |
 | search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |
 | recall_context | 1 | MCP, REST, CLI | read | no | turn | activate_context | turn, max_chars, purpose, continuity, anchor, include_timings, client, session, workspace, conversation, trigger, initiator, native_skills | Recall authorized context; abstain if uncertain. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw, unit_ref, purpose, history_limit, history_continuation, continuation, follow_corrections, offset, units, brief | Read a page, exact unit, exomem://map view, or topic brief. |
@@ -102,7 +104,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | prepare_note | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Prepare a sourced note without saving. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description, raw_protection, response_detail | Preserve text as append-only proof. |
 | preserve_artifacts | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, files*, adoption, transcriptions, raw_protection, archive, response_detail | Preserve client file handles as append-only Evidence. |
-| transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation, lane, artifact, expected_sha256, hold, artifacts, uploads, import_identity, response_detail | Prepare a file transfer or cancel owned waiting uploads. |
+| transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation, lane, artifact, expected_sha256, hold, artifacts, uploads, import_identity, size_bytes, response_detail | Prepare a file transfer or cancel owned waiting uploads. |
 | process_media | 1 | MCP, REST, CLI | write | no | - | - | path, paths, operation, language, multilingual, store, diarize, response_detail | Check governed media; retry after remediation; extract again; replicate originals. |
 | review_memory | 1 | MCP, REST, CLI | write | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, continuation, query, sources, suggested_title, tag, key, value, path, state, ref, detail, legacy_sample_limit, family, window_days, response_detail | Review health, provenance, drift and backlog. |
 | review_item_context | 1 | MCP, REST, CLI | read | no | ref | review_item_context | ref*, expected_fingerprint, max_body_chars, max_related_pages, max_graph_nodes, max_graph_edges, max_history, max_evolution_versions, continuation | Read one review item's target, provenance, relations and history. |
@@ -110,17 +112,17 @@ REST and CLI calls keep the grouped commands in the following registry.
 | connect_memory | 1 | MCP, REST, CLI | write | no | - | suggest_links, graph_context, suggest_relations, link, list_inbound_links | operation, path, target, query, requested_relation, continuation, unit_ref, categories, kinds, draft_title, draft_body, limit, scope, include_model_suggestions, depth, relation_types, node_types, max_nodes, max_edges, traversal_profile, max_body_chars, entity_type, name, slug, summary, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status, aliases, ref, expected_hash, why, expected_fingerprint, vocabulary_ref, vocabulary_fingerprint, identity_decision, facets, entity_family, registry_scope, relations, item_id, response_detail | Find relations, graph context or entities. |
 | adopt_vault | 1 | MCP, REST, CLI | write | no | path | adopt | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths, semantic_max_files, semantic_max_bytes, semantic_example_limit, response_detail | Scan or import; preserve originals. |
 | import_memory | 1 | MCP, REST, CLI | write | yes | - | adopt | action*, run_id, path, include_hidden, initialize_kb, collection, include, exclude, overrides, include_junk, plan_id, continuation, retry_failed, only_paths, why, write_manifest, sources, max_sources, max_chars_per_source, proposals, ref, expected_fingerprint, expected_hash, after, consume, series_id, next_window_bytes, import_id, paths, view, offset, limit, revision, upload, response_detail | Review and import a collection in a resumable run. |
-| maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings, rebuild_graph, detail, legacy_sample_limit, collection, apply, plan_id, source_snapshot, why, curation_action, run_id, plan, refs, paths, review_ref, hydration_recheck, expected_plan_fingerprint, vocabulary_ref, vocabulary_fingerprint, exclude_groups, acknowledge_skipped, cursor, path, choice, item_version, response_detail | Maintain vault health; several modes write. |
+| maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings, rebuild_graph, detail, legacy_sample_limit, collection, apply, plan_id, source_snapshot, why, curation_action, run_id, plan, refs, paths, pages, to_project, folder, from_project, review_ref, hydration_recheck, expected_plan_fingerprint, vocabulary_ref, vocabulary_fingerprint, exclude_groups, acknowledge_skipped, cursor, path, choice, item_version, response_detail | Maintain vault health; several modes write. |
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, why, include_model_suggestions, context, date_from, date_to, continuation, limit, query, requested_type, vocabulary_ref, vocabulary_fingerprint, detail, version, registry_scope, response_detail | Infer, validate, diff, or save governed memory schemas and workflow contracts. |
 | govern_memory | 2 | MCP, REST, CLI | write | yes | operation | - | operation*, session_action, documents, selector_paths, intent, ttl_seconds, target_ceiling, duration, proposal_id, scope, grant_id, scope_ids, audience, ceiling, token, authorization_session, purpose, duration_seconds, rule_ids, path, paths, backfill_action, companion_input, vocabulary_request_id, raw_release, response_detail | Manage opt-in confidential access policy. |
 | approve_procedure | 1 | MCP, REST, CLI | write | no | - | - | action*, ref, expected_version, response_detail | Approve, revoke or quarantine the owner's approval of a procedure page. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, source_kind, domain, artifact_path, reason, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, semantic_transition_token, relation_disposition, relation_review_hash, relation_review_reason, promotion_reason, preview_digest, preview_run_id, cursor, response_detail | Manage files when typed tools do not fit. |
-| record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, expand_child, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, expected_manifest_hash, acknowledged_gap_codes, body, delivery, changes, expected_item_version, refresh_presentation, held, hold, rows, source, on_reject, import_request, query, item_id, response_detail | Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence. |
+| record_memory | 1 | MCP, REST, CLI | write | yes | - | record_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, expand_children, expand_child, continuation, include_agent_history, output_format, item, item_key, expected_container_hash, expected_manifest_hash, acknowledged_gap_codes, body, delivery, changes, expected_item_version, refresh_presentation, held, hold, rows, source, on_reject, import_request, query, item_id, automatic, new_collection, new_fields, response_detail | Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence. |
 | plan_memory | 1 | MCP, REST, CLI | write | yes | - | plan_memory | action*, collection, manifest_path, manifest_text, why, scaffold, view, filters, columns, sort_by, descending, limit, aggregate, date_from, date_to, date_column, lifecycle, hierarchy_mode, hierarchy_depth, hierarchy_limit, continuation, include_agent_history, output_format, item, plan_id, expected_manifest_hash, expected_container_hash, acknowledged_gap_codes, body, changes, transition, expected_item_version, item_id, response_detail | Manage intent; record_memory holds outcomes. |
 | query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a vault CSV, TSV or JSON dataset. |
 | read_media | 2 | MCP | read | no | path | get_video_frames | path, media, paths, max_frames, start_sec, end_sec, max_side, region | Show images, sampled video frames or a stored preview inline (MCP only). |
-| observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check imports into and exports out of this Exomem Cloud memory, and how to send files. |
-| transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Exomem Cloud memory. |
+| observe_transfer | 1 | MCP (Cloud only) | read | no | - | - | action, import_id | Check imports into and exports out of this Evermatter Cloud memory, and how to send files. |
+| transfer_memory | 1 | MCP (Cloud only) | write | yes | - | - | action*, import_id, export_id, confirm | Cancel or discard an import, or request an export of this Evermatter Cloud memory. |
 
 ## Semantic Authoring Command Contract
 

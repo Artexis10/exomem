@@ -6,11 +6,11 @@ says: it writes a page, removes a deleted file, or renames a moved one. A file i
 projection manifest records it, so a kill at any point leaves an intent for the next start.
 
 The projector never overwrites a person's work. Before it replaces or removes a file it compares
-the file's hash with the manifest. A file that matches is Exomem's own projection. A file with the
-hash of bytes that the audit trail shows Exomem wrote for this path in its current life, which a
-kill left unrecorded, is Exomem's own projection too. Any other file is held in ``store_held`` and
+the file's hash with the manifest. A file that matches is Evermatter's own projection. A file with the
+hash of bytes that the audit trail shows Evermatter wrote for this path in its current life, which a
+kill left unrecorded, is Evermatter's own projection too. Any other file is held in ``store_held`` and
 left alone, and so is a projected file that has gone missing, unless the audit trail shows that
-Exomem removed it. A held path stays unprojected until something resolves the hold. This module
+Evermatter removed it. A held path stays unprojected until something resolves the hold. This module
 does not resolve holds.
 
 Every manifest, queue and hold write runs as store-thread work, one short transaction each, inside
@@ -194,18 +194,18 @@ class Facts:
     #: The hold at this path as its row reads, or None when nothing is held. A commit that settles
     #: the path names this row in ``StoreChange.resolves_held``.
     held_row: write.HeldRow | None
-    #: Hashes of the bytes that the audit trail shows Exomem wrote or recorded here, which a kill
+    #: Hashes of the bytes that the audit trail shows Evermatter wrote or recorded here, which a kill
     #: may have put on disk before the manifest heard of them: those after the manifest's revision,
     #: or with no manifest, those of this path's current life. For a binary, whose file the store
     #: never writes, it is the last recorded hash alone.
     audited: frozenset[str]
-    #: The audit trail shows Exomem removed this path after the manifest's revision, so a missing
+    #: The audit trail shows Evermatter removed this path after the manifest's revision, so a missing
     #: file is the removal that a kill left unrecorded and not an outside delete.
     removed: bool = False
     #: The record of a binary at this path; None for a page, or when the store records none.
     binary: read.BinaryMeta | None = None
     #: A queued move names this path as its source. The projector still has to remove the file
-    #: here, so Exomem's link to the path lasts until that removal, as an intent's does.
+    #: here, so Evermatter's link to the path lasts until that removal, as an intent's does.
     moves_away: bool = False
 
     @property
@@ -231,11 +231,11 @@ class Facts:
 
     @property
     def own_hashes(self) -> frozenset[str]:
-        """The hashes of a file that Exomem put at this path and that a person did not change.
+        """The hashes of a file that Evermatter put at this path and that a person did not change.
 
-        With no manifest row, no queued intent, no queued move away and nothing stored, Exomem's
+        With no manifest row, no queued intent, no queued move away and nothing stored, Evermatter's
         life at this path has ended: a file with bytes of that life is a person's restore, so none
-        are Exomem's.
+        are Evermatter's.
         """
         if (
             self.manifest is None
@@ -273,7 +273,7 @@ class PassReport:
     removed: int = 0
     #: Paths newly held in this pass, whether for an edit or a deleted file.
     held: int = 0
-    #: Delete intents that removed nothing, because no file of Exomem's was at the path.
+    #: Delete intents that removed nothing, because no file of Evermatter's was at the path.
     dropped: int = 0
     deferred: dict[str, str] = field(default_factory=dict)
     #: The pass stopped at a busy vault boundary (``BoundaryBusy``); what it had not recorded stays
@@ -571,7 +571,7 @@ class Projector:
         if self._remove(filesystem, facts, disk, report, store_revision=None):
             self._record_removed(intent.path, intent.revision)
             if report.removed == removed:
-                report.dropped += 1  # no file of Exomem's was there
+                report.dropped += 1  # no file of Evermatter's was there
 
     def _remove(
         self,
@@ -582,9 +582,9 @@ class Projector:
         *,
         store_revision: int | None,
     ) -> bool:
-        """Take away the file at ``facts.path`` if it is Exomem's own, and hold it if a person's.
+        """Take away the file at ``facts.path`` if it is Evermatter's own, and hold it if a person's.
 
-        A path with no manifest row was never projected, so a file there that Exomem did not write
+        A path with no manifest row was never projected, so a file there that Evermatter did not write
         is not this removal's to touch: it stays as it is, unheld and unlinked. Returns False only
         when the file was held, and True otherwise, meaning that the removal is settled.
         """
@@ -751,7 +751,7 @@ class Projector:
         *,
         store_revision: int | None,
     ) -> None:
-        """Keep a person's file and its bytes: it is neither the projection nor Exomem's own.
+        """Keep a person's file and its bytes: it is neither the projection nor Evermatter's own.
 
         A file above ``HELD_BODY_LIMIT`` is held by its hash alone; its bytes stay in the file.
         """
@@ -786,7 +786,7 @@ class Projector:
         self._run(work)
         report.held += 1
         log.warning(
-            "the vault projector held %s: the file on disk is not Exomem's projection (%s)",
+            "the vault projector held %s: the file on disk is not Evermatter's projection (%s)",
             rel,
             kind,
         )
@@ -797,7 +797,8 @@ class Projector:
         """The file holds ``page``'s bytes: record it, and drop the intent unless a newer waits."""
 
         def work(writer: CollectionWriter) -> None:
-            with writer.handle.transaction() as tx:
+            # The projection manifest and queue are the vault store's own tables.
+            with writer.handle.transaction(collection_free=True) as tx:
                 record_file(tx, page.path, page.sha256, size, mtime_ns, page.revision)
                 tx.execute(
                     "DELETE FROM store_projection_queue WHERE path = ? AND revision <= ?",
@@ -923,7 +924,7 @@ def _judge_write(facts: Facts, sha256: str | None) -> Judgement:
     page, manifest = facts.page, facts.manifest
     assert page is not None
     if sha256 is None:
-        # A projected file that is gone is an outside delete, unless Exomem removed it and a kill
+        # A projected file that is gone is an outside delete, unless Evermatter removed it and a kill
         # came before the manifest heard of it. A person's delete while a store delete or move-away
         # is queued, followed by a store put, is therefore not held; no bytes are lost, because the
         # store holds the page and the removal was already queued.
@@ -942,14 +943,14 @@ class Removal(enum.Enum):
 
     GONE = enum.auto()
     UNLINK = enum.auto()
-    #: A file that Exomem never projected here is not the removal's to touch: unheld and unlinked.
+    #: A file that Evermatter never projected here is not the removal's to touch: unheld and unlinked.
     LEAVE = enum.auto()
     HOLD = enum.auto()
 
 
 def _judge_removal(facts: Facts, sha256: str | None) -> Removal:
     """Whether the file with ``sha256`` at a path (None: no file) that a removal takes away goes,
-    stays, or is a person's, held. Only a file of Exomem's goes."""
+    stays, or is a person's, held. Only a file of Evermatter's goes."""
     if sha256 is None:
         return Removal.GONE
     if sha256 in facts.own_hashes:
@@ -1122,7 +1123,7 @@ def _audited_for(
 
 
 def _removed_for(database: Connection, rels: list[str]) -> set[str]:
-    """Which of ``rels``, each with a manifest row, Exomem removed or moved away after the
+    """Which of ``rels``, each with a manifest row, Evermatter removed or moved away after the
     manifest's revision."""
     if not rels:
         return set()
@@ -1188,7 +1189,7 @@ def drop_binary_move(tx: Connection, dst: str, src: str) -> None:
 
 def _drop_intent(writer: CollectionWriter, path: str, revision: int) -> None:
     # A later commit that queued the path again holds a later revision, and its intent stays.
-    with writer.handle.transaction() as tx:
+    with writer.handle.transaction(collection_free=True) as tx:
         tx.execute(
             "DELETE FROM store_projection_queue WHERE path = ? AND revision = ?", (path, revision)
         )

@@ -2133,10 +2133,12 @@ def _move_file_local(
                     # A changed self-link puts the source in `files_touched`; it lives at new_rel.
                     "upsert_reports": [
                         store_batch.row_report(
-                            "upsert", [new_rel, *(rel for rel in files_touched if rel != old_rel)]
+                            "upsert",
+                            [new_rel, *(rel for rel in files_touched if rel != old_rel)],
+                            root=vault_root,
                         ).as_dict()
                     ],
-                    "delete_report": store_batch.row_report("delete", [old_rel]).as_dict(),
+                    "delete_report": store_batch.row_report("delete", [old_rel], root=vault_root).as_dict(),
                     "reconcile_required": False,
                     "reconcile_guidance": None,
                 }

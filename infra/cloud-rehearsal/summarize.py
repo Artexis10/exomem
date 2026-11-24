@@ -18,11 +18,14 @@ def main(path: str) -> None:
     if "raw_import" in report["stages"]:
         raw_import(report)
         return
+    if "release_rollout" in report["stages"]:
+        release_rollout(report)
+        return
     if "catalogue_prewarm" in report["stages"]:
         catalogue_prewarm(report)
         return
     outcome = report["outcome"]
-    print("## Exomem Cloud P3 rehearsal\n")
+    print("## Evermatter Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
     print(f"- gates the node: **{outcome['gates_node']}** (steps {outcome['steps']})")
     for blocker in outcome.get("gate_blockers", []):
@@ -103,6 +106,31 @@ def large_import(report: dict) -> None:
         print(f"| {phase} | {seconds} |")
     for name, value in run.get("measurements", {}).items():
         print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2)}\n```")
+
+
+def release_rollout(report: dict) -> None:
+    run = report["stages"]["release_rollout"]
+    print("## Cloud release rollout (automate-cloud-releases 1.13, 1.15, 2.1, 3.1)\n")
+    print(f"- result: **{run.get('status', 'none: the run did not finish')}** (a partial proof; it never gates a node)")
+    print(f"- release set by: {run.get('principal', 'not recorded')}; hold budget {run.get('hold_budget_seconds', 'not recorded')} s; "
+          f"idle {run.get('idle_minutes', 'not recorded')} min; force {run.get('force_minutes', 'not recorded')} min")
+    for stage, record in report["stages"].items():
+        if isinstance(record, dict) and record.get("status") == "failed" and stage != "release_rollout":
+            print(f"- **stage {stage} failed:** {(record.get('failure') or {}).get('message', '')[:600]}")
+    # Steps 4 to 12 are the P3 lifecycle this mode replaces; they carry the Skipped marker.
+    proofs = [step for step in report["steps"] if (step.get("failure") or {}).get("type") != "Skipped"]
+    print("\n| # | proof | status | seconds | failure |\n|---|---|---|---|---|")
+    for step in proofs:
+        failure = (step.get("failure") or {}).get("message", "").replace("|", "\\|").replace("\n", " ")[:300]
+        print(f"| {step['number']} | {step['name']} | {step['status']} | {step['seconds']} | {failure} |")
+    print("\n| switch | calls | errors | max wait s | p95 wait s | calls held over 2 s |\n|---|---|---|---|---|---|")
+    for label, calls in (run.get("switches") or {}).items():
+        print(f"| {label} | {calls['calls']} | {calls['errors']} | {calls['max_wait_seconds']} | "
+              f"{calls['p95_wait_seconds']} | {calls['held_calls']} |")
+    for step in proofs:
+        if step.get("evidence"):
+            print(f"\n<details><summary>{step['number']} {step['name']}</summary>\n\n```json\n"
+                  f"{json.dumps(step['evidence'], indent=2, default=str)[:3000]}\n```\n</details>")
 
 
 def raw_import(report: dict) -> None:

@@ -28,7 +28,17 @@ from pathlib import Path
 from .vault_store import cli_fence
 
 SAMPLE_VAULT = Path(__file__).resolve().parent / "_sample_vault"
-TARGET_PATH = "Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md"
+TARGET_REL = "Notes/Insights/Retrieval needs owned files.md"
+
+
+def target_path() -> str:
+    """The demo page's vault path, under the managed root that is configured when this is called.
+
+    The demo pins its managed-root name before it reads the page, so it calls this after the pin.
+    """
+    from .kbdir import managed_join
+
+    return managed_join(TARGET_REL)
 
 # Correctly-spelled lean pins (the retired repo scripts carried rename-corrupted
 # variants of these names, which made them silent no-ops).
@@ -149,13 +159,13 @@ def run_demo(
         def _find() -> tuple[bool, str]:
             hits = find.find(target, query="retrieval", mode="keyword", limit=3, graph=False)
             paths = [h.path for h in hits]
-            if TARGET_PATH not in paths:
+            if target_path() not in paths:
                 return False, "expected retrieval insight was not returned"
             lines.extend(f"   - {p}" for p in paths)
             return True, f"{len(paths)} hit(s)"
 
         def _get() -> tuple[bool, str]:
-            page = get_page.get_page(target, path=TARGET_PATH)
+            page = get_page.get_page(target, path=target_path())
             title = page.frontmatter.get("title", "Retrieval needs owned files")
             lines.append(f"   - title: {title}")
             lines.append(f"   - type: {page.frontmatter.get('type', '-')}")
@@ -170,7 +180,7 @@ def run_demo(
             return True, "broken_wikilink, unprocessed_source"
 
         if not json_out:
-            echo("exomem demo — bundled sample vault, keyword mode, fully local")
+            echo("Evermatter demo — bundled sample vault, keyword mode, fully local")
             echo(f"vault: {target}")
             echo("")
 
@@ -267,5 +277,5 @@ def main(argv: list[str]) -> int:
             json_out=args.json,
         )
     except Exception as e:  # noqa: BLE001 — top-level CLI guard, mirror _serve_main
-        print(f"exomem demo failed: {e}", file=sys.stderr)
+        print(f"Evermatter demo failed: {e}", file=sys.stderr)
         return 1

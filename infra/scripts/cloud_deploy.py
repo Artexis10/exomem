@@ -3,8 +3,8 @@
 
 After a release, set its cell image as Substrate's `cell_image`, but only when:
 
-1. the image's attestation verifies as this repository's release workflow on
-   the release tag;
+1. the image's attestation verifies as the release workflow, on the release tag,
+   of the repository that built the image (named by the image's own repository);
 2. the rollout is not paused;
 3. the newest successful platform Deployment carries the release's chart and
    controller build inputs (the platform gate);
@@ -39,7 +39,13 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parents[2]
 GATE_FILE = Path(__file__).with_name("cloud_deploy_gate.json")
 BARRIER_FILE = ROOT / "infra/contracts/upgrade-barriers-v1.json"
-CELL_IMAGE_REPOSITORY = "ghcr.io/artexis10/exomem"
+# Cell image repository (newest first) -> the repository whose release workflow built it.
+# The set is closed because it lists the repositories that ever built these images; an
+# image outside it is refused.
+CELL_IMAGE_BUILDERS = {
+    "ghcr.io/substrate-systems/evermatter": "substrate-systems/evermatter",
+    "ghcr.io/artexis10/exomem": "Artexis10/exomem",
+}
 RELEASE_WORKFLOW = ".github/workflows/release-please.yml"
 PLATFORM_ENVIRONMENT = "cloud-platform"
 ROLLOUT_PATH = "/api/exomem/admin/cloud-release/rollout"
@@ -264,9 +270,19 @@ def uncrossed_barriers(release: str, deployment: dict, barriers: dict) -> list[s
             and entry["id"] not in crossed]
 
 
-def verify_attestation(repository: str, image: str, tag: str) -> bool:
-    """`gh attestation verify`: the signer is this repository's release workflow, run on the tag."""
+def attestation_repository(image: str) -> str:
+    """The repository that built `image` (`<repository>@<digest>`), from its image repository."""
 
+    builder = CELL_IMAGE_BUILDERS.get(image.partition("@")[0])
+    if builder is None:
+        raise Stop("CELL_IMAGE_REPOSITORY_UNKNOWN", ok=False)
+    return builder
+
+
+def verify_attestation(image: str, tag: str) -> bool:
+    """`gh attestation verify`: the signer is the builder's release workflow, run on the tag."""
+
+    repository = attestation_repository(image)
     result = subprocess.run(
         ["gh", "attestation", "verify", f"oci://{image}", "--repo", repository,
          "--signer-workflow", f"{repository}/{RELEASE_WORKFLOW}", "--source-ref", f"refs/tags/{tag}"],
@@ -274,13 +290,18 @@ def verify_attestation(repository: str, image: str, tag: str) -> bool:
     return result.returncode == 0
 
 
-def registry_digest(tag: str) -> str | None:
-    """The cell image index that the release published as `<version>-cloud`."""
+def registry_image(tag: str) -> str | None:
+    """The cell image index (`<repository>@<digest>`) that the release published as `<version>-cloud`,
+    under the newest repository that holds it; a release cut before the move is in the old one."""
 
     sys.path.insert(0, str(Path(__file__).parent))
     from release_recovery import image_digest
 
-    return image_digest(f"{CELL_IMAGE_REPOSITORY}:{tag.removeprefix('v')}-cloud")
+    for repository in CELL_IMAGE_BUILDERS:
+        digest = image_digest(f"{repository}:{tag.removeprefix('v')}-cloud")
+        if digest:
+            return f"{repository}@{digest}"
+    return None
 
 
 @dataclass
@@ -288,8 +309,8 @@ class Tools:
     """What a run reads and calls. Tests replace each with recorded answers."""
 
     transport: Transport = urllib_transport
-    digest: Callable[[str], str | None] = registry_digest
-    attest: Callable[[str, str, str], bool] = verify_attestation
+    image: Callable[[str], str | None] = registry_image
+    attest: Callable[[str, str], bool] = verify_attestation
     changed_paths: Callable[[str, str], list[str]] = git_changed_paths
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
@@ -306,21 +327,20 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
 
     # D1 steps 1-2: the newest release's cell image, and its attestation.
     tag = github.latest_release()
-    digest = tools.digest(tag)
-    if not digest:
+    image = tools.image(tag)
+    if not image:
         raise Stop("CELL_IMAGE_NOT_PUBLISHED", ok=False)
-    image = f"{CELL_IMAGE_REPOSITORY}@{digest}"
-    if not tools.attest(settings.repository, image, tag):
+    if not tools.attest(image, tag):
         raise Stop("ATTESTATION_UNVERIFIED", ok=False)
 
-    # D1 step 3: already the fleet's image, by digest or by release tag, before any
-    # gate, so a release the fleet runs never raises a platform alert.
+    # D1 step 3: never resume a paused fleet; only a person clears the pause. This comes
+    # first, so a re-run for the release the rollout paused on fails instead of passing.
     view = substrate.rollout()
+    refuse_paused(view)
+    # D1 step 4: already the fleet's image, by digest or by release tag, before any
+    # gate, so a release the fleet runs never raises a platform alert.
     if view.get("cell_image") == image or view.get("release") == tag:
         raise Stop("CELL_IMAGE_CURRENT", ok=True)
-    # D1 step 4: never resume a paused fleet; only a person clears the pause.
-    if view.get("paused") is True:
-        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
 
     # D2: the platform gate.
     deployment = github.newest_platform_deployment()
@@ -354,13 +374,26 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     deadline = tools.monotonic() + settings.poll_timeout
     while True:
         view = substrate.rollout()
-        if view.get("paused") is True:
-            raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+        refuse_paused(view)
         if view.get("canary_on_target") is True:
             raise Stop("CANARY_ON_TARGET", ok=True)
         if tools.monotonic() >= deadline:
             raise Stop("CANARY_WAIT_TIMEOUT", ok=False)
         tools.sleep(settings.poll_interval)
+
+
+def refuse_paused(view: dict) -> None:
+    """Stop with the pause's code, and nothing else, when the rollout view says it is paused."""
+
+    if view.get("paused") is True:
+        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+
+
+def finish(stop: Stop) -> int:
+    """Print the single line a stopped run shows, a code and the detail it chose to show, and return its exit code."""
+
+    print(f"cloud-deploy: {stop.code}" + (f" {stop.detail}" if stop.detail else ""))
+    return 0 if stop.ok else 1
 
 
 def _code(value: object) -> str:
@@ -375,8 +408,7 @@ def main(env: dict[str, str] | None = None, tools: Tools | None = None) -> int:
         deploy(settings, tools or Tools(), gate=load_gate(),
                barriers=json.loads(BARRIER_FILE.read_text(encoding="utf-8")))
     except Stop as stop:
-        print(f"cloud-deploy: {stop.code}" + (f" {stop.detail}" if stop.detail else ""))
-        return 0 if stop.ok else 1
+        return finish(stop)
     return 0
 
 

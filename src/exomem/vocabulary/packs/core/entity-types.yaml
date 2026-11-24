@@ -1,4 +1,4 @@
-# The core entity types Exomem ships. A vault extends or deprecates them in
+# The core entity types Evermatter ships. A vault extends or deprecates them in
 # `_Schema/entity-types.yaml`; it never edits this pack.
 schema_version: 1
 registry: entity-types

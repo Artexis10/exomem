@@ -1,4 +1,4 @@
-"""Server startup wiring for Exomem.
+"""Server startup wiring for Evermatter.
 
 This module owns process-local runtime setup: environment loading, vault
 resolution, warmup/model policy, media extraction, and file watching. It is kept
@@ -163,6 +163,7 @@ class LocalRuntimeActivation:
         self.media_replicas: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
         self.vault_backup: threading.Thread | None = None
+        self.upload_session_sweeper: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -291,6 +292,10 @@ class LocalRuntimeActivation:
         if self._shutdown.is_set():
             self._stop_background_workers()
             return
+        self._start_component("write intake", self._start_write_intake)
+        if self._shutdown.is_set():
+            self._stop_background_workers()
+            return
         self._start_component(
             "file watcher recovery",
             self._finish_file_watcher_startup,
@@ -400,8 +405,11 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import maintenance_jobs, working_set_runtime
+        from . import maintenance_jobs, working_set_runtime, write_intake
 
+        # First, so no queued save starts a replay while the workers below stop; a replay in
+        # flight is claimed by this process and re-claimed after the restart.
+        write_intake.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -495,7 +503,9 @@ class LocalRuntimeActivation:
         """Finish owned native work after activation can no longer assign workers."""
         from . import working_set_runtime
 
-        for thread in (self.retrieval_warmup, self.matrix_warmup, self.recall_reembed):
+        for thread in (
+            self.retrieval_warmup, self.matrix_warmup, self.recall_reembed, self.upload_session_sweeper,
+        ):
             if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
                 thread.join()
         working_set_runtime.join_builds(self.vault_root)
@@ -541,12 +551,31 @@ class LocalRuntimeActivation:
         self.review_pass = review_pass.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
-        """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
+        """Resume interrupted uploads and own their expiry while serving HTTP."""
         if not self.serves_upload_sessions:
             return
         from .server_transfer import resume_upload_sessions
+        from .upload_sessions import run_expiry_sweep
 
+        sweeper = threading.Thread(
+            target=run_expiry_sweep, args=(vault_root, self._shutdown),
+            name="upload-session-expiry", daemon=True,
+        )
+        sweeper.start()
+        self.upload_session_sweeper = sweeper
         resume_upload_sessions(vault_root)
+
+    def _start_write_intake(self, vault_root: Path) -> None:
+        """Apply queued saves, in the serving HTTP runtime only.
+
+        Acceptance needs this drainer, so a stdio server or the CLI keeps the busy refusal: a
+        process that may exit with the client must not take custody of a save.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import write_intake
+
+        write_intake.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""
@@ -689,14 +718,18 @@ class LocalRuntimeActivation:
         if not epistemic_graph.graph_enabled() or not epistemic_graph.startup_source_proof_pending(vault_root):
             return
         graph = epistemic_graph.EpistemicGraphIndex(vault_root)
-        with foreground_priority.bulk(stop=self._shutdown):
-            while True:
-                foreground_priority.check_cancelled()
-                admission = graph.validate_startup_snapshot()
-                if admission is not None:
-                    graph.recover_startup_graph(admission)
-                    return
-                foreground_priority.wait_for_retry(0.25)
+        try:
+            with foreground_priority.bulk(stop=self._shutdown):
+                while True:
+                    foreground_priority.check_cancelled()
+                    admission = graph.validate_startup_snapshot()
+                    if admission is not None:
+                        graph.recover_startup_graph(admission)
+                        return
+                    foreground_priority.wait_for_retry(0.25)
+        except foreground_priority.BulkCancelled:
+            # The shutdown's stop, as the watcher's own recovery handles it.
+            log.info("startup graph recovery cancelled")
 
     async def _finish_shutdown(self) -> None:
         """Finish the tracked shutdown before process teardown."""

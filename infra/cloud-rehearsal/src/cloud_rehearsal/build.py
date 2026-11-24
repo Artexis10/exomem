@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
+from cellctl.manifests import BACKUP_PATHS
 
 from . import images
 from .infra import docker_labels
@@ -46,9 +47,14 @@ ENTRY_MODULE = Path(__file__).with_name("cellctl_entry.py")
 CUSTODIAN_ENTRY_MODULE = Path(__file__).with_name("custodian_entry.py")
 BUMP_MODULE = Path(__file__).with_name("bump_parser_version.py")
 
-BROKEN_SHIM = """#!/bin/sh
-# Forced canary failure: cell-init runs for real, the server never starts.
+# What the broken target writes into each backed-up path before it fails, as a half-run migration would.
+# The release mode reads it while the attempt runs and again after the restore.
+BROKEN_MARKER = ".rehearsal-broken-target-marker"
+
+BROKEN_SHIM = f"""#!/bin/sh
+# Forced canary failure: cell-init runs for real, the server writes its marker and never starts.
 if [ "$1" = "cell-init" ]; then exec "$0-real" "$@"; fi
+for path in {" ".join(BACKUP_PATHS)}; do : > "$path/{BROKEN_MARKER}" 2>/dev/null; done
 exec sleep 2147483647
 """
 

@@ -333,7 +333,7 @@ def test_a_note_that_another_writer_files_between_calls_is_found_and_not_made_ag
         item for item in planned["plan"]["items"]
         if first["outcomes"].get(item["original_path"], {}).get("note", {}).get("status") != "applied"
     )
-    # Another writer, outside Exomem, files that item's note under a name of its own.
+    # Another writer, outside Evermatter, files that item's note under a name of its own.
     by_hand = "Knowledge Base/Notes/Insights/filed-by-hand.md"
     (vault / by_hand).write_text(
         "---\ntype: insight\ntitle: Filed by hand\nimport_collection: Coll\n"

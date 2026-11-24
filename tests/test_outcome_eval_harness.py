@@ -67,7 +67,7 @@ ENVELOPE = AgentEnvelope(executable=Path("/usr/bin/claude-under-test"), version=
 
 
 def paths_outside(env: dict[str, str], root: Path) -> list[str]:
-    """The Exomem settings in ``env`` that are absolute paths outside ``root``."""
+    """The Evermatter settings in ``env`` that are absolute paths outside ``root``."""
     return [
         f"{key}={value}"
         for key, value in env.items()
@@ -79,12 +79,12 @@ def paths_outside(env: dict[str, str], root: Path) -> list[str]:
 
 @pytest.mark.reads_repository_docs  # the shipped arms read the instruction block out of docs/prominence.md
 def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
-    """An actor started from a shell that has a live Exomem set up must not write to or read from it."""
+    """An actor started from a shell that has a live Evermatter set up must not write to or read from it."""
     for name, value in LIVE_ENV.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("XDG_STATE_HOME", LIVE_XDG)
 
-    # Per surface: its directory, the environments the actor runs with, the Exomem servers' own
+    # Per surface: its directory, the environments the actor runs with, the Evermatter servers' own
     # environments (which also fix the state root), the actor's argv and its MCP config file.
     surfaces = {}
     for arm in ("PP", "P", "E", "EH"):
@@ -138,10 +138,10 @@ def test_actor_environment_cannot_reach_live_state(tmp_path, monkeypatch):
         for setting, value in LIVE_ENV.items():
             assert value not in reachable, f"{name} carries the live {setting}"
         assert LIVE_XDG not in json.dumps(servers), (
-            f"{name}'s Exomem server would use the live state root"
+            f"{name}'s Evermatter server would use the live state root"
         )
         for env in [*envs, *servers]:
-            assert paths_outside(env, root) == [], f"{name} points Exomem outside its own directory"
+            assert paths_outside(env, root) == [], f"{name} points Evermatter outside its own directory"
         if mcp_config:
             assert "--strict-mcp-config" in argv, (
                 f"{name} would also load the operator's MCP servers"
@@ -315,7 +315,7 @@ def test_codex_judge_never_reads_an_old_verdict_file_as_its_own(tmp_path, exit_c
     ],
 )
 def test_a_session_that_did_not_run_as_configured_is_a_harness_fault(init, fault):
-    """A fallback model, an API key or an Exomem server that never connected must void the unit, not score as a loss."""
+    """A fallback model, an API key or an Evermatter server that never connected must void the unit, not score as a loss."""
     assert any(fault in text for text in init_faults(init, model="m", exomem=True))
 
 
@@ -383,7 +383,7 @@ def test_pp_is_p_with_the_memory_sentence_and_nothing_else(tmp_path):
         for arm in ("PP", "P")
     }
     sentence = actors["PP"].prompt(None, turn).removeprefix(actors["P"].prompt(None, turn))
-    assert "Exomem" in sentence and "memory" in sentence
+    assert "Evermatter" in sentence and "memory" in sentence
     assert actors["PP"].prompt(None, turn) == actors["P"].prompt(None, turn) + sentence
     for field in ("persists", "plugin", "shipped"):
         assert getattr(ARMS["PP"], field) == getattr(ARMS["P"], field)

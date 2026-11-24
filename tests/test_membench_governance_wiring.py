@@ -237,7 +237,7 @@ def test_wired_run_reports_dropped_rules_and_marks_them_unsupported(
 ) -> None:
     """Time-conditioned corpus rules are a reported divergence, never a score.
 
-    Exomem policy v1 has no time-conditioned rules, so a rule declassified
+    Evermatter policy v1 has no time-conditioned rules, so a rule declassified
     inside the knowledge horizon is dropped by the translation. The drop must
     be disclosed in a translation report inside the run dir, and every query
     whose withhold expectation traces to a dropped rule must have its

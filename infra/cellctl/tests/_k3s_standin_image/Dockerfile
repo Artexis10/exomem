@@ -1,5 +1,5 @@
 # Minimal stand-in cell image for tests/test_k3s_integration.py (task 3.10).
-# Not a real Exomem Cloud runtime -- see exomem.py's module docstring.
+# Not a real Evermatter Cloud runtime -- see exomem.py's module docstring.
 # restic 0.17+ per D8 (the backup/restore Jobs use this same image); lane
 # A's real image pins 0.19.1, alpine's community package is close enough for
 # this stand-in's purposes.

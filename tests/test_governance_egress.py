@@ -3248,6 +3248,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "apply-compensation": False,
         # A revert removes edges and trashes a page, so it is a write like apply.
         "revert": False,
+        # A relocation seals a run in the curation store, as propose does.
+        "relocate": False,
     }
 
     # A Records import's mode decides: preview and status read, start and cancel write.

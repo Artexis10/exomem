@@ -34,6 +34,7 @@ from .vault import (
     PlannedWrite,
     UnparseableFilenameStyleError,
     batch_atomic_write,
+    corrected_title_name,
     kb_root,
     read_bytes_without_pinning,
     read_guarded_text,
@@ -157,6 +158,12 @@ def load_project_registry(vault_root: Path) -> ProjectRegistry:
     return registry
 
 
+#: The parsed `filename_style` of each registry file, keyed by the file's bytes, so that naming a
+#: corpus page by page parses the YAML once. Bounded: one entry per vault a process serves.
+_STYLE_CACHE: dict[str, tuple[bytes, str | None]] = {}
+_STYLE_CACHE_CAP = 32
+
+
 def filename_style(vault_root: Path) -> str | None:
     """The vault's `filename_style` key, or None when it does not set one.
 
@@ -172,23 +179,48 @@ def filename_style(vault_root: Path) -> str | None:
 
     Returns the raw string; `vault.filename_style_source` checks it against the known styles,
     so an unrecognised name is refused there with the source named.
+
+    Each call reads the file's bytes, from the store when the store owns the file. The parsed
+    answer is cached by those bytes, so the cache is correct when the file changes. A refusal
+    is not cached: it is rare and must name the file's current state.
     """
     path = Path(vault_root) / registry_relpath()
-    where = registry_relpath()
     try:
-        data = yaml.safe_load(read_bytes_without_pinning(path, vault_root).decode("utf-8"))
+        raw = read_bytes_without_pinning(path, vault_root)
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeError, yaml.YAMLError) as error:
-        reason = (str(error).splitlines() or [type(error).__name__])[0]
-        # Text that does not parse is told apart from a file that cannot be opened: a write goes on
-        # in the default style for the first, and refuses for the second, whose content is unknown.
-        refusal = (
-            UnparseableFilenameStyleError
-            if isinstance(error, (UnicodeError, yaml.YAMLError))
-            else InvalidSlugError
-        )
-        raise refusal(f"filename style cannot be read from {where}: {reason}") from error
+    except OSError as error:
+        raise _style_refusal(error) from error
+    cached = _STYLE_CACHE.get(str(path))
+    if cached is not None and cached[0] == raw:
+        return cached[1]
+    value = _parse_filename_style(raw)
+    if len(_STYLE_CACHE) >= _STYLE_CACHE_CAP:
+        _STYLE_CACHE.pop(next(iter(_STYLE_CACHE)))
+    _STYLE_CACHE[str(path)] = (raw, value)
+    return value
+
+
+def _style_refusal(error: Exception) -> InvalidSlugError:
+    """The refusal for a registry whose style cannot be read."""
+    reason = (str(error).splitlines() or [type(error).__name__])[0]
+    # Text that does not parse is told apart from a file that cannot be opened: a write goes on
+    # in the default style for the first, and refuses for the second, whose content is unknown.
+    refusal = (
+        UnparseableFilenameStyleError
+        if isinstance(error, (UnicodeError, yaml.YAMLError))
+        else InvalidSlugError
+    )
+    return refusal(f"filename style cannot be read from {registry_relpath()}: {reason}")
+
+
+def _parse_filename_style(raw: bytes) -> str | None:
+    """`filename_style` parsed from the registry file's bytes."""
+    where = registry_relpath()
+    try:
+        data = yaml.safe_load(raw.decode("utf-8"))
+    except (UnicodeError, yaml.YAMLError) as error:
+        raise _style_refusal(error) from error
     if data is None:
         return None
     if not isinstance(data, dict):
@@ -306,6 +338,24 @@ def _title_case_slug(key: str, existing: Iterable[str] = ()) -> str:
 
 
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+
+
+class InvalidProjectFolderError(ValueError):
+    """A caller-named project folder that is not one portable folder name."""
+
+
+def require_portable_folder(folder: object) -> str:
+    """`folder` when it is the name the vault's own writer would give it, else refuse.
+
+    The rule is the note writer's (`vault.corrected_title_name`): one segment, NFC, no character
+    a platform or the wikilink grammar refuses, no leading dot, no trailing dot or space, and no
+    reserved device name.
+    """
+    if not isinstance(folder, str) or not folder or corrected_title_name(folder).name != folder:
+        raise InvalidProjectFolderError(
+            f"INVALID_PROJECT_FOLDER: project folder {folder!r} is not one portable folder name"
+        )
+    return folder
 
 
 class ProjectKeyTypoError(ValueError):
@@ -447,8 +497,9 @@ def plan_project_keys(
         close = _closest_existing_key(raw, list(proposed_folders))
         if close is not None:
             raise ProjectKeyTypoError(raw, close[0], close[1])
+        named = (folders or {}).get(raw) if replay is None else None
         folder_name = replay.folder if replay is not None else (
-            (folders or {}).get(raw) or _title_case_slug(raw, known_folders)
+            require_portable_folder(named) if named is not None else _title_case_slug(raw, known_folders)
         )
         variant = reuse_folder_spelling(folder_name, known_folders)
         if variant != folder_name:
@@ -473,10 +524,12 @@ def plan_project_keys(
     for item in introductions:
         if item.key in current.project_to_folder:
             continue
+        # A caller may name the folder, so it is written as a quoted scalar.
+        folder = yaml.safe_dump(item.folder, default_style='"', allow_unicode=True, width=1 << 16)
         text += (
             "\n  # auto-registered by exomem\n"
             f"  {item.key}:\n"
-            f"    folder: {item.folder}\n"
+            f"    folder: {folder.strip()}\n"
             f"    category: {item.category}\n"
         )
     project_directories = tuple(

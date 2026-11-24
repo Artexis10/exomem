@@ -9,8 +9,9 @@ import os
 import subprocess
 import sys
 import time
-from importlib.metadata import version
 from pathlib import Path
+
+from exomem.install_info import installed_version
 
 ISSUER = "https://memory.example"
 SIGNING_ROOT = "managed-upgrade-test-signing-root"
@@ -146,7 +147,7 @@ else:
 
     @app.custom_route("/health", methods=["GET"])
     async def health(request):
-        return JSONResponse({"version": version("exomem")})
+        return JSONResponse({"version": installed_version()})
 
     @app.custom_route("/health/ready", methods=["GET"])
     async def ready(request):
@@ -221,7 +222,7 @@ async def daemon(root, port, unit, env_file=None):
     event(root, "supervisor-start", mark=os.environ.get("EXOMEM_FIXTURE_MARK", ""))
     manager = Supervisor(
         directory,
-        initial_target={"python": sys.executable, "version": version("exomem")},
+        initial_target={"python": sys.executable, "version": installed_version()},
         ingress=ServiceIngress(IngressLimits(heartbeat_interval=0.1)),
         runtime=runtime,
         identity=identity,

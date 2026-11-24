@@ -30,6 +30,7 @@ from test_vault_store_held import (  # noqa: F401
 )
 from test_vault_store_migration import DIAGRAM, vault  # noqa: F401
 from test_vault_store_read_write import rows, stored, writer  # noqa: F401
+from test_vault_store_write_path import commits_since
 
 from exomem import commands, held_operation, state_paths
 from exomem.cli_ops import OpError
@@ -106,7 +107,7 @@ def test_the_review_tool_lists_each_item_with_what_the_store_lists_and_a_sentenc
     )
     assert row["file"] == {"exists": True, "sha256": item.file.sha256, "size": item.file.size}
     assert row["store"] == {"revision": item.store.revision, "sha256": item.store.sha256}
-    assert answer["outcome"].startswith("1 file changed outside Exomem and waits for a choice.")
+    assert answer["outcome"].startswith("1 file changed outside Evermatter and waits for a choice.")
     assert (row["resolvable"], row["keep_mine_possible"]) == (True, True)
     assert row["choices"] == ["keep-mine", "keep-store"]
     assert answer["total"] == 1 and answer["truncated"] is False
@@ -142,9 +143,10 @@ def test_the_repair_tool_keeps_the_stores_page_and_tells_where_the_persons_file_
         answer["saved_copy"] == exported.relative_to(state_paths.vault_state_dir(stored)).as_posix()
     )
     assert exported.read_bytes() == MINE
-    assert stored_page(stored)[0][1] == revision + 1 and queue(stored) == [(ALPHA, "write")]
-    assert answer["outcome"].startswith("Kept Exomem's page for")
-    assert answer["diagnostics"] == {"revision": revision + 1, "saved_copy_sha256": digest(MINE)}
+    # One canonical commit; the derivation of its rows moves the store revision past it.
+    assert commits_since(stored, revision) == 1 and queue(stored) == [(ALPHA, "write")]
+    assert answer["outcome"].startswith("Kept Evermatter's page for")
+    assert answer["diagnostics"] == {"revision": stored_page(stored)[0][1], "saved_copy_sha256": digest(MINE)}
     assert listed(stored)["items"] == []
 
 

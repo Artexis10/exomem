@@ -144,6 +144,48 @@ def test_one_notice_with_two_edges_reverts_both_in_one_call(
     assert not promotions.edge_present(vault, subject, "supports", second)
 
 
+def test_a_revert_drains_its_steps_fan_out_once_its_hold_ends(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A revert holds the vault for its whole plan: draining each step's fan-out inside that hold
+    only lengthened it, and every write waiting behind the revert waited longer."""
+    from exomem import curation, writer_lease
+
+    _as(monkeypatch, "creator")
+    first = _create_entity(vault, "Tidal Ledger")
+    second = _create_entity(vault, "Harbour Ledger")
+    subject = _create_entity(vault, "Tidal Accounts", relations=[
+        {"kind": "supports", "target": first},
+        {"kind": "supports", "target": second},
+    ])
+    ref = _entry_ref(vault, "edge")
+    _as(monkeypatch, "reader")
+    preview = _context(vault, ref)
+    real_next = curation._execute_next  # noqa: SLF001
+    held_at_drain: list[bool] = []
+
+    def step_with_fan_out(*args, **kwargs):
+        # Each step defers derived work, as a leaf that changes the corpus does.
+        result = real_next(*args, **kwargs)
+        writer_lease._ACTIVE_POST_TERMINAL_FANOUT.get().append(  # noqa: SLF001
+            lambda: held_at_drain.append(writer_lease.active_manager().holds_mutation_boundary(vault))
+        )
+        return result
+
+    monkeypatch.setattr(curation, "_execute_next", step_with_fan_out)
+    maintain = next(c for c in commands.PRODUCT_COMMANDS if c.name == "maintain_memory")
+    # Through the mutation terminal, which holds the vault for the revert and defers fan-out.
+    result = writer_lease.invoke_command(
+        maintain, vault, mode="curation", curation_action="revert", review_ref=ref,
+        expected_plan_fingerprint=preview["revert_fingerprint"], why="The user asked to undo it.",
+    )
+
+    assert "paths" in result, result
+    assert not promotions.edge_present(vault, subject, "supports", first)
+    assert not promotions.edge_present(vault, subject, "supports", second)
+    assert held_at_drain == [False, False]
+
+
 def test_an_endpoint_edit_invalidates_the_callers_full_revert_preview(
     vault: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

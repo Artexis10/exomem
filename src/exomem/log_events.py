@@ -74,6 +74,7 @@ EVENT_CATALOG: dict[str, EventSpec] = {
     "passage_search_abandoned": EventSpec(),
     "cloud_request_credential": EventSpec(),
     "cloud_operation_check": EventSpec(),
+    "cloud_service_notice_ignored": EventSpec(),
 }
 
 

@@ -434,3 +434,64 @@ def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatc
         ),
     )
     assert evidence.full_inflight(source, repository)
+
+
+@pytest.mark.parametrize(
+    ("event", "payload", "refused"),
+    [
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": ""}}, True),
+        ("workflow_dispatch", {"ref": "refs/heads/main", "inputs": {"queue": ""}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/release-cuts/" + "a" * 40, "inputs": {}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/merge-queue/abc-1", "inputs": {"queue": "batch 1@" + "a" * 40}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": "batch 1@" + "a" * 40}}, True),
+        ("schedule", {"ref": "refs/heads/main"}, False),
+    ],
+)
+def test_a_feature_branch_cannot_dispatch_a_full_run(event, payload, refused):
+    """Catches a Full run on a feature branch, which holds the shared runners the queue and release cuts need."""
+    assert (evidence.full_dispatch_refusal(event, payload) is not None) is refused
+
+
+def test_a_merge_queue_dispatch_is_never_full_evidence():
+    """Catches a merge queue run, which runs only what a push to main runs, qualifying a release."""
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": "batch 1@" + "a" * 40}})["full"] is False
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": ""}})["full"] is True
+    run = {
+        "event": "workflow_dispatch",
+        "path": evidence.WORKFLOW,
+        "workflow_id": 7,
+        "repository": {"full_name": "example/project"},
+        "head_repository": {"full_name": "example/project"},
+    }
+    assert evidence.trusted_full({**run, "head_branch": "main"}, "example/project", 7)
+    assert not evidence.trusted_full({**run, "head_branch": "merge-queue/abc-1"}, "example/project", 7)
+
+
+def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status(monkeypatch):
+    """Catches a release cut waiting forever on the merge queue status.
+
+    A release PR lands on its cut branch, which the queue never serves. A reconcile
+    PR lands on main, so it needs the queue's status, and main must require that
+    status from any source: a commit status carries no App identity.
+    """
+    policy = [
+        {"context": "Conventional Commit title", "app_id": 15368},
+        {"context": "merge queue", "app_id": -1},
+        {"context": "required CI gate", "app_id": 15368},
+    ]
+    monkeypatch.setattr(evidence, "main_check_policy", lambda: policy)
+    assert [check["context"] for check in evidence.release_pr_check_policy()] == [
+        "Conventional Commit title",
+        "required CI gate",
+    ]
+
+    def api(path, pages=False):
+        if "check-runs" in path:
+            return [{"check_runs": [
+                {"id": 1, "name": "Conventional Commit title", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+                {"id": 2, "name": "required CI gate", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+            ]}]
+        return [{"statuses": [{"id": 3, "context": "merge queue", "state": "success"}]}]
+
+    monkeypatch.setattr(evidence, "api", api)
+    assert {check["bucket"] for check in evidence.inherited_checks("a" * 40, policy)} == {"pass"}

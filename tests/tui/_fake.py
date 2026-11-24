@@ -132,6 +132,9 @@ class FakeBackend:
             return VaultState(Path(root), True)
         return VaultState(Path(root), False, "folder holds no Knowledge Base yet")
 
+    def holds_vault(self, folder: Path) -> bool:
+        return str(folder) in self.existing_vaults
+
     def start_runtime(self) -> None:
         self.runtime_started = True
 

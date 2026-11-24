@@ -2,7 +2,7 @@
 name: exomem-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions.
 metadata:
-  skill_contract: 223caf96d8b65bee32903a3672fe21bcabbb0d4330508b3f7f5318eb0bce604b
+  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
   version: "0.1.0"
 ---
 
@@ -41,11 +41,11 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -58,7 +58,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a
@@ -73,7 +73,7 @@ An unchanged map does not certify method freshness. Refresh when the task, evide
 or uncertainty changes materially; ordinary memory reads alone do not trigger refresh.
 
 ## Workflow
-1. Search Exomem with `search_memory` for the project/topic so reflection builds on existing memory.
+1. Search Evermatter with `search_memory` for the project/topic so reflection builds on existing memory.
 2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, held views and unsure reports (attributed, with their uncertainty, never as fact), open questions (including whether something happened), settled values (in full, not file pointers), and next actions.
 3. Draft each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`. Cite the session capture or prior notes it draws on in `sources:`.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.

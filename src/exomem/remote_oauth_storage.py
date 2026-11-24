@@ -1,7 +1,7 @@
-"""Shared OAuth and session state for active/passive Exomem replicas.
+"""Shared OAuth and session state for active/passive Evermatter replicas.
 
 This adapter carries already-encrypted values to an always-on HTTP coordinator.
-Legacy FastMCP OAuth bookkeeping may use its bounded cache; durable Exomem
+Legacy FastMCP OAuth bookkeeping may use its bounded cache; durable Evermatter
 session collections bypass that cache and remain remote-canonical.
 """
 
@@ -14,12 +14,12 @@ from typing import Any, SupportsFloat
 import httpx
 
 _COORDINATOR_USER_AGENT = (
-    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/substrate-systems/evermatter)"
 )
 
 
 class RemoteOAuthStorage:
-    """Implement ``key_value.aio.AsyncKeyValue`` over Exomem's state API."""
+    """Implement ``key_value.aio.AsyncKeyValue`` over Evermatter's state API."""
 
     _CACHEABLE_COLLECTIONS = {
         "mcp-jti-mappings",

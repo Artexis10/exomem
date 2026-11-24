@@ -1,13 +1,13 @@
 <!-- authority:non-specification -->
 
-# Exomem assistant guide
+# Evermatter assistant guide
 
-This guide is for agents using Exomem after the MCP server or connector is
+This guide is for agents using Evermatter after the MCP server or connector is
 available. It keeps the contract simple:
 
 - Keep temporary working context in the current conversation. Custom instructions
-  can guide one client; native memory is an explicit fallback when Exomem cannot capture.
-- Use Exomem as long-term governed memory: eligible durable preferences, personal baselines, project context, decisions, sourced
+  can guide one client; native memory is an explicit fallback when Evermatter cannot capture.
+- Use Evermatter as long-term governed memory: eligible durable preferences, personal baselines, project context, decisions, sourced
   conclusions, failures, experiments, proof-bearing records, and anything that
   should be searchable, citeable, reviewable, or supersedable across clients.
 - Do not make the user choose internal folders or page types unless the choice
@@ -15,7 +15,7 @@ available. It keeps the contract simple:
 
 ## Start here
 
-If the Exomem skill has already been loaded, follow it. Otherwise call:
+If the Evermatter skill has already been loaded, follow it. Otherwise call:
 
 ```text
 read_instructions(profile="compact")
@@ -29,7 +29,7 @@ rerank, or packed-context questions.
 
 ## The rule
 
-Search Exomem before answering when the turn touches the user's prior projects,
+Search Evermatter before answering when the turn touches the user's prior projects,
 notes, decisions, sources, failures, experiments, entities, or domains. Stay
 quiet for unrelated chat, short control prompts, and follow-ups where the current
 conversation already contains fresh KB evidence.
@@ -61,11 +61,12 @@ Capture raw material separately when provenance matters.
 Capture a stable preference, recurring routine, historical baseline, or durable
 affiliation only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Put a facet or affiliation on a
-uniquely resolved Entity; otherwise write one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, and trivial
-metrics get no note; this never authorizes creating an Entity,
-collection, or schema. A concise observation or narrow Entity facet follows
+uniquely resolved Entity; otherwise write one concise compiled observation. A
+recurring named item or measurement goes to a Records row: reuse a matching
+collection by natural key, else create a minimal one. Fleeting preferences, one-off
+activity, incidental associations, and trivial metrics get no note; eligibility alone
+never creates an Entity, collection, or schema. A concise observation, narrow Entity
+facet or minimal Records collection follows
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
 confirmed `restructure_execution`.
@@ -140,7 +141,7 @@ Agent behavior:
 3. Report the path.
 
 ```text
-Saved -> Knowledge Base/Notes/Research/Exomem/<title>.md
+Saved -> Knowledge Base/Notes/Research/Evermatter/<title>.md
 ```
 
 ### Find what I concluded
@@ -148,12 +149,12 @@ Saved -> Knowledge Base/Notes/Research/Exomem/<title>.md
 User:
 
 ```text
-What did I conclude about Exomem vs built-in memory?
+What did I conclude about Evermatter vs built-in memory?
 ```
 
 Agent behavior:
 
-1. Run `search_memory(query="Exomem built-in memory boundary", detail="compact")`.
+1. Run `search_memory(query="Evermatter built-in memory boundary", detail="compact")`.
 2. Cite relevant hits.
 3. If results are thin, retry with adjacent terms such as `native memory`,
    `assistant memory`, `custom instructions`, or `durable governed knowledge`.
@@ -229,8 +230,9 @@ receipt and only into one existing compatible Records collection. The delivery
 envelope maps the caller-authored link, reported-reference, and verification
 fields; it creates no schema and sets no item values. Reported remote identity
 is unverified unless matching platform proof establishes remote byte equality.
-Missing schema may yield a `structural_suggestions` proposal, but creation or
-change remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+A missing collection is created under the bounded Records rule, as one minimal
+collection under `proactive_capture`; any other creation, and any schema change,
+remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Compile evidence
 
@@ -366,7 +368,7 @@ content-read smoke-tested before their new digest is marked verified.
 
 | Client | Connection | Behavioral layer |
 | --- | --- | --- |
-| Claude Code | Local MCP via setup or manual config | Exomem skill, optional hooks |
+| Claude Code | Local MCP via setup or manual config | Evermatter skill, optional hooks |
 | Codex CLI | `codex mcp add ...` | `AGENTS.md`, optional hooks, `read_instructions()` fallback |
 | ChatGPT or hosted chat clients | Remote MCP/connector when supported | Custom instructions plus `read_instructions()` |
 | claude.ai web/mobile | Remote connector | Custom instructions plus `read_instructions()` |
@@ -375,20 +377,20 @@ content-read smoke-tested before their new digest is marked verified.
 
 ## Copyable instruction block
 
-Use this block when a client has no loaded Exomem skill. Claude Chat and ChatGPT
+Use this block when a client has no loaded Evermatter skill. Claude Chat and ChatGPT
 can load the skills from a plugin. Claude Code and Codex load them through
 `exomem setup`.
 
 Trim the tone line to your preference.
 
 ```text
-Use Exomem for eligible durable preferences, personal baselines, governed knowledge, sources, evidence, decisions, and reusable conclusions. Keep temporary working context in the current conversation.
+Use Evermatter for eligible durable preferences, personal baselines, governed knowledge, sources, evidence, decisions, and reusable conclusions. Keep temporary working context in the current conversation.
 
 Without a loaded skill, call read_instructions(profile="compact") once per session and follow it.
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
 ```
 
 ## Codex CLI
@@ -429,16 +431,16 @@ Claude/Codex envelope and output adapters:
 | Lifecycle event | Claude Code | Codex CLI 0.144.3 |
 | --- | --- | --- |
 | `PreCompact(manual|auto)` | structural checkpoint | structural checkpoint |
-| `SessionEnd` | structural checkpoint | unsupported; no Exomem registration |
+| `SessionEnd` | structural checkpoint | unsupported; no Evermatter registration |
 | `SessionStart(compact|resume)` | validated reinjection | validated reinjection |
 
-It runs locally without MCP, REST, a model, Exomem CLI, a vault path, or an MCP
+It runs locally without MCP, REST, a model, Evermatter CLI, a vault path, or an MCP
 credential. A checkpoint contains only bounded structural recovery evidence:
 repository/worktree state, bounded paths, content-free artifact hashes and
 checkbox profiles, and path-bound transcript byte-slice hashes. It never parses
 or stores transcript records, conversation/tool/system output, compaction
 summaries, secrets, or artifact/task text. Reinjection is advisory and never
-turns checkpoint data into an automatic Exomem write.
+turns checkpoint data into an automatic Evermatter write.
 
 State is per client and collision-resistant under
 `~/.claude/.cache/exomem-continuation/` or
@@ -503,15 +505,15 @@ read_instructions(profile="compact")
 Hosted clients usually cannot use local filesystem hooks or load the repo's
 Claude Code skill. To set one up:
 
-1. Connect Exomem through the remote MCP or connector support the client offers.
+1. Connect Evermatter through the remote MCP or connector support the client offers.
 2. Paste the learning instruction below into the account-level or project-level custom instructions.
-3. If the client has no loaded Exomem skill, add the instruction block above after it.
+3. If the client has no loaded Evermatter skill, add the instruction block above after it.
 
 ```text
-Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
 ```
 
-The agent then recalls what Exomem holds before a task and saves what it learns.
+The agent then recalls what Evermatter holds before a task and saves what it learns.
 The learning instruction is your own request, so it goes where the client reads
 your instructions. With the instruction block it is longer than a 1,500-character
 field, so where the client caps a field, give each text its own field. `exomem
@@ -526,7 +528,7 @@ If the hosted client cannot reliably call `read_instructions()` on its own, star
 chat with:
 
 ```text
-Call Exomem read_instructions(profile="compact") once, then use that contract for this
+Call Evermatter read_instructions(profile="compact") once, then use that contract for this
 chat. Do not search the KB unless this turn touches my prior projects, notes,
 decisions, sources, failures, experiments, or domains.
 ```
@@ -553,7 +555,7 @@ Resource mode is separate from search knobs:
 | `normal` | CPU-first default; keyword/BM25 recall is ready first |
 | `performance` | Explicit opt-in for GPU-capable steady-state work; models preload at startup and stay resident, so no request pays a model load |
 
-Do not interpret a slow diagnostic search with rerank enabled as "Exomem is
+Do not interpret a slow diagnostic search with rerank enabled as "Evermatter is
 slow" without checking timings, resource mode, cache state, and whether a model
 was cold.
 
@@ -575,6 +577,6 @@ For remote connectors, use [remote-quickstart.md](remote-quickstart.md). For the
 memory boundary, see [vs-built-in-memory.md](vs-built-in-memory.md).
 
 After a durable-auth upgrade, keep the existing connector URL and complete its
-one final GitHub login. New conversations should reuse the stored Exomem bearer;
+one final GitHub login. New conversations should reuse the stored Evermatter bearer;
 a repeated login prompt is a failed client-compatibility gate, while a `503`
 means the session authority is unavailable and should not trigger reauthorization.

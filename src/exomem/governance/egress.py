@@ -78,6 +78,7 @@ from ..published_admission import (
     request_decisions,
 )
 from . import (
+    admission_memo,
     artifact_census,
     authorization_custody,
     authorization_session_authority,
@@ -2285,7 +2286,8 @@ _PINNED_TOMBSTONES = {"tombstones": lambda vault_root: lifecycle.tombstoned_path
 _DECIDE_PATH_BATCH = Batch(
     pinned=_PINNED_TOMBSTONES,
     expects_hash="expected_content_hash",
-    alone=lambda kwargs: kwargs.get("artifact_copy") is not None,
+    alone=lambda kwargs: kwargs.get("artifact_copy") is not None or kwargs.get("page_snapshot") is not None,
+    effects=frozenset({"on_unavailable"}),
 )
 
 
@@ -6907,6 +6909,7 @@ _COMMAND_PROJECTOR_KIND: dict[str, str] = {
     "audit": "structure",
     "overview": "structure",
     "inspect_captured_sources": "structure",
+    "inspect_name_drift": "structure",
     "list_directory": "structure",
     "list_inbound_links": "structure",
     "evolution": "structure",
@@ -6957,6 +6960,7 @@ _COMMAND_OUTCOME_ADAPTER: dict[str, str] = {
     "record_memory": "structure",
     "plan_memory": "structure",
     "inspect_captured_sources": "structure",
+    "inspect_name_drift": "structure",
     "schema_memory": "structure",
     "activate_context": "structure",
     "served_context": "structure",
@@ -6983,7 +6987,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
                 "attention", "activation", "item", "audit", "dispositions",
                 "provenance", "evolution", "compilation", "stale", "contradiction",
                 "unprocessed-sources", "relation-debt", "relation-queue", "adoption",
-                "upkeep", "plan-progress", "write-advisory-result",
+                "upkeep", "plan-progress", "write-advisory-result", "queued-write",
                 "procedure_approvals", "held",
             ),
             "structure",
@@ -7500,6 +7504,9 @@ def release_level_for(
     receipt_decision: str | None = None,
     artifact_copy: reserved_paths.GenericFileCopy | None = None,
     record: bool = True,
+    policy: Policy | None = None,
+    tombstones: frozenset[str] | None = None,
+    page_snapshot: bytes | None = None,
 ) -> int | None:
     """The disclosure ceiling for one item, or `None` when it cannot be decided.
 
@@ -7513,12 +7520,14 @@ def release_level_for(
     may show and hands nothing from the item itself to anyone.
     """
     vault_root = Path(vault_root)
-    if lifecycle.is_tombstoned(vault_root, rel_path):
+    if (lifecycle.is_tombstoned(vault_root, rel_path) if tombstones is None
+            else lifecycle.is_tombstoned_in(tombstones, rel_path)):
         return None
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who, artifact_copy=artifact_copy):
+    if not content_permits(vault_root, rel_path, who, snapshot=page_snapshot, artifact_copy=artifact_copy):
         return DISCLOSURE_MIN
-    policy = policy_module.load(vault_root)
+    if policy is None:
+        policy = policy_module.load(vault_root)
     from ..collection_store.connection import CollectionStoreError
 
     try:
@@ -7543,6 +7552,8 @@ def release_level_for(
         authorization_session=who.authorization_session_id,
         authorization_context=who.verified_authorization_session,
         artifact_copy=artifact_copy,
+        tombstones=tombstones,
+        page_snapshot=page_snapshot,
     )
     level = None if decision is None else decision.level
     if not record:
@@ -7681,7 +7692,8 @@ _CURRENT_PATH_FINGERPRINT = object()
 def _path_only_stands_alone(kwargs: Mapping[str, Any]) -> bool:
     """A receipt records its effect when the read runs, and a captured fingerprint is one page's."""
     return (kwargs.get("receipt_decision") is not None
-            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT)
+            or kwargs.get("content_fingerprint", _CURRENT_PATH_FINGERPRINT) is not _CURRENT_PATH_FINGERPRINT
+            or kwargs.get("resolve_bytes") is False)
 
 
 @canonical_read(
@@ -7698,6 +7710,7 @@ def _release_level_for_path_only_snapshot(
     policy: Any | None = None,
     tombstones: frozenset[str] | None = None,
     content_fingerprint: str | None | object = _CURRENT_PATH_FINGERPRINT,
+    resolve_bytes: bool = True,
 ) -> int:
     """Continue internal publication admission against its verified raw preimage.
 
@@ -7713,8 +7726,16 @@ def _release_level_for_path_only_snapshot(
     if policy is None:
         policy = policy_module.load(vault_root)
     who = principal if principal is not None else effective_principal()
-    if not content_permits(vault_root, rel_path, who):
-        return DISCLOSURE_MIN
+    if resolve_bytes:
+        if not content_permits(vault_root, rel_path, who):
+            return DISCLOSURE_MIN
+    else:
+        from .. import document_containers
+
+        if (document_containers.in_payload_tree(rel_path)
+                or raw_protection.permits(vault_root, rel_path, who, resolve_bytes=False) is not True
+                or not connector_boundary.permits(vault_root, rel_path, who, resolve_bytes=False)):
+            return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     if not container_parent_allows(vault_root, rel_path, policy=policy, principal=who, purpose=declared_purpose):
         return DISCLOSURE_MIN
@@ -7736,7 +7757,7 @@ def _release_level_for_path_only_snapshot(
         return DISCLOSURE_MIN
     try:
         scope_ids = membership_module.evaluate_path_only(
-            vault_root, rel_path, policy
+            vault_root, rel_path, policy, resolve_bytes=resolve_bytes
         ).require_classified()
     except membership_module.MembershipUnresolved:
         if receipt_decision is not None:
@@ -7752,7 +7773,7 @@ def _release_level_for_path_only_snapshot(
         return DISCLOSURE_MIN
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     content_hash: str | None = None
-    if who.verified_authorization_session is not None:
+    if resolve_bytes and who.verified_authorization_session is not None:
         try:
             content_hash = (
                 hashlib.sha256(_page_bytes(vault_root, rel_path)).hexdigest()
@@ -8232,13 +8253,30 @@ def release_walk_filter(
     vault_root = Path(vault_root)
     who = principal if principal is not None else effective_principal()
     fail_closed = policy.blocked or not who.resolved
-    content_ok = content_permits_filter(vault_root, who, on_unavailable=on_unavailable)
+    # The paths whose decision met an input it could not read; their withhold is not kept (`judge_kept`).
+    unavailable: set[str] = set()
+    # Only grows, so a path whose decision added one sees a longer list even if another thread adds too.
+    failures: list[None] = []
+
+    def note_unavailable() -> None:
+        failures.append(None)
+        if on_unavailable is not None:
+            on_unavailable()
+
+    content_ok = content_permits_filter(vault_root, who, on_unavailable=note_unavailable)
     grants_hash = "" if fail_closed else _grants_hash(policy)
     declared_purpose = _declared_purpose(vault_root, who, purpose)
     verdicts: dict[tuple, tuple[bool, bool]] = {}
 
     def verdict(rel_path: str) -> tuple[bool, bool]:
         """`(allowed, decided from the page, the policy and the caller alone)`."""
+        before = len(failures)
+        decided = _verdict(rel_path)
+        if len(failures) != before:
+            unavailable.add(rel_path)
+        return decided
+
+    def _verdict(rel_path: str) -> tuple[bool, bool]:
         # The set read above, like `policy`: the plane does not move while one
         # walk runs, and re-proving it per path stats every tombstone and event file.
         if lifecycle.is_tombstoned_in(tombstones, rel_path):
@@ -8263,11 +8301,11 @@ def release_walk_filter(
             authorization_session=who.authorization_session_id,
             authorization_context=who.verified_authorization_session,
             tombstones=tombstones,
-            page_snapshot=raw,
-            on_unavailable=on_unavailable,
+            on_unavailable=note_unavailable,
+            **({"page_snapshot": raw} if raw is not None else {}),
         )
-        if decision is None and on_unavailable is not None:
-            on_unavailable()
+        if decision is None:
+            note_unavailable()
         allowed = decision is not None and decision.level >= RELEASE_FLOOR
         _outcome_for_decision(
             vault_root,
@@ -8310,7 +8348,31 @@ def release_walk_filter(
                 within_request=request_identity,
             )
 
-    keep = AdmittedPredicate(Admission(identity, judge, judge_many))
+    def judge_kept(paths: list[str]) -> dict[str, bool]:
+        from .. import document_containers
+
+        def decide_paths(wanted: list[str]) -> dict[str, bool]:
+            return {path: verdict[0] for path, verdict in judge_many(wanted, False).items()}
+
+        def decide_for_memo(wanted: list[str]) -> tuple[dict[str, bool], frozenset[str]]:
+            decided = decide_paths(wanted)
+            return decided, frozenset(unavailable.intersection(wanted))
+
+        # Only the bound writer's request pins the snapshot whose hashes prove a kept verdict current.
+        # Staged container pages and supplied bytes are read in place of stored ones, which no kept hash names.
+        if (not paths or bound_writer(vault_root) is None or document_containers._OVERLAY.get()
+                or read_page is not None):
+            return decide_paths(paths)
+        with release_decision_context(vault_root):
+            named = request_identity()
+            collector = _collector()
+            # A kept verdict records no outcome, so only a request that emits no receipt may use one.
+            if named is None or (collector is not None and not collector.sink):
+                return decide_paths(paths)
+            key = (named, who, policy.conflicted, membership_module.subject_inputs(vault_root, policy))
+            return admission_memo.decide(vault_root, key, paths, decide_for_memo, who)
+
+    keep = AdmittedPredicate(Admission(identity, judge, judge_many, judge_kept))
 
     owned = None if tombstones or fail_closed else _marker_owned_paths(vault_root, policy)
     if owned is not None:
@@ -8378,7 +8440,11 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
     store to read the page's container; the set holds one (`request_snapshot`), as a move's
     post-commit filter does, and a request that already holds one keeps it. The store
     thread serves a write without a resolution scope, so each decision also resolved the vault and
-    its state folder again; the set shares one resolution, as a move's preflight does. The scope
+    its state folder again; the set shares one resolution, as a move's preflight does. Each decision
+    of a store-owned page also proved the collection store's ownership binding and proved it again
+    when it finished; the set shares one proof, which it proves again when the set ends, as a
+    whole-vault aggregate does (`owner_only_aggregate`). A binding that changed meanwhile fails the
+    whole set, as it failed the decision that met it. The scope
     ends with the set, so the write still finds the placement live, and reads the store's new
     revision, after it waits for the mutation boundary or commits. Without a bound writer a
     decision opens no writer snapshot, so this holds nothing.
@@ -8387,26 +8453,31 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
     if writer is None:
         yield
         return
+    from ..collection_store import ownership
     from ..vault_store import read as store_read
 
     with (
         state_paths.resolution_scope(),
         writer.read_snapshot(),
         store_read.request_snapshot(vault_root),
+        ownership.read_scope(vault_root, finalize=True),
     ):
         yield
 
 
-def admitted(keep: Callable[[str], bool], paths: Iterable[str]) -> frozenset[str]:
+def admitted(keep: Callable[[str], bool], paths: Iterable[str], *, kept: bool = False) -> frozenset[str]:
     """The paths that the release filter `keep` admits, decided as one set.
 
     A filter that offers its `Admission` decides the set through `decide_many`; any other filter is
-    asked once per path. Each path gets the verdict that `keep(path)` gives it.
+    asked once per path. Each path gets the verdict that `keep(path)` gives it. With `kept`, the
+    filter may answer from verdicts it keeps from one request to the next (`Admission.decide_kept`).
     """
     wanted = list(dict.fromkeys(paths))
     offered = admission_of(keep)
     if offered is None:
         return frozenset(path for path in wanted if keep(path))
+    if kept:
+        return frozenset(path for path, allowed in offered.decide_kept(wanted).items() if allowed)
     return frozenset(path for path, verdict in offered.decide_many(wanted).items() if verdict[0])
 
 

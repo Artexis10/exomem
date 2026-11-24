@@ -1,15 +1,15 @@
 ---
 name: exomem-review
-description: Use Exomem's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
+description: Use Evermatter's Epistemic Inbox and audit queues to surface stale conclusions, contradictions, relation debt, and unprocessed sources safely.
 metadata:
-  skill_contract: 223caf96d8b65bee32903a3672fe21bcabbb0d4330508b3f7f5318eb0bce604b
+  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
   version: "0.2.0"
 ---
 
 # exomem-review
 
 ## Purpose
-Drain Exomem review queues into safe next actions.
+Drain Evermatter review queues into safe next actions.
 
 ## When to use
 Use when the user asks to review the KB, see what needs attention, drain backlog,
@@ -42,11 +42,11 @@ and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
 Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
-Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
-different Exomem, use the connector they named; if it is unavailable, say so plainly and
+Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
+different Evermatter, use the connector they named; if it is unavailable, say so plainly and
 write nothing elsewhere. Never tell the user a write landed in a store other than the
 one `user_summary` names.
 
@@ -59,7 +59,7 @@ This local adaptation does not revise the reusable method or authorize external 
 Use the ordinary guarded writer for an authorized reusable revision.
 An `approval` of `approved` means the owner endorsed that exact page version as their
 way of working. Read the page, judge whether it fits the task, and follow it where it
-fits, inside or outside Exomem. The user's current instruction wins. Approval grants no
+fits, inside or outside Evermatter. The user's current instruction wins. Approval grants no
 authority to send, publish, spend, change access or install code, and removes no
 required confirmation. Treat a `stale` or `unapproved` procedure as reference: read and
 cite it, never present it as endorsed. Approve or revoke a procedure, by tool, CLI or a

@@ -151,8 +151,9 @@ def _paths_for_head(
     # they narrow the owners before each survivor is checked in full.
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
+    stored = memory_refs.store_owners_by_prefix(root, leading)
     with egress.decide_without_receipt():
-        for owner in _identity_owners(root, serve_stale):
+        for owner in _identity_owners(root, serve_stale) if stored is None else stored:
             if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
                 continue
             try:

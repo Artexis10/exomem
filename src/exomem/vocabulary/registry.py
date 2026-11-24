@@ -838,7 +838,7 @@ def _split_removals(
                 f"UNKNOWN_REGISTRY_KEY: remove names {key!r}, which is not registered"
             )
         if base.origin != "vault":
-            raise RegistryError(f"PACK_ENTRY_FIXED: {key!r} ships with Exomem and cannot be removed")
+            raise RegistryError(f"PACK_ENTRY_FIXED: {key!r} ships with Evermatter and cannot be removed")
         count = None if usage is None else usage.count(key)
         if count is None:
             reason = getattr(usage, "reason", None) or "not_counted"

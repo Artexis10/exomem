@@ -1,6 +1,6 @@
 """`logs/ledger.jsonl` — one durable, hash-chained row per MCP tool call.
 
-Exomem already traces every call. `CallTraceMiddleware` emits `tool_start` /
+Evermatter already traces every call. `CallTraceMiddleware` emits `tool_start` /
 `tool_success` / `tool_failure` / `tool_error` prose lines to the rotating
 process log, and three JSONL journals record the *subsets* that are reads,
 queries, and mutations. None of that answers the question an operator actually

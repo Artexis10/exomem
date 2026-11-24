@@ -1,4 +1,4 @@
-"""Artifact renderers: stdlib + Pillow only; PDF degrades honestly.
+"""Artifact renderers: stdlib + Pillow only; a PNG or PDF that cannot be rendered degrades honestly.
 
 Every renderer returns bytes plus the canonical *logical* payload whose hash
 is the artifact's primary identity (byte hashes are secondary and scoped to
@@ -53,7 +53,6 @@ def logical_payload(content: SourceContent, sentinel: str, actual_kind: Artifact
 def renderer_versions() -> dict[str, str]:
     versions = {"membench-artifacts": "0.1.0"}
     versions["pillow"] = image_renderer.pillow_version() or "absent"
-    versions["pymupdf"] = pdf_renderer.pymupdf_version() or "absent"
     return versions
 
 

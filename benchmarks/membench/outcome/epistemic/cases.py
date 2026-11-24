@@ -39,7 +39,7 @@ RESERVED_NAMES = ("memory", "CLAUDE.md", ".claude")
 #: A closed set of the harness's own literals, not a reading of what an answer means. The judge reads each token
 #: that holds one as a neutral mark, and the case check keeps them out of case text, so every masked token comes
 #: from an arm. The mask hides these names; it does not hide every hint of the arm.
-STORE_NAMES = ("memory/", "exomem")
+STORE_NAMES = ("memory/", "evermatter", "exomem")
 
 
 @functools.cache

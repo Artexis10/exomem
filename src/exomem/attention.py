@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -91,6 +91,9 @@ DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     # vault meets its whole population at once, and a client that lists review items without
     # naming a queue is the only reader many sessions have; `note_cohesion` has no such bound.
     "ownership_review",
+    # After the page-level backlogs: one item for the whole vault, however many pages drift,
+    # so it cannot flood the queue it joins.
+    "name_drift",
 )
 # Registered — selectable via `categories` — but deliberately NOT default,
 # because these read old fields that a long-lived vault can already hold a large
@@ -477,10 +480,13 @@ def attention(
     effective_now = effective_now.astimezone(dt.UTC)
     today = today or effective_now.date()
     if held is None:
-        report = audit_module.audit(
-            vault_root, categories=sorted(resolved), today=today, now=effective_now
-        )
-        found, coverage = report.findings, (report.metadata or {}).get("coverage")
+        audited, stored = _stored_rows(vault_root, resolved)
+        found, coverage = list(stored), None
+        if audited:
+            report = audit_module.audit(
+                vault_root, categories=sorted(audited), today=today, now=effective_now
+            )
+            found, coverage = [*report.findings, *stored], (report.metadata or {}).get("coverage")
     else:
         # The held pass ran every triageable queue; its coverage is keyed by queue.
         found = held.findings
@@ -507,6 +513,25 @@ def attention(
         ),
         held,
     )
+
+
+def _stored_rows(vault_root: Path, resolved: set[str]) -> tuple[set[str], list[AuditFinding]]:
+    """The categories this request audits, and the findings it serves from stored rows instead.
+
+    The name-drift family judges every page, which a listing would pay on each request, so the
+    listing rebuilds its item from the due-state row (`due_state.name_drift_reading`). A caller that
+    may not see every page, and a vault whose projection holds no such row, audit it as before.
+    """
+    from . import due_state, name_drift
+    from .governance import egress
+
+    if name_drift.CATEGORY not in resolved or egress.owner_only_aggregate(vault_root) is not None:
+        return resolved, []
+    meta = due_state.name_drift_reading(vault_root)
+    if meta is None:
+        return resolved, []
+    found = name_drift.stored_finding(vault_root, meta)
+    return resolved - {name_drift.CATEGORY}, [found] if found is not None else []
 
 
 def _reviewable(
@@ -832,6 +857,41 @@ def entity_candidate_by_ref(
     raise ValueError(
         f"REVIEW_ITEM_NOT_FOUND: no current entity candidate for {reference}"
     )
+
+
+def pages_of_item(vault_root: Path, reference: str) -> list[str] | None:
+    """The pages a vault-wide family's review item stands for now, else None for any other ref.
+
+    A vault-wide family anchors its one item on a page that no action on it moves, but the item
+    stands for many pages, which the family reads afresh: an action on the item (a relocation by
+    its `review_ref`) acts on that batch, not on the anchor. Its identity is that anchor and its
+    family, so the family recognises its ref without the whole-vault passes of `item_by_ref`.
+    A page-level item stands for its own page, which its caller reads from the item.
+    """
+    from . import name_drift
+
+    # Review families are implemented in code, not authored data; each vault-wide one names its
+    # resolver here.
+    for resolve in (name_drift.pages_for_ref,):
+        batch = resolve(vault_root, reference)
+        if batch is not None:
+            return batch
+    return None
+
+
+def record_refused(vault_root: Path, reference: str, refused: Sequence[Mapping[str, str]]) -> None:
+    """Tell a vault-wide family which pages of its batch an action on its item refused.
+
+    Each row names a `page` and the refusal's `code`. The family that owns the reference keeps
+    them out of its next batches until they change, so its item can close while they wait for
+    repair. A reference no vault-wide family owns records nothing.
+    """
+    from . import name_drift
+
+    # The same families as `pages_of_item`; each one says whether the reference is its own.
+    for record in (name_drift.record_refused,):
+        if record(vault_root, reference, refused):
+            return
 
 
 def item_by_ref(

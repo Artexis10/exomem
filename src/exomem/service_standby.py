@@ -26,6 +26,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1084,11 +1085,19 @@ def _retire_covered_full_marker(
     record["full_marker"] = "retired" if retired else "retained"
 
 
-def _acquire_ownership() -> None:
-    """Take the writer lease this process deliberately refused while standby."""
-    from .writer_lease import start_server_lifecycle
+def _acquire_ownership() -> Callable[[], None] | None:
+    """Take the writer lease this process deliberately refused while standby.
 
-    start_server_lifecycle()
+    Returns the start of the collection store it now owns, which promotion runs
+    only after its graph proof: the store's takeover holds the canonical
+    boundary and its view reconciliation advances the commit generation, and
+    inside the proof window either one declined the sample or the seal on
+    2026-11-23, leaving writes refused as warming for minutes.
+    """
+    from .writer_lease import serve_vault_collection_store, start_server_lifecycle
+
+    manager = start_server_lifecycle(serve_collection_store=False)
+    return lambda: serve_vault_collection_store(manager)
 
 
 def promote(
@@ -1154,7 +1163,7 @@ def _promote_owned(
 
     # Observation and durable repair belong to the replacement only after
     # ownership. The normal activation retains this exact observer and buffer.
-    _acquire_ownership()
+    serve_collection_store = _acquire_ownership()
     epistemic_graph.require_startup_source_proof(vault_root)
     arm = getattr(_activation, "arm_promotion_observation", None)
     watcher = arm(deadline=deadline) if callable(arm) and time.monotonic() < deadline else None
@@ -1233,6 +1242,11 @@ def _promote_owned(
         record["identity_catalogue"] = "rebuild-after-promotion"
         record["identity_catalogue_cause"] = identity_cause
         reserved_paths.schedule_identity_catalogue_warm(Path(vault_root))
+    # Only now, after the graph seal: the store's takeover holds the boundary
+    # and its view passes advance the commit generation, both of which the
+    # sample and the seal compare. Nothing above this point uses the store.
+    if serve_collection_store is not None:
+        serve_collection_store()
     carried = _carried_at_promotion(record)
     record["carried_from_standby"] = sorted(carried)
     from . import runtime_readiness

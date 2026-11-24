@@ -36,6 +36,7 @@ from test_vault_store_readers import (
     restrict_external,
 )
 from test_vault_store_rederive import PROFILES, project, settle_to_the_end
+from test_vault_store_write_path import commits_since
 
 from exomem import (
     access,
@@ -430,7 +431,7 @@ def test_a_graph_read_borrows_the_request_snapshot_and_hands_it_back_unchanged(
             # SQLite keeps the name, but the reader's function and what it holds are gone.
             with pytest.raises(sqlite3.OperationalError, match="user-defined function raised"):
                 view.connection.execute("SELECT exomem_probe()")
-    assert read.current_revision(stored) == before + 1
+    assert commits_since(stored, before) == 1
 
 
 def test_a_nested_reader_with_its_own_deadline_gives_the_outer_readers_back_when_it_closes(

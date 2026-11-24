@@ -174,7 +174,9 @@ def test_a_committed_edit_is_embedded_from_the_store_and_stamped_with_its_hash_a
     """Vector rows that do not say which bytes they came from: a reader cannot tell a current page
     from a stale one, and the revision shows nothing about how far the drain has caught up."""
     catch_up(stored)
-    revision = commit(writer, HARBOUR)
+    commit(writer, HARBOUR)
+    # The revision that the drain reads the page at: the commit's, or a later derivation's.
+    revision = read.current_revision(stored)
 
     drained = catch_up(stored)
 

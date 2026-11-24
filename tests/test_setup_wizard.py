@@ -952,7 +952,7 @@ def test_scripted_setup_writes_no_instruction_file_unless_the_flag_asks(
 def test_a_level_saved_through_the_agent_keeps_setup_from_offering_the_instruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A user who told their agent "coding: off" asked Exomem to save only on request.
+    """A user who told their agent "coding: off" asked Evermatter to save only on request.
     Setup reads the vault's saved level as the owner, so it must not offer the
     instruction that asks for unprompted saves.
     """

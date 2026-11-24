@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Operates Exomem's opt-in manual cold-standby profile.
+  Operates Evermatter's opt-in manual cold-standby profile.
 
 .DESCRIPTION
   The profile is inactive until Configure is explicitly run with a host-owned
@@ -405,7 +405,7 @@ function Get-StatusReasons {
 function Get-ActivationReasons {
     param([hashtable]$Evidence, [hashtable]$Config, [switch]$GuardedBoot)
     $reasons = [System.Collections.Generic.List[string]]::new()
-    if ($Evidence.service.state -ne 'stopped') { $reasons.Add('local Exomem service is not conclusively stopped') }
+    if ($Evidence.service.state -ne 'stopped') { $reasons.Add('local Evermatter service is not conclusively stopped') }
     if ($Evidence.local_health.state -eq 'ready') { $reasons.Add('local origin is unexpectedly ready before activation') }
     if ($Evidence.local_health.state -in @('unknown', 'ambiguous')) { $reasons.Add('local pre-activation health is unknown') }
     if ($Evidence.local_tunnel.state -ne 'connected') { $reasons.Add('local named tunnel is not connected') }

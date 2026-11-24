@@ -1,7 +1,7 @@
 """The suite must not read whatever vault the developer's shell points at.
 
 EXOMEM_VAULT_PATH and EXOMEM_LOG_DIR are the two documented ways to aim a real
-Exomem at real data, and both are exported on a configured machine. Both also
+Evermatter at real data, and both are exported on a configured machine. Both also
 serve as fallbacks deep inside the product -- `LeaseManager._receipt_vault_root`
 and `query_log._target` -- reached whenever a call names no destination of its
 own. An unscoped test on such a machine therefore read and wrote the operator's

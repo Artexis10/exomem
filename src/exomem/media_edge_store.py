@@ -10,11 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import time
-from collections.abc import Awaitable, Iterator, Mapping
+from collections.abc import Mapping
 from contextlib import AsyncExitStack, contextmanager
 from pathlib import Path
-from typing import BinaryIO, TypeVar
+from typing import BinaryIO
 
 import httpx
 
@@ -32,7 +31,15 @@ from .media_edge_protocol import (
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
-from .media_store import MediaStoreError, ObjectHead, ObjectTooLarge, ReplicaAbsent, _declared_chunks
+from .media_store import (
+    MediaStoreError,
+    ObjectHead,
+    ObjectTooLarge,
+    ReplicaAbsent,
+    StreamReader,
+    _declared_chunks,
+    before_deadline,
+)
 
 URL_ENV = "EXOMEM_MEDIA_EDGE_URL"
 CREDENTIAL_FILE_ENV = "EXOMEM_MEDIA_EDGE_CREDENTIAL_FILE"
@@ -65,7 +72,7 @@ def _refusal(response: httpx.Response, size: int | None = None) -> MediaStoreErr
     return _unavailable(f"the media edge answered {response.status_code}")
 
 
-def _read_refusal(response: httpx.Response, reader: _Reader) -> MediaStoreError:
+def _read_refusal(response: httpx.Response, reader: StreamReader) -> MediaStoreError:
     if response.status_code == STATUS_ABSENT:
         body = reader.read(_MAX_ERROR_BYTES + 1)
         if len(body) > _MAX_ERROR_BYTES:
@@ -76,32 +83,6 @@ def _read_refusal(response: httpx.Response, reader: _Reader) -> MediaStoreError:
         except (ValueError, KeyError, RecursionError, TypeError):
             pass  # a proxy's 404 does not say what the store holds
     return _refusal(response)
-
-
-class _Reader:
-    def __init__(self, chunks: Iterator[bytes]):
-        self._chunks = chunks
-        self._buffer = bytearray()
-
-    def read(self, size: int = -1) -> bytes:
-        with _outage("read"):
-            while size < 0 or len(self._buffer) < size:
-                chunk = next(self._chunks, None)
-                if chunk is None:
-                    break
-                self._buffer.extend(chunk)
-        count = len(self._buffer) if size < 0 else size
-        block = bytes(self._buffer[:count])
-        del self._buffer[:count]
-        return block
-
-
-_ReadValue = TypeVar("_ReadValue")
-
-
-async def _before_deadline(deadline: float, read: Awaitable[_ReadValue]) -> _ReadValue:
-    async with asyncio.timeout(max(0.0, deadline - time.monotonic())):
-        return await read
 
 
 class EdgeStore:
@@ -140,7 +121,12 @@ class EdgeStore:
         if deadline is None:
             with self._client("read") as client, client.stream(method, path, params=params, headers=headers) as response:
                 block = _BLOCK if response.status_code == 200 else _MAX_ERROR_BYTES + 1
-                yield response, _Reader(response.iter_raw(block))
+
+                def raw():
+                    with _outage("read"):
+                        yield from response.iter_raw(block)
+
+                yield response, StreamReader(raw())
             return
 
         with _outage("read"), asyncio.Runner() as runner:
@@ -151,7 +137,7 @@ class EdgeStore:
                 return await held.enter_async_context(client.stream(method, path, params=params, headers=headers))
 
             def run(read):
-                return runner.run(_before_deadline(deadline, read))
+                return runner.run(before_deadline(deadline, read))
 
             try:
                 response = run(open_response())
@@ -160,10 +146,11 @@ class EdgeStore:
                 held.push_async_callback(chunks.aclose)
 
                 def raw():
-                    while (chunk := run(anext(chunks, None))) is not None:
-                        yield chunk
+                    with _outage("read"):
+                        while (chunk := run(anext(chunks, None))) is not None:
+                            yield chunk
 
-                yield response, _Reader(raw())
+                yield response, StreamReader(raw())
             finally:
                 runner.run(held.aclose())
 

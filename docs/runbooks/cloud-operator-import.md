@@ -11,7 +11,7 @@
 
 The owner's source vault was checked on 2026-09-28: its governance store is at schema v3, and it has no links, special files or hardlinks. Not yet run against a production cell.
 
-This procedure replaces the Exomem Cloud owner's cell vault with the owner's existing Exomem vault from another machine. It applies to the **owner's own vault only**. The operator mints the key that decrypts the archive, which is acceptable only when the operator and the vault's owner are the same person. Any other user's restore uses the key their own cell mints (`add-exomem-cloud-vault-import`, design D1), never this procedure. To restore a cell from one of its own backups, use [cloud operator restore](cloud-operator-restore.md).
+This procedure replaces the Evermatter Cloud owner's cell vault with the owner's existing Evermatter vault from another machine. It applies to the **owner's own vault only**. The operator mints the key that decrypts the archive, which is acceptable only when the operator and the vault's owner are the same person. Any other user's restore uses the key their own cell mints (`add-exomem-cloud-vault-import`, design D1), never this procedure. To restore a cell from one of its own backups, use [cloud operator restore](cloud-operator-restore.md).
 
 What moves is the vault directory, as a point-in-time copy. The source machine's machine-local state (indexes, the governance store) does not move; the cell rebuilds its own. The source keeps running and stays the owner's primary vault. Writes made after the copy are not in Cloud.
 
@@ -314,7 +314,7 @@ Scale the StatefulSet back by hand, as above, before you resume cellctl, so the 
 
 ## 8. Verify
 
-Through the owner's own Exomem Cloud connector:
+Through the owner's own Evermatter Cloud connector:
 
 1. Ask for a note you know is in the source vault's Knowledge Base. Recall covers the Knowledge Base; files outside it are reachable by path and through adoption. Allow a few minutes for indexing.
 2. Ask for a note that only the replaced Cloud vault held. It must not answer.

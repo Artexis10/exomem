@@ -199,8 +199,14 @@ def _write_state(vault_root: Path):
             return True, OpError(
                 error.code, error.reason, "Writes resume once the takeover settles."
             )
-    with closing(connection.open_reader(connection.store_path(root))) as reader:
-        reason = schema.divergence_reason(reader)
+    bound = bound_writer(root)
+    if bound is not None:
+        # The writer that the commit uses reads the fence: a fresh reader would cost a connection
+        # open under the vault mutation boundary on every write.
+        reason = schema.divergence_reason(bound.connection)
+    else:
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            reason = schema.divergence_reason(reader)
     if reason is not None:
         return True, OpError(
             "COLLECTION_STORE_DIVERGED",
@@ -208,7 +214,7 @@ def _write_state(vault_root: Path):
             "The owner reconciles the store with maintain_memory "
             "mode collections-store-adopt-local.",
         )
-    if bound_writer(root) is None:
+    if bound is None:
         # Waiting for the store thread from here, under the mutation boundary, would deadlock it, so
         # a commit never waits for it: a write from another thread is refused, an invariant and
         # not a retry. A background media writer reaches the store thread by hopping before its

@@ -111,7 +111,7 @@ def _stop(
 
 
 def _is_episode_ask(result: dict | None) -> bool:
-    return bool(result) and result["reason"].startswith("[Exomem episode check]")
+    return bool(result) and result["reason"].startswith("[Evermatter episode check]")
 
 
 def _stops(monkeypatch, capsys, tmp_path, count: int, *, landed: bool = True) -> list[dict | None]:
@@ -323,7 +323,7 @@ def test_the_hook_table_matches_the_canonical_one() -> None:
 
 def test_the_episode_ask_is_its_own_text_with_a_key_slot() -> None:
     assert hook.EPISODE_ASK != hook.REMINDER_SHORT
-    assert hook.EPISODE_ASK.startswith("[Exomem episode check]")
+    assert hook.EPISODE_ASK.startswith("[Evermatter episode check]")
     assert "{key}" in hook.EPISODE_ASK
 
 
@@ -835,7 +835,7 @@ WORKFLOW_KEY = "ep-" + "9a" * 16
 
 
 def _is_coverage_ask(result: dict | None) -> bool:
-    return bool(result) and result["reason"].startswith("[Exomem episode coverage]")
+    return bool(result) and result["reason"].startswith("[Evermatter episode coverage]")
 
 
 def _candidates_payload(
@@ -1126,7 +1126,7 @@ def test_the_stop_ask_names_the_active_episode_jobs() -> None:
 
 
 def _is_capture_reminder(result: dict | None) -> bool:
-    return bool(result) and result["reason"].startswith("[Exomem capture check]")
+    return bool(result) and result["reason"].startswith("[Evermatter capture check]")
 
 
 def _claude_turn(

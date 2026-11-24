@@ -54,6 +54,7 @@ _AREAS: dict[str, str] = {  # nosemgrep: ep-word-dict -- the closed area names o
     "record_memory": "records", "plan_memory": "plans", "approve_procedure": "procedures",
     "observe_memory": "observations", "bootstrap": "instructions",
     "inspect_captured_sources": "sources",
+    "inspect_name_drift": "maintenance",
     "inspect_capture_erasure_policy": "sources",
     "reserve_source_capture": "sources", "settle_source_capture": "sources", "erase_captured_source": "sources",
 }
@@ -475,7 +476,7 @@ def _door_call(
 
 _IMPORT_GUIDE = (
     "Send a folder to a personal server as one archive, in three steps, from a client that can run a shell command or has a networked sandbox. "
-    "A client with neither cannot: give the person `exomem import <folder>`. Exomem Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
+    "A client with neither cannot: give the person `exomem import <folder>`. Evermatter Cloud refuses lane `import`; its folders go through `exomem cloud import <folder>`. "
     "1. From the folder's parent, pack the folder as one archive, such as `tar -czf folder.tgz folder`, and take its SHA-256. "
     "2. Call upload_files with lane `import` and that expected_sha256, then run the `shell` line of the reply's `next` send step, "
     "with `<token>` and `<archive>` filled in, to send the archive. "

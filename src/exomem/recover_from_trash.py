@@ -1562,9 +1562,7 @@ def _recover_in_store(
         # Before the derive, so the page that it writes names no Trash entry.
         warnings.extend(_withdraw_retirement(root, meta, trash_rel, restore_rel))
     store_media.derive(root, destinations)
-    index = governed.settle(
-        root, recovery, store_batch.row_report("upsert", [*moves.values(), *destinations]), warnings
-    )
+    index = governed.settle(root, recovery, "upsert", [*moves.values(), *destinations], warnings)
     store_targets.publish_catalog(
         catalog_target, error_class=RecoverError, what="the trash entry was recovered"
     )

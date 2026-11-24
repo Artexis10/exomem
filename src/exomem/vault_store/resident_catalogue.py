@@ -42,6 +42,18 @@ def remember(
             _HELD.popitem(last=False)
 
 
+def advance(root: Path, before: tuple, after: tuple) -> None:
+    """Keep the rows and resolver that stand at ``before`` at ``after``.
+
+    A commit that writes no catalogue row moves the triple and leaves the rows as they were.
+    """
+    key = Path(root)
+    with _LOCK:
+        found = _HELD.get(key)
+        if found is not None and found[0] == before:
+            _HELD[key] = (after, *found[1:])
+
+
 def held(root: Path, triple: tuple | None) -> tuple[dict[str, str | None], vault.WikilinkResolver] | None:
     """The rows and resolver when they stand at ``triple``, else None.
 

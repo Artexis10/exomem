@@ -1,4 +1,4 @@
-# The inference modes Exomem ships: how a unit's conclusion was reached. A unit whose kind has the
+# The inference modes Evermatter ships: how a unit's conclusion was reached. A unit whose kind has the
 # `assertion` trait may name one in its `inference_mode` row. A vault adds modes or labels in the
 # `inference_modes` section of `_Schema/semantic-language-registry.yaml`. A mode carries labels
 # and a description and no behaviour. `labels` maps a language tag to the label in that language.

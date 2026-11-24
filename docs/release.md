@@ -45,7 +45,7 @@ uv build
 After a release with GHCR publishing enabled, smoke the published image:
 
 ```bash
-docker run --rm ghcr.io/artexis10/exomem:latest demo --json
+docker run --rm ghcr.io/substrate-systems/evermatter:latest demo --json
 ```
 
 Optional host-specific checks:
@@ -278,11 +278,14 @@ One scope job selects the CI policy: Full runs only on schedule or dispatch.
 After its required gate passes, a Full run retains `full-ci-evidence-RUN-ATTEMPT`
 with the actual checkout commit and Git tree. The selector verifies repository,
 workflow, issuer gate, full scope, and the tested commit. It compares that tested
-tree with merged main. Release evidence is a Full run on main, or a Full run
-dispatched on the source branch whose tree equals the merged tree. Identical
+tree with merged main. Release evidence is a Full run on main or on the release
+cut, or a retained receipt from an earlier Full run on the pull request's head
+whose tree equals the merged tree. Identical
 trees reuse proof after squash; a changed tree, expired receipt, or incomplete
 proof uses the Full fallback. Legacy receipt-free evidence remains eligible only
-for a scheduled or dispatched Full run at its exact main commit.
+for a scheduled or dispatched Full run at its exact main commit. A feature
+branch cannot dispatch Full (`release_evidence.py scope` refuses it), so new
+evidence comes from main, the schedule or the release cut's own Full run.
 
 A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does

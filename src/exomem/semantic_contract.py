@@ -14,6 +14,7 @@ import re
 import stat
 import threading
 import time
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -3529,17 +3530,22 @@ def _reconcile_markdown_delta(
     if inventory is not None:
         inventory = inventory.with_delta(raw_changes)
         if inventory.store_identity is not None:
-            from .collection_store.views import store_identity
-            from .vault_store import read
-
-            with read.snapshot(root) as view:
-                identity = store_identity(view.connection)
-                inventory = replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
+            inventory = _inventory_at_store_snapshot(root, inventory)
     return replace(
         candidate,
         capture_inventory=inventory,
         unparsed_titles=None if unparsed is None else MappingProxyType(unparsed),
     )
+
+
+def _inventory_at_store_snapshot(root: Path, inventory):
+    """``inventory`` with its store witness at the store state that this request reads."""
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    with read.snapshot(root) as view:
+        identity = store_identity(view.connection)
+        return replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
 
 
 def on_corpus_files_changed(
@@ -3892,14 +3898,20 @@ def advance_corpus_for_store_commit(
                 != _without_store_revision(_stored_config_census(entry[0]))
             ):
                 return False
-            context = (
-                entry[1]
-                if not changed
-                else _reconcile_markdown_delta(
+            if changed:
+                context = _reconcile_markdown_delta(
                     root, entry[1], changed,
                     relation_definitions=relation_definitions, language=language, patch_only=True,
                 )
-            )
+            else:
+                # A commit that names no Markdown page, such as the derivation that follows each
+                # governed write, changes no capture input. The inventory's witness moves with the
+                # census, or every inventory read after the commit would answer "pending".
+                context = entry[1]
+                inventory = context.capture_inventory
+                if (inventory is not None and inventory.store_identity is not None
+                        and inventory.store_identity[2] == before_revision):
+                    context = replace(context, capture_inventory=_inventory_at_store_snapshot(root, inventory))
             if context is None:
                 return False
             patched = _patch_markdown_census(
@@ -4243,7 +4255,7 @@ def build_corpus_context_with_census(
             if memo is not None and memo[0] is context and not restricted:
                 return memo[2], census
         # A filter decides every page: as one set, under one snapshot.
-        admitted = None if visible is None else egress.admitted(visible, context.pages)
+        admitted = None if visible is None else egress.admitted(visible, context.pages, kept=True)
         withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
         # The current admission proved every page. Reuse the validated enrichment
         # without copying its page states into a second mapping.
@@ -5154,12 +5166,11 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     """Every key under which a wikilink can reach one page.
 
     Read from the resolver's own maps, so the keys are the ones resolution
-    uses. Casefolded to meet `_dependency_key`, which is a superset of the
-    case-sensitive match.
+    uses, in the spelling `_dependency_fold` gives every link key.
     """
     resolver = vault.WikilinkResolver.from_entries(root, ((path, title),))
     return {
-        key.casefold()
+        _dependency_fold(key)
         for keys in (resolver.full_paths, resolver.kb_stripped, resolver.stems, resolver.titles)
         for key in keys
     }
@@ -5766,9 +5777,18 @@ def _derive_relation_facts(
     return tuple(sorted(facts, key=lambda item: item.identity))
 
 
+def _dependency_fold(key: str) -> str:
+    """The spelling in which a link key meets the keys that can reach a page: NFC, casefolded.
+
+    A superset of each resolver match: a title matches NFC and lower-cased (`vault.title_key`),
+    a path or a stem as written, so a link typed decomposed reaches the title it resolves to.
+    """
+    return unicodedata.normalize("NFC", key).casefold()
+
+
 def _dependency_key(raw_target: str) -> str:
     path, _, _ = _target_parts(raw_target)
-    return vault.wikilink_page_key(path).casefold()
+    return _dependency_fold(vault.wikilink_page_key(path))
 
 
 def require_page_status(page: SemanticPageState | None) -> None:
@@ -5799,7 +5819,7 @@ def _structural_relation_reasons(
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
-    expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
+    expected_successor = _dependency_fold(fact.logical_source_path.removesuffix(".md"))
     mutual_supersession = bool(
         definition is not None
         and registry.has(definition.key, "replaces")
@@ -7076,10 +7096,17 @@ def evaluate(
     before_review: RelationReviewState | None = None,
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
+    non_worsening: bool = False,
     include_relation_disposition: bool = True,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticContractResult:
-    """Evaluate supplied immutable state without crossing any adapter boundary."""
+    """Evaluate supplied immutable state without crossing any adapter boundary.
+
+    `grandfathered` and `non_worsening` each let the page keep the error keys its before state
+    already had and refuse only the ones the operation adds. The first comes from the activation
+    baseline; the second from an operation that changes where a page lives or how its links are
+    spelled, never what it says, so it owes no debt the page carried before it.
+    """
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
     before_context_matches = before is None or before_corpus.pages.get(before.path) == before
@@ -7138,7 +7165,9 @@ def evaluate(
         finding.key for finding in after_findings if finding.severity == "error"
     }
     use_subset_exception = (
-        grandfathered and operation in _GRANDFATHERED_OPERATIONS and before is not None
+        (grandfathered or non_worsening)
+        and operation in _GRANDFATHERED_OPERATIONS
+        and before is not None
     )
     normalized: list[ContractFinding] = []
     for finding in after_findings:

@@ -21,6 +21,7 @@ from membench.environment import (
     compare_environments,
     installed_distributions,
     load_environment,
+    product_distributions,
     runtime_closure,
     verify_run_environment,
 )
@@ -125,8 +126,9 @@ def test_capture_is_deterministic_within_a_process() -> None:
 
 def test_runtime_closure_holds_product_dependencies_and_not_tooling() -> None:
     closure = set(runtime_closure())
+    product = next(name for name in product_distributions() if name in installed_distributions())
     # Declared in [project].dependencies, and squarely in the retrieval path.
-    for name in ("exomem", "rank-bm25", "snowballstemmer", "numpy"):
+    for name in (product, "rank-bm25", "snowballstemmer", "numpy"):
         assert name in closure, f"{name} must be inside the product runtime closure"
     # Requested extras of a dependency ARE part of the product: the product
     # depends on `pyjwt[crypto]`, so cryptography can be imported by it.

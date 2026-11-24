@@ -24,7 +24,7 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_bypass_writers import GAMMA, GAMMA_TEXT, govern, store_gamma
 from test_vault_store_lifecycle_writers import store_folder
 from test_vault_store_migration import BETA, vault  # noqa: F401
-from test_vault_store_write_path import planned, revision, store_rows
+from test_vault_store_write_path import commits_since, planned, revision, store_rows
 
 from exomem import (
     adopt,
@@ -162,7 +162,7 @@ def test_a_governed_delete_killed_at_each_crash_point_reconciles_once_from_the_s
     terminals = [phase for _type, phase in phases(served) if phase in {"committed", "aborted"}]
     assert terminals == [terminal]
     assert first["repairs"] and second["repairs"] == []
-    trashed = revision(served) == start + 1
+    trashed = commits_since(served, start) == 1
     assert trashed is (terminal == "committed")
     assert stored_page(served, BETA) is not trashed
     # The projector is off: BETA's old file stays on disk either way.
@@ -236,7 +236,7 @@ def test_a_governed_recovery_killed_at_each_crash_point_reconciles_once_from_the
     ]
     assert settled == [terminal]
     assert first["repairs"] and second["repairs"] == []
-    restored = revision(served) == start + 1
+    restored = commits_since(served, start) == 1
     assert restored is (terminal == "committed")
     assert stored_page(served, BETA) is restored
     assert lifecycle.is_tombstoned(served, BETA) is not restored
@@ -329,7 +329,7 @@ def test_an_active_catalog_publishes_a_store_mode_trash_with_its_log_entry(
     result = delete_file.delete_file(served, path=GAMMA, confirm=True)
 
     # One commit holds the trash and its log entry.
-    assert revision(served) == start + 1
+    assert commits_since(served, start) == 1
     assert stored_page(served, result.trash_path)
     log_after = read.owned_bytes(served, LOG)
     assert GAMMA.removesuffix(".md").encode() in log_after

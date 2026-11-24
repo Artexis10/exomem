@@ -153,7 +153,7 @@ resource "b2_application_key" "database_backup_restore" {
 # Object Lock parameters, and a bucket with a default retention applies those
 # parameters to every upload. k3s's uploader sends neither, so every snapshot
 # was rejected with "Content-MD5 OR x-amz-checksum- HTTP header is required".
-# Exomem's own durability workers are unaffected because boto3 sets Content-MD5
+# Evermatter's own durability workers are unaffected because boto3 sets Content-MD5
 # for locked PUTs; this is specific to k3s.
 #
 # Object Lock cannot be disabled once enabled on a B2 bucket, so sharing the

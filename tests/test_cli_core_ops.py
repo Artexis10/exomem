@@ -627,6 +627,29 @@ def test_adopt_human_renderer_prints_compact_terminal_decisively(capsys) -> None
     assert "Mode: scan-only" not in out
 
 
+def test_adopt_human_renderer_reads_the_leaf_of_a_reply_that_acknowledges_derived_rows(capsys) -> None:
+    """A committed adoption whose reply acknowledges its derived rows, as a store-mode write does:
+    the leaf sits under ``leaf_result``, and a renderer that took ``diagnostics`` as the leaf prints
+    an empty scan-only report."""
+    from exomem.__main__ import _print_human
+
+    _print_human(
+        {
+            "user_summary": "Adopted 2 files.",
+            "diagnostics": {
+                "operational": {"ok": True, "status": "committed", "mutated": True},
+                "leaf_result": {"mode": "copy", "summary": {"totals": {"files": 2, "markdown": 2, "dirs": 1}}},
+                "derived_components": [{"component": "lexstore", "state": "completed", "code": None}],
+            },
+        },
+        op="adopt_vault",
+    )
+    out = capsys.readouterr().out
+
+    assert "Mode: copy" in out
+    assert "Scan: 2 files, 2 markdown, 1 folders" in out
+
+
 def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
     with pytest.warns(DeprecationWarning):
         code, out, err = _run(

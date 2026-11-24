@@ -208,17 +208,17 @@ def target_refusal(
     """
     vault_root = Path(vault_root)
     if canonical_relative(target) is None:
-        return "POINTER_INVALID", f"{target!r} is not a vault-relative path inside the vault."
+        return "POINTER_INVALID", "the path is not a vault-relative path inside the vault."
     if in_append_only_tree(target) is None:
         trees = " or ".join(f"{tree}/" for tree in APPEND_ONLY_KB_SUBPATHS)
-        return "POINTER_OUTSIDE_CUSTODY", f"{target} is not under {trees}."
+        return "POINTER_OUTSIDE_CUSTODY", f"the path is not under {trees}."
     if originals.is_note_path(target):
-        return "POINTER_INVALID", f"{target} is a page; a custody pointer names the raw file."
+        return "POINTER_INVALID", "the path is a page; a custody pointer names the raw file."
     found = locate(vault_root, target, withheld_filter(vault_root))
     if found.state == UNREADABLE:
-        return "POINTER_INVALID", f"{target}: {PROBLEM_TEXT[UNREADABLE]}."
+        return "POINTER_INVALID", f"{PROBLEM_TEXT[UNREADABLE]}."
     if found.state != PRESENT:
-        return "POINTER_TARGET_MISSING", f"no file exists at {target}."
+        return "POINTER_TARGET_MISSING", f"{PROBLEM_TEXT[MISSING]}."
     size = frontmatter.get("binary_size")
     if type(size) is int and found.size is not None and found.size != size:
         return "POINTER_MISMATCH", f"{target} is {found.size} bytes; the card records {size}."

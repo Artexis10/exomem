@@ -38,7 +38,7 @@ this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not b
 whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
 carry the codes and reasons. A result whose status is
 `replayed` reads `Already saved -> <title>`. Each sentence ends with the name of the store
-that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
+that took the write, such as `Saved -> <title> (personal Evermatter)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
 When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds
@@ -76,7 +76,12 @@ answering is the agent's decision with the user (see `writing.md`).
 Its `kind` is `ownership` while the written page is asked whether it belongs in its
 project and nobody has answered. It holds the review item's `ref`, `fingerprint` and
 `id`, and one `question` that carries the ownership test and the call that keeps the
-page where it is. A response carries one such advisory, and the ownership one leads.
+page where it is. A response carries one such advisory.
+Its `kind` is `rename` after a write that changed a page's title so that its file name no
+longer follows it. It holds the page's `ref`, its `current_name`, the `planned_name`,
+the spelled-out `call` that renames that page, and an `outcome` sentence. The user's edit
+is the approval. It is absent when the title did not change or the name still follows it,
+and the rename one leads.
 Use `detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
@@ -100,6 +105,9 @@ omit it; it never invents a missing identity.
 Do not reread solely to confirm a successful commit. Use one bounded final
 verification of the whole requested outcome, and extra reads only when content,
 warnings or missing concurrency guards actually require them.
+
+Only a committed result is a save. A call that could not run, failed in transport,
+or returned no committed result saved nothing; say so, never report it saved.
 
 `graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
 failed canonical write. They appear under `diagnostics.operational` and in no
@@ -181,12 +189,31 @@ failed file. Retry the failed files in a new call that names only them, under a
 new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
 committed and the same identity and payload are retried.
 
+A save can instead return `state: "queued"` with `committed: false` and a
+`queued_write.ref`. The memory was busy, so the service holds the save durably
+and applies it in arrival order. It is not saved yet: tell the user it is
+queued, never that it is saved. Do not resend it; a resend with the same
+identity returns the same receipt. Read its outcome later with the `route`
+the reply gives (`review_memory` mode `queued-write` with that `ref`): it ends
+`applied`, or `failed` with its refusal and the original arguments to correct
+and send again.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
 following their `retry`: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
+
+A collection write that ends `MUTATION_ACKNOWLEDGEMENT_PENDING` was accepted by the store and
+may still commit. Recover in one of two ways, and never with a new identity or a changed
+payload:
+
+1. Replay the call with the same identity and the same payload. The product returns the
+   recorded result and never writes twice.
+2. Read the collection and the row by its natural key, then write only what is missing.
+
+A read refused `COLLECTION_STORE_BUSY` committed nothing; retry it later.
 
 ## Refusals
 

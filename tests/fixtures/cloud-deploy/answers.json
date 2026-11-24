@@ -101,7 +101,7 @@
     "success": true,
     "requestId": "req-0003",
     "view": {
-      "cell_image": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "cell_image": "ghcr.io/substrate-systems/evermatter@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "release": "v0.171.0",
       "paused": false,
       "error_code": null,
@@ -117,7 +117,7 @@
     "success": true,
     "requestId": "req-0004",
     "view": {
-      "cell_image": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "cell_image": "ghcr.io/substrate-systems/evermatter@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "release": "v0.171.0",
       "paused": false,
       "error_code": null,
@@ -133,7 +133,7 @@
     "success": true,
     "requestId": "req-0005",
     "view": {
-      "cellImage": "ghcr.io/artexis10/exomem@sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "cellImage": "ghcr.io/substrate-systems/evermatter@sha256:2222222222222222222222222222222222222222222222222222222222222222",
       "cells": [
         {
           "cellId": "zq7xk2mfp4wn8rtd",
@@ -174,6 +174,22 @@
         "on_target": 41,
         "behind_target": 0,
         "held": 0
+      }
+    }
+  },
+  "substrate_rollout_paused_on_the_release": {
+    "success": true,
+    "requestId": "req-0009",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "release": "v0.171.0",
+      "paused": true,
+      "error_code": "UPGRADE_READINESS_TIMEOUT",
+      "canary_on_target": false,
+      "cells": {
+        "on_target": 40,
+        "behind_target": 0,
+        "held": 1
       }
     }
   }

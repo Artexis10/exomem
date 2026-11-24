@@ -21,8 +21,8 @@ from exomem._hooks import exomem_retrieve_nudge as retrieve_hook
 HOOKS = Path(__file__).resolve().parents[1] / "src" / "exomem" / "_hooks"
 SESSION = "session-next-turn"
 #: The stable start of the capture reminder, which is all these tests pin of its wording.
-MARKER = "[Exomem capture check]"
-EPISODE_MARKER = "[Exomem episode check]"
+MARKER = "[Evermatter capture check]"
+EPISODE_MARKER = "[Evermatter episode check]"
 PROMPT = "Please look at how the depot ledger reconciles and tell me what changed."
 SIX_HOURS = 6 * 3600
 

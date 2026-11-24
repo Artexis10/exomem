@@ -2,7 +2,7 @@
 """Desk-side persistent-core health/readiness/resource-status acceptance check.
 
 Run after the media idle deadline. The script is stdlib-only and intentionally
-measures OS processes rather than importing Exomem or torch.
+measures OS processes rather than importing Evermatter or torch.
 """
 
 from __future__ import annotations

@@ -20,10 +20,10 @@ import shutil
 import subprocess
 import tomllib
 import zipfile
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import workflow_skills
+from . import install_info, workflow_skills
 from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
@@ -35,8 +35,8 @@ APACHE_LICENSE = Path(__file__).parent / "_licenses" / "Apache-2.0.txt"
 
 #: Wherever a shipped doc shows an install line it writes this placeholder instead
 #: of a version: every deployment fills the release it ships, so no copy advises a
-#: mutable install (`exomem@latest`, unversioned `uvx exomem`, `pip install
-#: exomem`) and every example command names an immutable one. Unrendered, it still
+#: mutable install (`evermatter@latest`, unversioned `uvx evermatter`, `pip install
+#: evermatter`) and every example command names an immutable one. Unrendered, it still
 #: reads as an ordinary fill-in like the docs' other `<...>` placeholders.
 RELEASE_PLACEHOLDER = "<exomem-release>"
 
@@ -53,10 +53,10 @@ def release_version() -> str:
         project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
     except (OSError, tomllib.TOMLDecodeError):
         project = {}
-    if project.get("name") == "exomem" and project.get("version"):
+    if project.get("name") in install_info.DISTRIBUTION_NAMES and project.get("version"):
         return str(project["version"])
     try:
-        return version("exomem")
+        return install_info.installed_version()
     except PackageNotFoundError:
         return RELEASE_PLACEHOLDER
 
@@ -126,7 +126,7 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
     """Require personalized output inside its explicit vault.
 
     The sole checkout exception is the known git-ignored ``.exomem-private/``
-    root in the active Exomem checkout. Checkout public/release paths are
+    root in the active Evermatter checkout. Checkout public/release paths are
     rejected even when this module is imported from an installed wheel.
     """
 
@@ -218,7 +218,7 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 #
 # The plugin installs skills and hooks in one action. Its MCP declaration is an
 # optional shared HTTP endpoint: a blank URL is inert on current Claude Code, so
-# enabling the plugin never launches another full Exomem core per chat session.
+# enabling the plugin never launches another full Evermatter core per chat session.
 # Local-only users can opt into stdio explicitly with `exomem setup --stdio`.
 # The skills/ and hooks/ trees are GENERATED from the same package sources and
 # guarded by a sync test rather than hand-maintained.
@@ -254,7 +254,7 @@ def _write_generated(path: Path, payload: dict) -> None:
 
 def _package_version() -> str:
     try:
-        return version("exomem")
+        return install_info.installed_version()
     except PackageNotFoundError:
         return "0+unknown"
 
@@ -274,8 +274,8 @@ def _plugin_manifest() -> dict:
         # The Hosted manifest has carried them since it was first generated, and
         # these are deliberately the same values so the two listings agree.
         "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
-        "homepage": "https://substratesystems.io/exomem",
-        "repository": "https://github.com/Artexis10/exomem",
+        "homepage": "https://evermatter.ai",
+        "repository": "https://github.com/substrate-systems/evermatter",
         "license": "Apache-2.0",
         "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
@@ -287,9 +287,9 @@ def _plugin_manifest() -> dict:
         "userConfig": {
             "mcp_url": {
                 "type": "string",
-                "title": "Exomem MCP URL",
+                "title": "Evermatter MCP URL",
                 "description": (
-                    "Optional full Exomem MCP service URL ending in /mcp. "
+                    "Optional full Evermatter MCP service URL ending in /mcp. "
                     "Leave blank and run `exomem setup` to configure a native client route."
                 ),
                 "default": "",
@@ -328,7 +328,7 @@ def _plugin_hooks() -> dict:
         entry["hooks"] = [{"type": "command", "command": command}]
         events.setdefault(event, []).append(entry)
     return {
-        "description": "Exomem capture, retrieval, and continuation hooks.",
+        "description": "Evermatter capture, retrieval, and continuation hooks.",
         "hooks": events,
     }
 

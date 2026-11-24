@@ -2,7 +2,7 @@
 
 OpenSpec make-vault-store-canonical, design D5 and task 4.4. The vault is the migration suite's
 generated vault in store mode, and each page's change is a real ``write.commit``. A held row is
-inserted the way the projector writes one: Exomem changed a page, a person edited or deleted its
+inserted the way the projector writes one: Evermatter changed a page, a person edited or deleted its
 file, and the row records both.
 """
 
@@ -18,13 +18,14 @@ import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, DIAGRAM, migrate_apply, vault  # noqa: F401
 from test_vault_store_read_write import put, rows, stored, writer  # noqa: F401
+from test_vault_store_write_path import commits_since
 
 from exomem import state_paths
 from exomem.cli_ops import OpError
 from exomem.curation import MAX_WHY_CHARS
 from exomem.vault_store import held, projector, read, write
 
-EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Exomem changed.\n"
+EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Evermatter changed.\n"
 MINE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe edit that a person made in the file.\n"
 WHY = "the owner asked"
 
@@ -34,7 +35,7 @@ def digest(body):
 
 
 def hold(root, writer, kind, *, body=True, exomem=EXOMEM, mine=MINE):
-    """Exomem changed ALPHA to ``exomem`` and a person changed its file to ``mine``.
+    """Evermatter changed ALPHA to ``exomem`` and a person changed its file to ``mine``.
 
     The store, the file and the held row end as the projector leaves them.
     """
@@ -76,7 +77,7 @@ def hold_a_binary(root, writer):
 
 
 def hold_after_store_delete(root, writer, *, mine=MINE):
-    """Exomem deleted ALPHA's page while a person edited its file, which stays with no page."""
+    """Evermatter deleted ALPHA's page while a person edited its file, which stays with no page."""
     manifest = rows(root, "SELECT revision FROM store_manifest WHERE path = ?", ALPHA)[0][0]
     write.commit(
         writer, write.StoreChange(write.Origin.GOVERNED, "test", deletes=(write.PageDelete(ALPHA),))
@@ -91,7 +92,7 @@ def hold_after_store_delete(root, writer, *, mine=MINE):
 
 
 def hold_through_the_projector(root, writer, kind):
-    """A person changed ALPHA's file while Exomem changed its page; the real projector held it."""
+    """A person changed ALPHA's file while Evermatter changed its page; the real projector held it."""
     if kind == "edit":
         (root / ALPHA).write_bytes(MINE)
     else:
@@ -160,13 +161,13 @@ def test_the_list_gives_each_item_the_persons_file_and_the_stores_page_as_they_a
 
 
 def test_the_list_offers_only_the_choices_that_a_resolve_takes(stored, writer, monkeypatch):
-    """A list that offers keep-mine after Exomem changed the page again, or any choice for a file
+    """A list that offers keep-mine after Evermatter changed the page again, or any choice for a file
     too large to read whole, so the agent tries a resolution that the store must refuse."""
     hold(stored, writer, "edit")
     before = only_item(stored)
     assert (before.resolvable, before.keep_mine_possible) == (True, True)
     assert before.choices == (held.KEEP_MINE, held.KEEP_STORE)
-    write.commit(writer, put(ALPHA, EXOMEM + b"A later Exomem change.\n"))
+    write.commit(writer, put(ALPHA, EXOMEM + b"A later Evermatter change.\n"))
     after = only_item(stored)
     assert (after.resolvable, after.keep_mine_possible) == (True, False)
     assert after.choices == (held.KEEP_STORE,)
@@ -229,25 +230,25 @@ def test_keep_mine_on_an_edit_makes_the_persons_bytes_the_page_without_projectin
     """
     revision = hold(stored, writer, "edit", body=False)
     resolved = resolve(stored, writer, held.KEEP_MINE)
-    assert resolved.revision == revision + 1
-    assert stored_page(stored) == [(MINE, revision + 1)]
+    assert commits_since(stored, revision) == 1
+    assert stored_page(stored) == [(MINE, resolved.revision)]
     assert (stored / ALPHA).read_bytes() == MINE
     assert queue(stored) == []
     assert rows(stored, "SELECT sha256, revision FROM store_manifest WHERE path = ?", ALPHA) == [
-        (digest(MINE), revision + 1)
+        (digest(MINE), resolved.revision)
     ]
     assert rows(stored, "SELECT path FROM store_held") == []
     assert rows(
-        stored, "SELECT operation, origin, reason FROM store_audit WHERE revision = ?", revision + 1
+        stored, "SELECT operation, origin, reason FROM store_audit WHERE revision = ?", resolved.revision
     ) == [("import", "outside editor", f"held keep-mine: {WHY}")]
     assert held.list_held(stored) == []
 
 
 def test_keep_mine_refuses_when_exomem_changed_the_page_after_the_edit_was_held(stored, writer):
-    """A keep-mine that overwrites a newer Exomem change with a person's older edit."""
+    """A keep-mine that overwrites a newer Evermatter change with a person's older edit."""
     hold(stored, writer, "edit")
     seen = only_item(stored).item_version
-    newer = EXOMEM + b"A later Exomem change.\n"
+    newer = EXOMEM + b"A later Evermatter change.\n"
     write.commit(writer, put(ALPHA, newer))
     with pytest.raises(write.StoreConflict) as refused:
         resolve(stored, writer, held.KEEP_MINE, seen=seen)
@@ -267,7 +268,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     """A keep-store that loses the person's bytes, saves them inside the vault, or leaves nothing
     queued, so the store's page never reaches the file. The held body is stale, so only the file can
     be the source of the export."""
-    revision = hold(stored, writer, "edit")
+    hold(stored, writer, "edit")
     with writer.handle.transaction() as tx:
         tx.execute("UPDATE store_held SET body = ? WHERE path = ?", (b"stale", ALPHA))
     resolved = resolve(stored, writer, held.KEEP_STORE)
@@ -277,7 +278,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     assert exported.parts[-len(ALPHA.split("/")) :] == tuple(ALPHA.split("/"))
     assert datetime.now(UTC).strftime("%Y-%m-%d") in exported.parts
     assert digest(exported.read_bytes()) == digest(MINE) == resolved.exported_sha256
-    assert stored_page(stored) == [(EXOMEM, revision + 1)]
+    assert stored_page(stored) == [(EXOMEM, resolved.revision)]
     assert queue(stored) == [(ALPHA, "write")]
     assert rows(stored, "SELECT sha256 FROM store_manifest WHERE path = ?", ALPHA) == [
         (digest(MINE),)
@@ -285,7 +286,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     assert rows(stored, "SELECT path FROM store_held") == []
     copy = exported.relative_to(state_paths.vault_state_dir(stored)).as_posix()
     assert rows(
-        stored, "SELECT operation, reason FROM store_audit WHERE revision = ?", revision + 1
+        stored, "SELECT operation, reason FROM store_audit WHERE revision = ?", resolved.revision
     ) == [
         (
             "write",
@@ -322,12 +323,12 @@ def test_keep_mine_on_a_delete_removes_the_page_and_projects_nothing(stored, wri
     """
     revision = hold(stored, writer, "delete")
     resolved = resolve(stored, writer, held.KEEP_MINE)
-    assert resolved.revision == revision + 1
+    assert commits_since(stored, revision) == 1
     assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", ALPHA) == []
     assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", ALPHA) == []
     assert queue(stored) == []
     assert rows(stored, "SELECT path FROM store_held") == []
-    assert rows(stored, "SELECT operation FROM store_audit WHERE revision = ?", revision + 1) == [
+    assert rows(stored, "SELECT operation FROM store_audit WHERE revision = ?", resolved.revision) == [
         ("delete",)
     ]
     assert not (stored / ALPHA).exists()
@@ -339,10 +340,10 @@ def test_keep_store_on_a_delete_queues_the_page_and_exports_nothing(stored, writ
     Or one that leaves the manifest row, so the projector holds the missing file again instead of
     writing it.
     """
-    revision = hold(stored, writer, "delete")
+    hold(stored, writer, "delete")
     resolved = resolve(stored, writer, held.KEEP_STORE)
     assert (resolved.exported_to, exports_exist(stored)) == (None, False)
-    assert stored_page(stored) == [(EXOMEM, revision + 1)]
+    assert stored_page(stored) == [(EXOMEM, resolved.revision)]
     assert queue(stored) == [(ALPHA, "write")]
     assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", ALPHA) == []
     assert rows(stored, "SELECT path FROM store_held") == []
@@ -351,7 +352,7 @@ def test_keep_store_on_a_delete_queues_the_page_and_exports_nothing(stored, writ
 def test_keep_store_on_an_edit_of_a_page_the_store_deleted_removes_the_file_after_exporting_it(
     stored, writer
 ):
-    """A person's edit that raced Exomem's delete: keep-store must queue the file's removal, and the
+    """A person's edit that raced Evermatter's delete: keep-store must queue the file's removal, and the
     person's bytes must be saved first."""
     hold_after_store_delete(stored, writer)
     resolve(stored, writer, held.KEEP_STORE)
@@ -408,7 +409,7 @@ def test_a_held_row_that_goes_between_the_read_and_the_commit_rolls_the_whole_re
     with pytest.raises(write.StoreConflict):
         resolve(stored, writer, held.KEEP_MINE, seen=seen)
     assert stored_page(stored) == [(EXOMEM, revision)]
-    assert read.current_revision(stored) == revision
+    assert commits_since(stored, revision) == 0
 
 
 def test_an_unknown_choice_and_an_item_that_is_not_held_each_name_what_to_change(stored, writer):

@@ -1,11 +1,11 @@
-"""The derived-row half of one store-mode commit (OpenSpec make-vault-store-canonical D2).
+"""The derived rows of store-mode pages (OpenSpec make-vault-store-canonical D2).
 
-``apply`` runs inside ``write.commit``'s transaction, after the page tables hold the commit's own
-bytes. It writes the lexical, graph and identity rows of every page that the commit gives bytes to,
-drops the rows of every page that it removes, and re-derives the graph rows of the pages whose
-links the commit re-resolves. It reads the transaction's own tables for pages (and the disk for a
-page that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves
-no row without its page.
+``derive_paths`` runs on the store thread, in a drain transaction of its own after the commit that
+queued the paths (``derivation.drain``). It writes the lexical, graph and identity rows of every page
+that the store holds at a path, drops the rows of every path that it no longer holds, and re-derives
+the graph rows of the pages whose links those paths re-resolve. It reads the transaction's own tables
+for pages (and the disk for a page that the store does not own), so the rows always follow the bytes
+that the store holds when the drain runs, and a kill leaves the intent to derive them again.
 
 The registries (traversal profiles, the type basis) and the access policy are the exception: the
 owners' builders read them from disk, while the schema overlay under ``_Schema`` is store-owned. A
@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 from .. import (
     epistemic_graph,
@@ -39,9 +39,6 @@ from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
 from . import read, resident_catalogue
-
-if TYPE_CHECKING:
-    from .write import StoreChange
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
@@ -112,36 +109,44 @@ class ResolverDelta:
     )
 
 
-def apply(
+def derive_paths(
     tx: Connection,
     root: Path,
-    change: StoreChange,
-    existing: frozenset[str],
     *,
+    written: list[str],
+    removed: list[str],
+    refreshed: list[str],
     before: tuple | None = None,
     prepared_lexical: Mapping[str, _LexicalPage] | None = None,
     reserve_graph: ReserveGraph | None = None,
+    metered: frozenset[str] = frozenset(),
 ) -> ResolverDelta:
-    """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
+    """Derive the rows of the paths that a drain batch names into ``tx``, and return its resolver delta.
 
-    ``existing`` is the set of the change's page paths that the store held before the commit, which
-    tells a new page from an edited one. ``before`` is the vault triple that the commit starts at; a
-    caller that gives it lets the commit derive from the catalogue resolver that the last commit left
-    and carry the new one out (``resident_catalogue.remember``).
+    ``written`` are the paths that the store holds a page at, ``removed`` the ones that it does not
+    any more, ``refreshed`` the files that it does not own. ``before`` is the vault triple that the
+    batch starts at; a caller that gives it derives from the catalogue resolver that the last batch
+    left and carries the new one out (``resident_catalogue.remember``).
+
+    ``reserve_graph`` charges the graph rows of the ``metered`` paths (an original, and the source a
+    move of it vacates) and of the pages outside the batch that re-derive because they link to them,
+    directly or through a prior path that the original's lineage claims. Other pages of the batch draw
+    on no room.
+
+    The derived catalogue tells a new page from an edited one: no path counts as held before, so a
+    page that the catalogue does not hold re-resolves every link that may name it.
     """
     return _Derivation(
         tx,
         Path(root),
-        written=[*(put.rel for put in change.puts), *(move.dst for move in change.moves)],
-        removed=[
-            *(delete.rel for delete in change.deletes),
-            *(move.src for move in change.moves),
-        ],
-        refreshed=list(change.refresh),
-        existing=existing,
+        written=written,
+        removed=removed,
+        refreshed=refreshed,
+        existing=frozenset(),
         before=before,
         prepared_lexical=prepared_lexical,
         reserve_graph=reserve_graph,
+        metered=metered,
     ).run()
 
 
@@ -170,11 +175,13 @@ class _Derivation:
         before: tuple | None = None,
         prepared_lexical: Mapping[str, _LexicalPage] | None = None,
         reserve_graph: ReserveGraph | None = None,
+        metered: frozenset[str] = frozenset(),
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
         self.before_triple = before
         self.prepared_lexical = prepared_lexical or {}
         self.reserve_graph = reserve_graph
+        self.metered = metered if reserve_graph is not None else frozenset()
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
@@ -192,6 +199,8 @@ class _Derivation:
         self._relayout: object | None = None
         #: The prior paths whose claimants this commit changes; links naming them re-resolve.
         self.prior_changed: set[str] = set()
+        # The prior paths that a metered page claims or gives up: links that name one re-resolve to it.
+        self.metered_prior_changed: set[str] = set()
         # One basis for the commit, so that the registry loads once and not once per page parse.
         self.type_basis = epistemic_graph.producer_type_basis(root)
 
@@ -217,7 +226,10 @@ class _Derivation:
             }
             rows = () if raw is None else memory_refs.prior_path_rows(rel, raw, self.relayout())
             memory_refs.replace_prior_rows(self.tx, rel, rows)
-            self.prior_changed |= before ^ {row[0] for row in rows}
+            changed = before ^ {row[0] for row in rows}
+            self.prior_changed |= changed
+            if rel in self.metered:
+                self.metered_prior_changed |= changed
 
     # ------------------------------------------------------------------ sources
 
@@ -275,9 +287,10 @@ class _Derivation:
         for rel in self.removed:
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         for rel in derived:
-            self._write_graph(rel, graph)
-        for rel in self._dependents(before, after_entries, before_resolver, resolver):
-            self._write_graph(rel, graph)
+            self._write_graph(rel, graph, charge=rel in self.metered)
+        dependents, linking = self._dependents(before, after_entries, before_resolver, resolver)
+        for rel in dependents:
+            self._write_graph(rel, graph, charge=rel in linking)
         return delta
 
     def _resolver_entries(self) -> dict[str, str | None]:
@@ -356,7 +369,7 @@ class _Derivation:
 
     # ------------------------------------------------------------------ graph rows
 
-    def _write_graph(self, rel: str, graph: _GraphInputs) -> None:
+    def _write_graph(self, rel: str, graph: _GraphInputs, *, charge: bool = False) -> None:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
         prepared = self.prepared_lexical.get(rel)
@@ -386,7 +399,7 @@ class _Derivation:
                     prepared_structure=structure,
                 )
         if rows is None:
-            if self.reserve_graph is not None:
+            if charge and self.reserve_graph is not None:
                 self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
@@ -394,7 +407,7 @@ class _Derivation:
                 self.tx, rows, graph.stamps,
                 # Pages that link to an original re-derive in the same transaction, so their
                 # graph rows draw on the same reservation as the original's own.
-                before_write=self.reserve_graph,
+                before_write=self.reserve_graph if charge else None,
             )
 
     # ------------------------------------------------------------------ dependents
@@ -405,12 +418,13 @@ class _Derivation:
         after: dict[str, str | None],
         before_resolver: vault.WikilinkResolver,
         after_resolver: vault.WikilinkResolver,
-    ) -> list[str]:
+    ) -> tuple[list[str], set[str]]:
         """The pages outside the commit whose links re-resolve, from the transaction's own tables.
 
         A page that appears, goes or changes its title can move any link, in either direction: the
         links that start resolving to it and the links that stop. Any other edit moves only the
         links that name a unit of the page with a ``#`` fragment, as file mode re-derives them.
+        Also returns the ones among them that re-resolve because of a metered path.
         """
         # A prior path that gains or loses a claimant moves the links that name it.
         moved: set[str] = set(self.removed) | self.prior_changed
@@ -427,7 +441,17 @@ class _Derivation:
         resolvers = (before_resolver, after_resolver)
         found = epistemic_graph.dependent_paths(self.tx, moved, resolvers)
         found |= epistemic_graph.dependent_paths(self.tx, edited, resolvers, fragments_only=True)
+        linking: set[str] = set()
+        if self.metered:
+            # Only the pages that link to an original re-derive on its account; the dependents of the
+            # batch's other pages draw on no room, as in a batch that carries no original.
+            linking = epistemic_graph.dependent_paths(
+                self.tx, (moved & self.metered) | self.metered_prior_changed, resolvers
+            )
+            linking |= epistemic_graph.dependent_paths(
+                self.tx, edited & self.metered, resolvers, fragments_only=True
+            )
         # A page of the commit is derived already; the rest follow in path order, so a kill-free
         # replay of the same commit writes the same rows.
-        return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed))
+        return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed)), linking
 

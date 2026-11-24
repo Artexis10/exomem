@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud plugin operations
+# Evermatter Cloud plugin operations
 
 Claude and OpenAI packages use the same hand-authored skill and workflow files
 under `src/exomem/_scaffold/_Schema/`. `plugins/cloud/definition.json` contains
@@ -155,7 +155,7 @@ surface with `surface`, `installation`, `cases`, `disabled_comparison`) and
 `cross_readbacks`. Each cross readback names `write_surface`, `write_case`,
 `read_surface` and its independently captured `readback`. Disabled comparisons
 use the grounded-recall prompt in a fresh chat, `plugin_enabled: false`, and
-cannot contain Exomem calls or the hidden marker. Missing records fail closed.
+cannot contain Evermatter calls or the hidden marker. Missing records fail closed.
 
 ```bash
 uv run --frozen python scripts/cloud-plugin.py evaluate --trace <private-trace.json>

@@ -1,7 +1,7 @@
 """Rebuildable physical binding facts in the existing media ledger.
 
 Canonical companions remain authoritative. An incomplete projection can never
-authorize eviction; it does not participate in upload or read admission.
+authorize eviction or an automatic policy copy.
 """
 
 from __future__ import annotations
@@ -14,13 +14,16 @@ import threading
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from itertools import islice
 from pathlib import Path
 
-from . import media_capacity, original_pool, originals, reserved_paths, trash_metadata
+from . import held_fs, media_capacity, original_pool, originals, reserved_paths, trash_metadata
 
 # This key and the schema fields below belong to the versioned derived ledger.
 _STATE = "physical-bindings-v1"
+_POLICY_PAGE = 256
+_BINDING_COLUMNS = "binary_rel, companion_rel, companion_hash, object_key, sha256, size, resident_only, reference"
 log = logging.getLogger(__name__)
 
 
@@ -34,6 +37,19 @@ class Binding:
     size: int
     resident_only: bool
     reference: str | None
+    policy_refs: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyFiling:
+    binary_rel: str
+    companion_rel: str
+    companion_hash: str
+    object_key: str
+    sha256: str
+    size: int
+    resident_only: bool
+    references: tuple[originals.StoredObject, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +59,7 @@ class Checkpoint:
     revision: int | None = None
     seq: int | None = None
     policy: str | None = None
+    policy_projection: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +67,7 @@ class Basis:
     pooled: bool
     bounds: media_capacity.Bounds | None
     store: str | None
+    policy_projection: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +90,33 @@ def basis(vault: Path) -> Basis:
     config = originals.configuration(vault)
     return Basis(original_pool.enabled(vault),
                  media_capacity.bounds_for(config, vault) if config is not None else None,
-                 None if config is None else str(config["store"]))
+                 None if config is None else str(config["store"]), _policy_enabled(config))
+
+
+def _policy_enabled(config: dict[str, object] | None) -> bool:
+    from .media_protection import POLICY_FIELD
+
+    return config is not None and POLICY_FIELD in config
+
+
+def _tracks_bindings(vault: Path, ledger) -> bool:
+    if original_pool.enabled(vault):
+        return True
+    try:
+        if _policy_enabled(originals.configuration(vault)):
+            return True
+        # A file write while protection is off must invalidate a prior protected frontier.
+        with closing(ledger._connect(readonly=True)) as conn:
+            state = checkpoint(conn)
+            return state.complete and state.policy_projection
+    except sqlite3.OperationalError:
+        return True  # A busy or locked ledger may still hold a complete frontier, so withdraw it.
+    except sqlite3.DatabaseError:
+        # No reader, eviction included, can trust a corrupt ledger, so it must not refuse the file write.
+        return False
+    except (OSError, ValueError, RecursionError):
+        # A temporary configuration failure must withdraw any old proof without refusing the file write.
+        return True
 
 
 def initialize(conn: sqlite3.Connection) -> None:
@@ -83,6 +127,9 @@ def initialize(conn: sqlite3.Connection) -> None:
                  "resident_only INTEGER NOT NULL, reference TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS media_bindings_object ON media_bindings(object_key, binary_rel)")
     conn.execute("CREATE INDEX IF NOT EXISTS media_bindings_companion ON media_bindings(companion_rel)")
+    conn.execute("CREATE TABLE IF NOT EXISTS media_policy_filings ("
+                 "binary_rel TEXT PRIMARY KEY REFERENCES media_bindings(binary_rel) ON DELETE CASCADE, "
+                 "companion_hash TEXT NOT NULL, refs TEXT NOT NULL)")
     # A pin captures the acquired object's identity. Joining its current filing later
     # would silently move that pin when a companion changes.
     for table in ("media_access", "jobs"):
@@ -105,6 +152,7 @@ def checkpoint(conn: sqlite3.Connection) -> Checkpoint:
     try:
         state = Checkpoint(**json.loads(row[0]))
         if (type(state.generation) is not int or state.generation < 0 or type(state.complete) is not bool
+                or type(state.policy_projection) is not bool
                 or any(value is not None and (type(value) is not int or value < 0)
                        for value in (state.revision, state.seq))
                 or state.policy is not None and not originals.is_sha256(state.policy)):
@@ -137,13 +185,22 @@ def withdraw(vault: Path) -> Checkpoint | None:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
             before = checkpoint(conn)
-            _record(conn, Checkpoint(before.generation + 1, False, before.revision, before.seq, before.policy))
+            _record(conn, replace(before, generation=before.generation + 1, complete=False))
         return before
 
 
 def policy_key(vault: Path) -> str:
+    from .media_protection import POLICY_FIELD
+
     config = originals.configuration(vault)
-    return hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    placement: object = config
+    if config is not None and POLICY_FIELD in config:
+        # Placement needs to know whether to capture references. Goals and allowance use the live policy.
+        placement = (
+            "policy-filings-v1", original_pool.enabled(vault),
+            {name: value for name, value in config.items() if name != POLICY_FIELD},
+        )
+    return hashlib.sha256(json.dumps(placement, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def object_key(vault: Path, binary_rel: str, digest: str | None = None, *, pooled: bool | None = None,
@@ -250,6 +307,7 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
     if "stored_object" in fields and reference is None:
         raise ValueError("an original companion has an incomplete recovery reference")
     selected = selected if selected is not None else basis(vault)
+    policy_refs = _listed_refs(fields, reference) if selected.policy_projection else None
     if reference is not None and reference.store != selected.store:
         reference = None
     bounds = selected.bounds
@@ -257,7 +315,25 @@ def from_page(vault: Path, rel: str, data: bytes, *, selected: Basis | None = No
                 or bounds is None or bounds.classify(binary.size) == media_capacity.RESIDENT)
     key = object_key(vault, binary.path, binary.sha256, pooled=selected.pooled, bound=originals.bound_path(fields))
     return Binding(binary.path, rel, digest, key, binary.sha256,
-                   binary.size, resident, None if reference is None else json.dumps(reference.fields(), sort_keys=True))
+                   binary.size, resident, None if reference is None else json.dumps(reference.fields(), sort_keys=True),
+                   policy_refs)
+
+
+def _listed_refs(fields: dict[str, object], reference: originals.StoredObject | None) -> str | None:
+    listed = fields.get(originals.REPLICAS, [])
+    if not isinstance(listed, list):
+        return None
+    references = originals.replica_references(listed)
+    if len(references) != len(listed):
+        return None
+    if reference is not None:
+        references = (reference, *references)
+    return json.dumps([ref.fields() for ref in references], sort_keys=True, separators=(",", ":"))
+
+
+def _binding_values(binding: Binding) -> tuple:
+    return (binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
+            binding.sha256, binding.size, int(binding.resident_only), binding.reference)
 
 
 def _put(conn: sqlite3.Connection, bindings: Iterable[Binding]) -> None:
@@ -267,11 +343,16 @@ def _put(conn: sqlite3.Connection, bindings: Iterable[Binding]) -> None:
                  "companion_hash=excluded.companion_hash, object_key=excluded.object_key, sha256=excluded.sha256, "
                  "size=excluded.size, resident_only=excluded.resident_only, reference=excluded.reference "
                  "WHERE media_bindings.companion_rel = excluded.companion_rel",
-                 ((binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
-                   binding.sha256, binding.size, int(binding.resident_only), binding.reference) for binding in bindings)).rowcount
+                 (_binding_values(binding) for binding in bindings)).rowcount
     if changed != len(bindings):
         # A new companion must not erase another companion's retention requirement.
         raise ValueError("canonical companions disagree about one filing")
+    conn.executemany(
+        "INSERT INTO media_policy_filings VALUES (?, ?, ?) "
+        "ON CONFLICT(binary_rel) DO UPDATE SET companion_hash=excluded.companion_hash, refs=excluded.refs",
+        ((binding.binary_rel, binding.companion_hash, binding.policy_refs)
+         for binding in bindings if binding.policy_refs is not None),
+    )
 
 
 def apply_delta(vault: Path, paths: Iterable[str], bindings: Iterable[Binding], *,
@@ -289,7 +370,8 @@ def apply_delta(vault: Path, paths: Iterable[str], bindings: Iterable[Binding], 
                              ((rel, rel) for rel in paths))
             _put(conn, bindings)
             coalesce_cache(conn, (binding.object_key for binding in bindings))
-            _record(conn, Checkpoint(current.generation, expected.complete, revision, seq, expected.policy))
+            complete = expected.complete and (not expected.policy_projection or expected.policy == policy_key(vault))
+            _record(conn, replace(expected, generation=current.generation, complete=complete, revision=revision, seq=seq))
     return True
 
 
@@ -334,7 +416,7 @@ def operation(vault: Path, paths: Iterable[str]) -> Iterator[None]:
     ledger = _ledger(vault, create=False)
     from .vault_store import mode
 
-    before = (withdraw(vault) if ledger.path.exists() and original_pool.enabled(vault)
+    before = (withdraw(vault) if ledger.path.exists() and _tracks_bindings(vault, ledger)
               and not mode.store_mode_for_reads(vault) else None)
     if before is None:
         yield
@@ -359,7 +441,7 @@ def begin_file_change(vault: Path, images: Mapping[str, bytes], installed: Itera
         active.paths.update(installed)
         return None  # The enclosing operation already withdrew completeness and applies one delta.
     ledger = _ledger(vault, create=False)
-    if not ledger.path.exists() or not original_pool.enabled(vault):
+    if not ledger.path.exists() or not _tracks_bindings(vault, ledger):
         return None
     from .vault_store import mode
 
@@ -372,13 +454,11 @@ def begin_file_change(vault: Path, images: Mapping[str, bytes], installed: Itera
         forward = prepare_delta(vault, paths, images=images, selected=selected)
         if not inverse.bindings and not forward.bindings:
             return None
-        from dataclasses import replace
-
         # A staged ordinary binary wins over a same-digest pooled object in a mixed archive.
         forward = PreparedDelta(forward.paths, tuple(
             replace(binding, object_key=binding.binary_rel) if binding.binary_rel in paths else binding
             for binding in forward.bindings))
-    except (OSError, ValueError, UnicodeError, reserved_paths.ReservedPathLeafError):
+    except (OSError, ValueError, RecursionError, reserved_paths.ReservedPathLeafError):
         withdraw(vault)
         return None  # Unknown inventory retains bytes; it does not refuse a filing.
     # If this durable withdrawal fails, publishing changed bindings would make
@@ -573,7 +653,7 @@ def current(vault: Path, conn: sqlite3.Connection) -> bool:
 def external_change(vault: Path) -> None:
     """Fence an observed outside edit before its existing watcher debounce."""
     ledger = _ledger(vault, create=False)
-    if ledger.path.exists() and original_pool.enabled(vault):
+    if ledger.path.exists() and _tracks_bindings(vault, ledger):
         withdraw(vault)
 
 
@@ -584,7 +664,7 @@ def repair_paths(vault: Path, paths: Iterable[str]) -> None:
         active.paths.update(paths)
         return  # The operation's own index receipts join its one delta instead of withdrawing again.
     ledger = _ledger(vault, create=False)
-    if not ledger.path.exists() or not original_pool.enabled(vault):
+    if not ledger.path.exists() or not _tracks_bindings(vault, ledger):
         return
     from .vault_store import mode
 
@@ -593,14 +673,23 @@ def repair_paths(vault: Path, paths: Iterable[str]) -> None:
         return
     with closing(ledger._connect(readonly=True)) as conn:
         before = checkpoint(conn)
-    delta = prepare_delta(vault, paths)
+    try:
+        placement = basis(vault)
+    except (OSError, ValueError, RecursionError):
+        if before.complete:
+            withdraw(vault)
+        return
+    delta = prepare_delta(vault, paths, selected=placement)
     with closing(ledger._connect(readonly=True)) as conn:
         selected = []
+        refs = (", p.refs AS policy_refs FROM media_bindings b LEFT JOIN media_policy_filings p "
+                "ON p.binary_rel = b.binary_rel AND p.companion_hash = b.companion_hash"
+                if placement.policy_projection and _has_policy_projection(conn) else " FROM media_bindings b")
         for start in range(0, len(delta.paths), 256):
             batch = delta.paths[start:start + 256]
             placeholders = ",".join("?" for _ in batch)
             selected.extend(Binding(**dict(row)) for row in conn.execute(
-                f"SELECT * FROM media_bindings WHERE companion_rel IN ({placeholders})", batch))
+                f"SELECT b.*{refs} WHERE b.companion_rel IN ({placeholders})", batch))
         if sorted(selected, key=lambda item: item.binary_rel) == sorted(delta.bindings, key=lambda item: item.binary_rel):
             return
     withdrawn = withdraw(vault)
@@ -629,9 +718,10 @@ def rebuild(vault: Path) -> bool | None:
     # A separate SQLite transaction permits streaming the census without holding the
     # canonical writer. A changed generation discards it before publication.
     with closing(ledger._connect()) as conn:
-        conn.execute("CREATE TEMP TABLE binding_census AS SELECT * FROM media_bindings WHERE 0")
+        conn.execute("CREATE TEMP TABLE binding_census AS "
+                     "SELECT *, CAST(NULL AS TEXT) AS policy_refs FROM media_bindings WHERE 0")
         conn.execute("CREATE INDEX temp.binding_census_companion ON binding_census(companion_rel)")
-        conn.execute("CREATE TEMP TABLE displaced_census AS SELECT * FROM media_bindings WHERE 0")
+        conn.execute("CREATE TEMP TABLE displaced_census AS SELECT * FROM binding_census WHERE 0")
         placements = trash_metadata.PlacementCensus(vault)
         try:
             displaced: list[tuple[originals.DisplacedReference, Binding]] = []
@@ -646,10 +736,8 @@ def rebuild(vault: Path) -> bool | None:
                         displaced.append((error, found))
                     continue
                 if binding is not None:
-                    conn.execute("INSERT INTO binding_census VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                                 (binding.binary_rel, binding.companion_rel, binding.companion_hash,
-                                  binding.object_key, binding.sha256, binding.size,
-                                  int(binding.resident_only), binding.reference))
+                    conn.execute("INSERT INTO binding_census VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                 (*_binding_values(binding), binding.policy_refs))
             _confirm_displaced(vault, conn, displaced)
             _retire_census(vault, conn, placements)
             _fill_displaced(conn)  # A retired filing that a confirmed page still names stays counted.
@@ -681,9 +769,13 @@ def rebuild(vault: Path) -> bool | None:
                 if conn.execute("SELECT 1 FROM binding_census GROUP BY binary_rel HAVING COUNT(*) > 1 LIMIT 1").fetchone():
                     raise ValueError("canonical companions disagree about one filing")
                 conn.execute("DELETE FROM media_bindings")
-                conn.execute("INSERT INTO media_bindings SELECT * FROM binding_census")
+                conn.execute(f"INSERT INTO media_bindings SELECT {_BINDING_COLUMNS} FROM binding_census")
+                if selected.policy_projection:
+                    conn.execute("INSERT INTO media_policy_filings SELECT binary_rel, companion_hash, policy_refs "
+                                 "FROM binding_census WHERE policy_refs IS NOT NULL")
                 coalesce_cache(conn)
-                _record(conn, Checkpoint(before.generation + 1, True, *source, policy))
+                _record(conn, Checkpoint(before.generation + 1, True, *source, policy,
+                                         policy_projection=selected.policy_projection))
                 conn.commit()
                 return True
         except (ValueError, UnicodeError, OSError, reserved_paths.ReservedPathLeafError, sqlite3.Error):
@@ -706,10 +798,8 @@ def _confirm_displaced(vault: Path, conn: sqlite3.Connection,
 
     if not all(recorded_versions(vault, [(error.binary, error.reference) for error, _binding in displaced])):
         raise ValueError("a page away from its original binds a version that the media ledger does not record")
-    conn.executemany("INSERT INTO displaced_census VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                     ((binding.binary_rel, binding.companion_rel, binding.companion_hash, binding.object_key,
-                       binding.sha256, binding.size, int(binding.resident_only), binding.reference)
-                      for _error, binding in displaced))
+    conn.executemany("INSERT INTO displaced_census VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     ((*_binding_values(binding), binding.policy_refs) for _error, binding in displaced))
     _fill_displaced(conn)
 
 
@@ -767,7 +857,7 @@ _failed_census: dict[Path, int] = {}
 
 
 def recover(vault: Path) -> bool:
-    """Make a shared archive's projection current with a background census; True when it is current.
+    """Make the physical projection current with a background census; True when it is current.
 
     Background passes call this outside any guard, since the census takes its own; a request or an eviction never
     does. A census that lost a race runs again on the next pass. A failed census is not repeated until the
@@ -775,7 +865,7 @@ def recover(vault: Path) -> bool:
     """
     vault = Path(vault).resolve()
     ledger = _ledger(vault, create=False)
-    if not ledger.path.exists() or not original_pool.enabled(vault):
+    if not ledger.path.exists() or not _tracks_bindings(vault, ledger):
         return False
     with _census_lock:
         with closing(ledger._connect(readonly=True)) as conn:
@@ -823,6 +913,88 @@ def unreferenced(vault: Path, *, batch: int = 1024) -> Iterator[tuple[str, str]]
             after = page[-1][0]
 
     return rows()
+
+
+def _has_policy_projection(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'media_policy_filings'").fetchone() is not None
+
+
+def _policy_ready(vault: Path, conn: sqlite3.Connection) -> bool:
+    from .collection_store import connection
+
+    try:
+        return (_policy_enabled(originals.configuration(vault))
+                and checkpoint(conn).policy_projection and current(vault, conn)
+                and _has_policy_projection(conn))
+    except (OSError, ValueError, RecursionError, held_fs.HeldFsError, sqlite3.Error,
+            connection.CollectionStoreError, connection.CollectionStoreUnavailable):
+        return False
+
+
+def policy_keys(vault: Path, conn: sqlite3.Connection, *, after: str = "", limit: int) -> tuple[str, ...] | None:
+    """Read one page of physical object keys from the current opted-in projection."""
+    if not 0 < limit <= _POLICY_PAGE or not _policy_ready(vault, conn):
+        return None
+    # Each step seeks past all aliases of the previous key in the existing physical binding index.
+    rows = conn.execute(
+        "WITH RECURSIVE keys(object_key, ordinal) AS ("
+        " SELECT (SELECT MIN(object_key) FROM media_bindings WHERE object_key > ?), 1"
+        " UNION ALL SELECT (SELECT MIN(b.object_key) FROM media_bindings b WHERE b.object_key > keys.object_key), "
+        " ordinal + 1 FROM keys WHERE object_key IS NOT NULL AND ordinal < ?"
+        ") SELECT object_key FROM keys WHERE object_key IS NOT NULL ORDER BY ordinal",
+        (after, limit),
+    )
+    return tuple(row[0] for row in rows)
+
+
+def policy_filings(
+    vault: Path, conn: sqlite3.Connection, keys: Iterable[str], *, limit: int = _POLICY_PAGE,
+) -> dict[str, tuple[PolicyFiling, ...] | None] | None:
+    """Read exact per-filing facts in a bounded page. The caller guards any admission that uses them.
+
+    An unknown object returns None for its key. When the page fills, the first
+    unread key and later keys are unknown. An absent object has an empty tuple.
+    An unusable source frontier returns None for the whole page.
+    """
+    requested = tuple(islice(keys, _POLICY_PAGE + 1))
+    if not 0 < limit <= _POLICY_PAGE or len(requested) > _POLICY_PAGE or not _policy_ready(vault, conn):
+        return None
+    if not requested:
+        return {}
+    rows = conn.execute(
+        "SELECT b.*, p.refs FROM media_bindings b LEFT JOIN media_policy_filings p "
+        "ON p.binary_rel = b.binary_rel AND p.companion_hash = b.companion_hash "
+        "WHERE b.object_key IN (SELECT value FROM json_each(?)) "
+        "ORDER BY b.object_key, b.binary_rel LIMIT ?",
+        (json.dumps(requested), limit + 1),
+    ).fetchall()
+    first_incomplete = rows[limit]["object_key"] if len(rows) > limit else None
+    filings: dict[str, list[PolicyFiling] | None] = {
+        key: [] if first_incomplete is None or key < first_incomplete else None for key in requested
+    }
+    for row in rows[:limit]:
+        group = filings[row["object_key"]]
+        if group is None:
+            continue
+        filing = _policy_filing(row)
+        if filing is None or (group and (group[0].sha256, group[0].size) != (filing.sha256, filing.size)):
+            filings[row["object_key"]] = None
+        else:
+            group.append(filing)
+    return {key: None if group is None else tuple(group) for key, group in filings.items()}
+
+
+def _policy_filing(row: sqlite3.Row) -> PolicyFiling | None:
+    if row["refs"] is None:
+        return None
+    try:
+        raw = json.loads(row["refs"])
+    except (ValueError, TypeError, RecursionError):
+        return None
+    references = originals.replica_references(raw)
+    if not isinstance(raw, list) or len(references) != len(raw):
+        return None
+    return PolicyFiling(*row[:6], bool(row["resident_only"]), references)
 
 
 class ObjectBindingProofLimit(Exception):

@@ -43,6 +43,7 @@ from .. import (
 from ..kbdir import managed_root
 from ..restore_journal import CONTINUITY_EVIDENCE, MEMBERSHIP_EVIDENCE
 from . import (
+    admission_memo,
     authorization_custody,
     authorization_session_authority,
     authorization_session_lifecycle,
@@ -1453,6 +1454,7 @@ def _clear_policy_caches(vault_root: Path) -> None:
     policy_module._CACHE.pop(str(policy_module.governance_root(vault_root)), None)
     membership.clear_memo()
     page_admission.forget_scopes(vault_root)
+    admission_memo.forget(vault_root)
     try:
         from . import egress
 

@@ -1,4 +1,4 @@
-# The Planning values Exomem ships: the governed vocabulary of the Planning
+# The Planning values Evermatter ships: the governed vocabulary of the Planning
 # core fields. A key is `<field>.<value>`; a Planning item stores the value.
 # A vault adds values in `_Schema/planning-values.yaml`; shipped values are
 # fixed. A status carries its planning `class` (open, done or dropped). A kind

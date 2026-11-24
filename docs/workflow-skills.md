@@ -2,16 +2,16 @@
 
 # Workflow skills
 
-Workflow skills are named agent workflows that sit above Exomem's typed tools.
+Workflow skills are named agent workflows that sit above Evermatter's typed tools.
 They are small `SKILL.md` files that tell an agent when to activate, which
-Exomem capabilities to use, what invariants to preserve, and what output shape
+Evermatter capabilities to use, what invariants to preserve, and what output shape
 to return.
 
 ## How the layers differ
 
 | Layer | What it is | Example |
 | --- | --- | --- |
-| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `search_memory`, `read_page`, `create_note`, `save_source`, `list_review_items` |
+| Evermatter product commands | Product MCP/REST/CLI commands that read and write the KB | `search_memory`, `read_page`, `create_note`, `save_source`, `list_review_items` |
 | Context packs | Retrieval-time evidence bundles returned by `search_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
 | Knowledge packs | Product/domain guidance selected during setup | technical, creative, legal/warranty, personal records |
 | Workflow skills | Agent-visible workflows for common user intent | `exomem-continue`, `exomem-capture`, `exomem-review` |
@@ -53,7 +53,7 @@ purposes, trigger examples, and the canonical vault-relative path.
 
 ## Invariants
 
-Every workflow skill preserves the same Exomem contract:
+Every workflow skill preserves the same Evermatter contract:
 
 - Search before claiming prior context.
 - Keep raw `Sources/` and `Evidence/` separate from compiled notes.

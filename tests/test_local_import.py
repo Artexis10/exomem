@@ -421,7 +421,7 @@ def test_exomem_import_command_prints_the_result_and_the_start_path(tmp_path, mo
     assert result["staged"] == {"files": 1, "bytes": 4}
     # The last thing a person reads is the route, and the second copy is named with the way to discard it.
     assert captured.err.strip().splitlines()[-1].startswith("Next: run manage_memory with operation \"imports.file\"")
-    assert "No Exomem command discards it" in captured.err and str(vault / "_Imports" / result["import_id"]) in captured.err
+    assert "No Evermatter command discards it" in captured.err and str(vault / "_Imports" / result["import_id"]) in captured.err
 
 
 @pytest.mark.parametrize("spelling", ["absolute", "windows drive", "windows share", "parent traversal"])

@@ -539,6 +539,22 @@ def _cancel_upload_reattempts():
         upload_sessions._forget(session_id)
 
 
+@pytest.fixture(autouse=True)
+def _stop_write_intake_drainers():
+    """No test leaves a write-intake drainer (`exomem-write-intake`) running into the next one.
+
+    The serving runtime starts one per vault and only its shutdown stops it. The thread
+    never ends by itself, so it cannot join `_VAULT_WALKING_THREAD_NAMES`; it is stopped here.
+    """
+    yield
+    from exomem import write_intake
+
+    with write_intake._DRAINERS_LOCK:
+        roots = list(write_intake._DRAINERS)
+    for root in roots:
+        write_intake.stop(root)
+
+
 #: Captured before any test can instrument the filesystem primitives: the
 #: guard below runs in autouse teardown, after test-scoped patches of
 #: `os.scandir`/`os.lstat` may still be mid-unwind, and the guard's own probe
@@ -700,7 +716,7 @@ def _best_effort_proc_cwd(pid: int) -> str:
 
 def _matching_processes(exclude: frozenset[int]) -> tuple[tuple[int, str], ...]:
     """All ``(pid, cmdline)`` for live processes outside ``exclude`` whose
-    cmdline contains "pytest" or "exomem".
+    cmdline contains "pytest", "exomem" or "evermatter".
 
     Uncapped and unredacted -- :func:`_concurrent_process_candidates` applies
     the cap and redaction on top of this. Split out so ancestor-exclusion and
@@ -731,7 +747,8 @@ def _matching_processes(exclude: frozenset[int]) -> tuple[tuple[int, str], ...]:
                 cmdline = raw.replace(b"\x00", b" ").strip().decode("utf-8", "replace")
                 if not cmdline:
                     continue
-                if "pytest" in cmdline or "exomem" in cmdline:
+                # The product runs as `evermatter` from a checkout of that name, and its package keeps the `exomem` import name.
+                if any(name in cmdline for name in ("pytest", "exomem", "evermatter")):
                     found.append((pid, cmdline))
             except Exception:  # noqa: BLE001 -- one entry's failure must not discard matches already found; this scan is best-effort triage, never load-bearing for the assert.
                 continue
@@ -756,7 +773,7 @@ def _candidate_exclusion_pids() -> frozenset[int]:
 
 
 def _concurrent_process_candidates() -> tuple[str, ...]:
-    """Best-effort `/proc` scan for other live pytest/exomem processes.
+    """Best-effort `/proc` scan for other live pytest/exomem/evermatter processes.
 
     Purely diagnostic triage, never load-bearing for the assert: the state
     root is machine-global, so another worktree's pytest, a stray `-x` run,
@@ -781,7 +798,7 @@ def _concurrent_process_candidates() -> tuple[str, ...]:
         argv0 = cmdline.split(" ", 1)[0]
         basename = argv0.rsplit("/", 1)[-1] or argv0
         cwd = _best_effort_proc_cwd(pid)
-        found.append(f"pid {pid}: {basename} (matched: pytest|exomem, cwd: {cwd})")
+        found.append(f"pid {pid}: {basename} (matched: pytest|exomem|evermatter, cwd: {cwd})")
     if len(matches) > _CONCURRENT_CANDIDATE_CAP:
         found.append(f"(+{len(matches) - _CONCURRENT_CANDIDATE_CAP} more)")
     return tuple(found)
@@ -790,7 +807,7 @@ def _concurrent_process_candidates() -> tuple[str, ...]:
 _STATE_ROOT_GUARD_TRIAGE_HINT = (
     "this also fires for cross-process interference, not just this diff: "
     "another worktree's pytest, a stray -x run, or a foreign tmpdir can "
-    "touch this same machine-global root; check for concurrent pytest/exomem "
+    "touch this same machine-global root; check for concurrent pytest/exomem/evermatter "
     "processes and rerun this file solo before attributing the failure to "
     "the code under test."
 )
@@ -1278,9 +1295,15 @@ def obligations_only(vault: Path) -> Path:
 
     The Sources there are an outstanding backlog (`unprocessed_source`), which counts
     in the due-state projection. A module that counts dated obligations uses this
-    through `pytestmark`, so the backlog does not shift its totals.
+    through `pytestmark`, so the backlog does not shift its totals. The fixture's
+    slug-named pages are a second backlog (`name_drift`), so that family is switched off.
     """
+    from exomem import review_state
+
     shutil.rmtree(vault / "Knowledge Base" / "Sources")
+    review_state.ReviewStateStore(vault).set_disposition(
+        "name_drift", "off", why="handled: the fixture's slug names are not under test"
+    )
     find_module.clear_cache()
     return vault
 

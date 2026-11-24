@@ -1,4 +1,8 @@
-"""A stored Evidence original must leave capacity for its canonical and projected copies."""
+"""A stored Evidence original must leave capacity for its canonical and projected copies.
+
+In store mode the commit meters the page; the rows derived from it wait in the derivation queue,
+with the reason ``no_room``, until the vault has room for them.
+"""
 
 import json
 import string
@@ -16,7 +20,20 @@ from exomem import lexstore, media_capacity, move_file, preserve, writer_lease
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection
 from exomem.governance.principal import library_scope
-from exomem.vault_store import read, write
+from exomem.vault_store import derivation, read, write
+
+
+def queued(writer, rel):  # noqa: F811
+    """The reason codes that keep ``rel``'s derived rows waiting: empty once they are derived."""
+    return writer.connection.execute(
+        "SELECT failed_code FROM store_derivation_queue WHERE path = ?", (rel,)
+    ).fetchall()
+
+
+def derive_again(root, writer):  # noqa: F811
+    """Retry every waiting derivation now, as the store thread does when it starts."""
+    derivation.started(root.resolve(), writer)
+    derivation.drain(root.resolve(), writer)
 
 
 def test_store_original_and_later_projection_each_obey_the_vault_floor(
@@ -114,7 +131,7 @@ def test_store_original_and_later_projection_each_obey_the_vault_floor(
 
 
 def test_indexable_original_needs_room_for_its_search_rows(
-    served, tmp_path, monkeypatch,  # noqa: F811
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
 ):
     if not lexstore.fts5_available():
         pytest.skip("this SQLite build omits the full-text catalogue")
@@ -133,15 +150,17 @@ def test_indexable_original_needs_room_for_its_search_rows(
     data = f"---\ntitle: Catalogue sample\nx-note: {words}\n---\n\n{words}\n"
     target = "Knowledge Base/Evidence/Tests/Minutes/catalogue.md"
 
-    def file_original():
-        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
-            return preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md", content=data)
+    def catalogued():
+        with closing(connection.open_reader(connection.store_path(served))) as reader:
+            return reader.execute("SELECT pages.path FROM tri JOIN pages ON pages.rowid = tri.rowid "
+                                  "WHERE tri MATCH ? AND pages.path = ?", ("a123", target)).fetchall()
 
-    revision = read.current_revision(served)
-    with pytest.raises(OpError) as busy:
-        file_original()
-    assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+    # The page fits above the floor and is stored; its search rows do not, so they wait for room.
+    with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+        assert preserve.preserve(served, scope="Tests", category="Minutes", filename="catalogue.md",
+                                 content=data).path == target
+    assert read.owned_bytes(served, target) == data.encode()
+    assert queued(writer, target) == [(derivation.NO_ROOM,)] and catalogued() == []
 
     free[0] = 96 * floor
     with media_capacity.commit_credit("other-catalogue-original"):
@@ -149,17 +168,12 @@ def test_indexable_original_needs_room_for_its_search_rows(
             assert room is not None
             room.reserve_commit(90 * floor, 1, incoming=0, offset=0)
     config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": 0}}}))
-    with pytest.raises(OpError) as reserved:
-        file_original()
-    assert reserved.value.code == media_capacity.UPLOAD_SPACE_BUSY
-    assert read.current_revision(served) == revision and not read.page_exists(served, target)
+    derive_again(served, writer)
+    assert queued(writer, target) == [(derivation.NO_ROOM,)] and catalogued() == []
 
     media_capacity.release_commit_credit(served, "other-catalogue-original")
-    assert file_original().path == target
-    assert read.owned_bytes(served, target) == data.encode()
-    with closing(connection.open_reader(connection.store_path(served))) as reader:
-        assert reader.execute("SELECT pages.path FROM tri JOIN pages ON pages.rowid = tri.rowid "
-                              "WHERE tri MATCH ? AND pages.path = ?", ("a123", target)).fetchone() == (target,)
+    derive_again(served, writer)
+    assert queued(writer, target) == [] and catalogued() == [(target,)]
 
 
 def test_public_move_of_a_pending_original_meters_its_lineage_rewrite(
@@ -228,16 +242,14 @@ def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
     source = "Knowledge Base/Evidence/Tests/Minutes/field.md"
     destination = "Knowledge Base/_archive/field.md"
     assert not any(lexstore.page_membership(destination))
-    filing = write.StoreChange(write.Origin.GOVERNED, "file original",
-                               puts=(write.PagePut(source, original, media_allocation=True),))
-    before = read.current_revision(served)
-    with pytest.raises(OpError) as filing_busy:
-        write.commit(writer, filing)
-    assert filing_busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-    assert read.current_revision(served) == before and not read.page_exists(served, source)
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file original",
+                                           puts=(write.PagePut(source, original, media_allocation=True),)))
+    assert read.owned_bytes(served, source) == original
+    assert queued(writer, source) == [(derivation.NO_ROOM,)]
 
     free[0] = floor + 128 * floor
-    write.commit(writer, filing)
+    derive_again(served, writer)
+    assert queued(writer, source) == []
     database = connection.store_path(served)
     wal = database.with_name(database.name + "-wal")
     writer.connection.execute("PRAGMA secure_delete = ON")
@@ -247,7 +259,7 @@ def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
     headroom = 24 * floor
     with closing(connection.open_reader(database)) as reader:
         reader.execute("BEGIN")
-        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        reader.execute("SELECT revision FROM store_mode").fetchone()
         (structure_size,) = reader.execute(
             "SELECT length(CAST(structure_json AS BLOB)) FROM pages WHERE path = ?", (source,),
         ).fetchone()
@@ -258,16 +270,14 @@ def test_unindexed_move_reserves_wal_for_retiring_the_source_catalogue(
         assert reader.execute("SELECT COUNT(*) FROM semantic_units WHERE parent_path = ?", (source,)).fetchone() == (610,)
         wal_size = wal.stat().st_size
         free[0] = floor + headroom
-        with pytest.raises(OpError) as busy:
-            write.commit(writer, change)
-        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-        assert read.current_revision(served) == revision and wal.stat().st_size == wal_size
-        assert read.owned_bytes(served, source) == original and not read.page_exists(served, destination)
+        write.commit(writer, change)
+        assert read.owned_bytes(served, destination) == original and not read.page_exists(served, source)
+        assert queued(writer, source) == [(derivation.NO_ROOM,)]
+        assert writer.connection.execute("SELECT COUNT(*) FROM pages WHERE path = ?", (source,)).fetchone() == (1,)
 
         free[0] = floor + 128 * floor
-        write.commit(writer, change)
+        derive_again(served, writer)
         assert wal.stat().st_size - wal_size > headroom
-        assert read.owned_bytes(served, destination) == original and not read.page_exists(served, source)
         with closing(connection.open_reader(database)) as current:
             assert current.execute("SELECT path FROM pages WHERE path IN (?, ?)", (source, destination)).fetchall() == []
 
@@ -300,28 +310,26 @@ def test_original_reserves_resolved_graph_records_before_writing_them(
     assert writer.handle.checkpoint()
     with closing(connection.open_reader(database)) as reader:
         reader.execute("BEGIN")
-        revision, = reader.execute("SELECT revision FROM store_mode").fetchone()
+        reader.execute("SELECT revision FROM store_mode").fetchone()
         original_pages, = reader.execute("PRAGMA page_count").fetchone()
         page_size, = reader.execute("PRAGMA page_size").fetchone()
         wal_size = wal.stat().st_size
-        with pytest.raises(OpError) as busy:
-            write.commit(writer, change)
-        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-        assert read.current_revision(served) == revision and not read.page_exists(served, source)
-        assert wal.stat().st_size == wal_size
+        # The page fits above the floor; its resolved graph rows do not, and none is written.
+        write.commit(writer, change)
+        assert read.owned_bytes(served, source) == original
+        assert queued(writer, source) == [(derivation.NO_ROOM,)]
         assert writer.connection.execute(
             "SELECT COUNT(*) FROM graph_edges WHERE source_path = ?", (source,),
         ).fetchone() == (0,)
 
         free[0] = floor + 256 * floor
-        write.commit(writer, change)
+        derive_again(served, writer)
         count, longest = writer.connection.execute(
             "SELECT COUNT(*), MAX(length(dst_key)) FROM graph_edges WHERE source_path = ?", (source,),
         ).fetchone()
         assert count == len(targets) and longest > 2000
         growth = (writer.connection.execute("PRAGMA page_count").fetchone()[0] - original_pages) * page_size
         assert growth + wal.stat().st_size - wal_size > 4 * floor
-        assert read.owned_bytes(served, source) == original
 
 
 def test_a_small_note_needs_room_for_itself_not_for_the_whole_store(
@@ -373,20 +381,22 @@ def test_a_move_needs_room_for_the_leaves_its_source_records_leave(
         reader.execute("BEGIN")  # A pinned reader keeps every frame of both moves in the WAL.
         reader.execute("SELECT revision FROM store_mode").fetchone()
         page_size, = reader.execute("PRAGMA page_size").fetchone()
-        pages, = reader.execute("PRAGMA page_count").fetchone()
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+            write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive first",
+                                                   moves=(write.PageMove(first, "Knowledge Base/_archive/first.md"),)))
+        pages = writer.connection.execute("PRAGMA page_count").fetchone()[0]
         wal_size = wal.stat().st_size
-        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive first",
-                                               moves=(write.PageMove(first, "Knowledge Base/_archive/first.md"),)))
+        derivation.drain(served.resolve(), writer)
+        # What the drain wrote for the first move's rows: its source's deleted rows and their leaves.
         written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
                    + wal.stat().st_size - wal_size)
 
         free[0] = floor + written - media_capacity._allocation_unit(served)
-        revision = read.current_revision(served)
-        with pytest.raises(OpError) as busy:
-            write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive second",
-                                                   moves=(write.PageMove(second, "Knowledge Base/_archive/second.md"),)))
-        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-        assert read.current_revision(served) == revision and read.page_exists(served, second)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "archive second",
+                                               moves=(write.PageMove(second, "Knowledge Base/_archive/second.md"),)))
+        assert queued(writer, second) == [(derivation.NO_ROOM,)]
+        assert writer.connection.execute("SELECT COUNT(*) FROM pages WHERE path = ?", (second,)).fetchone() == (1,)
 
 
 def test_an_original_needs_room_for_the_pages_that_link_to_it(
@@ -408,25 +418,122 @@ def test_an_original_needs_room_for_the_pages_that_link_to_it(
     wal = database.with_name(database.name + "-wal")
     assert writer.handle.checkpoint()
 
-    def file_survey(name: str) -> None:
+    def file_survey(name: str) -> str:
+        path = f"Knowledge Base/Evidence/Tests/Surveys/{name}.md"
         write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file survey", puts=(write.PagePut(
-            f"Knowledge Base/Evidence/Tests/Surveys/{name}.md", f"# {name}\n\nRaw readings.\n".encode(),
-            media_allocation=True),)))
+            path, f"# {name}\n\nRaw readings.\n".encode(), media_allocation=True),)))
+        return path
 
     with closing(connection.open_reader(database)) as reader:
         reader.execute("BEGIN")  # A pinned reader keeps every frame of both filings in the WAL.
         reader.execute("SELECT revision FROM store_mode").fetchone()
         page_size, = reader.execute("PRAGMA page_size").fetchone()
-        pages, = reader.execute("PRAGMA page_count").fetchone()
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+            file_survey("north-survey")
+        pages = writer.connection.execute("PRAGMA page_count").fetchone()[0]
         wal_size = wal.stat().st_size
-        file_survey("north-survey")
+        derivation.drain(served.resolve(), writer)
         written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
                    + wal.stat().st_size - wal_size)
         assert written > 8 * floor  # the 200 linking pages re-derive their graph rows
 
         free[0] = floor + written - media_capacity._allocation_unit(served)
-        revision = read.current_revision(served)
-        with pytest.raises(OpError) as busy:
-            file_survey("south-survey")
-        assert busy.value.code == media_capacity.UPLOAD_SPACE_BUSY
-        assert read.current_revision(served) == revision
+        south = file_survey("south-survey")
+        assert read.page_exists(served, south)
+        assert queued(writer, south) == [(derivation.NO_ROOM,)]
+
+
+def test_an_original_draws_no_room_for_the_other_pages_its_commit_writes(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a drain that charges a commit's unrelated notes to its original's room.
+
+    The charge fails the commit's batch, and its 300 notes then derive one transaction at a time.
+    """
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # Room for the original's own commit and derived rows, not for the graph rows of the notes.
+    free = [floor + 6 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    notes = tuple(
+        write.PagePut(
+            f"Knowledge Base/Notes/Gauges/gauge-{note:03}.md",
+            (f"# Gauge {note}\n\n" + "".join(
+                f"- [rule] Check gauge {note} against [[station-{note:03}-{index:02}-{'calibration-' * 20}]].\n"
+                for index in range(30)
+            )).encode(),
+        )
+        for note in range(300)
+    )
+    original = "Knowledge Base/Evidence/Tests/Gauges/calibration.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file calibration with notes", puts=(
+            write.PagePut(original, b"# Calibration\n\nRaw readings.\n", media_allocation=True), *notes,
+        )))
+
+    drained = derivation.drain(served.resolve(), writer)
+
+    assert (drained.batches, drained.failed) == (1, 0)
+    assert queued(writer, original) == []
+    assert writer.connection.execute(
+        "SELECT COUNT(*) FROM store_derivation_queue WHERE path LIKE 'Knowledge Base/Notes/Gauges/%'"
+    ).fetchone() == (0,)
+
+
+def test_a_second_move_needs_room_for_the_pages_that_link_to_its_first_path(
+    served, writer, projecting, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a move that charges the pages linking to the path it leaves, but not the ones that
+    reach the original through its lineage and re-derive all the same."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=4096 * floor, free=free[0]))
+    folder = "Knowledge Base/Evidence/Tests/Minutes"
+    for name in ("north-readings", "south-readings"):
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            preserve.preserve(served, scope="Tests", category="Minutes", filename=f"{name}.md",
+                              content="---\ntitle: Gauge log\n---\n\nRaw readings.\n")
+        # The move records lineage in the frontmatter, and the title differs from the first stem, so the
+        # notes reach the original through its lineage alone.
+        body = "".join(f"- [rule] Check gauge {index} against [[{name}]].\n" for index in range(30))
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "linking notes", puts=tuple(
+            write.PagePut(f"Knowledge Base/Notes/Readings/{name}-{note:03}.md", f"# Note {note}\n\n{body}".encode())
+            for note in range(200))))
+
+    def move(old: str, new: str) -> None:
+        with library_scope():
+            move_file.move_file(served, old_path=f"{folder}/{old}.md", new_path=f"{folder}/{new}.md",
+                                update_wikilinks=False)
+
+    move("north-readings", "kept-north-readings")
+    move("south-readings", "kept-south-readings")
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both moves in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+            move("kept-north-readings", "archived-north-readings")
+        pages = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        wal_size = wal.stat().st_size
+        derivation.drain(served.resolve(), writer)
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+        assert written > 8 * floor  # the 200 notes that name the first path re-derive their graph rows
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        move("kept-south-readings", "archived-south-readings")
+        south = f"{folder}/archived-south-readings.md"
+        assert read.page_exists(served, south)
+        assert queued(writer, south) == [(derivation.NO_ROOM,)]

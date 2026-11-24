@@ -44,10 +44,12 @@ CEILINGS = {
     # reminder, the KB is the source of truth) are restored for at most 60 bytes.
     "retrieval reminder": (retrieve.REMINDER, 332),
     "retrieval pointer": (retrieve.REMINDER_POINTER, 160),
-    # 1150 -> 1210 (1198 in use at balanced); sent on every substantive MCP-mode turn, so growth costs every
-    # turn. The added scope (the user's work or life; general questions need no recall) stopped agents recalling
-    # on general-knowledge turns, where each needless recall cost a tool call and its packet.
-    "mcp activation": (retrieve._MCP_ACTIVATION, 1210),
+    # 1210 -> 1450 (1428 in use at balanced): the activation head gains the
+    # disconnect sentence, so a session whose Evermatter tools vanished is told to say
+    # so rather than stay silent (2026-11-23 Cloud disconnect went unnoticed for
+    # hours); it is gated on tool discovery so deferred ToolSearch reads connected.
+    # Sent on every substantive MCP-mode turn, so growth costs every turn.
+    "mcp activation": (retrieve._MCP_ACTIVATION, 1450),
 }
 
 
@@ -71,24 +73,36 @@ def test_a_whole_mcp_block_stays_one_short_paragraph():
     """The client prints the whole reason in its block box, so the sum is the budget."""
     key = capture.episode_key("claude", "s-size")
     fires = {
-        # 370 -> 405 with the short capture check's 285 -> 320 above.
-        "capture": (_mcp_fire(capture.REMINDER_SHORT), 405),
-        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 385),
+        # 405 -> 470: the preamble grows from "skip silently" to "tell the user".
+        "capture": (_mcp_fire(capture.REMINDER_SHORT), 470),
+        "episode": (_mcp_fire(capture.EPISODE_ASK.replace("{key}", key)), 465),
     }
     for name, (reason, ceiling) in fires.items():
         assert len(reason.encode("utf-8")) <= ceiling, (name, len(reason.encode("utf-8")))
     preamble = _mcp_fire("").strip()
-    assert len(preamble.encode("utf-8")) <= 90
-    for word in ("Skip", "not connected", "cannot capture", "read_instructions first"):
+    assert len(preamble.encode("utf-8")) <= 190
+    for word in ("tell the user", "not connected", "cannot capture", "read_instructions first"):
         assert word in preamble
+    # A disconnect is never skipped silently: the user hears nothing is saved.
+    assert "Skip" not in preamble
+
+
+def test_the_activation_texts_keep_the_disconnect_sentence(monkeypatch):
+    """A cut that drops it quietly re-creates the 2026-11-23 silent-disconnect
+    incident: tools vanish, the agent carries on, the user hears nothing."""
+    assert "disconnected" in retrieve._MCP_ACTIVATION
+    assert "Tell the user" in retrieve._MCP_ACTIVATION
+    # The light variant builds its own text; the head must carry the sentence too.
+    monkeypatch.setattr(retrieve, "_prominence", lambda: "light")
+    assert "disconnected" in retrieve._mcp_activation_text()
 
 
 def test_the_short_capture_check_uses_rules_available_without_a_vault_copy():
     """Installed clients use their skill; tool-only clients use the portable contract.
 
-    A vault reference can be absent even when Exomem is connected and can capture.
+    A vault reference can be absent even when Evermatter is connected and can capture.
     """
-    assert "Exomem skill" in capture.REMINDER_SHORT
+    assert "Evermatter skill" in capture.REMINDER_SHORT
     assert "read_instructions" in capture.REMINDER_SHORT
     assert "read_memory" not in capture.REMINDER_SHORT
 
@@ -99,7 +113,7 @@ def test_the_checkpoint_context_is_capped_at_two_kib():
 
 def test_the_short_capture_check_keeps_the_incident_rules_by_name():
     text = capture.REMINDER_SHORT
-    assert text.startswith("[Exomem capture check]")
+    assert text.startswith("[Evermatter capture check]")
     for rule in (
         "live policy",
         "no chat transcripts",

@@ -2,7 +2,7 @@
 #
 # Two independent axes: `source_kinds` is what an artifact IS, `domains`
 # is what it is ABOUT. Both are OPEN — any slug-shaped key is accepted and
-# auto-registers here on first use. Exomem ships useful defaults in code; this
+# auto-registers here on first use. Evermatter ships useful defaults in code; this
 # file records what your vault added, and lets you override how any key is
 # displayed or where it is filed.
 #
@@ -10,7 +10,7 @@
 # description, aliases, status (active|deprecated), replaced_by, requires_url.
 #
 # You rarely need to touch this. Capture with the label you actually mean and
-# Exomem writes the entry for you. Edit it when you want a nicer display name, a
+# Evermatter writes the entry for you. Edit it when you want a nicer display name, a
 # different folder, or to retire a key:
 #
 #   source_kinds:

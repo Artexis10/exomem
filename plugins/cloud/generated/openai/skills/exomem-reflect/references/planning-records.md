@@ -78,11 +78,11 @@ canonical operations are implementation leaves underneath them. Do not ask the
 user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema
 blocks, or supersession internals unless that detail changes what will happen.
 
-Keep temporary working context in the current conversation. Exomem is the durable
+Keep temporary working context in the current conversation. Evermatter is the durable
 home for preferences, feedback, personal baselines, project context, decisions,
 sourced conclusions, failures, experiments, and proof-bearing records.
 Capture follows the live engagement policy. Native memory is an explicit fallback
-when Exomem cannot capture; move durable results to Exomem when it can.
+when Evermatter cannot capture; move durable results to Evermatter when it can.
 
 | Simple action | User phrasing | Product route |
 |---|---|---|
@@ -98,13 +98,72 @@ when Exomem cannot capture; move durable results to Exomem when it can.
 | `maintain` | "check vault health," "fix safe drift," "make Planning/Records files readable" | Remote tools may use `inspect_memory(operation="maintenance.audit")` or preview one collection with `mode="structured-files"`. Structured-file apply requires its exact preview plan; ordinary `fix`/`backfill-ids`/`reconcile` writes run as maintenance jobs that start from a preview's `plan_id` and a `why` |
 | `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `inspect_memory` and `manage_memory`; infer before saving, and keep governance optional |
 
-Records routing is semantic: use it for durable observed events or current state
-without waiting for a magic verb. When exactly one compatible existing collection
-accepts a sufficiently identified observation, the active engagement policy may
-append or update it and the agent reports the mutation. Ask one focused question
+Records routing is semantic: use it for durable observed events, current state and
+recurring structured work without waiting for a magic verb. When exactly one compatible
+existing collection accepts a sufficiently identified observation, the active engagement
+policy may append or update it and the agent reports the mutation. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
-When no collection fits, use `inspect_memory(operation="records.describe")` and propose a
-concise collection; the agent must not silently create a long-lived schema.
+
+**Recurring structured work** is stable identities that recur, repeated observations or
+evaluations of the same items, comparisons, state that changes, or a need to query exactly.
+You judge it from the meaning of the conversation: no repeat count and no word list decides
+it. One passing mention of an item is not recurrence and gets no collection. Narrative and
+synthesis stay in Notes.
+
+1. Recognise the structured work in the conversation.
+2. List the collections and their fields: `query_records` with no `collection`.
+3. Reuse a compatible collection, judged by meaning and schema. A repeated item updates the
+   row its natural key names.
+4. If none fits and the identity, type and scope are clear, `add_record` with
+   `new_collection` creates a minimal collection and adds the first row in one call, under
+   the served `proactive_capture` disposition (below).
+5. Backfill the items the conversation already established, each with its date and who
+   said what.
+6. Report the collection and the rows in your reply.
+
+Ask one question only when two collections compete, an identity is unresolved, or the type
+or scope is unclear in a way that changes the action.
+
+A minimal collection is a Records collection with a declared natural key, a short list of
+fields, and no saved views, references or rollups. You author no schema for it:
+
+- `silent`: call `add_record` with the collection's title in `collection`, the first row in
+  `item` and `new_collection: {"natural_key": [<the item fields that identify a row>]}`. The
+  server makes one field per key of `item`, typed from its value (a string, number, boolean or
+  ISO date), creates the collection and adds the row. Report both in the same reply. Give
+  every field a plain value; a null, list or object cannot be typed from one row.
+- `advisory`: propose the named collection in the user's own words. After one inline
+  confirmation, create it with `records.create` (no `automatic`), then call `add_record`.
+- `off`: initiate nothing. A creation the user asks for is served as before.
+
+A title that already names a collection makes `add_record` a plain append, so look at the
+inventory first: a mistyped title would start a new collection. With `new_collection` the
+server refuses `AUTOMATIC_CREATION_REFUSED`, creates nothing and names the failed bound when
+the vault is not in `silent` capture, the schema is outside the bounds, or the vault already
+created its daily share of automatic collections. The refusal carries the create call with
+the manifest it would have made: propose that collection, and make that call after the user
+confirms. `records.create` with `automatic: true` is the same bounded create for a manifest
+you wrote yourself. Any other creation is confirmed `restructure_execution`, and so is every
+schema change other than adding fields, merge, deletion and migration of a collection. A
+Planning collection never takes `automatic`. The inventory shows `created_automatically` for each collection, so the
+owner can review what you created.
+
+A collection is never complete at its first row. When a later fact has no field (an outside
+claim that arrives on a later turn, a date, a measurement), add the field in the same call:
+`add_record` or `edit_record` with `options: {"new_fields": [<the fields of item or changes that
+the collection does not declare>]}`. Under `silent` the server adds each field, typed from its
+value, and writes the row, and the reply names them in `added_fields`. Never put the fact into another field, such as a status: that
+mixes who said what. Under `advisory`, or when an automatic collection would pass 12 fields, the call
+is refused with the proposal and the confirmed `revise` that adds the fields: propose them,
+make that call after the user confirms, then write the row or resume its held candidate.
+A write that names an undeclared field without `new_fields` is refused
+`SCHEMA_UNKNOWN_FIELD` with the same next step. Renaming, retyping or removing a field stays a
+confirmed `revise`.
+
+Keep who said what in separate fields: the user's own feedback, your proposals, and findings
+from outside sources. When the user has not resolved whether two names are the same item,
+keep two rows and record the ambiguity; never merge them.
+
 A refused Record write is held rather than lost: the response names the failing
 field and returns a `held` reference, so fix the named field and resume by that
 reference (or `discard` it) instead of looping or preserving diagnostic
@@ -114,9 +173,9 @@ A committed Note or Evidence write may return `records_routing` when its authore
 terms have one clear existing Records home. Read the observation before appending
 under the active capture disposition, and resume a returned held candidate when
 needed; the advisory never writes a record by itself. A strong
-`collection_candidate` is likewise a proposal: use `inspect_memory(operation="records.describe")`
-and `validate` to draft a concise schema, ask one question in the user's domain
-language, and create only after that inline confirmation. Backfill only exactly
+`collection_candidate` is likewise a proposal. Under `silent` capture create it with
+`add_record` and `new_collection`; when a bound refuses, or under `advisory` capture, ask one
+question in the user's domain language and create only after that inline confirmation. Backfill only exactly
 dated evidence units, citing each unit or artifact in `sources`; prose notes stay
 where they are.
 
@@ -216,8 +275,8 @@ Examples:
   general note.
 - "I completed a dated training session" -> resolve exactly one compatible
   collection before `add_record(...)`; keep the session as an
-  observed Record, not a compiled conclusion. If none fits, propose a collection
-  rather than creating one silently.
+  observed Record, not a compiled conclusion. If none fits, `add_record` with
+  `new_collection` creates a minimal collection under the served capture disposition, as above.
 - "Show my last three months" -> `query_records(...)` with a bounded date/query shape; use a compiled Note only for an explicit conclusion from that history.
 - "The second one is done, the rest can wait" -> one landing, two consequences: `add_record(...)` for the produced deliverable, then `edit_plan_item(...)` to complete that work item; the others stay queued and nothing else moves. Report it once: "<deliverable> is done and logged; the rest stay queued." Discover the collection with `inspect_memory` when none is named, inspect that exact collection with `query_plan_items(collection=...)`, then resolve the item with `query_plan_items(...)` filtered on the title or a natural-key field plus `lifecycle` and `status`.
 - "Save this feature idea" -> `add_plan_item(...)`; use explicit `triage` for a horizon or hierarchy change, never infer it from elapsed time — a stated outcome is evidence, the clock is not.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the installed Exomem HTTP app without OAuth for transport E2E.
+"""Run the installed Evermatter HTTP app without OAuth for transport E2E.
 
 REST remains bearer-authenticated through EXOMEM_REST_API_KEY. OAuth itself is
 covered separately; this runner isolates MCP initialization and app lifespan

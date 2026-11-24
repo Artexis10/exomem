@@ -250,3 +250,26 @@ def test_a_view_deleted_again_after_the_store_restored_it_is_restored_again(idle
         release_on_idle(manager)
         view.unlink()
         _until(view.exists)
+
+
+def test_an_index_build_on_a_released_store_keeps_its_lists_and_takes_no_lease(idle_service, monkeypatch):
+    """Recall's index build reads the store's collections from a thread of its own. Queued on the store thread,
+    it would open a released store and take the lease back, so a holder that is not preferred would keep taking
+    writer authority from the one that is. Failing instead would stop the whole index until a writer opened."""
+    from test_collection_store_service import _built_on_a_thread_of_its_own
+
+    from exomem import working_set_index
+
+    root, manager = idle_service.root, idle_service.manager
+    # The manager reports admission before the store thread has opened its writer, which a read beside needs.
+    _until(lambda: runtime.writer_admitted(root))
+    assert manifest_path() in _built_on_a_thread_of_its_own(root, "while-admitted")
+    grants, _ticks = watching(monkeypatch, manager)
+    release_on_idle(manager)
+    granted = len(grants)
+
+    anchored = _built_on_a_thread_of_its_own(root, "after-idle")
+
+    assert manifest_path() in anchored
+    assert working_set_index.WorkingSetIndex(root).freshness_stamp() == "after-idle"
+    assert manager._fencing_token is None and len(grants) == granted

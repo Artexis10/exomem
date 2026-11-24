@@ -1,4 +1,4 @@
-"""Process-safe, re-entrant serialization for one Exomem vault.
+"""Process-safe, re-entrant serialization for one Evermatter vault.
 
 The lock file is runtime coordination state, not authority or durable vault
 content.  A process-local ``RLock`` handles threads and nested command helpers;

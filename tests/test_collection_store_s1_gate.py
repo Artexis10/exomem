@@ -50,6 +50,7 @@ from exomem.collection_store.connection import CollectionStoreError
 from exomem.collection_store.preview import preview_store
 from exomem.get_page import get_page
 from exomem.governance.principal import library_scope
+from exomem.install_info import distribution_probe
 from exomem.plan_memory import plan_memory
 from exomem.record_memory import record_memory
 from exomem.structured_collections import CollectionError
@@ -389,7 +390,7 @@ def test_custody_lost_after_admission_refuses_the_next_publication(abc):
 
 def _older():
     assert OLDER, "the gate runner provides EXOMEM_TEST_OLDER_READER_PYTHON"
-    return subprocess.run([OLDER, "-I", "-c", "from importlib.metadata import version; print(version('exomem'))"],
+    return subprocess.run([OLDER, "-I", "-c", distribution_probe("release") + "print(release)"],
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
@@ -1707,9 +1708,9 @@ def test_launcher_refuses_the_release_one_store_schema_back_before_handoff(abc, 
     from exomem.service_manager import WorkerRuntime
 
     assert PREVIOUS, "the gate runner provides EXOMEM_TEST_PREVIOUS_SCHEMA_PYTHON"
-    probe = subprocess.run([PREVIOUS, "-I", "-c", "import json; from importlib.metadata import version; "
-        "from exomem.state_migration import supported_state_compatibility_ids; "
-        "print(json.dumps([version('exomem'), supported_state_compatibility_ids()]))"],
+    probe = subprocess.run([PREVIOUS, "-I", "-c", "import json\n" + distribution_probe("release")
+        + "from exomem.state_migration import supported_state_compatibility_ids\n"
+        "print(json.dumps([release, supported_state_compatibility_ids()]))"],
         capture_output=True, text=True, check=True)
     version, supported = json.loads(probe.stdout)
     *earlier, current = schema.compatibility_ids()

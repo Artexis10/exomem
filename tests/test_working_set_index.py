@@ -219,7 +219,7 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
         "_walk_page_entries",
         lambda vault_root, **_kwargs: ([r0_dup, r1, r2], outbound, names, project_members),
     )
-    monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
+    monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root, **_: ([], []))
     monkeypatch.setattr(
         working_set_index, "_project_candidates", lambda vault_root, member_paths, **kwargs: ([], {})
     )

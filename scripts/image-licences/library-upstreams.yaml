@@ -1,0 +1,213 @@
+# Upstream project and licence of each shared library in a published image that no
+# package manager owns: libraries bundled inside Python wheels, and libraries the
+# image build adds. scripts/image-library-inventory.py reads this file. A library the
+# file does not name renders as UNMAPPED in docs/licensing/image-shared-libraries.md,
+# so a new bundled library cannot enter an image unrecorded.
+#
+# `class` is one of the closed set that the script declares:
+#   permissive, public-domain, weak-copyleft (LGPL, CDDL: a separate, replaceable
+#   shared object may ship), linking-exception (GPL with the GCC runtime exception),
+#   strong-copyleft (GPL, AGPL), proprietary.
+# A licence offered as a choice (an `OR` in `licence`) names the licence elected in
+# `elected`, and the script refuses an entry that does not.
+#
+# `evidence` is a licence file that the wheel ships (its name under `licenses/`, in the
+# `.dist-info` directory, or at the top of a package directory that the wheel's RECORD
+# lists) and that states the library's licence. `none` means the wheel ships no licence
+# text for the library, and the licence is the upstream project's published licence,
+# read on 2026-11-23 and not checked against the binary. An entry that cites a banner
+# string or a configure line read from the binary says so.
+# A library named `"*"` covers every shared object of that wheel that no other entry
+# names. `licence: declared` takes the licence that the wheel's own metadata declares.
+
+wheels:
+  numpy:
+    evidence: LICENSE.txt
+    libraries:
+      libscipy_openblas64_: {upstream: OpenBLAS with LAPACK, licence: BSD-3-Clause AND BSD-3-Clause-Open-MPI, class: permissive}
+      libgfortran: {upstream: GCC runtime library (libgfortran), licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception}
+      libquadmath: {upstream: GCC runtime library (libquadmath), licence: LGPL-2.1-or-later, class: weak-copyleft}
+  scipy:
+    evidence: LICENSE.txt
+    libraries:
+      libscipy_openblas: {upstream: OpenBLAS with LAPACK, licence: BSD-3-Clause AND BSD-3-Clause-Open-MPI, class: permissive}
+      libgfortran: {upstream: GCC runtime library (libgfortran), licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception}
+      libquadmath: {upstream: GCC runtime library (libquadmath), licence: LGPL-2.1-or-later, class: weak-copyleft}
+  scikit-learn:
+    evidence: COPYING
+    libraries:
+      libgomp: {upstream: GCC runtime library (libgomp), licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception}
+  ijson:
+    evidence: LICENSE.txt
+    libraries:
+      libyajl: {upstream: YAJL, licence: ISC, class: permissive}
+  onnxruntime:
+    evidence: LICENSE
+    libraries:
+      libonnxruntime: {upstream: ONNX Runtime, licence: MIT, class: permissive}
+      libonnxruntime_providers_shared: {upstream: ONNX Runtime, licence: MIT, class: permissive}
+  sqlite-vec:
+    evidence: none
+    libraries:
+      vec0: {upstream: sqlite-vec (a SQLite loadable extension), licence: MIT OR Apache-2.0, elected: MIT, class: permissive}
+  pillow:
+    evidence: LICENSE
+    libraries:
+      libavif: {upstream: libavif (with AOM), licence: BSD-2-Clause, class: permissive}
+      libbrotlicommon: {upstream: Brotli, licence: MIT, class: permissive}
+      libbrotlidec: {upstream: Brotli, licence: MIT, class: permissive}
+      libfreetype: {upstream: FreeType, licence: FTL OR GPL-2.0-or-later, elected: FTL, class: permissive}
+      libharfbuzz: {upstream: HarfBuzz, licence: MIT, class: permissive}
+      libjpeg: {upstream: libjpeg-turbo, licence: IJG AND BSD-3-Clause AND Zlib, class: permissive}
+      liblcms2: {upstream: Little CMS 2, licence: MIT, class: permissive}
+      liblzma: {upstream: XZ Utils (liblzma), licence: 0BSD, class: permissive}
+      libopenjp2: {upstream: OpenJPEG, licence: BSD-2-Clause, class: permissive}
+      libpng16: {upstream: libpng, licence: libpng-2.0, class: permissive}
+      libsharpyuv: {upstream: libwebp (libsharpyuv), licence: BSD-3-Clause, class: permissive}
+      libtiff: {upstream: libtiff, licence: libtiff, class: permissive}
+      libwebp: {upstream: libwebp, licence: BSD-3-Clause, class: permissive}
+      libwebpdemux: {upstream: libwebp, licence: BSD-3-Clause, class: permissive}
+      libwebpmux: {upstream: libwebp, licence: BSD-3-Clause, class: permissive}
+      libzstd: {upstream: Zstandard, licence: BSD-3-Clause OR GPL-2.0-only, elected: BSD-3-Clause, class: permissive}
+      libxcb: {upstream: libxcb (X.Org), licence: MIT, class: permissive}
+      libXau: {upstream: libXau (X.Org), licence: MIT, class: permissive}
+  rawpy:
+    evidence: LICENSE.LibRaw
+    libraries:
+      libraw_r: {upstream: LibRaw, licence: LGPL-2.1-only OR CDDL-1.0, elected: LGPL-2.1-only, class: weak-copyleft}
+      libgomp: {upstream: GCC runtime library (libgomp), licence: GPL-3.0-or-later WITH GCC-exception-3.1, evidence: none, class: linking-exception}
+      libjasper: {upstream: JasPer, licence: JasPer-2.0, evidence: none, class: permissive}
+      libjpeg: {upstream: libjpeg-turbo, licence: IJG AND BSD-3-Clause AND Zlib, evidence: none, class: permissive}
+      liblcms2: {upstream: Little CMS 2, licence: MIT, evidence: none, class: permissive}
+  pypdfium2:
+    evidence: pdfium.txt
+    libraries:
+      libpdfium: {upstream: PDFium (binary build by pdfium-binaries), licence: BSD-3-Clause AND Apache-2.0 with the dependency licences that the wheel lists in BUILD_LICENSES, class: permissive}
+  pi-heif:
+    evidence: LICENSES_bundled.txt
+    libraries:
+      libheif: {upstream: libheif, licence: LGPL-3.0 (the wheel states LGPLv3), class: weak-copyleft}
+      libde265: {upstream: libde265, licence: LGPL-3.0 (the wheel states LGPLv3), class: weak-copyleft}
+  torch:
+    evidence: LICENSE
+    libraries:
+      "*": {upstream: PyTorch, licence: declared, class: permissive}
+      libgomp: {upstream: GCC runtime library (libgomp), licence: GPL-3.0-or-later WITH GCC-exception-3.1, evidence: none, class: linking-exception}
+      libgfortran: {upstream: GCC runtime library (libgfortran), licence: GPL-3.0-or-later WITH GCC-exception-3.1, evidence: none, class: linking-exception}
+      libopenblas: {upstream: OpenBLAS, licence: BSD-3-Clause, evidence: none, class: permissive}
+      libarm_compute: {upstream: Arm Compute Library, licence: MIT, evidence: none, class: permissive}
+      libarm_compute_graph: {upstream: Arm Compute Library, licence: MIT, evidence: none, class: permissive}
+  triton:
+    evidence: LICENSE
+    libraries:
+      "*": {upstream: Triton, licence: declared, class: permissive}
+      libcupti: {upstream: NVIDIA CUPTI, licence: LicenseRef-NVIDIA-Proprietary, evidence: none, class: proprietary}
+      libcheckpoint: {upstream: NVIDIA CUPTI, licence: LicenseRef-NVIDIA-Proprietary, evidence: none, class: proprietary}
+      libnvperf_host: {upstream: NVIDIA CUPTI, licence: LicenseRef-NVIDIA-Proprietary, evidence: none, class: proprietary}
+      libnvperf_target: {upstream: NVIDIA CUPTI, licence: LicenseRef-NVIDIA-Proprietary, evidence: none, class: proprietary}
+      libpcsamplingutil: {upstream: NVIDIA CUPTI, licence: LicenseRef-NVIDIA-Proprietary, evidence: none, class: proprietary}
+  # NVIDIA CUDA runtime wheels, installed for torch in the cuda image. Each declares
+  # LicenseRef-NVIDIA-Proprietary and ships the NVIDIA End User License Agreement.
+  nvidia-cublas: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuBLAS, licence: declared, class: proprietary}}}
+  nvidia-cuda-cupti: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA CUPTI, licence: declared, class: proprietary}}}
+  nvidia-cuda-nvrtc: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA NVRTC, licence: declared, class: proprietary}}}
+  nvidia-cuda-runtime: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA CUDA runtime, licence: declared, class: proprietary}}}
+  nvidia-cudnn-cu13: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuDNN, licence: declared, class: proprietary}}}
+  nvidia-cufft: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuFFT, licence: declared, class: proprietary}}}
+  nvidia-cufile: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuFile, licence: declared, class: proprietary}}}
+  nvidia-cusolver: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuSOLVER, licence: declared, class: proprietary}}}
+  nvidia-cusparse: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA cuSPARSE, licence: declared, class: proprietary}}}
+  nvidia-cusparselt-cu13: {evidence: none, libraries: {"*": {upstream: NVIDIA cuSPARSELt, licence: declared, class: proprietary}}}
+  nvidia-nccl-cu13: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA NCCL, licence: declared, class: proprietary}}}
+  nvidia-nvjitlink: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA nvJitLink, licence: declared, class: proprietary}}}
+  nvidia-nvshmem-cu13: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA NVSHMEM, licence: declared, class: proprietary}}}
+  nvidia-nvtx: {evidence: License.txt, libraries: {"*": {upstream: NVIDIA NVTX, licence: declared, class: proprietary}}}
+
+  # Removed from the images by the licence work. They stay here so a scan of an older
+  # release still renders: the released v0.200.0 images carry them.
+  pymupdf:
+    evidence: COPYING
+    libraries:
+      "*": {upstream: PyMuPDF with MuPDF, licence: AGPL-3.0-only OR Artifex Commercial License, elected: AGPL-3.0-only, class: strong-copyleft}
+  pillow-heif:
+    evidence: LICENSES_bundled.txt
+    libraries:
+      libheif: {upstream: libheif, licence: LGPL-3.0 (the wheel states LGPLv3), class: weak-copyleft}
+      libde265: {upstream: libde265, licence: LGPL-3.0 (the wheel states LGPLv3), class: weak-copyleft}
+      libx265: {upstream: x265, licence: GPL-2.0 (the wheel states GPLv2), class: strong-copyleft}
+  # av 18.1.0 (cp311-abi3, manylinux_2_28, x86_64 and aarch64), read from the PyPI wheels
+  # that the lock pins, on 2026-11-23. Both are configured with --enable-version3,
+  # --enable-libx264 and --enable-libx265, without --enable-gpl, and each FFmpeg library's
+  # own banner reads "LGPL version 3 or later". `readelf -d` shows that only libavcodec
+  # loads libx264 and libx265, which are GPL, so libavcodec is the strong-copyleft library.
+  # libavformat, libavfilter and libavdevice load libavcodec and no GPL library of their own,
+  # so each stays weak-copyleft. The GPL enters through libavcodec only. The wheel ships no
+  # FFmpeg licence text.
+  av:
+    evidence: none
+    libraries:
+      libavcodec: {upstream: FFmpeg, licence: "LGPL-3.0-or-later by its own banner; it loads libx264 and libx265 (GPL-2.0-or-later)", class: strong-copyleft}
+      libavdevice: {upstream: FFmpeg, licence: "LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own", class: weak-copyleft}
+      libavfilter: {upstream: FFmpeg, licence: "LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own", class: weak-copyleft}
+      libavformat: {upstream: FFmpeg, licence: "LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own", class: weak-copyleft}
+      libavutil: {upstream: FFmpeg, licence: LGPL-3.0-or-later by its own banner, class: weak-copyleft}
+      libswresample: {upstream: FFmpeg, licence: LGPL-3.0-or-later by its own banner, class: weak-copyleft}
+      libswscale: {upstream: FFmpeg, licence: LGPL-3.0-or-later by its own banner, class: weak-copyleft}
+      libx264: {upstream: x264, licence: GPL-2.0-or-later, class: strong-copyleft}
+      libx265: {upstream: x265, licence: GPL-2.0-or-later, class: strong-copyleft}
+      libSvtAv1Enc: {upstream: SVT-AV1, licence: BSD-3-Clause-Clear, class: permissive}
+      libdav1d: {upstream: dav1d, licence: BSD-2-Clause, class: permissive}
+      libvpx: {upstream: libvpx, licence: BSD-3-Clause, class: permissive}
+      libopus: {upstream: Opus, licence: BSD-3-Clause, class: permissive}
+      libmp3lame: {upstream: LAME, licence: LGPL-2.0-or-later, class: weak-copyleft}
+      libopencore-amrnb: {upstream: OpenCORE AMR, licence: Apache-2.0, class: permissive}
+      libopencore-amrwb: {upstream: OpenCORE AMR, licence: Apache-2.0, class: permissive}
+      libwebp: {upstream: libwebp, licence: BSD-3-Clause, class: permissive}
+      libwebpmux: {upstream: libwebp, licence: BSD-3-Clause, class: permissive}
+      libsharpyuv: {upstream: libwebp (libsharpyuv), licence: BSD-3-Clause, class: permissive}
+      libgnutls: {upstream: GnuTLS, licence: LGPL-2.1-or-later, class: weak-copyleft}
+      libnettle: {upstream: Nettle, licence: LGPL-3.0-or-later OR GPL-2.0-or-later, elected: LGPL-3.0-or-later, class: weak-copyleft}
+      libhogweed: {upstream: Nettle (Hogweed), licence: LGPL-3.0-or-later OR GPL-2.0-or-later, elected: LGPL-3.0-or-later, class: weak-copyleft}
+      libgmp: {upstream: GMP, licence: LGPL-3.0-or-later OR GPL-2.0-or-later, elected: LGPL-3.0-or-later, class: weak-copyleft}
+      libunistring: {upstream: libunistring, licence: LGPL-3.0-or-later OR GPL-2.0-or-later, elected: LGPL-3.0-or-later, class: weak-copyleft}
+      libasound: {upstream: ALSA library, licence: LGPL-2.1-or-later, class: weak-copyleft}
+      libdrm: {upstream: libdrm, licence: MIT, class: permissive}
+      libvpl: {upstream: oneVPL, licence: MIT, class: permissive}
+      libxcb: {upstream: libxcb (X.Org), licence: MIT, class: permissive}
+      libxcb-shape: {upstream: libxcb (X.Org), licence: MIT, class: permissive}
+      libxcb-shm: {upstream: libxcb (X.Org), licence: MIT, class: permissive}
+      libxcb-xfixes: {upstream: libxcb (X.Org), licence: MIT, class: permissive}
+      libXau: {upstream: libXau (X.Org), licence: MIT, class: permissive}
+
+# Libraries outside both a package manager and a wheel. The key is the library's stem.
+# `evidence` is the file in the image that states the licence.
+other_libraries:
+  - {stem: libpython3.12, upstream: CPython, licence: PSF-2.0, class: permissive, evidence: /usr/local/lib/python3.12/LICENSE.txt}
+  - {stem: libpython3, upstream: CPython, licence: PSF-2.0, class: permissive, evidence: /usr/local/lib/python3.12/LICENSE.txt}
+  - {stem: libavcodec, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libavdevice, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libavfilter, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libavformat, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libavutil, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libswresample, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+  - {stem: libswscale, upstream: FFmpeg (built by this image in its LGPL configuration), licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1}
+
+# Operating-system packages for which trivy reads no licence, because the Debian
+# copyright file states it as free text instead of `License:` fields. `evidence` is the
+# copyright file in the image that states the licence. A package that this list omits
+# renders as `none read`; none of those copyright files names a GPL or LGPL licence.
+operating_system:
+  - {package: libgcc-s1, licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception, evidence: /usr/share/doc/gcc-14-base/copyright}
+  - {package: libstdc++6, licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception, evidence: /usr/share/doc/gcc-14-base/copyright}
+  - {package: libgomp1, licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception, evidence: /usr/share/doc/gcc-14-base/copyright}
+  - {package: libatomic1, licence: GPL-3.0-or-later WITH GCC-exception-3.1, class: linking-exception, evidence: /usr/share/doc/gcc-14-base/copyright}
+  - {package: libcrypt1, licence: LGPL-2.1-or-later, class: weak-copyleft, evidence: /usr/share/doc/libcrypt1/copyright}
+  - {package: libncursesw6, licence: X11 (MIT-style permission notice), class: permissive, evidence: /usr/share/doc/libtinfo6/copyright}
+  - {package: libleptonica6, licence: BSD-style redistribution notice, class: permissive, evidence: /usr/share/doc/libleptonica6/copyright}
+  - {package: libpixman-1-0, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libpixman-1-0/copyright}
+  - {package: libx11-6, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libx11-6/copyright}
+  - {package: libx11-data, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libx11-data/copyright}
+  - {package: libxcb1, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libxcb1/copyright}
+  - {package: libxcb-render0, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libxcb-render0/copyright}
+  - {package: libxcb-shm0, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libxcb-shm0/copyright}
+  - {package: libxext6, licence: MIT-style permission notice, class: permissive, evidence: /usr/share/doc/libxext6/copyright}

@@ -31,6 +31,7 @@ from mcp import ClientSession
 from mcp.client.auth import OAuthClientProvider
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.exceptions import McpError
 
 from .http import Resolver
 from .substrate import MCP_URL, OAUTH_CLIENT_ID, PUBLIC_BASE_URL
@@ -144,6 +145,52 @@ def _error_code(response: httpx.Response) -> str:
     return str(error or body.get("code") if isinstance(body, dict) else body)[:200]
 
 
+async def read_refusal_body(response: httpx.Response) -> None:
+    """A response hook: reads a refusal's body while its stream is open. The SDK raises on the status alone,
+    so without this a call that the gateway refused could not say why (RATE_LIMITED, CELL_NOT_READY, ...)."""
+
+    if response.is_error:
+        await response.aread()
+
+
+def refusal_text(error: BaseException) -> str | None:
+    """What a refused call says, with the error code from the gateway's body, or None for any other error."""
+
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    try:
+        code = _error_code(error.response)
+    except httpx.ResponseNotRead:
+        code = "<body not read>"
+    return f"HTTP {error.response.status_code} {code}"
+
+
+# How much of a refused call's response body a report keeps.
+BODY_EXCERPT_BYTES = 120
+
+
+def refusal_excerpt(error: BaseException) -> str | None:
+    """The start of a refused call's response body, or None when the error has no body that was read.
+
+    `refusal_text` names the gateway's JSON error code and calls anything else "<non-JSON body>", which hid a
+    proxy's plain-text "Bad Gateway". An empty body is "", so it stays apart from a missing body."""
+
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None
+    try:
+        raw = error.response.content
+    except httpx.ResponseNotRead:
+        return None
+    return raw[:BODY_EXCERPT_BYTES].decode("utf-8", errors="replace")
+
+
+def session_gone(error: BaseException) -> bool:
+    """The server no longer knows the session (HTTP 404 on its id), so a client initializes a fresh session and
+    repeats the call. The SDK answers that status with this fixed message instead of an HTTP error."""
+
+    return isinstance(error, McpError) and error.error.message == "Session terminated"
+
+
 @dataclass
 class _Storage:
     client_info: OAuthClientInformationFull
@@ -224,7 +271,7 @@ class TenantClient:
         return OAuthClientProvider(
             server_url=MCP_URL,
             client_metadata=OAuthClientMetadata(
-                client_name="Exomem Cloud rehearsal",
+                client_name="Evermatter Cloud rehearsal",
                 redirect_uris=[self.redirect_uri],
                 grant_types=["authorization_code", "refresh_token"],
                 response_types=["code"],
@@ -245,7 +292,8 @@ class TenantClient:
 
         if self._http is None or self._http.is_closed:
             self._http = self.resolver.async_client(
-                auth=self._auth(), timeout=httpx.Timeout(120.0), event_hooks={"request": [self._observe_token_request]}
+                auth=self._auth(), timeout=httpx.Timeout(120.0),
+                event_hooks={"request": [self._observe_token_request], "response": [read_refusal_body]},
             )
         return self._http
 

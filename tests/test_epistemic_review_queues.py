@@ -318,6 +318,10 @@ def test_default_attention_union_is_pinned() -> None:
 
     `ownership_review` joins last by the add-ownership-review contract: a backlog whose
     intake the daily rotation bounds, shown to a client that names no category.
+
+    `name_drift` joins after it by the align-names-with-titles `attention-queue` delta: one
+    item for the whole vault, whose call renames the next batch, so it adds one row however
+    many names drifted. A stale name is housekeeping, so it sits below a page's home.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -336,6 +340,7 @@ def test_default_attention_union_is_pinned() -> None:
         "original_fixity",
         "source_identity_conflict",
         "ownership_review",
+        "name_drift",
     )
 
 

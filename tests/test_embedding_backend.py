@@ -28,7 +28,7 @@ EQUIVALENCE_TEXTS = [
     " ",
     "a",
     "The mitochondrion is the powerhouse of the cell.",
-    "Exomem is a governed long-term memory store for durable conclusions.",
+    "Evermatter is a governed long-term memory store for durable conclusions.",
     "  leading and trailing whitespace  ",
     "Ünïcödé ñoñ-ÄSCII — em-dash, curly ’quotes‘, and 中文字符 mixed in.",
     "🧠🔬 emoji only 🚀",

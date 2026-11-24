@@ -1,6 +1,6 @@
 name: Cloud images
 
-# Every release publishes the Exomem Cloud cell and cellctl images for
+# Every release publishes the Evermatter Cloud cell and cellctl images for
 # linux/amd64 and linux/arm64 (release-please.yml, build-cloud-images). This
 # workflow builds both images natively on each architecture and runs them, so a
 # binary fetched for the wrong architecture, or a dependency with no build for
@@ -18,6 +18,9 @@ on:
       - "infra/cellctl/uv.lock"
       - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
+      - "scripts/check-image-licences.sh"
+      - "scripts/ci-install-trivy.sh"
+      - "scripts/image-licences/**"
       - "scripts/check-media-samples.py"
       - "tests/fixtures/media-samples/**"
       - ".github/workflows/cloud-images.yml"
@@ -34,6 +37,9 @@ on:
       - "infra/cellctl/uv.lock"
       - "infra/cellctl/src/**"
       - "tests/test_cloud_image_container.py"
+      - "scripts/check-image-licences.sh"
+      - "scripts/ci-install-trivy.sh"
+      - "scripts/image-licences/**"
       - "scripts/check-media-samples.py"
       - "tests/fixtures/media-samples/**"
       - ".github/workflows/cloud-images.yml"
@@ -83,7 +89,7 @@ jobs:
           test "$(docker image inspect --format '{{.Architecture}}' exomem:cloud-smoke)" = "${{ matrix.arch }}"
       - name: restic runs in the Cloud cell image
         run: docker run --rm --network=none --read-only --entrypoint restic exomem:cloud-smoke version
-      - name: The Exomem CLI identifies itself in Cloud mode
+      - name: The Evermatter CLI identifies itself in Cloud mode
         run: docker run --rm --network=none --read-only -e EXOMEM_CLOUD_CELL=1 exomem:cloud-smoke --version
       # Cell init, then create_note and search_memory over MCP HTTP with the cell
       # bearer, under a read-only root, UID 10001 and no capabilities. The test
@@ -101,6 +107,12 @@ jobs:
             exit 1
           fi
 
+      # Release builds run the same check on the pushed digests (release-please.yml).
+      - name: Install the pinned trivy
+        run: scripts/ci-install-trivy.sh
+      - name: The Cloud cell image has no GPL-only or AGPL-only Python distribution
+        run: scripts/check-image-licences.sh exomem:cloud-smoke
+
       - name: Build the cellctl image for this runner's architecture
         run: |
           docker build --tag exomem-cellctl:smoke infra/cellctl
@@ -110,3 +122,5 @@ jobs:
         run: |
           docker run --rm --network=none --read-only --entrypoint python3 exomem-cellctl:smoke \
             -c "import asyncpg, cryptography.hazmat.bindings._rust, cellctl.main"
+      - name: The cellctl image has no GPL-only or AGPL-only Python distribution
+        run: scripts/check-image-licences.sh exomem-cellctl:smoke

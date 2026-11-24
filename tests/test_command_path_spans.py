@@ -143,7 +143,7 @@ def test_an_encode_names_the_module_that_asked_and_separates_waiting(
     monkeypatch.setattr(recall_space, "_previous_gate", lambda: SimpleNamespace(
         admission=contextlib.nullcontext, execution=execution,
     ))
-    # A caller whose frame belongs to an Exomem module, without importing one
+    # A caller whose frame belongs to an Evermatter module, without importing one
     # that would need a model: the attribution reads the frame's module name.
     namespace = {"__name__": "exomem.context_pack", "embeddings": embeddings}
     exec("def ask():\n    return embeddings.embed_texts(['a', 'ccc', 'bb'])\n", namespace)

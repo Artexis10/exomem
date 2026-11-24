@@ -60,8 +60,8 @@ Each run acts only on the newest published release. Steps:
 
 1. Read the cell image digest that the newest release published.
 2. Verify the digest's attestation with `gh attestation verify`. The signer must be this repository's release workflow, on the release tag. This is the identity that the deploy tier checks (`make-cloud-cells-operator-resistant` D6).
-3. Read the rollout view. If its `cell_image` equals the digest, set nothing and succeed.
-4. If the rollout is paused, set nothing, and fail with the pause's error code (D8).
+3. Read the rollout view. If the rollout is paused, set nothing, and fail with the pause's error code (D8). A re-run for the release that the rollout paused on fails too.
+4. If the view's `cell_image` equals the digest, or its `release` equals the tag, set nothing and succeed.
 5. Apply the platform gate (D2) and the barrier check (D3).
 6. Send `PUT cloud-release` with `{cellImage, release}`, where `release` is the verified tag. If Substrate answers `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER`, the release is not newer than the fleet. The run then sets nothing, logs the code and succeeds.
 7. Poll the rollout view until its `canary_on_target` is true, which means that the canary runs the target and is Ready. Fail on a pause or on the poll timeout.
@@ -311,6 +311,23 @@ This is the core of a seamless upgrade. It lives in Substrate's cloud handler, b
 - `EXOMEM_CLOUD_CONNECT_TIMEOUT_MS` bounds each connect attempt.
 - `EXOMEM_CLOUD_UPSTREAM_TIMEOUT_SECONDS` bounds the time from the first forwarded byte to the response headers. When it runs out, the gateway answers `504 CELL_TIMEOUT` and frees its slot.
 - Stateless FastMCP answers with SSE, so headers arrive early. `EXOMEM_CLOUD_UPSTREAM_IDLE_SECONDS` therefore bounds the gap between response body chunks. When it runs out, the gateway closes the stream and frees its slot. Its value stays above the longest tool call that task 1.4 records.
+- Traefik closes an idle connection to the gateway after `cloudIngress.gatewayIdleConnTimeout`, 4 s, before the gateway's Node server closes it at 5 s plus a 1 s buffer. Otherwise Traefik can send a POST on a connection the gateway has closed, and the client gets Traefik's plain `502`. A local repro on the same Traefik and Node images answered 6 of 80 such POSTs with `502`, and 0 of 80 with the 4 s timeout.
+- A cell that stops for an attempt refuses new connections, which the gateway holds. It finishes the tool calls already in flight within uvicorn's graceful timeout (FastMCP's 2 s). Without this, sse-starlette ended every open event stream at SIGTERM. The gateway had already written the response headers, so it closed the connection, and Traefik answered `502`. Rehearsal run 43780052934 hit this at the canary's stop and at cell B's stop, each within 2 s of the hold. The single `502` in run 43770645662 has the same signature. A call written on a keep-alive connection at the instant the cell closes it still gets `503 CELL_NOT_READY`, because the gateway never resends a request the cell may have read.
+
+**Client limits (task 1.4, 2026-11-15).** A local stand-in held each `tools/call` with no response bytes for 10, 30, 45, 60 and 120 s. A second run answered the first `tools/call` with `503` and `Retry-After: 2`. The measurements ran by hand; the stand-in and its output are not in the repository.
+
+| Client | Answers a held call through | Gives up at | Retries a `503` with `Retry-After` | Source |
+|---|---|---|---|---|
+| Claude Code 2.1.325 | 10, 30 and 45 s | 60 s ("The operation timed out.") | No. It sends one request, and the agent sees the error. | Measured. The documented first-byte limit for HTTP servers is 60 s. |
+| Codex CLI 0.169.0 | 10, 30, 45, 60 and 120 s | Not reached at 120 s | No. It sends one request, and the agent sees the error. | Measured. The docs say 60 s (`tool_timeout_sec`), the source 300 s. |
+| claude.ai connectors | Not measured | 240 s per tool call | Not documented | Documented, not measured |
+| ChatGPT connectors | Not measured | Not documented | Not documented | Documented, not measured |
+
+- The shortest limit is 60 s, so the 40 s budget leaves about 20 s for the cell to send its first response byte after the hold.
+- No measured client retries a `503`, so a hold that runs out reaches the agent as an error. The budget therefore matters more than `Retry-After`.
+- With a 40 s budget, every held call in the cloud-rehearsal `release` mode reached its restarted cell. Run 43759488588 made 1,058 calls through three switches, with no error and a longest wait of 34.5 s. Run 43794420561 made 1,052, with no error and longest waits of 32.9, 38.5 and 40.3 s.
+- The 40.3 s call reached its cell at the end of the hold. A cell that restarts more slowly than the rehearsal's gives its held calls the `503`. Task 2.2's production stop figures decide whether the budget needs to grow toward the 60 s client limit.
+- That 40.3 s call is the longest tool call the rehearsal recorded, and the hold took most of it. Calls outside a hold answered with a p95 of 0.15 s. The idle bound, `cloudGateway.upstream.idleSeconds`, defaults to 600 s, above both. A tool that runs longer needs its own figure before anyone lowers the bound.
 
 **Home.** Home shows `504 CELL_TIMEOUT` with its existing cell-unavailable message. A `503 CELL_NOT_READY` after a hold reads as today's.
 
@@ -414,7 +431,7 @@ The command reads the live release from Helm's release metadata, not from the pl
 - A pass that could not observe every cell sends no transition, so it resolves no alert. This is the rule of the existing alerts.
 - A person clears the pause. Neither `cellctl` nor the workflow clears it.
 
-**The workflow** also reports a pause. It fails when it finds the rollout paused (D1 step 4), or when the rollout pauses during its poll (D1 step 7). It prints only the pause's error code.
+**The workflow** also reports a pause. It fails when it finds the rollout paused (D1 step 3), or when the rollout pauses during its poll (D1 step 7). It prints only the pause's error code.
 
 ### D9. Later: prepare the cell before its stop
 

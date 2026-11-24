@@ -398,6 +398,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "media-jobs-store",
         "media-previews",
         "ownership-review",
+        "write-intake-store",
         "procedure-approval-key",
         "procedure-approvals",
         "original-pool",

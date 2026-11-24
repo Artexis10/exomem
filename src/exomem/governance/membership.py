@@ -623,7 +623,9 @@ def inheritance_edge(
     page = Path(rel_path)
     if part_of and (source := extraction_parts.source_page_for(page)) is not None:
         return InheritanceEdge(PART_EDGE, source.as_posix())
-    if parent_media is not None and page.parent == scene_frames.frames_dir_for(Path(parent_media)):
+    # A value without a file name, such as "/", names no video and so no frames folder.
+    if (parent_media is not None and (video := Path(parent_media)).name
+            and page.parent == scene_frames.frames_dir_for(video)):
         return InheritanceEdge(FRAME_EDGE, parent_media + ".md")
     return None
 

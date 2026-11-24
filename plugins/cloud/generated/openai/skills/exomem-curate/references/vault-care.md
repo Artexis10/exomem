@@ -199,7 +199,15 @@ Previews one Planning or Records collection's manifest-declared human filenames 
 
 ### curation
 
-The governed multi-step mode. The agent authors a closed typed plan from explicit context. Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
+The governed multi-step mode. The agent authors a closed typed plan from explicit context, or `relocate` derives one. Evermatter validates and fingerprints it and records one exact-plan approval (`expected_plan_fingerprint`). Each apply or resume then runs the plan's steps, one write hold per step, until the run ends or the request's time is spent. Other writes land between steps. A request that stops early answers `executing` with `progress` (steps, committed, this call), and `resume` continues the same approval. A refusal after committed steps answers `stopped` beside the progress instead of an error. Follow `next_action`: `resume` after a busy vault or run, otherwise the run's `partial` or `blocked` answer. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
+
+`relocate` moves a set of pages into one project, renames them to their titles, or both, in one reviewed plan. Pass `pages` (refs or vault paths) or one `review_ref`, and `to_project` to change project. `from_project` names the key to replace when a page carries several; `folder` names where the notes of a new key live. Evermatter derives every step:
+
+- a move, or an in-place field edit, of each page;
+- an edit of the project fields of each Source that a moved page cites;
+- closing `repoint-links` steps that rewrite links to the old paths, a few referring pages per step.
+
+A cited Source gains the new key. It loses the old key only when no page outside the set still cites it under that key. A page without a typed folder, such as an entity, stays in its own folder: it takes its title-named path there and changes its fields. The reply is a grouped summary with counts and samples, never the whole plan: show it as the preview, then approve its fingerprint with `apply`. A proposal that runs short of the request's time answers `preparing` with `progress` (steps, prepared, this call). Make the same `relocate` call again, as `next_action` says, until it seals; each call keeps the steps the earlier ones prepared. A `review_ref` batch is sized to what one plan holds, and the pages left for later are counted under `deferred_to_next_batch`. A page the lane cannot change is listed under `refused` with its code, and the other pages still seal. `propose-compensation` undoes the whole run as one plan; a project key that the run registered stays registered.
 
 Page steps cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. `move`, `delete` and `supersede` keep refusing Sources and Evidence. Two fold steps are the only way the lane retires one of their pages, and each moves bytes to the trash only after it re-checks that identical bytes are held elsewhere:
 

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from . import __version__, cuda_containment, install_info, process_memory
+from . import __version__, cuda_containment, install_info, media_types, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
 from .kbdir import managed_join, managed_root, managed_root_rel
@@ -352,7 +352,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", *media_types.PDF_READERS, "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -1549,7 +1549,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 "ordinary startup refuses until an explicit offline migration completes."
             ),
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     if migration_status != "complete":
@@ -1559,7 +1559,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "Machine-local state migration is required before startup "
             f"(manifest status: {migration_status}).",
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     return _check(
@@ -2118,7 +2118,7 @@ def _check_mps_headroom() -> DoctorCheck | None:
         "mps.headroom",
         "pass",
         "Apple Silicon MPS is available. macOS does not expose a stable non-torch "
-        "free-memory probe for Metal, so Exomem uses policy controls: lazy model "
+        "free-memory probe for Metal, so Evermatter uses policy controls: lazy model "
         "preload by default, live-write burst deferral, and explicit indexing for imports.",
         details={
             "model_preload_allowed": warmup.model_preload_allowed(mode.resolve_mode()),
@@ -4257,7 +4257,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
             _check_dependency("pillow", "media", import_name="PIL"),
-            _check_dependency("pymupdf", "media", import_name="fitz"),
+            *(_check_dependency(module, "media") for module in media_types.PDF_READERS),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),
             _check_asr_backend(),

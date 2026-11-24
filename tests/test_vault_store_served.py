@@ -31,7 +31,9 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
-from test_vault_store_bypass_writers import RAW_SOURCE
+from test_vault_store_bypass_writers import RAW_SOURCE, govern
+from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVATION_SECONDS, holds
+from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_write_path import store_rows
@@ -55,9 +57,10 @@ from exomem import (
     server_runtime,
     writer_lease,
 )
-from exomem.collection_store import runtime
+from exomem.collection_store import connection, runtime
+from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import importer, projector, read, rederive, write
+from exomem.vault_store import derivation, derive, importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
@@ -188,13 +191,410 @@ def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, se
         stored, "manage_memory_file", operation="delete", path=path, confirm=True,
         response_detail="full",
     )
-    trash_path = trashed["diagnostics"]["trash_path"]
+    # The reply acknowledges the page's derived rows, so the delete's own result is its leaf.
+    trash_path = trashed["diagnostics"]["leaf_result"]["trash_path"]
 
     recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
 
     assert recovered["path"] == path
     assert read.owned_bytes(stored, path) == body
     assert not read.page_exists(stored, trash_path)
+
+
+def test_a_governed_trash_through_the_served_door_settles_its_receipt_in_the_request(stored, service):
+    """A governed page trashed as an agent trashes it. Settled before its request derived the rows,
+    the trash found them deferred, warned that its state was not exact and left its receipt and
+    tombstone pending until a reconcile; a recovery in that state keeps the page hidden."""
+    govern(stored, BETA)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)] == ["committed"]
+
+
+def test_a_governed_trash_holds_the_boundary_no_longer_when_its_derivation_is_slow(
+    stored, service, monkeypatch
+):
+    """A governed page trashed, recovered and trashed again through the served door, the second
+    time with rows that take seconds to derive. Settled under the boundary, the trash held it for
+    those seconds; it holds it no longer, and its request still settles its receipt."""
+    govern(stored, BETA)
+    held = holds(monkeypatch)
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True, force_orphan=True)
+    quick = max(held)
+    # A governed reply withholds the trashed path; its tombstone names it.
+    [trashed] = tombstones(stored)[0]["manifest"]
+    call(stored, "manage_memory_file", operation="recover", trash_path=trashed["trash_path"])
+    held.clear()
+    delay[0] = SLOW_DERIVATION_SECONDS
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    slow = max(held)
+    assert slow - quick < HOLD_GROWTH_LIMIT_MS, (
+        f"the trash held the boundary {slow:.0f} ms with a {SLOW_DERIVATION_SECONDS:.0f} s "
+        f"derivation, against {quick:.0f} ms with an instant one"
+    )
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)][-1:] == ["committed"]
+
+
+def test_a_governed_trash_whose_rows_cannot_be_derived_says_so_in_its_reply(
+    stored, service, monkeypatch
+):
+    """A governed page trashed while its rows fail to derive. The trash settles after its terminal,
+    so a warning that the settling adds then must still reach the reply, which otherwise says
+    nothing while the content stays tombstoned."""
+    govern(stored, BETA)
+
+    def derive_paths(*arguments, **keywords):
+        raise RuntimeError("the derivation fails")
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True, response_detail="full")
+
+    assert lifecycle.TRASH_NOT_EXACT in reply["warnings"]
+    assert reply["diagnostics"]["operational"]["warnings_count"] == len(reply["warnings"])
+    assert [marker["state"] for marker in tombstones(stored)] == ["pending"]
+
+
+def test_a_full_reply_names_each_derived_component_as_its_acknowledgement_does(stored, service):
+    """A move's and a delete's full replies, as an agent reads them: the writer's index report, made
+    before the request derived the rows, named them deferred beside an acknowledgement that names
+    them completed."""
+    moved = f"{NOTES}/Beta Moved.md"
+    replies = [
+        call(stored, "manage_memory_file", operation="move", old_path=BETA, new_path=moved,
+             response_detail="full"),
+        call(stored, "manage_memory_file", operation="delete", path=moved, confirm=True,
+             force_orphan=True, response_detail="full"),
+    ]
+
+    for reply in replies:
+        acknowledged = {(item["component"], item["state"])
+                        for item in reply["diagnostics"]["derived_components"]}
+        index = reply["diagnostics"]["leaf_result"]["index"]
+        # A delete's index is one report; a move's holds one per side of the move.
+        reports = [index] if "components" in index else [*index["upsert_reports"], index["delete_report"]]
+        reported = {(item["component"], item["outcome"]) for report in reports
+                    for item in report["components"]
+                    if item["component"] in {component for component, _state in acknowledged}}
+        assert reported and reported <= acknowledged, (reported, acknowledged)
+
+
+def derived(root, seconds=60):
+    """Wait until the store thread has derived every intent that has not failed.
+
+    A served write acknowledges at its commit, and the store thread derives its rows after that,
+    so a raw read of derived rows right after a served call would race that drain. A request waits
+    for it on its own (``read.request_snapshot``); a raw read does not.
+    """
+    deadline = time.monotonic() + seconds
+    while store_rows(root, "SELECT 1 FROM store_derivation_queue WHERE failed_code IS NULL LIMIT 1"):
+        assert time.monotonic() < deadline, "the store thread derived the rows of the served writes"
+        time.sleep(0.02)
+
+
+@contextmanager
+def derivation_held(monkeypatch):
+    """Every derivation on the store thread waits until the yielded event is set (or 30 s pass)."""
+    release = threading.Event()
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        release.wait(30)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    try:
+        yield release
+    finally:
+        release.set()
+
+
+QUOKKA = {
+    "title": "Quokka census", "status": "draft", "summary": "A census finding.",
+    "content": "## Observations\n\n- [finding] The quokka population grew near [[Alpha]].\n",
+}
+
+
+def test_a_search_right_after_a_save_finds_the_page_and_the_graph_its_link(
+    stored, service, monkeypatch
+):
+    """A save that acknowledges once its page is stored, and a search that starts right after it,
+    before the store thread derived the page's rows. A search that read the rows as they stood would
+    miss the page that the person just saved, and the graph would lack its link."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 10.0)  # a loaded host derives slowly
+    reader_waits = threading.Event()
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        reader_waits.set()
+        return real_caught_up(still_held_back, seconds)
+
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        # The rows follow only once a reader waits for them: no reader can start after them.
+        reader_waits.wait(10)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    saved = call(stored, "remember", **QUOKKA, response_detail="full")
+    found = call(stored, "ask_memory", query="quokka population")
+    context = call(stored, "connect_memory", operation="context", path=saved["path"])
+
+    assert saved["diagnostics"]["operational"]["derived_sync"] == "pending"
+    assert saved["path"] in [hit["path"] for hit in found["hits"]]
+    assert "notice" not in found
+    assert f"file:{ALPHA}" in {edge["dst_key"] for edge in context["graph"]["edges"]}
+
+
+def test_a_search_that_outwaits_its_bound_says_the_rows_lag_and_a_lookup_refuses(
+    stored, service, monkeypatch
+):
+    """A save and a move whose rows the store thread derives only after a later search's wait ran
+    out. The search serves the rows it has and says that recent pages lag; a read of the saved
+    page's reference still finds it from its stored bytes, and a read of the moved page's old path
+    refuses rather than answer that no such page exists."""
+    archived = f"{NOTES}/Archive/Alpha.md"
+    with derivation_held(monkeypatch) as release:
+        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+        # An explanation keeps the search's internals, the lag figures among them.
+        found = call(stored, "ask_memory", query="quokka population", explain=True)
+        by_reference = call(stored, "read_memory", path=saved["ref"])
+        release.set()
+    derived(stored)
+    with derivation_held(monkeypatch):
+        call(stored, "manage_memory_file", operation="move", old_path=ALPHA, new_path=archived)
+        with pytest.raises(Exception) as refused:  # noqa: PT011 - the dispatcher's error type varies
+            call(stored, "read_memory", path=ALPHA)
+
+    assert saved["path"] not in [hit["path"] for hit in found["hits"]]
+    assert "not yet in the search" in found["notice"]
+    assert found["lag"]["derived_pending"] >= 1
+    assert isinstance(found["lag"]["oldest_derivation_age_seconds"], int)
+    assert saved["path"] not in json.dumps(found["lag"]) and "Quokka" not in found["notice"]
+    assert by_reference["path"] == saved["path"]
+    assert read.DERIVED_BEHIND in str(refused.value), refused.value
+    assert read.page_exists(stored, archived)
+
+
+def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):
+    """A save whose rows the store thread derives only after the next recall's wait ran out. The
+    recall cannot rank the page yet, and without the notice that a search carries it missed the
+    page in silence."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        call(stored, "remember", **QUOKKA)
+        packet = call(stored, "activate_context", turn="How did the quokka population change?")
+
+    assert "not yet in the search" in packet["notice"]
+    assert packet["lag"]["derived_pending"] >= 1
+
+
+def test_a_recall_during_the_lag_answers_whatever_its_refs_name(stored, service, monkeypatch):
+    """A recall whose conversation cites the short id of a page saved a moment ago, and a ref that
+    names no page, while the save's rows lag. A refusal for the lag inside the shared name lookup
+    made one such ref fail the whole recall."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        saved = call(stored, "remember", **QUOKKA)
+        short = call(stored, "read_memory", path=saved["path"])["id"]
+        cited = call(
+            stored, "activate_context", turn="Summarise the census.", conversation={"refs": [short]}
+        )
+        unnamed = call(
+            stored, "activate_context", turn="Summarise the census.",
+            conversation={"refs": ["A page that nobody wrote"]},
+        )
+
+    assert "not yet in the search" in cited["notice"]
+    assert "not yet in the search" in unnamed["notice"]
+
+
+def test_a_read_during_the_lag_gives_the_pages_own_id_and_that_id_names_it(
+    stored, service, monkeypatch
+):
+    """A save, a read of its page while its rows lag, and reads by the id that the read gave,
+    before and after the rows arrive. The compact save reply carries no id, so a read is how an
+    agent learns it. Taken from the rows, the read's id was one that named nothing once they
+    arrived, and the id lookup missed a page that only the store holds."""
+    with derivation_held(monkeypatch) as release:
+        saved = call(stored, "remember", **QUOKKA)
+        read_back = call(stored, "read_memory", path=saved["path"])
+        before = call(stored, "read_memory", path=read_back["id"])
+        release.set()
+    derived(stored)
+    after = call(stored, "read_memory", path=read_back["id"])
+
+    assert before["path"] == after["path"] == saved["path"]
+    assert read_back["ref"] == after["ref"]
+
+
+def test_a_write_and_a_drain_never_wait_for_rows(stored, service, monkeypatch):
+    """Two saves and a move while the rows of earlier saves are pending, then the drain of them all.
+    A write that waited for those rows would add up to the wait bound to every save in a burst, and
+    a drain that waited would wait for the rows it derives itself."""
+    waits = []
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        waits.append(threading.current_thread().name)
+        return real_caught_up(still_held_back, seconds)
+
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        call(stored, "remember", **QUOKKA)
+        call(stored, "remember", **{**QUOKKA, "title": "Second census"})
+        call(stored, "manage_memory_file", operation="move", old_path=ALPHA,
+             new_path=f"{NOTES}/Archive/Alpha.md")
+        assert store_rows(stored, "SELECT 1 FROM store_derivation_queue LIMIT 1"), (
+            "the rows must be pending for this check to mean anything"
+        )
+    derived(stored)
+
+    assert waits == []
+
+
+def test_a_reader_holds_no_store_connection_while_it_waits_for_the_rows(
+    stored, service, monkeypatch
+):
+    """A search that waits for a save's rows. Waiting inside its snapshot, it would hold a store
+    connection, and the WAL that the store thread writes behind it, for as long as it waits."""
+    open_readers: dict[int, int] = {}
+    real_reader = connection.store_reader
+
+    @contextmanager
+    def store_reader(*arguments, **keywords):
+        thread = threading.get_ident()
+        with real_reader(*arguments, **keywords) as reader:
+            open_readers[thread] = open_readers.get(thread, 0) + 1
+            try:
+                yield reader
+            finally:
+                open_readers[thread] -= 1
+
+    held_while_waiting = []
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        def look():
+            held_while_waiting.append(open_readers.get(threading.get_ident(), 0))
+            return still_held_back()
+
+        return real_caught_up(look, seconds)
+
+    monkeypatch.setattr(connection, "store_reader", store_reader)
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    with derivation_held(monkeypatch) as release:
+        call(stored, "remember", **QUOKKA)
+        threading.Timer(0.3, release.set).start()
+        call(stored, "ask_memory", query="quokka population")
+
+    assert held_while_waiting, "the search must wait for this check to mean anything"
+    assert set(held_while_waiting) == {0}, held_while_waiting
+
+
+def test_a_save_replies_before_the_store_thread_derives_its_rows(stored, service, monkeypatch):
+    """Two saves, the second with rows that take seconds to derive. Its reply came only after its
+    own derivation, so every save waited out the cost of its search and graph rows."""
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    def reply_seconds(title):
+        began = time.monotonic()
+        call(stored, "remember", **{**QUOKKA, "title": title})
+        return time.monotonic() - began
+
+    reply_seconds("Warm census")  # the first save after a start pays for warm caches
+    derived(stored)
+    quick = reply_seconds("Quick census")
+    derived(stored)
+    delay[0] = SLOW_DERIVATION_SECONDS
+    slow = reply_seconds("Slow census")
+    print(json.dumps({"quick_reply_s": round(quick, 3), "slow_derivation_reply_s": round(slow, 3)}))
+
+    assert (slow - quick) * 1000 < HOLD_GROWTH_LIMIT_MS, (
+        f"the save replied in {slow:.2f} s with a {SLOW_DERIVATION_SECONDS:.0f} s derivation, "
+        f"against {quick:.2f} s with an instant one"
+    )
+
+
+def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(
+    stored, monkeypatch, caplog
+):
+    """A store whose derivation step raises each time, as a diverged store refuses it: the store
+    thread retries once per retry delay and warns once. Kept at its first owed time, the drain ran
+    again at once, hundreds of times a second, with a traceback each time."""
+    monkeypatch.setattr(runtime, "DERIVED_RETRY_SECONDS", 0.5)
+    attempts = []
+
+    def failing(*_arguments, **_keywords):
+        attempts.append(time.monotonic())
+        raise RuntimeError("the derivation step failed")
+
+    caplog.set_level(logging.DEBUG, logger=runtime.logger.name)
+    with store_thread(stored):
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", failing)
+            derivation.owe(stored.resolve())
+            deadline = time.monotonic() + 30
+            while len(attempts) < 3:
+                assert time.monotonic() < deadline, "the store thread retried the failed drain"
+                time.sleep(0.05)
+    warned = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING and "the vault store could not advance" in record.getMessage()
+    ]
+
+    gaps = [later - earlier for earlier, later in zip(attempts[:2], attempts[1:3], strict=True)]
+    assert min(gaps) >= 0.45, gaps
+    assert len(warned) == 1
+
+
+def test_a_clean_stop_derives_the_rows_that_committed_pages_still_owe(stored, monkeypatch):
+    """A clean stop with committed pages whose rows neither their own drain nor the store thread
+    derived: the stop derives them within its bound, so none is due at the next start. The store
+    thread's own stop drain ran after the lease's handoff began, which refused it."""
+    created = [f"{NOTES}/Owed {number}.md" for number in range(3)]
+    with store_thread(stored):
+        # The thread first drains what the vault's earlier commits owe; it must be idle before these.
+        deadline = time.monotonic() + 30
+        while derivation.owed_in(stored.resolve()) is not None:
+            assert time.monotonic() < deadline, "the store thread drained what its start owed"
+            time.sleep(0.05)
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+            commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+        assert sorted(store_rows(stored, "SELECT path FROM store_derivation_queue")) == [
+            (rel,) for rel in sorted(created)
+        ]
+
+    assert store_rows(stored, "SELECT path FROM store_derivation_queue") == []
 
 
 def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(
@@ -307,13 +707,13 @@ def test_a_busy_boundary_leaves_bookkeeping_for_the_next_pass_and_logs_no_error(
     assert created not in queued(stored) and read.owned_bytes(stored, ALPHA) == edited
 
 
-def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tick(
+def test_the_media_writers_commit_in_a_served_process_beside_a_registry_tick(
     stored, service, monkeypatch
 ):
     """A media writer that a served process refuses, or whose hop waits out the mutation timeout
-    behind a registry tick that waits for a boundary another thread holds (tasks.md 2.5)."""
-    # The scheduler starts no tick while another thread holds the boundary, so a tick parks only
-    # when a holder takes it between the tick's start and its write. ``pending`` opens that gap.
+    behind a registry tick while another thread holds the boundary (tasks.md 2.5)."""
+    # A holder takes the boundary between the tick's start and its batch. ``pending`` opens that
+    # gap. The batch takes no boundary, so the writer waits only for the holder.
     started, go = threading.Event(), threading.Event()
     pending = rederive.pending
 
@@ -324,7 +724,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         return pending(*arguments)
 
     monkeypatch.setattr(rederive, "pending", gapped)
-    mutation = get_manager()._mutation_coordinator_for(stored)
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
@@ -347,10 +746,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         assert started.wait(30), "a registry tick started"
         with held_elsewhere(stored) as release:
             go.set()
-            deadline = time.monotonic() + 30
-            while not mutation.waiter_count():  # the tick waits for the boundary
-                assert time.monotonic() < deadline, "the registry tick waited for the boundary"
-                time.sleep(0.01)
             threading.Timer(hold_seconds, release.set).start()
             began = time.monotonic()
             outcome = writer_call()
@@ -436,8 +831,9 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     publish, it left its marker and retried for the life of the process."""
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     caplog.set_level(logging.INFO)
-    # File mode's debt: the repair its writes queued before the migration, and the barrier that a
-    # stopped rebuild leaves on the sidecar.
+    # File mode's debt: graph repair queued in the deferred index, as a file-mode write leaves it
+    # when migration has not drained it, and the barrier that a stopped rebuild leaves on the sidecar.
+    deferred_index.add_graph(stored, [ALPHA])
     assert deferred_index.snapshot_graph(stored, limit=8)
     epistemic_graph.EpistemicGraphIndex(stored).withdraw_availability()
     activation = server_runtime.LocalRuntimeActivation(stored, fallback_seconds=600.0)

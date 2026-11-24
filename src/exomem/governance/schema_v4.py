@@ -40,6 +40,10 @@ class ActiveTupleStale(SchemaV4Error):
     """The complete active tuple no longer matches a reviewed predecessor."""
 
 
+class ActiveStateUnreadable(SchemaV4Error):
+    """SQLite could not return the active governance state."""
+
+
 def _text(value: object, name: str, *, maximum: int = _MAX_TEXT_BYTES) -> str:
     if not isinstance(value, str) or not value:
         raise SchemaV4Error(f"{name} must be non-empty bounded text")
@@ -2194,7 +2198,9 @@ def load_active_state(
         ):
             if not hmac.compare_digest(actual.encode(), expected.encode()):
                 raise SchemaV4Error("external activation tuple does not match")
-    except (IndexError, TypeError, ValueError, sqlite3.Error, SchemaV4Error):
+    except sqlite3.Error:
+        raise ActiveStateUnreadable("governance activation state is unavailable") from None
+    except (IndexError, TypeError, ValueError, SchemaV4Error):
         raise SchemaV4Error("governance activation state is unavailable") from None
 
     return VerifiedActiveGovernanceState(

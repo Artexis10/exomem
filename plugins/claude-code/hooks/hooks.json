@@ -1,5 +1,5 @@
 {
-  "description": "Exomem capture, retrieval, and continuation hooks.",
+  "description": "Evermatter capture, retrieval, and continuation hooks.",
   "hooks": {
     "Stop": [
       {

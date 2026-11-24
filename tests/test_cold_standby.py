@@ -38,7 +38,7 @@ def _config(tmp_path: Path, *, role: str = "laptop") -> tuple[Path, dict[str, ob
             "stable_url": "https://exomem.example.test/health/ready",
             "oauth_discovery_url": "https://exomem.example.test/.well-known/oauth-authorization-server",
         },
-        "services": {"exomem": "Exomem", "cloudflared": "cloudflared"},
+        "services": {"exomem": "Evermatter", "cloudflared": "cloudflared"},
         "tunnels": {
             "local_name": f"{role}-tunnel",
             "local_id": local_tunnel_id,

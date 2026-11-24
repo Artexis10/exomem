@@ -6,7 +6,7 @@ A legacy `reclassified_from` value reads as entries older than every `moved_from
 entry and keeps its bytes. An undo removes the entry its forward move appended. A
 restricted caller's undo, which may not restore every repoint, also appends an entry
 naming the path it vacates. A page without a frontmatter block moves without lineage:
-Exomem never invents a block in a page it does not otherwise own.
+Evermatter never invents a block in a page it does not otherwise own.
 
 Lineage is the durable source of a page's prior paths. The derived `prior_paths`
 index (`memory_refs`) is refilled from these entries and the relayout record.

@@ -120,9 +120,9 @@ def test_first_run_welcome(snap_compare):
 def test_first_run_preview(snap_compare):
     async def run_before(pilot) -> None:
         await _settle(pilot)
-        await pilot.press("enter")  # 'Create a fresh vault at ~/Exomem'
+        await pilot.press("enter")  # 'Create a fresh vault at ~/Evermatter'
         await pilot.pause()
-        pilot.app.screen.query_one("#path-input").value = "~/Exomem"
+        pilot.app.screen.query_one("#path-input").value = "~/Evermatter"
         await pilot.pause()
 
     assert snap_compare(_app(_first_run_backend()), terminal_size=(80, 24), run_before=run_before)

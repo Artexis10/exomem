@@ -346,5 +346,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: live-k3s-${{ matrix.suite }}-${{ matrix.shard }}-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: ${{ runner.temp }}/live-k3s.xml
           if-no-files-found: warn

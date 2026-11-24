@@ -99,17 +99,66 @@ def _with_ancestors(taxonomy: source_taxonomy.SourceTaxonomy, touched: Sequence[
     return list(ordered)
 
 
+@dataclass(frozen=True, slots=True)
+class Reading:
+    """What one turn touches among the caller's domain profiles: their pages, the domains and the evidence read.
+
+    The profiles block and the catalogue's overflow order both start from it, so the selection runs once per request.
+    `evidence` is `semantic`, `lexical`, or `none` when no reading ran.
+    """
+
+    taxonomy: source_taxonomy.SourceTaxonomy
+    pages: tuple[ProfilePage, ...]
+    touched: tuple[str, ...]
+    evidence: str
+
+    def domains(self) -> list[str]:
+        """The touched domains, each followed by its ancestors, nearest first, once each."""
+        return _with_ancestors(self.taxonomy, self.touched)
+
+
+def read(
+    root: Path, caller: Any, *, turn: str = "", turn_vector: Any = None, catalogue: Any = None,
+    lexical: profile_selection.LexicalBasis | None = None,
+) -> Reading:
+    """The domains the turn touches: those whose profile page clears a floor in `profile_selection`.
+
+    The selection reads the turn vector the activation pass already holds and one keyword query, both restricted to
+    the caller's profile pages. The keyword query reads the catalogue at the `lexical` checkpoint the request holds;
+    with none it does not run. A domain that has no profile page is never touched.
+    """
+    own_catalogue = catalogue is None
+    catalogue = catalogue or context_catalogue.ContextCatalogue(root)
+    try:
+        taxonomy = source_taxonomy.load_taxonomy(root)
+        pages = profile_pages(root, caller, catalogue, taxonomy)
+    finally:
+        if own_catalogue:
+            catalogue.close()
+    conventions = activation_conventions.load_conventions(root).conventions
+    # The shipped conventions file always sets every limit; a missing one reads as the most restrictive value, so a
+    # broken install selects and serves nothing.
+    semantic_floor = conventions.budget("profile_semantic_floor")
+    lexical_floor = conventions.budget("profile_lexical_floor")
+    selection = profile_selection.select(
+        root, [page.path for page in pages], turn, turn_vector, restricted=caller.restricted, lexical=lexical,
+        semantic_floor=float("inf") if semantic_floor is None else semantic_floor,
+        lexical_floor=float("inf") if lexical_floor is None else lexical_floor,
+    )
+    domain_of = {page.path: page.domain for page in pages}
+    touched = list(dict.fromkeys(domain_of[path] for path in selection.pages))[: max(0, int(conventions.budget("profile_domains_max") or 0))]
+    return Reading(taxonomy, tuple(pages), tuple(touched), selection.evidence)
+
+
 def compile_block(
     root: Path, caller: Any, *, turn: str = "", turn_vector: Any = None,
     catalogue: Any = None, known_generations: Mapping[str, str] | None = None, today: date | None = None,
-    lexical: profile_selection.LexicalBasis | None = None,
+    lexical: profile_selection.LexicalBasis | None = None, reading: Reading | None = None,
 ) -> dict[str, Any]:
     """The profiles for the domains the turn touches, from admitted units only.
 
-    A domain is touched when its profile page clears a floor in `profile_selection`, which reads the turn vector
-    the activation pass already holds and one keyword query, both restricted to the caller's profile pages.
-    The keyword query reads the catalogue at the `lexical` checkpoint the request holds; with none it does not run.
-    `selection` on the block names the evidence read, so a turn without a vector shows as `lexical`.
+    The domains come from `reading`, or from one `read` of the turn when the caller holds none. `selection` on the
+    block names the evidence read, so a turn without a vector shows as `lexical`.
 
     A hidden page or unit changes no count, generation or expiry. Each profile fits whole lines within the vault's
     `budgets.domain_profile_max_chars`, and together they fit `budgets.profiles_max_chars`. The block has its own
@@ -119,38 +168,22 @@ def compile_block(
     """
     today = today or date.today()
     known = known_generations or {}
-    own_catalogue = catalogue is None
-    catalogue = catalogue or context_catalogue.ContextCatalogue(root)
-    try:
-        taxonomy = source_taxonomy.load_taxonomy(root)
-        pages = profile_pages(root, caller, catalogue, taxonomy)
-    finally:
-        if own_catalogue:
-            catalogue.close()
+    if reading is None:
+        reading = read(root, caller, turn=turn, turn_vector=turn_vector, catalogue=catalogue, lexical=lexical)
+    taxonomy, pages = reading.taxonomy, reading.pages
     by_domain: dict[str, list[ProfilePage]] = {}
     for page in pages:
         by_domain.setdefault(page.domain, []).append(page)
     conventions = activation_conventions.load_conventions(root).conventions
-    # The shipped conventions file always sets every limit; a missing one reads as the most restrictive value, so a
-    # broken install selects and serves nothing.
     each = max(0, conventions.budget("domain_profile_max_chars") or 0)
     total = max(0, conventions.budget("profiles_max_chars") or 0)
-    semantic_floor = conventions.budget("profile_semantic_floor")
-    lexical_floor = conventions.budget("profile_lexical_floor")
-    selection = profile_selection.select(
-        root, [page.path for page in pages], turn, turn_vector, restricted=caller.restricted, lexical=lexical,
-        semantic_floor=float("inf") if semantic_floor is None else semantic_floor,
-        lexical_floor=float("inf") if lexical_floor is None else lexical_floor,
-    )
-    if pages and turn.strip() and selection.evidence == profile_selection.NONE:
+    if pages and turn.strip() and reading.evidence == profile_selection.NONE:
         # Profiles exist and neither reading could run: the turn's profiles are unknown, not absent.
         block = _empty("unavailable")
         _pin(root, caller, block, [])
         return block
-    domain_of = {page.path: page.domain for page in pages}
-    touched = list(dict.fromkeys(domain_of[path] for path in selection.pages))[: max(0, int(conventions.budget("profile_domains_max") or 0))]
-    order = [domain for domain in _with_ancestors(taxonomy, touched) if domain in by_domain]
-    block = _empty(selection=selection.evidence)
+    order = [domain for domain in reading.domains() if domain in by_domain]
+    block = _empty(selection=reading.evidence)
     pinned: list[dict[str, Any]] = []
     used = 0
     stopped = False

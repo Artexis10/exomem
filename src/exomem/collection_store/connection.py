@@ -144,7 +144,7 @@ def _apply_writer_pragmas(conn: sqlite3.Connection) -> None:
     if mode is None or str(mode[0]).lower() != "wal":
         raise CollectionStoreUnavailable(
             "wal_unavailable",
-            "WAL journaling did not take effect on the state root. Keep the Exomem "
+            "WAL journaling did not take effect on the state root. Keep the Evermatter "
             "state root on a local filesystem (not a network or synced share).",
         )
     conn.execute("PRAGMA synchronous=FULL")
@@ -340,18 +340,28 @@ class WriterConnection:
     @contextmanager
     def transaction(
         self, *, resolve_divergence: bool = False, before_commit: Callable[[], None] | None = None,
+        collection_free: bool = False,
     ) -> Iterator[sqlite3.Connection]:
-        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back.
+
+        ``collection_free`` declares that the body writes only the vault store's own tables, never a row
+        that a collection's release reads, so the release cache keeps what it holds across the commit
+        (``ReleaseCache.begin``).
+        """
         from sqlalchemy.exc import DBAPIError
 
         self.require_write_authority(allow_diverged=resolve_divergence)
+        from .. import write_intake
+
+        # The store's commit gate: a queued save's replay records that it reached its commit first.
+        write_intake.mark_replay_reached_commit()
         cache = self.release_cache
         cache.check()
         try:
             self.core.begin()
         except DBAPIError as error:
             raise error.orig from error
-        cache.begin()
+        cache.begin(collection_free=collection_free)
         self._owns_transaction = True
         try:
             yield self.connection
@@ -398,20 +408,23 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
 
-    def checkpoint(self) -> bool:
+    def checkpoint(self, *, passive: bool = False) -> bool:
         """Copy every WAL commit into the store file and empty the WAL (design §11).
 
         Closing the writer does this only as the last connection: another open reader,
         even an idle one, keeps the commits in the WAL beside a store file that lacks
         them. It never waits, so a release or shutdown keeps its deadline: a reader's
         open read transaction holds the copy back at once, and it returns False with
-        every commit still in the WAL.
+        every commit still in the WAL. ``passive`` copies the commits that no reader
+        still needs and keeps the WAL file, as SQLite's own autocheckpoint does.
         """
         self.require_write_authority()
         conn = self.connection
         conn.execute("PRAGMA busy_timeout=0")
         try:
-            blocked, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            blocked, _, _ = conn.execute(
+                "PRAGMA wal_checkpoint(PASSIVE)" if passive else "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
         finally:
             conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         return blocked == 0
@@ -493,7 +506,7 @@ class SnapshotHandle:
         raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
 
     # The writer's two write entry points (``WriterConnection``), so a write refuses as designed.
-    def transaction(self, *, resolve_divergence: bool = False) -> None:
+    def transaction(self, *, resolve_divergence: bool = False, collection_free: bool = False) -> None:
         self.require_write_authority()
 
     def execute(self, statement, parameters=None) -> None:
@@ -739,7 +752,7 @@ def _recorded_version(conn: sqlite3.Connection) -> int:
     """The schema version a store records, read from ``store_meta`` alone so a head reader may ask.
 
     A lend checks this number only, where a fresh open also checks the alembic revision: a migration
-    changes both in one transaction, so only an edit from outside Exomem can set them apart.
+    changes both in one transaction, so only an edit from outside Evermatter can set them apart.
     """
     rows = conn.execute("SELECT value FROM store_meta WHERE key = ?", (schema.META_SCHEMA_VERSION,)).fetchall()
     try:

@@ -98,6 +98,8 @@ ACCESS: dict[str, Declaration] = {
     # The store route: `lease` and `store-mode` are the commands that act on a store-mode vault.
     "lease": _NONE,
     "store-mode": _NONE,
+    # Lists, shows and dismisses saves in the machine-local write-intake store, not pages.
+    "intake": _NONE,
     # Reads the governance store and its custody, not pages.
     "governance-schema status": _NONE,
     # Walks the vault's Markdown to build the catalogue that the target holds.

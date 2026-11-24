@@ -140,7 +140,7 @@ export function planBullets(totals) {
   const total = copy + existing + unsupported + junk;
   const bullets = [
     `${copy} files will be copied in`,
-    `${existing} files are already in Exomem; no copy is needed`,
+    `${existing} files are already in Evermatter; no copy is needed`,
     `${unsupported} files cannot be copied in this plan`,
     `${junk} other files will be skipped`,
     "0 files will be changed, moved, or deleted — always",
@@ -205,7 +205,7 @@ export function phaseScreen(run, astep) {
 
 const FAILURE_REASONS = {
   UNSUPPORTED_IMPORT_TYPE: "This kind of file isn't supported yet.",
-  ALREADY_GOVERNED: "Already in Exomem's library — no copy needed.",
+  ALREADY_GOVERNED: "Already in Evermatter's library — no copy needed.",
   NOT_FOUND: "This file moved or was removed after the scan.",
   SOURCE_CHANGED: "This file changed after we looked, so we left it untouched.",
   BATCH_ROLLED_BACK: "Nothing was written for this file — a safety check undid the batch.",

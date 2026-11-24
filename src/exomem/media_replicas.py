@@ -245,8 +245,8 @@ def eviction_custody_wait(
 
 
 _PROVED_EXACT_UPLOAD = _KNOWN_EXACT_UPLOAD + f" AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS}) LIMIT 1"
-_PROVED_EXACT_DECRYPT = (f"SELECT 1 FROM {_DECRYPT_PROOFS} WHERE sampled = 1 "
-                         f"AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS})")
+_KNOWN_EXACT_DECRYPT = f"SELECT 1 FROM {_DECRYPT_PROOFS} WHERE sampled = 1"
+_PROVED_EXACT_DECRYPT = _KNOWN_EXACT_DECRYPT + f" AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS})"
 _RECORD_EXACT_DECRYPT = (f"INSERT INTO {_DECRYPT_PROOFS}({_HEALTH_COLUMNS}, n, sampled) "
                          f"VALUES ({_HEALTH_PARAMETERS}, 0, 1) ON CONFLICT({_HEALTH_COLUMNS}) "
                          "DO UPDATE SET sampled = 1 WHERE sampled = 0")
@@ -465,6 +465,10 @@ def _initialize_status(conn: sqlite3.Connection, existing: set[str]) -> None:
 
 def initialize(conn: sqlite3.Connection) -> None:
     """Create the replica tables. A table created fresh clears the census, so its first rows read as unknown."""
+    from . import media_protection_budget, media_protection_work
+
+    media_protection_budget.initialize(conn)
+    media_protection_work.initialize(conn)
     existing = _status_schema(conn)
     recreated = bool(existing.intersection(_STATUS_TABLES)) and not _REPLICA_STATUS_TRIGGERS.issubset(existing)
     _initialize_export_coverage(conn, existing)
@@ -922,6 +926,60 @@ def has_quarantined(vault: Path, references: Iterable[originals.StoredObject]) -
         return quarantined_in(conn, references)
 
 
+_POLICY_KEYS = ", ".join(f"json_extract(value, '$[{index}]')" for index in range(len(_HEALTH_FIELDS)))
+_POLICY_MATCH = f" AND ({_HEALTH_COLUMNS}) = ({_health_columns('wanted.')})"
+_POLICY_CONTENT_PROOF = (
+    f"WITH wanted({_HEALTH_COLUMNS}) AS (SELECT {_POLICY_KEYS} FROM json_each(?)) "
+    f"SELECT {_health_columns('wanted.')} FROM wanted WHERE "
+    f"EXISTS ({_KNOWN_EXACT_UPLOAD}{_POLICY_MATCH}) OR EXISTS ({_KNOWN_EXACT_DECRYPT}{_POLICY_MATCH})"
+)
+
+
+def verified_for_policy(
+    conn: sqlite3.Connection, config: dict[str, object], references: Iterable[originals.StoredObject],
+) -> frozenset[originals.StoredObject]:
+    """Read exact content and recoverability evidence for one bounded set on the caller's transaction."""
+    from . import media_store
+
+    wanted = set(references)
+    if not wanted:
+        return frozenset()
+    entries = originals.store_entries(config)
+    schema = _status_schema(conn)
+    if not _STATUS_REQUIRED_SCHEMA.issubset(schema) or _census(conn) is None:
+        return frozenset()
+    exports_complete = _export_coverage_complete(conn, schema)
+    keys = json.dumps(sorted({reference.key_version for reference in wanted}))
+    exports = dict(conn.execute("SELECT key_version, confirmed_at FROM media_key_exports "
+                                "WHERE key_version IN (SELECT value FROM json_each(?))", (keys,)))
+    content = set(map(tuple, conn.execute(_POLICY_CONTENT_PROOF, (json.dumps(sorted(map(_health_key, wanted))),))))
+    damaged = set(map(tuple, conn.execute(_DAMAGED_AMONG, (_quadruples(wanted),))))
+    eligibility = {(reference.store, reference.key_version) for reference in wanted}
+    usable = {
+        (store, key) for store, key in eligibility
+        if recoverability(config, key, exports, exports_complete=exports_complete)[0] is True
+        and media_store.replica_readability(config, entries.get(store), key) is None
+    }
+    return frozenset(
+        reference for reference in wanted
+        if (reference.store, reference.key_version) in usable and _health_key(reference) in content
+        and (reference.store, reference.object, reference.version) not in damaged
+    )
+
+
+def prioritize_policy_checks(
+    conn: sqlite3.Connection, references: Iterable[tuple[str, originals.StoredObject]],
+) -> None:
+    """Make missing exact policy evidence due within the existing verification budgets."""
+    cutoff = time.time() - _CHECK_INTERVAL
+    conn.executemany(
+        f"UPDATE media_replicas SET check_from=0, sample_from=0 WHERE binary_rel=? "
+        f"AND ({_HEALTH_COLUMNS}) = ({_HEALTH_PARAMETERS}) AND state <> '{QUARANTINED}' "
+        "AND MAX(checked_at, decrypted_at)< ? AND (check_from<>0 OR sample_from<>0)",
+        ((path, *_health_key(reference), cutoff) for path, reference in references),
+    )
+
+
 def _replicas_of(snapshot: originals.OriginalSnapshot) -> Iterator[originals.StoredObject]:
     """Every replica a binding lists, the eviction store's pointer first."""
     if snapshot.reference is not None:
@@ -1093,11 +1151,13 @@ def _reachable_now(vault: Path, name: str, *, deadline: float | None = None, for
     """Wait briefly for an identity probe, leaving busy slots and other stores alone."""
     from . import media_store
 
-    timeout = media_store.STORE_PROBE_SECONDS
+    started = time.monotonic()
+    until = started + media_store.STORE_PROBE_SECONDS
     if deadline is not None:
-        timeout = min(timeout, deadline - time.monotonic())
+        until = min(until, deadline)
     try:
-        answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name), timeout=timeout)
+        answer = media_store.wait_store_read(vault, name, lambda: media_store.store_reachable(vault, name, until),
+                                             timeout=until - started)
     except media_store.StoreReadPending:
         return False
     except media_store.StoreReadTimedOut:
@@ -1111,8 +1171,8 @@ def observe(vault: Path, *, deadline: float | None = None) -> None:
     """Record whether each store that has a cheap check answers as itself now.
 
     Only the worker calls it (and the drain, when a copy meets a store that does not answer), so a status reports an
-    observation with its time and never reads a store itself. A store with no cheap check (a remote one) is not
-    probed and keeps no record.
+    observation with its time and never reads a store itself. A store with no cheap check is not probed and keeps
+    no record. A B2 store's check is a fresh authorization that also rechecks its key's scope.
     """
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
@@ -1342,7 +1402,7 @@ def _add_checks(totals: dict[str, Any], stats: dict[str, Any]) -> None:
 
 def status(vault: Path) -> dict[str, object]:
     """Read the owner status from one ledger snapshot, bounded by the stores and returned dimensions."""
-    from . import media_store
+    from . import media_protection, media_protection_work, media_store
 
     vault = Path(vault).resolve()
     config = originals.configuration(vault)
@@ -1352,21 +1412,26 @@ def status(vault: Path) -> dict[str, object]:
     entries = originals.store_entries(config)
     key = str(config.get("key_version"))
     month = _month(time.time())
+    protection = {}
+    if media_protection.POLICY_FIELD in config:
+        protection["protection"] = {"state": "unknown", "reason": "policy evidence cannot be read"}
     try:
         with closing(MediaJobStore(vault, create=False)._connect(readonly=True)) as conn:  # never recreates a table
             conn.execute("BEGIN")
+            if protection:
+                protection["protection"] = media_protection_work.status(conn, config)
             schema = _status_schema(conn)
             if not _STATUS_REQUIRED_SCHEMA.issubset(schema):
-                return _unknown("the replica status schema is incomplete")
+                return {**_unknown("the replica status schema is incomplete"), **protection}
             exports_complete = _export_coverage_complete(conn, schema)
             census = _census(conn)
             if census is None:
-                return _unknown("the replica table is being rebuilt from the bindings")
+                return {**_unknown("the replica table is being rebuilt from the bindings"), **protection}
             rows = {row["name"]: row for row in conn.execute(_STATUS, {"stores": json.dumps(list(entries)),
                                                                       "key": key, "month": month})}
             eviction = media_store.personal_eviction_status(conn, config)
     except (sqlite3.Error, OSError) as error:
-        return _unknown(f"the replica state cannot be read: {type(error).__name__}")
+        return {**_unknown(f"the replica state cannot be read: {type(error).__name__}"), **protection}
     names = (*entries, *(name for name in rows if name not in entries))
     stores: dict[str, dict[str, Any]] = {}
     for name in names:
@@ -1427,7 +1492,7 @@ def status(vault: Path) -> dict[str, object]:
     result = {**_coverage(census, exports_complete=exports_complete,
                           damage_complete=not any(row["unproved"] for row in rows.values())),
               "source": "media ledger table, rebuilt from the bindings",
-              "stores": list(stores.values()), "totals": totals}
+              "stores": list(stores.values()), "totals": totals, **protection}
     if eviction is not None:
         result["eviction"] = eviction
     return result
@@ -1928,7 +1993,7 @@ _checked: dict[Path, float] = {}  # when each vault last ran a check round
 
 def work(vault: Path, *, deadline: float | None = None, copies: _CopyDispatch | None = None) -> bool:
     """One bounded unit of background work: a rebuild, a scan, or a drain and the check round that is due; True when it did something."""
-    from . import media_store
+    from . import media_protection, media_protection_work, media_store
     from .cli_ops import OpError
 
     vault = Path(vault).resolve()
@@ -1952,9 +2017,10 @@ def work(vault: Path, *, deadline: float | None = None, copies: _CopyDispatch | 
     drain_until = now + _DRAIN_SECONDS if deadline is None else min(deadline, now + _DRAIN_SECONDS)
     if next_check is not None:
         drain_until = min(drain_until, next_check + _CHECK_INTERVAL)
+    has_policy = media_protection.POLICY_FIELD in config
     try:
         settled = (drain(vault, deadline=drain_until) if copies is None
-                   else copies.offer(vault, deadline=deadline))
+                   else copies.offer(vault, deadline=deadline, policy_config=config if has_policy else None))
     except OpError as error:
         if error.code != media_store.STORE_BUSY_CODE:
             raise
@@ -1963,13 +2029,20 @@ def work(vault: Path, *, deadline: float | None = None, copies: _CopyDispatch | 
         # The request stays pending. A broken copy write cannot stop due verification.
         log.warning("media replicas: a copy round could not update its ledger", exc_info=True)
         settled = 0
+    planned = False
+    if has_policy:
+        planned = media_protection_work.plan(vault, config, deadline=deadline)
+        if copies is None and (deadline is None or time.monotonic() < deadline):
+            if (destination := media_protection_work.next_store(vault, config, excluded=set())) is not None:
+                settled += media_protection_work.copy_one(vault, destination)
     # Verification does not wait for an empty queue: a backlog of copies would otherwise hold every check and sample
     # back for as long as it lasts, with replicas overdue. A round costs one bounded drain and one bounded check.
     now = time.monotonic()
     if (deadline is not None and now >= deadline) or (next_check is not None and now - next_check < _CHECK_INTERVAL):
-        return settled > 0
+        return planned or settled > 0
     _checked[vault] = now
-    return settled + check(vault, deadline=deadline) + sample(vault, deadline=deadline) > 0
+    verified = check(vault, deadline=deadline) + sample(vault, deadline=deadline)
+    return planned or settled + verified > 0
 
 
 # --- scheduled checks --------------------------------------------------------------------------------
@@ -2569,7 +2642,11 @@ class _CopyDispatch:
         self.after = ""
         self.retry_after: dict[str, float] = {}
 
-    def offer(self, vault: Path, *, deadline: float | None) -> int:
+    def offer(
+        self, vault: Path, *, deadline: float | None, policy_config: dict[str, object] | None = None,
+    ) -> int:
+        from . import media_protection_work
+
         now = time.monotonic()
         if self.stop.is_set() or (deadline is not None and now >= deadline):
             return 0
@@ -2604,11 +2681,15 @@ class _CopyDispatch:
                     if len(picked) == free:
                         break
 
+        if policy_config is not None and len(picked) < free:
+            if (destination := media_protection_work.next_store(
+                    vault, policy_config, excluded=skipped | set(picked))) is not None:
+                picked.append(destination)
         for store in picked:
-            self._launch(vault, store)
+            self._launch(vault, store, policy_enabled=policy_config is not None)
         return len(picked)
 
-    def _launch(self, vault: Path, store: str) -> None:
+    def _launch(self, vault: Path, store: str, *, policy_enabled: bool = False) -> None:
         key = vault, store
         with _LOCK:
             if self.stop.is_set() or key in _active_copies or len(_active_copies) >= _COPY_SLOTS:
@@ -2620,6 +2701,10 @@ class _CopyDispatch:
             try:
                 with foreground_priority.bulk(stop=self.stop):
                     settled = drain(vault, store=store)
+                    if policy_enabled and not self.stop.is_set() and settled < _DRAIN_BATCH:
+                        from . import media_protection_work
+
+                        settled += media_protection_work.copy_one(vault, store)
             except foreground_priority.BulkCancelled:
                 pass
             except Exception:  # noqa: BLE001 - an individual destination cannot stop the scheduler

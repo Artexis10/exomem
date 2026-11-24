@@ -38,8 +38,8 @@ env:
   EXOMEM_TEST_OLDER_READER_VERSION: "0.106.0"
   EXOMEM_TEST_OLDER_READER_SHA256: "a3d18d3abbfcf93b4831950c033197b5ca3f6aecdd89756e6359ca5b51cba626"
   # The newest release one store schema back; move it to the next one with each schema bump.
-  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.196.0"
-  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "ea85ab67291588b1e43c36da526c2769b51bf8fbcf00e2a03ce4e5eef38eec26"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_VERSION: "0.200.0"
+  EXOMEM_TEST_PREVIOUS_SCHEMA_SHA256: "722882a877da8e291e4ac46e0f1e062b467e738e49fae15c8b13378e55238111"
 
 jobs:
   suite:
@@ -173,5 +173,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: crossplat-${{ matrix.os }}-shard-${{ matrix.shard }}-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: test-results/junit-${{ matrix.os }}-shard-${{ matrix.shard }}.xml
           if-no-files-found: warn

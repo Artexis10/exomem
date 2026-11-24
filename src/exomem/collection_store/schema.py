@@ -48,7 +48,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The last schema that changed a table that a store-mode page read reads: 16 gave pages their mtime. A store
@@ -88,8 +88,9 @@ META_CREATED_AT = "created_at"
 META_MIGRATED_FROM = "migrated_from"
 META_LEASE_EPOCH = "lease_epoch"
 
-#: The store-mode tables (schema 15). They hold pages, projection state and the audit trail of a vault
-#: whose pages the store owns; in file mode they stay empty.
+#: The store-mode tables (schema 15; the derivation queue from schema 20). They hold pages, projection
+#: state, derivation intents and the audit trail of a vault whose pages the store owns; in file mode
+#: they stay empty.
 VAULT_STORE_TABLES = (
     "store_mode",
     "store_mode_objects",
@@ -99,6 +100,7 @@ VAULT_STORE_TABLES = (
     "store_projection_queue",
     "store_held",
     "store_audit",
+    "store_derivation_queue",
 )
 
 TABLES = (
@@ -769,7 +771,7 @@ def _migrate_to_9(conn: sqlite3.Connection) -> None:
     the export manifest the member came from. ``rows_digest`` chains each accepted
     row's item key and payload hash in member order (``importer``), and
     ``row_count_after`` is the collection's row count once the member is in.
-    ``importer_version`` is the Exomem release that imported the member and
+    ``importer_version`` is the Evermatter release that imported the member and
     ``zone_rules`` the zone rules' release, NULL when the mapping names no zone. A
     later job with the same mapping skips a member the log records.
     """
@@ -1283,6 +1285,28 @@ def _migrate_to_19(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE audit_effects")
     conn.execute("ALTER TABLE audit_effects_v19 RENAME TO audit_effects")
     conn.execute("CREATE INDEX audit_effects_by_row ON audit_effects(row_id, txn_id)")
+
+
+def _migrate_to_20(conn: sqlite3.Connection) -> None:
+    """Add the store-mode derivation queue: one intent per path whose derived rows follow its bytes.
+
+    A governed write commits its pages with one intent per path, and the store thread derives the
+    lexical, identity, inbound and graph rows from the intents after the write's transaction. A
+    store from an earlier schema derived inside each write, so it starts with an empty queue.
+    """
+    # The operation column is a closed set that this schema fixes: derive a stored page (or drop the
+    # rows of a path the store no longer holds), or refresh a file that the store does not own.
+    conn.execute("""CREATE TABLE store_derivation_queue(
+      path TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('derive', 'refresh')),
+      queued_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      failed_code TEXT,
+      retry_at TEXT,
+      metered INTEGER NOT NULL DEFAULT 0 CHECK(metered IN (0, 1))
+    ) STRICT""")
+    conn.execute("CREATE INDEX store_derivation_queue_by_revision ON store_derivation_queue(revision)")
 
 
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:

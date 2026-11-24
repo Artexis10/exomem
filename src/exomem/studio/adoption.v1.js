@@ -369,7 +369,7 @@ function offerKbSetup(path) {
   node.hidden = false;
   node.textContent = "";
   node.append(
-    el("span", "One quick step first: Exomem needs its own library folder next to your files. "),
+    el("span", "One quick step first: Evermatter needs its own library folder next to your files. "),
   );
   const button = el("button", "Set it up");
   button.type = "button";
@@ -435,7 +435,7 @@ function populateFindings() {
   const nonText = byId("adopt-nontext");
   if (nonText) {
     nonText.textContent = totals.binary
-      ? `Photos, PDFs and other files: ${totals.binary}. Select eligible files to keep copies in Exomem. Processing may continue after copying.`
+      ? `Photos, PDFs and other files: ${totals.binary}. Select eligible files to keep copies in Evermatter. Processing may continue after copying.`
       : "";
     nonText.hidden = !totals.binary;
   }
@@ -624,7 +624,7 @@ function populatePreview() {
   const totals = derivedPlanTotals(plan);
   const contract = byId("adopt-contract");
   if (contract) {
-    contract.textContent = `Exomem will COPY ${totals.copy || 0} files into its own library. `
+    contract.textContent = `Evermatter will COPY ${totals.copy || 0} files into its own library. `
       + "Copies, never moves: every original stays exactly where it is.";
   }
   const {bullets} = planBullets(totals);
@@ -640,7 +640,7 @@ function populatePreview() {
     const list = el("ul", "", "file-table");
     items.slice(0, 200).forEach((item) => {
       const li = el("li");
-      const action = item.action === "already-imported" ? "already in Exomem as" : "copied in as";
+      const action = item.action === "already-imported" ? "already in Evermatter as" : "copied in as";
       li.append(el("span", `${item.original_path}  →  ${action} "${item.title || item.target_name || ""}"`));
       li.append(el("span", "We record where it came from and a checksum, so you can verify your original any time.", "fine-print"));
       list.append(li);
@@ -667,8 +667,8 @@ function confirmApply() {
   const totals = derivedPlanTotals(plan);
   openConfirm({
     kicker: "YOU STAY IN CONTROL",
-    title: `Copy ${totals.copy || 0} files into Exomem?`,
-    description: "This adds copies to Exomem's library. Your originals are not touched.",
+    title: `Copy ${totals.copy || 0} files into Evermatter?`,
+    description: "This adds copies to Evermatter's library. Your originals are not touched.",
     confirmLabel: "Yes, copy them in",
     cancelLabel: "Not yet",
     onConfirm: async () => {
@@ -735,7 +735,7 @@ function confirmStopApply() {
   openConfirm({
     kicker: "YOU STAY IN CONTROL",
     title: "Stop bringing files in?",
-    description: "Files already copied stay in Exomem; nothing more will be added. Your originals are untouched either way.",
+    description: "Files already copied stay in Evermatter; nothing more will be added. Your originals are untouched either way.",
     confirmLabel: "Stop now",
     cancelLabel: "Keep going",
     onConfirm: async () => {
@@ -1077,7 +1077,7 @@ async function doAsk() {
     // such as the session's first due-state block.
     const hits = Array.isArray(result) ? result : (result && (result.hits || result.items)) || [];
     if (!hits.length) {
-      replaceChildren(answers, [el("p", "Nothing matched yet. Try different words — or give Exomem a minute to finish settling in, then ask again.", "section-note empty")]);
+      replaceChildren(answers, [el("p", "Nothing matched yet. Try different words — or give Evermatter a minute to finish settling in, then ask again.", "section-note empty")]);
       return;
     }
     replaceChildren(answers, hits.map((hit) => {

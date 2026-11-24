@@ -2812,7 +2812,7 @@ def test_a_tight_cap_drops_link_lines_before_any_lead_or_method_line() -> None:
     assert not first_link.startswith("- ")
     with_one = hook._format_task_context(packet["task_context"], len(routes) + 1 + len(first_link) + 1)
     assert [line.split(":")[0] for line in with_one.splitlines()] == [
-        "- task context", "- task lead", "  links", "- task lead", "- method"]
+        "- task context", "- task lead", "  links", "- task lead", "- approach"]
     assert "Site notes" not in with_one
     routes_only = hook._format_task_context(packet["task_context"], len(routes) + 1)
     assert routes_only == routes
