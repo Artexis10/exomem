@@ -674,7 +674,7 @@ class FakeClaude:
         return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr="")
 
 
-def play_claude(tmp_path, monkeypatch, case: dict, replies: list[tuple[int, str]]):
+def play_claude(tmp_path, monkeypatch, case: dict, replies: list[tuple[int, str]], *, hooks: bool = True):
     work = tmp_path / "work"
     work.mkdir()
     (work / "CLAUDE.md").write_text("learning instruction")
@@ -690,6 +690,7 @@ def play_claude(tmp_path, monkeypatch, case: dict, replies: list[tuple[int, str]
         executable=Path("fake-claude"),
         model="m",
         max_turns=20,
+        hooks=hooks,
     )
     return played, record, fake
 
@@ -699,15 +700,24 @@ def option(argv: list[str], name: str) -> str | None:
 
 
 @pytest.mark.reads_repository_docs
-def test_one_turn_runs_unpersisted_with_its_stream_where_it_always_was(
+def test_a_hooked_turn_keeps_its_transcript_and_an_unhooked_one_runs_unpersisted(
     tmp_path, monkeypatch
 ) -> None:
+    """An unpersisted hooked turn leaves the capture hook no transcript, so the hook cannot see a save and reminds
+    after it, which no interactive session does."""
     case = {"id": "x", "prompt": "only turn", "pass": {"called_any": ["recall_context"]}}
     played, record, fake = play_claude(
         tmp_path, monkeypatch, case, [(0, stream("done", tool=("recall_context", "{}")))]
     )
     argv = fake.runs[0]["argv"]
-    assert argv[2] == "only turn" and "--no-session-persistence" in argv and "--resume" not in argv
+    assert argv[2] == "only turn" and option(argv, "--session-id") and "--no-session-persistence" not in argv
+    assert "--resume" not in argv
+    unhooked = tmp_path / "unhooked"
+    unhooked.mkdir()
+    _, _, plain = play_claude(
+        unhooked, monkeypatch, case, [(0, stream("done", tool=("recall_context", "{}")))], hooks=False
+    )
+    assert "--no-session-persistence" in plain.runs[0]["argv"]
     assert (tmp_path / "stream.jsonl").exists()
     assert (
         played["answer"] == "done" and played["answers"] == ["done"] and played["follow_up"] is None
@@ -730,7 +740,7 @@ def test_several_turns_are_one_session_and_the_follow_up_is_a_new_one(
     assert [first[2], second[2], later[2]] == ["first", "second", "later"]
     session = option(first, "--session-id")
     assert session and option(second, "--resume") == session and "--session-id" not in second
-    assert session not in later and "--resume" not in later and "--no-session-persistence" in later
+    assert option(later, "--session-id") not in (None, session) and "--resume" not in later
     # The follow-up starts from the hook's initial state, not the main session's cooldowns.
     assert fake.runs[2]["env"]["EXOMEM_HOOK_HOME"] != fake.runs[0]["env"]["EXOMEM_HOOK_HOME"]
     assert fake.runs[1]["env"]["EXOMEM_HOOK_HOME"] == fake.runs[0]["env"]["EXOMEM_HOOK_HOME"]

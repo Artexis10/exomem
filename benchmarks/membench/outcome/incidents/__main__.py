@@ -1194,13 +1194,15 @@ def play_claude(
         else nullcontext(mcp_server(root, arm, arm_env))
     )
     turns, follow_up = user_turns(case), case.get("follow_up")
-    # One turn runs unpersisted, as it always has. Several are one session that each turn resumes by its id.
-    main_session = str(uuid.uuid4()) if len(turns) > 1 else None
+    # Several turns are one session that each turn resumes by its id. A hooked session is persisted even for one turn:
+    # the capture hook reads the session's transcript to see a save, as it does in an interactive session, and an
+    # unpersisted run leaves it none. Only an unhooked single turn runs unpersisted.
+    main_session = str(uuid.uuid4()) if len(turns) > 1 or hooks else None
     sessions = [(turns, main_session, env)]
     if follow_up is not None:
         # A new session on the same vault, from the hook's initial state: nothing of the main session's
         # cooldowns reaches it, as on a later day.
-        sessions.append(([follow_up], None, {**env, **hook_env(root, session="follow-up")}))
+        sessions.append(([follow_up], str(uuid.uuid4()) if hooks else None, {**env, **hook_env(root, session="follow-up")}))
     results: list[list[dict]] = []
     spent: list[float | None] = []
     withholder = Withholder(withhold, root / "wire.json") if withhold else None
