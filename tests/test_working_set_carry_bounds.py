@@ -559,6 +559,29 @@ def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_an
             bases.append(retained)
 
 
+def test_a_corpus_past_the_base_bound_keeps_no_base_and_its_figures_stay_exact(monkeypatch) -> None:
+    """Past the bound no base is kept, so the build counts every page in first-seen order without introducers."""
+    from exomem import bm25
+
+    rows = {"a.md": "kappa alpha beta", "b.md": "beta delta delta epsilon", "c.md": "gamma alpha zeta"}
+    digests = {path: lexstore._text_digest(text) for path, text in rows.items()}
+    _statistics, _postings, base = lexstore._admitted_corpus(rows, digests, None)
+    assert base is not None
+    # Out of key order, as rows can arrive: the count must still meet the pages sorted by key.
+    later = {"d.md": "beta theta", **rows, "a.md": "omega alpha beta"}
+    monkeypatch.setattr(lexstore, "_ADMITTED_BASE_TERMS_MAX", 5)
+    statistics, postings, retained = lexstore._admitted_corpus(
+        later, {path: lexstore._text_digest(text) for path, text in later.items()}, base
+    )
+    oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in later.items()})
+
+    assert retained is None
+    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    assert statistics.idf_floor.hex() == oracle.idf_floor.hex()
+    assert statistics.average_length.hex() == oracle.average_length.hex()
+    assert dict(postings.lengths) == {path: len(text.split()) for path, text in later.items()}
+
+
 @pytest.mark.parametrize("repeats", [256, 65_536])
 def test_a_page_term_count_survives_a_word_repeated_past_each_storage_width(repeats: int) -> None:
     """A page's counts are kept in the narrowest width that holds them: a word repeated past a width's

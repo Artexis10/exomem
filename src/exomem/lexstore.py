@@ -3448,7 +3448,8 @@ class _AdmittedStatisticsEntry:
 #: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
 #: no base, and its next build counts every page. The base also keeps each word's introducer (`_DocumentFrequency`),
 #: about 55 bytes a word of the vocabulary: 10 MiB for the 190,000 words of a synthetic vault-sized corpus whose
-#: pages hold 4.3 million term references.
+#: pages hold 4.3 million term references. The bound counts references, not words, so a vocabulary near the bound
+#: (every reference a distinct word) costs about 160 to 220 MiB a base, for up to `_ADMITTED_BASES_MAX` bases.
 _ADMITTED_BASE_TERMS_MAX = 4_000_000
 #: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
 #: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
@@ -3661,7 +3662,8 @@ def _document_frequency(
     With no base, every document is counted. With a base, `left` maps each document the base counted that is now
     gone or changed to the terms the base counted for it, and `entered` names each new or changed document; every
     other document is the base's. Then only the words those documents hold or introduced find their introducer
-    again, so the cost follows the change and the vocabulary, not the corpus.
+    again. Usually the cost follows the change and the vocabulary; a word whose introducer left or dropped it
+    sends one forward scan over the documents after that introducer, which can walk most of the corpus.
     """
     if base is None:
         counts, introduced = _first_seen(documents, sorted(documents))
@@ -3749,17 +3751,23 @@ def _admitted_corpus(
             length, terms, counts = _page_terms(rows[path])
             pages[path] = _PageTerms(digest, length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
-    counted = _document_frequency(
-        {path: page.terms for path, page in pages.items()},
-        base.counted if base is not None else None,
-        {path: kept.terms for path, kept in held.items() if pages.get(path) is not kept},
-        [path for path, page in pages.items() if held.get(path) is not page],
-    )
-    statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page.length for page in pages.values()), counted.frequency
-    )
     kept_terms = sum(len(page.terms) for page in pages.values())
-    retained = _AdmittedBase(pages, counted) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    if kept_terms <= _ADMITTED_BASE_TERMS_MAX:
+        counted = _document_frequency(
+            {path: page.terms for path, page in pages.items()},
+            base.counted if base is not None else None,
+            {path: kept.terms for path, kept in held.items() if pages.get(path) is not kept},
+            [path for path, page in pages.items() if held.get(path) is not page],
+        )
+        frequency, retained = counted.frequency, _AdmittedBase(pages, counted)
+    else:
+        # No base is kept, so its introducers would be thrown away: count every page in first-seen order only.
+        counts, _introduced = _first_seen({path: page.terms for path, page in pages.items()}, sorted(pages))
+        frequency = dict(counts)
+        retained = None
+    statistics = bm25_module.CorpusStatistics.from_counts(
+        len(pages), sum(page.length for page in pages.values()), frequency
+    )
     # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
     postings = bm25_module.CorpusPostings(
         {path: page.length for path, page in pages.items()},
@@ -11700,7 +11708,8 @@ class LexicalStore:
                 if parent is not None:
                     kept_parents[path] = parent
                     kept_bytes += _units_bytes(units)
-                else:
+                elif units:
+                    # An owner-only parent that emitted no unit leaves nothing of its own in the corpus.
                     private = True
             # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
             # parents this build did not read. Each is used again only at its own revision; a deleted or
