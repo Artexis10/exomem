@@ -183,13 +183,17 @@ jobs:
             track "MCP registry" "$server $version" "publishing disabled"
           fi
 
+          # A release's images live under the repository that built it: GHCR names a
+          # repository's images ghcr.io/<owner>/<name>, lowercased.
+          builder=$(python3 infra/scripts/release_recovery.py builder --tag "$tag")
+          image_base="ghcr.io/${builder,,}"
           # These targets and tags are the closed Docker release contract.
           image_list=(
-            "lean ghcr.io/substrate-systems/evermatter:$version latest"
-            "ml ghcr.io/substrate-systems/evermatter:$version-ml ml"
-            "cuda ghcr.io/substrate-systems/evermatter:$version-cuda cuda"
-            "cloud ghcr.io/substrate-systems/evermatter:$version-cloud cloud"
-            "cellctl ghcr.io/substrate-systems/evermatter-cellctl:$version -"
+            "lean $image_base:$version latest"
+            "ml $image_base:$version-ml ml"
+            "cuda $image_base:$version-cuda cuda"
+            "cloud $image_base:$version-cloud cloud"
+            "cellctl $image_base-cellctl:$version -"
           )
           images='{}'
           for entry in "${image_list[@]}"; do
