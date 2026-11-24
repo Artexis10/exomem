@@ -12,14 +12,17 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit as audit_module
 from exomem import (
+    agent_refusal,
     audit_fix,
+    capabilities,
     commands,
     maintenance_jobs,
+    operation_entries,
     public_surface,
     public_tools,
 )
+from exomem import audit as audit_module
 from exomem.governance.principal import owner_principal, request_scope
 
 PAGE_ID = "00000000-0000-4000-8000-000000000091"
@@ -676,6 +679,36 @@ def test_edit_observation_forwards_kind_as_of_and_verdict(tmp_path: Path) -> Non
 # --------------------------------------------------------------------------- #
 # 1.6  Units show their supersession
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("called", "action"),
+    [
+        ({"operation": "supersede", "path": PAGE, "unit": "claim-1", "content": "Opens at ten.",
+          "reason": "hours changed"}, "supersede_observation"),
+        ({"operation": "assess", "path": PAGE, "unit": "claim-1", "verdict": "confirmed",
+          "reason": "checked the sign"}, "assess_observation"),
+        ({"operation": "assess", "path": PAGE, "unit": "claim-1",
+          "relations": [{"kind": "supports", "target": "[[Shop sign]]"}],
+          "reason": "found the source"}, "link_observation"),
+    ],
+)
+def test_a_claim_write_refused_busy_is_retried_through_edit_note(called: dict, action: str) -> None:
+    """The public surface lists no observe_memory, so its retry names the edit_note action that sends the call."""
+    public = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+    )
+    busy = {"code": "MUTATION_BUSY", "status": "retryable", "wait_ms": 0}
+    with capabilities.active_surface(public):
+        reply = agent_refusal.reply(
+            busy, None, command="observe_memory", called=called, parameters=(),
+            write=True, full=False, envelope=busy,
+        )
+        tool, spelled = capabilities.active_spell_call("observe_memory", called)
+
+    assert reply["error"]["retry"] == {"tool": "edit_note"}
+    assert spelled["action"] == action
+    assert operation_entries.unspell_call(tool, spelled, "public") == ("observe_memory", called)
 
 
 def test_page_units_show_both_ends_of_a_supersession(tmp_path: Path) -> None:

@@ -9108,6 +9108,7 @@ def op_observe_memory(
     relation_review_reason: str | None = None,
     reason: str | None = None,
     target_fingerprints: dict[str, str] | None = None,
+    validate_only: bool = False,
 ) -> dict:
     """Check or edit one semantic unit on a compiled note.
 
@@ -9138,6 +9139,7 @@ def op_observe_memory(
         reason: Rationale kept with the prior interpretation.
         target_fingerprints: Exact corrective refs/current fingerprints.
             Omit for page/heading links; echo for episode unit leaves.
+        validate_only: Preview a supersede or assess without writing; echo its transition_token.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -9205,6 +9207,7 @@ def op_observe_memory(
             relation_review_reason=relation_review_reason,
             reason=reason,
             target_fingerprints=target_fingerprints,
+            validate_only=validate_only,
         )
         if result.get("mutated"):
             query_log.log_write_call(

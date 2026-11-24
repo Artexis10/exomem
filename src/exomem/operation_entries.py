@@ -712,6 +712,11 @@ _REMAINING = {
         _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("update", "change_observations", None, ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("remove", "change_observations", ("path", "unit", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        # A claim correction previews with validate_only, which reads like `validate`: it lands nothing and never queues.
+        _row("supersede", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), verb="saved"),
+        _row("supersede", "prepare_note", None, ("path",), kind="validate-supersede", constraints=(_literal("validate_only", True, implied=True),)),
+        _row("assess", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), destructive=True, verb="updated"),
+        _row("assess", "prepare_note", None, ("path",), kind="validate-assess", constraints=(_literal("validate_only", True, implied=True),)),
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),

@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, assert_never, get_args
 
 from . import (
     access,
@@ -39,9 +39,7 @@ from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
 
 ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
-
-# nosemgrep: ep-word-set -- the closed operation set this module implements, not text
-_OPERATIONS = frozenset({"add", "update", "remove", "validate", "supersede", "assess"})
+_OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
 _COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
@@ -123,14 +121,26 @@ def observe_memory(
     reason: str | None = None,
     target_fingerprints: dict[str, str] | None = None,
     today: dt.date | None = None,
+    validate_only: bool = False,
 ) -> dict[str, Any]:
-    """Validate or atomically mutate one semantic unit in a compiled or entity page."""
+    """Validate or atomically mutate one semantic unit in a compiled or entity page.
+
+    `validate_only` previews a supersede or assess, as `validate` previews an add or update:
+    the reply carries the transition token that the same call then commits with.
+    """
     op = str(operation or "").strip().lower()
     if op not in _OPERATIONS:
         raise ObserveMemoryError(
             "INVALID_OBSERVE_OPERATION",
-            "operation must be add, update, remove, validate, supersede, or assess",
+            f"operation must be one of: {', '.join(_OPERATIONS)}",
         )
+    # Only these operations have a preview entry; elsewhere the surface would queue and report a preview as a write.
+    if validate_only and op not in {"supersede", "assess"}:
+        raise ObserveMemoryError(
+            "INVALID_OBSERVE_INPUT",
+            f"validate_only previews a supersede or assess; preview {op} as operation validate",
+        )
+    previewing = op == "validate" or bool(validate_only)
     if unit is not None and unit_ref:
         raise ObserveMemoryError(
             "INVALID_OBSERVE_INPUT",
@@ -718,7 +728,7 @@ def observe_memory(
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
     # commits, so it stays entirely uninstrumented and byte-identical.
-    timings = MutationTimings() if op != "validate" else None
+    timings = MutationTimings() if not previewing else None
     try:
         with semantic_contract.call_context("write"):
             preflight = semantic_writes.preflight_existing(
@@ -738,7 +748,7 @@ def observe_memory(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
-                validate_only=operation == "validate",
+                validate_only=previewing,
                 stamp=temporal.stamp(authored_day),
                 timings=timings,
             )
@@ -834,7 +844,7 @@ def observe_memory(
             )
         preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-    if op == "validate":
+    if previewing:
         return _result(
             operation=op,
             path=editable.rel_path,
@@ -1156,6 +1166,7 @@ def _not_a_claim(refusal: semantic_units.ClaimRefusal) -> tuple[str, str]:
                 "the claim item runs past one line, so it cannot become a compact unit in place",
                 f"Join the item into one line with {edit}, then send this call again.",
             )
+    assert_never(refusal)
 
 
 def claim_conversion(
