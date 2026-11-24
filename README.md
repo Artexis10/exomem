@@ -33,7 +33,7 @@ vault: /tmp/exomem-demo-XXXXXX
 1. doctor: PASS (0.8s)
 2. find "retrieval": PASS (0.1s)
    - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
-   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
+   - Knowledge Base/Notes/Insights/Retrieval needs owned files.md
 3. get retrieval insight: PASS (0.0s)
    - title: Retrieval needs owned files
    - type: insight
@@ -438,7 +438,7 @@ Examples:
 ```bash
 kb find "project handoff" --mode keyword
 kb find "stale decision" --json
-kb get "Notes/Insights/retrieval-needs-owned-files" --json
+kb get "Notes/Insights/Retrieval needs owned files" --json
 kb note --note-type insight --title "Agents need durable context" \
   --content "# Agents need durable context"
 ```

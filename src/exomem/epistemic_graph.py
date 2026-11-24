@@ -4208,11 +4208,16 @@ class EpistemicGraphIndex:
                 # A registry mismatch is not source evidence. Bind the cold
                 # result and membership before startup can act on that mismatch.
                 seal: list[_SnapshotSourceSeal] = []
-                if self._snapshot_sources_match_disk(
-                    conn, resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
-                    fold=True, seal_out=seal, negative_out=startup_negative,
-                    fatal_read_out=fatal_read_out,
-                ):
+                try:
+                    sealed = self._snapshot_sources_match_disk(
+                        conn, resolver_fingerprint=values.get(_RESOLVER_TOPOLOGY_KEY),
+                        fold=True, seal_out=seal, negative_out=startup_negative,
+                        fatal_read_out=fatal_read_out,
+                    )
+                except foreground_priority.BulkCancelled:
+                    conn.close()
+                    raise
+                if sealed:
                     startup_negative.extend(seal)
             if current and (not exact_live_checkpoint or startup_negative is not None):
                 # Remembered per everything the verdict depends on (#1454):
@@ -4294,6 +4299,9 @@ class EpistemicGraphIndex:
                         if decline != ["proof_raised"] and not self_owned:
                             with _SNAPSHOT_PROOFS_LOCK:
                                 _SNAPSHOT_PROOFS[registry_key] = (proof_identity, current)
+                    except foreground_priority.BulkCancelled:
+                        conn.close()
+                        raise
                     finally:
                         if mine is not None:
                             with _SNAPSHOT_PROOFS_LOCK:
@@ -4900,10 +4908,18 @@ class EpistemicGraphIndex:
                 reason_out.append(reason)
             return False
 
+        # A stopping bulk pass, such as startup validation in a worker being
+        # shut down for a handoff, ends at its next page, walked path or
+        # recheck. The supervisor gives a stopping worker seconds; a proof
+        # that ran to its end held one for two minutes on 2026-11-23. The stop
+        # unwinds as `BulkCancelled`, so no caller acts on a half-run proof.
+        stop = foreground_priority.cancellation_event()
         interrupt: Callable[[], None] | None = None
-        if deadline is not None or cancelled is not None:
+        if deadline is not None or cancelled is not None or stop is not None:
 
             def interrupt() -> None:
+                if stop is not None and stop.is_set():
+                    raise foreground_priority.BulkCancelled()
                 if deadline is not None and time.monotonic() >= deadline:
                     raise _ProofDeadlinePassed
                 if cancelled is not None and cancelled():

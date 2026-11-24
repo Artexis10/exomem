@@ -114,6 +114,7 @@ from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import mutation_terminal as mutation_terminal_module
+from . import name_drift as name_drift_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import ocr_facts as ocr_facts_module
@@ -1926,7 +1927,9 @@ def op_bootstrap(
                 "stable_named_entity": call_text("connect_memory", {"operation": "create-entity"}),
             },
             "preflight": {
-                tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
+                tools_text("connect_memory", "read"): (
+                    "read-only link and relation check before a compiled note write"
+                ),
                 "near_duplicate_warnings": (
                     "if they fire, prefer edit or replace over a parallel page; a write advisory "
                     "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
@@ -1942,12 +1945,12 @@ def op_bootstrap(
                 "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
                 "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
-                    "A committed response may carry one advisory. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
+                    "A committed response may carry one advisory. rename: a retitle left the file name behind the title; the outcome, current and planned names and the relocate call. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
-                    else "advisory in the default committed response. kind='ownership': the written page is asked whether it belongs in its current project and home folder while its review item is open; it carries the item's ref and fingerprint and one question, and the runtime never says the page is misfiled. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                    else "advisory in the default committed response. kind='rename': a write changed the page's title so that its file name no longer follows it; it carries the outcome, the current and planned names and the spelled-out relocate call for that page, and the user's edit is the approval. kind='ownership': the written page is asked whether it belongs in its current project and home folder while its review item is open; it carries the item's ref and fingerprint and one question, and the runtime never says the page is misfiled. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
                 "structure_suggestion_handling": (
-                    "ownership: answer its question about the page in hand and never change the page to answer it. Serves the project's goal: "
+                    "rename: preview the call, tell the user the new name in one line and apply it; the user's retitle is the approval. ownership: answer its question about the page in hand and never change the page to answer it. Serves the project's goal: "
                     + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the project goal>"})
                     + ". Unsure: dismiss with a `deferred:` reason or make no call. Elsewhere or several: tell the user, and on their yes propose it with "
                     + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
@@ -14934,6 +14937,24 @@ def op_inspect_captured_sources(
     return inventory(vault_root, system=system, record_id=record_id, cursor=cursor, limit=limit)
 
 
+def op_inspect_name_drift(
+    vault_root: Path,
+    cursor: str | None = None,
+    limit: Annotated[
+        int, Field(ge=1, le=name_drift_module.MAX_PAGE_SIZE)
+    ] = name_drift_module.DEFAULT_PAGE_SIZE,
+) -> dict:
+    """List pages whose file name no longer follows their title, with the name each would get today.
+
+    A page is listed when a rename-only relocation would rename it now. Returns the total count
+    (unknown when the scan did not finish), then per page its ref, title, current name and
+    planned name. Pages with no usable title, or that this caller cannot rename, are marked and
+    never proposed. Rename a batch with the call in `rename_next_batch`, after the user approves
+    one preview.
+    """
+    return name_drift_module.listing(vault_root, cursor=cursor, limit=limit)
+
+
 def op_inspect_capture_erasure_policy(
     vault_root: Path,
     system: Annotated[str, Field(min_length=1)],
@@ -15322,6 +15343,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "triage_memory",
             "prepare_note",
             "coordination_status",
+            "inspect_name_drift",
         ],
     },
     "connect": {
@@ -15488,6 +15510,7 @@ _SPEC: tuple[tuple, ...] = (
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None, _MCRC),
+    ("inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
     ("fetch", op_fetch, 1, False, False, "id", _MCRC),
@@ -15601,6 +15624,16 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC, (),
         {"public_title": "Erase a captured Source", "surface": "service", "actions": ("update",), "first_run_safe": False,
          "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure",)}},
+    ),
+    (
+        "inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC,
+        ("inspect_name_drift",),
+        {
+            "public_title": "Inspect stale file names",
+            "surface": "advanced",
+            "actions": ("review",),
+            "first_run_safe": True,
+        },
     ),
     (
         "coordination_status",

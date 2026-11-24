@@ -2,7 +2,7 @@
 name: exomem
 description: Use Evermatter for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Evermatter (formerly Exomem), KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Evermatter's to govern.
 metadata:
-  skill_contract: e14f3c0c1daf7436b2597f8f4d937991a3bf7d3b291e41931b7a3f33a4d51680
+  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
   version: "0.32.0"
 ---
 
@@ -341,7 +341,7 @@ commits only a plan that was previewed. Supersession has no
 server-side gate today; that is named future work, not an implied gate, so the
 confirmation is yours to obtain.
 
-Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `relocate` maps to `structural_suggestions` too: it derives and seals the plan that moves or renames a set of pages, and answers with the grouped summary you preview. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, let each request run the steps its time allows, let resume continue that approval until the run ends, and confirm compensation separately.
+Curation `work-item`, `propose`, `preview`, `status`, and `propose-compensation` map to `structural_suggestions`; `off` still permits an explicit user request. Curation `relocate` maps to `structural_suggestions` too: it derives and seals the plan that moves or renames a set of pages, and answers with the grouped summary you preview, or with `preparing` when the same call must run again. Curation `apply`, `resume`, and `apply-compensation` use `restructure_execution`: preview and confirm one immutable plan fingerprint, let each request run the steps its time allows, let resume continue that approval until the run ends, and confirm compensation separately.
 
 An explicit undo request authorizes curation `revert` as `restructure_execution`.
 Pass the item's `revert_fingerprint` as `expected_plan_fingerprint`.

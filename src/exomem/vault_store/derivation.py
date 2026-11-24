@@ -548,8 +548,9 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
 
     started = False
     try:
-        # Close the transaction before releasing capacity, including on rollback, as a commit does.
-        with ExitStack() as allocations, writer.handle.transaction() as tx:
+        # Close the transaction before releasing capacity, including on rollback, as a commit does. A
+        # derivation writes the vault store's derived rows alone, never a collection's.
+        with ExitStack() as allocations, writer.handle.transaction(collection_free=True) as tx:
             started = True
             row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
             if row is None or row[0] != mode.STORE_MODE:
@@ -570,6 +571,7 @@ def _derive(root: Path, writer: CollectionWriter, batch: list[_Intent], result: 
             delta = derive.derive_paths(
                 tx, root, written=written, removed=removed, refreshed=refreshed,
                 before=before, prepared_lexical=prepared, reserve_graph=reserve_graph,
+                metered=frozenset(metered),
             )
             settle()
             tx.executemany(

@@ -145,7 +145,8 @@ The memory refs among `pages` SHALL resolve over one identity census.
 - **WHEN** the agent relocates 40 pages of two projects, among them an entity and
   an insight, to a new project, and the user approves the one preview
 - **THEN** every compiled page moves to its title-named path in the new project's
-  folder, and the entity changes only its project field in place
+  folder, and the entity stays in its own folder, takes its title-named path
+  there and changes its project field
 - **AND** each page keeps its identity and records its old path in `moved_from`
 - **AND** no page links to an old path
 - **AND** each cited Source differs only in its project fields and in its
@@ -162,6 +163,46 @@ The memory refs among `pages` SHALL resolve over one identity census.
 - **WHEN** the owner approves the compensation of a completed relocation
 - **THEN** every moved page, edited Source and rewritten referrer returns to its
   bytes before the relocation
+
+### Requirement: A relocation that runs short of time goes on from its prepared steps
+
+A relocation SHALL prepare its steps under the request budget, by the rule that
+stops execution between steps. When it stops before the seal, it SHALL keep the
+steps it prepared, seal nothing, and answer `preparing` with `progress` and
+`next_action: relocate`. The same relocation made again by the same caller
+SHALL go on from the kept steps, and SHALL seal the plan that one uninterrupted
+relocation would seal. The seal SHALL check every kept step's binding against
+the vault.
+
+#### Scenario: A long preparation seals over several calls
+
+- **WHEN** preparing a relocation's steps takes longer than one request budget
+- **THEN** each call answers `preparing` with its progress, and no call prepares
+  a kept step again
+- **AND** a later call seals the plan with the fingerprint that one uninterrupted
+  relocation gives
+
+#### Scenario: A page that changes between calls refuses the seal
+
+- **WHEN** a page changes after its step was prepared and kept
+- **THEN** the seal refuses with `CURATION_BINDING_STALE`, and the kept steps are
+  dropped
+- **AND** the same relocation made again prepares from the vault as it is, and
+  seals
+
+### Requirement: Kept steps go on only for the caller who kept them
+
+A relocation SHALL go on from kept steps only for a caller with the same
+audience, purpose and connector ceiling as the caller who kept them. Any other
+caller SHALL prepare its own plan.
+
+#### Scenario: A caller under another ceiling prepares its own plan
+
+- **WHEN** the owner's relocation stops with kept steps, and an owner client
+  whose connector ceiling withholds one referrer makes the same relocation
+- **THEN** the client seals the plan that its own relocation gives, which counts
+  only the referrers it sees
+- **AND** its apply completes
 
 ### Requirement: A relocation lists what it cannot change and seals the rest
 

@@ -614,6 +614,11 @@ def _file_inputs(root):
 
     loaded, tombstones = policy.load(root), lifecycle.tombstoned_paths(root)
     access_fingerprint, rules, blocked = access._policy_state(root)
+    return inputs_of(loaded, tombstones, access_fingerprint, rules, blocked)
+
+
+def inputs_of(loaded, tombstones, access_fingerprint, rules, blocked):
+    """The file-held inputs of a history release from inputs already read, such as an operation's snapshot."""
     return _FileInputs(loaded, tombstones, rules, blocked, (access_fingerprint, blocked, tuple(sorted(tombstones))))
 
 

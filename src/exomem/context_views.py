@@ -52,6 +52,7 @@ from . import (
     lifecycle_statuses,
     profile_selection,
     project_keys,
+    published_admission,
     skills_context,
     source_taxonomy,
     stance,
@@ -547,6 +548,9 @@ def _world(
             among = catalogue.entries()
             # Every entry is decided here, and each read of the view decides them all again.
             egress.reserve_decision_memo(len(among))
+        # A page the collection store owns is decided on the store thread. Naming every entry to the command
+        # first lets the first such decision answer all of them in one store request, not one per entry.
+        published_admission.announce(entry.path for entry in among if entry.path)
         entries = [
             entry for entry in among
             if _admits(entry, caller.visible)

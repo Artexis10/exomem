@@ -8,12 +8,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 42
-- Tier 1 commands: 37
+- Product commands: 43
+- Tier 1 commands: 38
 - Tier 2 commands: 5
-- Public MCP tools: 34
-- REST commands: 39
-- CLI commands: 39
+- Public MCP tools: 35
+- REST commands: 40
+- CLI commands: 40
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -53,6 +53,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | episode_memory | Direct inputs | episode_memory |
 | govern_memory | Direct inputs | govern_memory |
 | import_memory | file, start, select, plan, apply, cancel, finish, propose, apply-proposal, acknowledge | adoption_studio |
+| inspect_name_drift | Direct inputs | inspect_name_drift |
 | maintain_memory | Direct inputs | maintain_memory |
 | manage_memory_file | Direct inputs | manage_memory_file |
 | observe_memory | Direct inputs | observe_memory |
@@ -84,6 +85,7 @@ REST and CLI calls keep the grouped commands in the following registry.
 | inspect_captured_sources | 1 | MCP, REST, CLI | read | no | - | inspect_captured_sources | system*, record_id, cursor, limit | List canonical captured revisions with complete-publication and exact-index observations. |
 | inspect_capture_erasure_policy | 1 | MCP, REST, CLI | read | no | - | - | system* | Read whether current host policy enables erasure for one opaque identity system. |
 | erase_captured_source | 1 | MCP, REST, CLI | write | no | - | - | operation_id*, source_identity*, expected_source_ref*, expected_source_hash*, response_detail | Advance retirement of one captured Source incarnation and report each component's progress. |
+| inspect_name_drift | 1 | MCP, REST, CLI | read | no | - | inspect_name_drift | cursor, limit | List pages whose file name no longer follows their title, with the name each would get today. |
 | coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Read writer-lease health during outages. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow, skill_contract, section, topic | Read Evermatter's contract and live settings when missing or changed; reuse while current. |
 | search_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, categories, kinds, source_kinds, domains, relations, relation_of, relation_direction, filters, result_level, limit, continuation, scope, mode, detail, deep, graph, rerank, rerank_max_candidates, prefer_compiled, prefer_active, prefer_used, widen_outside_kb, graph_enrich, include_timings, explain, purpose | Search compiled knowledge and originals for an evidence gap. |

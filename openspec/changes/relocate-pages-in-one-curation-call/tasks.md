@@ -8,6 +8,8 @@
 - [x] 1.7 Resolve the named memory refs over one identity census. Proved by `test_pages_named_by_memory_ref_resolve_over_one_identity_census`.
 - [x] 1.8 Write a list to a field whose registry `shape` is `list`. Proved by `test_a_list_field_that_gains_a_project_stays_a_list`.
 - [x] 1.9 List a Source that its leaf refuses at preparation under `refused`, and go on. Proved by `test_a_source_its_leaf_refuses_is_listed_and_the_relocation_goes_on`.
+- [x] 1.10 Prepare a relocation's steps under the request budget, answer `preparing` with `progress` when a call runs short, and go on from the kept steps when the same call is made again. Proved by `test_a_proposal_that_runs_short_goes_on_from_its_prepared_steps_to_the_same_seal` and `test_a_page_that_changes_after_its_step_was_kept_refuses_the_seal`. Catches: a proposal that outlasts the request budget and keeps nothing, a call that prepares kept steps again, and a kept step sealed after its page changed.
+- [x] 1.11 Keep a paused preparation only for callers with the same audience, purpose and connector ceiling, and delete an expired one when a read finds it. Proved by `test_a_kept_preparation_goes_on_only_for_a_caller_under_the_same_ceiling`. Catches: an owner client that seals steps prepared under a wider ceiling, so its proposal counts a referrer withheld from it and its apply stops on a write it may not make.
 - [x] 1.3 Read the fields that carry project keys from the `page-fields` registry (`carries: project-key`), in the relocation and in the pointer write's key check. Proved by the relocation test, whose Sources differ only in carrying fields.
 
 ## 2. Execution

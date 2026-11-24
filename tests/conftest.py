@@ -1294,9 +1294,15 @@ def obligations_only(vault: Path) -> Path:
 
     The Sources there are an outstanding backlog (`unprocessed_source`), which counts
     in the due-state projection. A module that counts dated obligations uses this
-    through `pytestmark`, so the backlog does not shift its totals.
+    through `pytestmark`, so the backlog does not shift its totals. The fixture's
+    slug-named pages are a second backlog (`name_drift`), so that family is switched off.
     """
+    from exomem import review_state
+
     shutil.rmtree(vault / "Knowledge Base" / "Sources")
+    review_state.ReviewStateStore(vault).set_disposition(
+        "name_drift", "off", why="handled: the fixture's slug names are not under test"
+    )
     find_module.clear_cache()
     return vault
 

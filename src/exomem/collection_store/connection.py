@@ -340,8 +340,14 @@ class WriterConnection:
     @contextmanager
     def transaction(
         self, *, resolve_divergence: bool = False, before_commit: Callable[[], None] | None = None,
+        collection_free: bool = False,
     ) -> Iterator[sqlite3.Connection]:
-        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back.
+
+        ``collection_free`` declares that the body writes only the vault store's own tables, never a row
+        that a collection's release reads, so the release cache keeps what it holds across the commit
+        (``ReleaseCache.begin``).
+        """
         from sqlalchemy.exc import DBAPIError
 
         self.require_write_authority(allow_diverged=resolve_divergence)
@@ -355,7 +361,7 @@ class WriterConnection:
             self.core.begin()
         except DBAPIError as error:
             raise error.orig from error
-        cache.begin()
+        cache.begin(collection_free=collection_free)
         self._owns_transaction = True
         try:
             yield self.connection
@@ -500,7 +506,7 @@ class SnapshotHandle:
         raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
 
     # The writer's two write entry points (``WriterConnection``), so a write refuses as designed.
-    def transaction(self, *, resolve_divergence: bool = False) -> None:
+    def transaction(self, *, resolve_divergence: bool = False, collection_free: bool = False) -> None:
         self.require_write_authority()
 
     def execute(self, statement, parameters=None) -> None:

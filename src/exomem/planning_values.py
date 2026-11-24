@@ -274,6 +274,12 @@ class PlanningValues:
             )
         return ("public", registry.load(SPEC, None).effective_digest)
 
+    def admitted_dependency(self) -> tuple[str, str]:
+        """`dependency` once the overlay is admitted: what any read of these values depends on."""
+        if self.root is not None:
+            self._overlay()
+        return self.dependency
+
     def matches(self, dependency: tuple[str, str]) -> bool:
         """Re-admit before comparing a cached result's private dependency."""
         if dependency[0] == "public":
