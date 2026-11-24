@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import functools
 import hashlib
 import json
 import logging
@@ -2801,10 +2802,12 @@ def restructure_collection(
         snapshot: record_formats.AdapterSnapshot,
         _chain: _AuditChain,
     ) -> _Revision:
-        rows = {record.identity.key: dict(record.values) for record in snapshot.records}
+        # Copied only when a step reads row values and after the collection's size passed its bound.
+        rows = functools.cache(lambda: {record.identity.key: dict(record.values) for record in snapshot.records})
         resolved = restructure.resolve(
             current_text, steps=steps, undo=undo, origin=origin,
-            history=lambda: shape_history(root, current.collection_id), rows=lambda: rows,
+            history=lambda: shape_history(root, current.collection_id), rows=rows,
+            size=lambda: len(snapshot.records),
             # Only collections the caller may read hold a title: a refusal that named a withheld one would tell an
             # author who cannot read it that it exists, so a title only it holds counts as free.
             titles=lambda: frozenset(
@@ -2843,12 +2846,12 @@ def restructure_collection(
             return _Revision(result={
                 "valid": True, "preview": True, "collection_id": current.collection_id, "origin": origin,
                 "steps": list(run), "inverse": list(run_inverse), "rows_changed": len(planned.changed_rows),
-                "rows_total": len(rows),
+                "rows_total": len(snapshot.records),
             })
         return _Revision(
             manifest_text=planned.text,
             proposed=proposed,
-            row_writes=_restructure_row_writes(root, current, snapshot, rows, planned),
+            row_writes=_restructure_row_writes(root, current, snapshot, rows() if planned.changed_rows else {}, planned),
             shape=lambda transition_id: restructure.entry(
                 transition_id=transition_id, collection_id=current.collection_id, at=automatic_collection.now_stamp(),
                 origin=origin, why=why, steps=run, inverse=run_inverse, undoes=undoes,

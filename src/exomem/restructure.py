@@ -99,6 +99,16 @@ MAX_STEPS = 16
 # path stayed inside it, but through the service a merge held up to 0.58 s on a laptop at load 13-14, nearly all of
 # it CPU: the same merge took 0.31-0.54 s of CPU across three runs. 256 keeps that worst case inside the budget.
 MAX_REWRITTEN_ROWS = 256
+# The most current rows a collection may hold for a restructure or an undo to run in one call. Every step kind holds
+# the store's writer for a time that grows with the collection, whatever it writes: a retitle re-validates every row,
+# and a field step loads and copies every row twice before it knows what it changes. At 100,000 rows a retitle held
+# the writer 8.95 s, a refused rename 2.21 s and a rename of a field 100 rows hold 14.26 s, against a 0.5 s budget.
+# Measured on 2026-11-24 with `uv run python scripts/measure-restructure-hold.py ROWS --repeats 3` on a laptop at
+# load 3.6-3.9, a store without a marker, each step with its undo: the worst hold at 4,000 rows was 0.363 s, at 6,000
+# rows 0.454 s (a split; a rename 0.369 s, a retype 0.373 s, a merge 0.316 s, a retitle 0.243 s) and at 8,000 rows
+# 0.543 s. 6,000 is the largest size measured that stays inside the budget. A collection past it is refused after one
+# count, which costs 0.3 ms at 20,000 rows, where the same retitle held the writer 0.40 s and the same rename 0.88 s.
+MAX_COLLECTION_ROWS = 6000
 # The scalar types that carry no extra declaration, so a field of one can be added or retyped by name and type alone:
 # every presentation scalar but `enum`, which needs its values, and `link`, which needs its target.
 _SCALAR_TYPES = tuple(sorted(collections._PRESENTATION_SCALAR_TYPES - {"enum", "link"}))
@@ -120,12 +130,13 @@ class Holding:
 class Reach:
     """How a move reaches past the called collection: the substrate's lookups, each refusing what it cannot give.
 
-    `load` returns another collection named by id or manifest path. `parse` reads a manifest from its path and text,
-    for the keys and the filter a move derives. `create` returns the id and manifest path that a split's new
-    collection takes, from the source's manifest path and the new title.
+    `load` returns another collection named by id or manifest path, after it checks that the collection and the
+    `extra` rows the step adds to it stay within `MAX_COLLECTION_ROWS` (see `require_collection_size`). `parse` reads a
+    manifest from its path and text, for the keys and the filter a move derives. `create` returns the id and manifest
+    path that a split's new collection takes, from the source's manifest path and the new title.
     """
 
-    load: Callable[[str], Holding]
+    load: Callable[[str, int], Holding]
     parse: Callable[[str, str], collections.CollectionManifest]
     create: Callable[[str, str], tuple[str, str]]
 
@@ -528,7 +539,9 @@ class _World:
         name = _name(name, "target")
         if name in self.edits:
             return name
-        held = self.reach.load(name)
+        # A merge leaves its target holding the source's rows too. Its undo reads the target again, so the target
+        # must stay inside the collection bound after the merge, or the merge would make itself undoable no more.
+        held = self.reach.load(name, len(self.rows[self.home]) if step["step"] == "merge_into" else 0)
         if held.collection_id not in self.edits:
             self.start.setdefault(held.collection_id, held)
             self._hold(held)
@@ -1040,6 +1053,7 @@ def resolve(
     origin: str,
     history: Callable[[], Sequence[Mapping[str, Any]]],
     rows: Callable[[], Mapping[str, Mapping[str, Any]]],
+    size: Callable[[], int],
     titles: Callable[[], Collection[str]],
     collection_id: str = "",
     path: str = "",
@@ -1048,7 +1062,9 @@ def resolve(
 ) -> Resolved:
     """Turn a call's `steps` or `undo` into a plan, reading history, rows and titles only where a step needs them.
 
-    A `declined` origin keeps the proposal and plans no change: it is not proved, because it is not applied.
+    A `declined` origin keeps the proposal and plans no change: it is not proved, because it is not applied, and it
+    loads no row, so the collection's size does not bound it. Any other call first checks `size`, the number of
+    current rows the collection holds, counted without loading them (`require_collection_size`).
     `collection_id`, `path` and `reach` name the called collection and how a move reaches others (see `plan`).
     `automatic` is the substrate's bound check of an automatic call, `automatic_collection.require_restructure_bounds`
     with its storage bound. It runs once, on the proven plan, with the starting manifest text, the steps, the entry
@@ -1058,6 +1074,8 @@ def resolve(
         raise refuse("INVALID_RESTRUCTURE", "give steps or undo, and not both")
     if undo is not None and origin == "declined":
         raise refuse("INVALID_RESTRUCTURE", "an undo is applied, so it has no declined origin")
+    if origin != "declined":
+        require_collection_size(size())
     entries = history() if undo is not None or automatic is not None else ()
     undoes = None
     if undo is not None:
@@ -1084,6 +1102,24 @@ def require_one_call(planned: Plan) -> None:
     written = len(planned.changed_rows) + sum(len(change.written) for change in planned.others)
     retracted = len(planned.retracted) + sum(len(change.retracted) for change in planned.others)
     require_rows(written + retracted)
+
+
+def require_collection_size(count: int, *, extra: int = 0) -> None:
+    """Refuse a restructure or an undo of a collection that holds more current rows than one call reshapes.
+
+    Both storage modes call this with a row count taken before any row is loaded or copied, so a refusal costs one
+    count and changes nothing. `extra` is the rows that a merge adds to its target, which the target must still hold
+    within the bound afterwards.
+    """
+    if count + extra > MAX_COLLECTION_ROWS:
+        raise refuse(
+            "RESTRUCTURE_TOO_MANY_ROWS",
+            (f"this list is too large to reshape in one call: it holds {count} rows" if not extra else
+             f"this merge is too large to undo in one call: the target would hold {count + extra} rows")
+            + f" and one call reshapes a list of at most {MAX_COLLECTION_ROWS}. Reshaping a larger list is a later change",
+            rows_total=count + extra, maximum=MAX_COLLECTION_ROWS,
+            remediation="the collection keeps its current shape",
+        )
 
 
 def require_rows(count: int) -> None:

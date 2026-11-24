@@ -3814,6 +3814,7 @@ class CollectionWriter:
             text, steps=steps, undo=undo, origin=origin,
             history=lambda: self.shape_history(current.collection_id),
             rows=lambda: dict(typed_storage.collection_values(self.connection, current.collection_id)),
+            size=lambda: self._current_row_count(current.collection_id),
             # A collection this split already began holds its title; the split takes it over instead (`_begun`).
             # Only collections the caller may read hold a title: a refusal that named a withheld one would tell an
             # author who cannot read it that it exists, so a title only it holds counts as free.
@@ -3852,6 +3853,10 @@ class CollectionWriter:
                                 {*change.written, *change.retracted}))
         self._refuse_lost_references(written)
         return resolved, prepared, others, self._moved_inputs(planned)
+
+    def _current_row_count(self, collection_id):
+        """The rows a collection holds now, counted in the database without loading one."""
+        return self.connection.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (collection_id,)).fetchone()[0]
 
     def _refuse_lost_references(self, written):
         """Refuse a restructure after which a declared reference of any collection would no longer find its rows.
@@ -3899,10 +3904,12 @@ class CollectionWriter:
         `source_id` at manifest `version` is the called collection, from which a split's new collection takes its id.
         """
 
-        def load(name):
+        def load(name, extra):
             row, manifest, _declared = self._collection(name)
             if manifest.derived:
                 raise derived_rows.refused("restructure")
+            # A move loads every row of the collection it reaches, so that collection is bounded as the called one is.
+            restructure.require_collection_size(self._current_row_count(row["collection_id"]), extra=extra)
             (text,) = self.connection.execute(
                 "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
                 (row["collection_id"], row["manifest_version"]),
@@ -4017,8 +4024,7 @@ class CollectionWriter:
                 "valid": True, "preview": True, "collection_id": current.collection_id, "origin": origin,
                 "steps": list(resolved.run), "inverse": list(resolved.planned.inverse),
                 "rows_changed": len(resolved.planned.changed_rows),
-                "rows_total": self.connection.execute(
-                    "SELECT COUNT(*) FROM items WHERE collection_id=?", (current.collection_id,)).fetchone()[0],
+                "rows_total": self._current_row_count(current.collection_id),
             }
 
     def _restructure_identity(self, collection, steps, undo, origin, why, request_id):

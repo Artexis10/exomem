@@ -277,6 +277,48 @@ def test_a_step_that_rewrites_more_rows_than_one_call_commits_is_refused(work, m
     assert (work.rows(), work.manifest()) == (rows, manifest)
 
 
+def test_a_restructure_of_a_collection_larger_than_one_call_reshapes_is_refused_before_it_changes_anything(work, monkeypatch):
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
+    rows, manifest = work.rows(), work.manifest()
+
+    errors = [work.refused(steps=steps) for steps in (
+        [{"step": "retitle", "title": "Other"}], [{"step": "rename_field", "field": "count", "to": "total"}])]
+
+    for error in errors:
+        assert error["code"] == "RESTRUCTURE_TOO_MANY_ROWS" and error["rows_total"] == 2 and error["maximum"] == 1
+        assert "too large to reshape in one call" in error["message"] and "later change" in error["message"]
+    assert (work.rows(), work.manifest()) == (rows, manifest)
+
+
+def test_an_undo_of_a_collection_larger_than_one_call_reshapes_is_refused(work, monkeypatch):
+    applied = work.restructure(steps=[{"step": "retitle", "title": "Other"}])
+    manifest = work.manifest()
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
+
+    error = work.refused(undo=applied["shape"]["id"])
+
+    assert error["code"] == "RESTRUCTURE_TOO_MANY_ROWS" and error["rows_total"] == 2
+    assert work.manifest() == manifest
+
+
+def test_a_declined_proposal_is_recorded_for_a_collection_larger_than_one_call_reshapes(work, monkeypatch):
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
+
+    declined = work.restructure(steps=[{"step": "retitle", "title": "Other"}], origin="declined")
+
+    assert declined["shape"]["origin"] == "declined"
+
+
+def test_a_store_refuses_a_collection_larger_than_one_call_reshapes_without_loading_a_row(store, monkeypatch):
+    work = make_store_work(store)
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
+    monkeypatch.setattr(typed_storage, "collection_values", lambda *_: pytest.fail("a refused restructure loaded rows"))
+
+    error = work.refused(steps=[{"step": "rename_field", "field": "count", "to": "total"}])
+
+    assert error["code"] == "RESTRUCTURE_TOO_MANY_ROWS"
+
+
 def test_a_retype_that_would_turn_a_stored_fraction_into_a_whole_number_is_refused(work):
     """2.0 and 2 are equal numbers but different stored values, so the undo could not return the row as it was."""
     work.restructure(steps=[{"step": "add_field", "field": "weight", "type": "number"}])

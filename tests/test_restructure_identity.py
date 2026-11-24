@@ -16,8 +16,8 @@ from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_collection_store_writer import store as store  # noqa: F401 - the fixture, by name
 from test_restructure import WHY, make_file_work, make_store_work, stored, verify_from_genesis
 
+from exomem import restructure, vault
 from exomem import structured_collections as collections
-from exomem import vault
 from exomem.cli_ops import OpError
 from exomem.collection_store import history
 from exomem.governance.principal import owner_principal, request_scope
@@ -110,6 +110,29 @@ def test_a_merge_copies_every_row_into_the_target_and_its_undo_takes_them_back_o
     work.restructure(undo=applied["shape"]["id"])
     verify_from_genesis(store, CID)
     verify_from_genesis(store, TARGET)
+
+    assert state(store, work, target) == before
+
+
+def test_a_merge_that_leaves_its_target_larger_than_one_call_reshapes_is_refused_so_its_undo_stays_open(
+        store, work, shape, monkeypatch):
+    target = other(store, shape, rows=(("a", 3), ("c", 5), ("d", 6)))
+    before = state(store, work, target)
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 4)
+
+    refused = work.refused(steps=[{"step": "merge_into", "target": TARGET}])
+
+    assert refused["code"] == "RESTRUCTURE_TOO_MANY_ROWS" and refused["rows_total"] == 5 and refused["maximum"] == 4
+    assert state(store, work, target) == before
+
+
+def test_a_merge_that_fills_its_target_to_the_bound_can_still_be_undone(store, work, shape, monkeypatch):
+    target = other(store, shape, rows=(("a", 3), ("c", 5), ("d", 6)))
+    before = state(store, work, target)
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 5)
+
+    applied = work.restructure(steps=[{"step": "merge_into", "target": TARGET}])
+    work.restructure(undo=applied["shape"]["id"])
 
     assert state(store, work, target) == before
 
