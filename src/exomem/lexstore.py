@@ -3443,14 +3443,17 @@ class _AdmittedStatisticsEntry:
     postings: Any = None
 
 
-#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes for the term and 1 for its
-#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 35 MiB, which holds about
-#: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
-#: no base, and its next build counts every page. The base also keeps each word's introducer (`_DocumentFrequency`),
-#: about 55 bytes a word of the vocabulary: 10 MiB for the 190,000 words of a synthetic vault-sized corpus whose
-#: pages hold 4.3 million term references. The bound counts references, not words, so a vocabulary near the bound
-#: (every reference a distinct word) costs about 160 to 220 MiB a base, for up to `_ADMITTED_BASES_MAX` bases.
-_ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Unique-term references that one scope's admitted-corpus base may keep. A corpus past it keeps no base, so every
+#: build after a write tokenizes and counts every page again: about 1.7 s more CPU a recall on a synthetic
+#: 15,600-page corpus of 4.5 million references (2026-11-24). On synthetic Zipf corpora a base holds about 88 MiB
+#: at 3.4 million references and 218,000 words, and about 196 MiB at 10.6 million references and 465,000 words.
+#: Under both bounds the worst case, a uniform vocabulary of a million words, holds about 290 MiB for one base and
+#: its statistics entry, and about 540 MiB for four. A 17,000-page live vault held 3.7 million references.
+_ADMITTED_BASE_TERMS_MAX = 12_000_000
+#: Words a kept base may count. Its introducer maps (`_DocumentFrequency`) grow with the vocabulary, not with the
+#: references, so a corpus whose text is mostly unique tokens, such as hashes or identifiers, keeps no base.
+#: The 17,000-page live vault held 244,000 distinct stemmed words at its 3.7 million references (2026-11-24).
+_ADMITTED_BASE_WORDS_MAX = 1_000_000
 #: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
 #: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
 #: each other's pages: each build subtracted the other set's terms and re-read its own texts, about 2.5 s of CPU a
@@ -3759,7 +3762,9 @@ def _admitted_corpus(
             {path: kept.terms for path, kept in held.items() if pages.get(path) is not kept},
             [path for path, page in pages.items() if held.get(path) is not page],
         )
-        frequency, retained = counted.frequency, _AdmittedBase(pages, counted)
+        frequency = counted.frequency
+        # The word maps grow with the vocabulary, so a corpus past the word bound keeps no base either.
+        retained = _AdmittedBase(pages, counted) if len(frequency) <= _ADMITTED_BASE_WORDS_MAX else None
     else:
         # No base is kept, so its introducers would be thrown away: count every page in first-seen order only.
         counts, _introduced = _first_seen({path: page.terms for path, page in pages.items()}, sorted(pages))
