@@ -1249,39 +1249,47 @@ class OperationAuthorization:
         mutation = self.mutation if mutation is None else mutation
         if self.failed or self.policy.blocked or (not self.who.resolved and not self.policy.empty) or self.access_blocked:
             return Decision(0)
+        active = self.grants.get(basis.identity, ()) if session else ()
         try:
             inputs = path_inputs(self, subject, path, mutation=mutation)
             if not inputs.shown or (mutation and inputs.write_withheld):
                 return Decision(0)
-            scope_ids = inputs.scopes
-            ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                       mutation=mutation, capture=inputs.capture, strict=True)
-            if ceiling.level == 0:
-                return ceiling
+            granted = None
+            if active:
+                bound = _bound(subject, self.logical_vault_id).basis
+                member = authority.SessionMembership(bound.identity, bound.fingerprint, inputs.scopes)
+                granted = [policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
+                                                grant.audience, grant.ceiling)
+                           for grant in active if member in grant.membership]
+            return self._scopes_decision(basis, inputs.scopes, mutation=mutation, capture=inputs.capture,
+                                         key=lambda: self._decision_key(subject), granted=granted)
         except connector_boundary.UNDECIDED:
             # Withheld for this operation only: the input may read again on the next one.
             self.undecided += 1
             return Decision(0)
-        try:
-            key = self._decision_key(subject)
-        except connector_boundary.BoundaryUnavailable:
-            self.undecided += 1
-            return Decision(0)
-        active = self.grants.get(basis.identity, ()) if session else ()
-        if not active and key in self.cache.decisions:
-            return self.cache.decisions[key]
-        grants = list(self.policy.grants)
-        if active:
-            basis = _bound(subject, self.logical_vault_id).basis
-        for grant in active:
-            if authority.SessionMembership(basis.identity, basis.fingerprint, scope_ids) in grant.membership:
-                grants.append(policy.StandingGrant(grant.grant_id, "authorization-session", grant.scope_ids,
-                                                   grant.audience, grant.ceiling))
+
+    def _scopes_decision(self, basis, scope_ids, *, mutation=False, capture=None, key=None,
+                         granted=None) -> Decision:
+        """The decision for a subject with ``basis`` that lies in exactly ``scope_ids``, once its path inputs allow it.
+
+        Every subject and every proof about many subjects is decided here: the connector's ceiling over the
+        scopes, then the policy kernel under the subject's default audience with the standing grants.
+        ``granted`` lists the session grants that name the subject, or is None when no session grant names
+        it; only then is the decision kept under ``key()``, which is always read. Raises one of
+        ``connector_boundary.UNDECIDED``.
+        """
+        ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
+                                                   mutation=mutation, capture=capture, strict=True)
+        if ceiling.level == 0:
+            return ceiling
+        memo = key() if key is not None else None
+        if granted is None and memo is not None and memo in self.cache.decisions:
+            return self.cache.decisions[memo]
         scope_ids, effective = subject_policy(basis, scope_ids, self.policy)
-        decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose,
-                          policy=effective, active_grants=grants)
-        if not active:
-            self.cache._remember(self.cache.decisions, key, decision, 65536)
+        decision = decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose, policy=effective,
+                          active_grants=[*self.policy.grants, *(granted or ())])
+        if granted is None and memo is not None:
+            self.cache._remember(self.cache.decisions, memo, decision, 65536)
         return decision
 
     def _release_dependency(self):
@@ -1465,15 +1473,9 @@ class OperationAuthorization:
     def _scopes_released(self, basis, scope_ids: tuple[str, ...]) -> bool:
         """Whether a read of a subject with ``basis`` in exactly ``scope_ids`` is released, as `_subject_decision` decides."""
         try:
-            ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
-                                                       strict=True)
+            return self._scopes_decision(basis, scope_ids).level >= 6
         except connector_boundary.UNDECIDED:
             return False
-        if ceiling.level < 6:
-            return False
-        scope_ids, effective = subject_policy(basis, scope_ids, self.policy)
-        return decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose, policy=effective,
-                      active_grants=list(self.policy.grants)).level >= 6
 
     def manifest_subject(self, cid: str) -> CanonicalSubject:
         """The collection's manifest subject, from one point read per read operation.
