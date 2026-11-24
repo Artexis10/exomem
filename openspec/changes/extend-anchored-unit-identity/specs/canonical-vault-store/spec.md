@@ -91,7 +91,7 @@ A writer SHALL be able to update, insert, retire, move and embed a unit by its r
 - **THEN** the move refuses with `UNIT_MOVE_TOO_WIDE`, names the count and suggests embedding the unit from the destination instead
 
 ### Requirement: A page embeds a unit of another page
-A unit SHALL live in one home page. Another page SHALL show it with a block embed and SHALL NOT hold a copy of its bytes. A rich unit with an `id` SHALL have a block id only at the end of its body's first paragraph: one already there, else one its first embed writes. A body with no paragraph SHALL refuse with `UNIT_EMBED_NO_PARAGRAPH`. A promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB.
+A unit SHALL live in one home page; another page SHALL show it with a block embed, not a copy. `#^x` SHALL resolve to the rich unit whose body holds a block ending with ` ^x`. A first embed SHALL name such a block id or write a new one, unique on the page, at the end of the body's first paragraph; a body with no paragraph SHALL refuse with `UNIT_EMBED_NO_PARAGRAPH`. A promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB.
 
 #### Scenario: An edit at home shows everywhere
 - **WHEN** a person edits a unit in its home page and another page embeds it
@@ -109,19 +109,36 @@ A unit SHALL live in one home page. Another page SHALL show it with a block embe
 - **AND** the unit's identity, content and fingerprint stay the same
 
 #### Scenario: A person's block id is reused
-- **WHEN** the first paragraph of a rich unit's body already ends with `^xyz` and a write adds its first embed
+- **WHEN** a rich unit's body already holds a block that ends with `^xyz` and a write adds its first embed
 - **THEN** the embed names `^xyz` and the store writes no second block id
+
+#### Scenario: A new opening paragraph detaches nothing
+- **WHEN** a rich unit's block name ends its first paragraph and a person adds a new paragraph before it
+- **THEN** every embed and link that names the block name still resolves to the unit
+
+#### Scenario: A colliding name falls back to a generated one
+- **WHEN** a rich unit's `id` equals a block id that another paragraph of the page already carries
+- **THEN** its first embed writes a generated block id that matches no block id or anchor on the page
 
 #### Scenario: An id that is not a block id gets a generated one
 - **WHEN** a write adds the first embed of a rich unit whose `id` is `claim_1`
 - **THEN** the store writes a generated block id of letters, digits and hyphens, unique on the page
 
+#### Scenario: A body with no paragraph refuses
+- **WHEN** a write adds the first embed of a rich unit whose body holds only a table
+- **THEN** the write refuses with `UNIT_EMBED_NO_PARAGRAPH` and names a unit-level link as the way forward
+
+#### Scenario: A truncated expansion says so
+- **WHEN** a reader expands a page that holds 100 embeds
+- **THEN** the read returns 64 embedded units
+- **AND** it says that it stopped at the bound, and after which embed
+
 #### Scenario: A promotion keeps an embed rendering
 - **WHEN** a write promotes an embedded compact unit to a rich block
-- **THEN** the rich block's first content paragraph keeps the compact line's block id
+- **THEN** the rich block's first paragraph ends with the compact line's block id
 
 ### Requirement: A semantic write refuses to drop a referenced unit
-A semantic write SHALL check, in its preflight and with one batched query, whether a referenced unit loses its anchor, a unit that a same-page link names included and a unit that it moves counted as kept. It SHALL read inbound unit links by the rule that link reads do not trust rows that lag their page. Unless the write names the unit in `retire_units`, it SHALL refuse with `REFERENCED_UNIT_CHANGED` and name the unit and the ways forward.
+A semantic write SHALL check, in its preflight and with one batched query, whether a referenced unit loses its anchor or a block name that a reference uses, a unit that a same-page link names included and a unit that it moves counted as kept. It SHALL read inbound unit links by the rule that link reads do not trust rows that lag their page. Unless the write names the unit in `retire_units`, it SHALL refuse with `REFERENCED_UNIT_CHANGED` and name the unit and the ways forward.
 
 #### Scenario: An agent rewrite would drop a referenced unit
 - **WHEN** a governed page edit would remove an embedded unit and does not name it in `retire_units`
@@ -132,6 +149,10 @@ A semantic write SHALL check, in its preflight and with one batched query, wheth
 - **WHEN** a write removes unit A while unit B on the same page carries `supersedes: [[#a]]`
 - **THEN** the write refuses with `REFERENCED_UNIT_CHANGED` unless it names A in `retire_units`
 
+#### Scenario: Deleting an embedded block name is caught
+- **WHEN** a governed edit deletes the paragraph that carries the block name another page's embed uses
+- **THEN** the edit refuses with `REFERENCED_UNIT_CHANGED` unless it names the unit in `retire_units`
+
 #### Scenario: A soft reference does not block a write
 - **WHEN** a semantic write removes a unit that only a saved soft reference names
 - **THEN** the write commits
@@ -141,7 +162,7 @@ A semantic write SHALL check, in its preflight and with one batched query, wheth
 - **THEN** the edit does not refuse
 
 ### Requirement: A removed referenced unit keeps its references
-When an edit removes a unit that a stored relationship, an embed or a unit-level link names, or keeps it without its anchor, the store SHALL keep those references and open one review item. The item SHALL list embedding pages 50 at a time with their total. The repair tool SHALL resolve it by restoring the anchor, attaching the references to a unit on the same page, or retiring them; retiring SHALL leave embeds and links as text.
+When an edit removes a unit that a stored relationship, an embed or a unit-level link names, or keeps it without the anchor or block name they use, the store SHALL keep those references and open one review item. The item SHALL list embedding pages 50 at a time with their total. The repair tool SHALL resolve it by restoring the anchor or block name, attaching the references to a unit on the same page, or retiring them; retiring SHALL leave embeds and links as text.
 
 #### Scenario: A hand edit deletes an embedded unit
 - **WHEN** a person deletes a unit that another page embeds
@@ -164,7 +185,7 @@ The importer SHALL import a changed file of a page that holds referenced units o
 - **THEN** the importer commits once, after the saves stop
 
 ### Requirement: Cross-page unit answers apply two-ended visibility
-Embed expansion, the referenced-unit refusal, the move count and review items SHALL answer a page that the caller may not see as absent and SHALL NOT count it. An alias whose unit the caller may not see SHALL answer as a stale reference. A unit move SHALL rewrite referring pages only within `MoverView.scope` and only those it may write; any other page SHALL keep its link, resolved through the alias, and SHALL appear in an owner review item.
+Embed expansion, the referenced-unit refusal, the move count and review items SHALL answer a page that the caller may not see as absent and SHALL NOT count it. A reference whose alias names a unit the caller may not see SHALL answer as it would without its alias. A unit move SHALL rewrite referring pages only within `MoverView.scope` and only those it may write; any other page SHALL keep its link, resolved through the alias, and SHALL appear in an owner review item.
 
 #### Scenario: An invisible home expands to nothing
 - **WHEN** a reader expands an embed whose home page the reader may not see
@@ -176,9 +197,9 @@ Embed expansion, the referenced-unit refusal, the move count and review items SH
 - **AND** Exomem resolves that page's embed through the alias
 - **AND** an owner review item lists that page
 
-#### Scenario: An alias to a hidden unit answers stale
-- **WHEN** a reader resolves a reference whose alias names a unit on a page that the reader may not see
-- **THEN** the answer is stale, as for a reference that matches nothing
+#### Scenario: An alias to a hidden unit is ignored
+- **WHEN** a reader resolves a fingerprint-bound reference that matches nothing and whose alias names a unit on a page that the reader may not see
+- **THEN** the answer is stale, as it would be without the alias
 - **AND** a write by that reference refuses with `STALE_UNIT_REFERENCE`
 
 #### Scenario: A hidden reference does not refuse a write
@@ -204,11 +225,16 @@ Every table and index that this change adds SHALL be an owner object under `vaul
 - **AND** when a build with them returns, the aliases resolve and the requests run
 
 ### Requirement: Aliases survive a rollback to file mode
-Before it projects, rollback to file mode SHALL rewrite every embed and unit-level link that resolves only through an alias to the unit's current reference. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
+Before it projects, rollback to file mode SHALL rewrite, as governed writes, every embed and unit-level link that resolves only through an alias. It SHALL refuse when it cannot rewrite one, unless `--export-aliased` exports their list. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
 
 #### Scenario: A page left on an alias matches after rollback
 - **WHEN** a restricted move leaves a hidden page's embed on the alias and the vault rolls back to file mode
 - **THEN** that page's embed names the unit's current page, and file mode's graph answer for it matches the store's
+
+#### Scenario: A link that rollback cannot rewrite is exported
+- **WHEN** an alias-only link sits on a page that rollback may not rewrite
+- **THEN** rollback refuses and names the link's page
+- **AND** with `--export-aliased` it exports the list beside the vault and completes
 
 #### Scenario: A round trip keeps a moved unit's old reference
 - **WHEN** an agent moves a unit, the vault rolls back to file mode and later migrates again with its export
