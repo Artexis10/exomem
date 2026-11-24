@@ -151,3 +151,11 @@ Evidence, 2026-11-23, tool-only Sonnet client, one draw, at the balanced level, 
 - The 24 scale cases, against the earlier shipped run (an older base, before the recall tool description was trimmed): exact unchanged at 12/24. Positives fully delivered rose from 14/16 to 16/16, but the gain is the two cases the text was tuned on; on the other 22, exact went up on 2 and down on 3. No write was attempted to a wrong collection on either arm.
 - Precision: 7 of 8 scale negatives made an Exomem call, against 6 of 8. The new text also recalled once on a general first turn of a fresh case. The cost is one recall's latency on some general turns, with no writes.
 - One fresh case still makes no call after a general first turn on either arm.
+
+## Task leads rank like search
+
+On 2026-11-24 a broad question about what a speaker said in a recorded Q&A missed its compiled note on the installed service, although search ranked that note third. The note was task lead 7 of 12, and the default allowance renders about five leads. Task discovery kept its leads in the order its lanes ran: the keyword reading's top 12 first, then the dense reading's pages, then the method search's. When the keyword reading alone returned 12 pages, no other lane could place a lead. In this turn, dropping "a" from "Q&A" as a stopword left a one-letter word that is also the name of a busier subject, so pages about that subject filled every keyword slot.
+
+Decision: order the leads by the reciprocal-rank fusion that search uses (`fusion.reciprocal_rank_fusion`, `RankingConfig.rrf_k`), and read each lane as deep as search's lanes (`candidate_multiplier`, `candidate_floor`). A page that two lanes rank well now outranks a page that one lane alone ranks first. The lanes do the same work; only their depth and the ordering change. A routed collection stays first, and the compiled-first reorder still runs over the fused head.
+
+Rejected: querying with the raw turn instead of its content words. On the live catalogue it moved the note from 15th to 3rd only because the turn's function words matched the note's transcript wording, which is chance, not relevance. Rejected: calling search itself from recall, which would add a second retrieval pipeline to every recall while recall latency is being cut.

@@ -53,3 +53,9 @@
 - [x] 6.5 Decide the catalogue shape on a fresh held-out set with a tool-only real client: catalogue alone against catalogue plus the selector, per-case exact with intervals; keep the selector off by default.
 - [x] 6.6 Ask for recall on a later turn that opens a subject from the user's life or work, in clients without hooks, through the server instructions within their 900-character bound; prove it with a tool-only real client on the cases that exposed the miss and on fresh cases, with general-only negatives.
   - Server instructions only; proved on fresh cases and the scale set (design, "A later subject in a client without hooks"; run record `subject-switch-s1`).
+
+## 7. Task leads rank like search
+
+- [x] 7.1 Order task leads by the reciprocal-rank fusion of the discovery lanes, at search's fusion constant and lane depth; verify that a page both readings rank leads when more keyword matches than leads crowd it.
+- [ ] 7.2 Replay the 2026-11-24 broad-question miss and the development cases on a vault copy, main against the fix; record where each needed page lands and the task-discovery latency.
+- [ ] 7.3 Verify on the installed service that the broad question from the 2026-11-24 miss serves its compiled note among the rendered leads.
