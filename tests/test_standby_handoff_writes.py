@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -60,6 +61,7 @@ from pathlib import Path
 
 sys.path.insert(0, {tests_dir!r})
 from test_graph_post_handoff_writes import (  # noqa: E402
+    ACK_BOUND_SECONDS,
     GENERATED,
     WRITE_COUNT,
     _governed_write,
@@ -94,6 +96,26 @@ def counted(self, **kwargs):
 
 
 EpistemicGraphIndex._rebuild_all_off_boundary = counted
+
+# Whole-vault work the graph rebuild counter does not see; a write must start none of it.
+uncounted = []
+
+
+def count_calls(owner, name, kind):
+    original = getattr(owner, name)
+
+    def wrapper(*args, **kwargs):
+        uncounted.append(kind)
+        return original(*args, **kwargs)
+
+    setattr(owner, name, wrapper)
+
+
+from exomem import epistemic_graph  # noqa: E402
+
+count_calls(lexstore.LexicalStore, "_rebuild", "lexical rebuild")
+count_calls(lexstore, "_schedule_repair", "lexical repair scheduled")
+count_calls(epistemic_graph, "_start_background_proof", "background graph proof")
 
 if retry_catalogue:
     assess = lexstore.assess_live_catalog
@@ -322,18 +344,44 @@ if advanced:
 
 from exomem.cli_ops import OpError  # noqa: E402
 
+import traceback  # noqa: E402
+
 acknowledgements = []
 per_write_rebuilds = []
+per_write_uncounted = []
+stall_traces = []
 refusals = []
+
+
+def record_stall(index):
+    # A write past the incremental bound records every thread's stack, so the stall names its cause.
+    frames = sys._current_frames()
+    stall_traces.append(
+        f"write {{index}} still running after {{ACK_BOUND_SECONDS}}s:\\n"
+        + "\\n".join(
+            f"thread {{ident}}:\\n" + "".join(traceback.format_stack(frame))
+            for ident, frame in frames.items()
+            if ident != threading.get_ident()
+        )
+    )
+
+
 for index in range(WRITE_COUNT):
     before = len(passes)
+    before_uncounted = len(uncounted)
+    stall = threading.Timer(ACK_BOUND_SECONDS, record_stall, args=(index,))
+    stall.daemon = True
+    stall.start()
     try:
         acknowledgements.append(
             _governed_write(root, generated / f"generated-note-{{index:04d}}.md", "promoted")
         )
     except OpError as error:
         refusals.append(error.code)
+    finally:
+        stall.cancel()
     per_write_rebuilds.append(len(passes) - before)
+    per_write_uncounted.append(uncounted[before_uncounted:])
 
 graph_sync.drain_active_rebuilds(timeout=60.0)
 if advanced:
@@ -371,6 +419,8 @@ print(
             "warm_passes": warm_passes,
             "rebuilds": len(passes),
             "per_write_rebuilds": per_write_rebuilds,
+            "per_write_uncounted": per_write_uncounted,
+            "stall_traces": stall_traces,
             "acknowledgements": acknowledgements,
             "refusals": refusals,
             "queued_after_drain": queued_after_drain,
@@ -440,9 +490,18 @@ def test_a_promoted_standby_serves_its_first_ten_writes_incrementally(
     assert report["rebuilds"] == 0
     assert report["queued_after_drain"] == 0
     assert report["available"] is True, report
-    # The rebuild counters and the median carry the defect, where every write rebuilds.
-    # On a loaded CI runner one write in ten stalls 2.7-3.1 s mid-series with zero rebuilds.
-    _assert_incremental_latency(report["acknowledgements"], bound=LIVE_ACK_BOUND_SECONDS)
+    assert report["per_write_uncounted"] == [[]] * WRITE_COUNT, (
+        f"a write started whole-vault work: {report['per_write_uncounted']}"
+    )
+    for trace in report["stall_traces"]:
+        warnings.warn(f"[{arm}] {trace}", stacklevel=1)
+    # Only the retry arm writes in a managed runtime, and on CI one or two of its ten writes
+    # stall 2.0-3.4 s with no whole-vault work counted; the cause is not yet known, and the
+    # stall traces above name it. The other arms keep the incremental bound.
+    if arm == "retry":
+        _assert_incremental_latency(report["acknowledgements"], bound=LIVE_ACK_BOUND_SECONDS)
+    else:
+        _assert_incremental_latency(report["acknowledgements"])
 
 
 @pytest.mark.parametrize(
