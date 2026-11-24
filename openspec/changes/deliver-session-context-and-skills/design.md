@@ -163,3 +163,11 @@ Evidence, 2026-11-24, Sonnet client in that mode, one draw, run records `deferre
 - The off level: the first text asked for recall without a condition and searched memory in 5 of 5 off sessions, against 0 of 5 on main. The text that ships says the level a tool reports wins, and searched memory in 0 of 5.
 - Regression cases built from two real misses: own-subject cases read memory 1 of 5 times on main and 5 of 5 with the text that ships. General cases made no call on either.
 - 12 fresh cases against main: exact 9/12 against 4/12, +0.42 [+0.17, +0.67]; the keyed item was used in 8 of 8 keyed cases against 1 of 8. General cases made no call on either arm. Every attempted write targeted the keyed collection; the bench vault has no collection store and refused most of them.
+
+## Task leads rank like search
+
+On 2026-11-24 a broad question about what a speaker said in a recorded Q&A missed its compiled note on the installed service, although search ranked that note third. The note was task lead 7 of 12, and the default allowance renders about five leads. Task discovery kept its leads in the order its lanes ran: the keyword reading's top 12 first, then the dense reading's pages, then the method search's. When the keyword reading alone returned 12 pages, no other lane could place a lead. In this turn, dropping "a" from "Q&A" as a stopword left a one-letter word that is also the name of a busier subject, so pages about that subject filled every keyword slot.
+
+Decision: order the leads by the reciprocal-rank fusion that search uses (`fusion.reciprocal_rank_fusion`, `RankingConfig.rrf_k`), and read each lane as deep as search's lanes (`candidate_multiplier`, `candidate_floor`). A page that two lanes rank well now outranks a page that one lane alone ranks first. The lanes do the same work; only their depth and the ordering change. A routed collection stays first, and the compiled-first reorder still runs over the fused head.
+
+Rejected: querying with the raw turn instead of its content words. On the live catalogue it moved the note from 15th to 3rd only because the turn's function words matched the note's transcript wording, which is chance, not relevance. Rejected: calling search itself from recall, which would add a second retrieval pipeline to every recall while recall latency is being cut.

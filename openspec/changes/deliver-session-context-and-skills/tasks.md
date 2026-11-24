@@ -56,3 +56,9 @@
 - [x] 6.7 Make the shipped skill's description ask for recall on subjects of the user's own life or work, for clients that defer tools and hide server instructions; prove it on the incident regression cases and on fresh cases with a client that behaves that way.
   - Skill description only; proved in the bench's `deferred-skill` client mode on the incident regression cases and on fresh cases with the off level unchanged (run records `deferred-skill-description-s1` and `-s2`; design, "A client that defers tools and hides server instructions"). The live claude.ai check follows the release.
 - [ ] 6.8 Name every item an overflowing catalogue could not list, within `skills_names_max_chars`, so a collection that declares no topic and shares no word with the turn still reaches the agent; prove it on the installed service with the turn that exposed the miss.
+
+## 7. Task leads rank like search
+
+- [x] 7.1 Order task leads by the reciprocal-rank fusion of the discovery lanes, at search's fusion constant and lane depth; verify that a page both readings rank leads when more keyword matches than leads crowd it.
+- [ ] 7.2 Replay the 2026-11-24 broad-question miss and the development cases on a vault copy, main against the fix; record where each needed page lands and the task-discovery latency.
+- [ ] 7.3 Verify on the installed service that the broad question from the 2026-11-24 miss serves its compiled note among the rendered leads.
