@@ -134,7 +134,8 @@ def observe_memory(
             "INVALID_OBSERVE_OPERATION",
             f"operation must be one of: {', '.join(_OPERATIONS)}",
         )
-    # Only these operations have a preview entry; elsewhere the surface would queue and report a preview as a write.
+    # Only these operations have a preview entry; elsewhere the surface would queue
+    # and report a preview as a write.
     if validate_only and op not in {"supersede", "assess"}:
         raise ObserveMemoryError(
             "INVALID_OBSERVE_INPUT",
@@ -1039,7 +1040,9 @@ def _bind_claim_id(
             )
         if resolution.unit is not None and resolution.unit.unit_ref:
             text = unit_id(resolution.unit)
-    return _bind_unit_id(vault_root, document, text, definitions_unavailable=definitions_unavailable)
+    return _bind_unit_id(
+        vault_root, document, text, definitions_unavailable=definitions_unavailable
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1210,7 +1213,7 @@ def _superseding_unit(
     path: str,
     unit: Any | None,
 ) -> Any | None:
-    """The unit already superseding `unit` on this page, if one exists; a converted item has none."""
+    """The unit already superseding `unit` on this page, if any; a converted item has none."""
     if unit is None or unit.unit_ref is None:
         return None
     for successor, target in working_set_currency.same_page_supersessions(
