@@ -503,7 +503,7 @@ On a personal server, the reply to a destination ticket SHALL include a `page` s
 
 ### Requirement: Kept text never holds a card number
 
-Every capture that keeps caller text SHALL remove each payment card number before the text is hashed or written. That covers Evidence text, captions, transcriptions, Source text and observation text. A card number has 14 to 19 digits, unbroken or in a grouping that card schemes print. Its issuer prefix and length belong to a card scheme, and its Luhn check digit holds. The kept text SHALL show where the number was, keeping its last four digits.
+These captures SHALL remove each payment card number before the text is hashed or written: Evidence text, captions, transcriptions, Source text and observation text. A card number has 14 to 19 digits, unbroken or in a grouping that card schemes print. Its issuer prefix and length belong to a card scheme, and its Luhn check digit holds. The kept text SHALL show where the number was, keeping its last four digits.
 
 #### Scenario: A card number in a text original is removed
 
@@ -520,6 +520,15 @@ Every capture that keeps caller text SHALL remove each payment card number befor
 
 - **WHEN** a kept text contains an IMEI, an EAN-13 barcode, a grouped order number and a SHA-256 digest
 - **THEN** all are stored unchanged
+
+### Requirement: Digest-bound Source text with a secret is refused
+
+Source text sent with `expected_sha256` promises those exact bytes. When it holds a card number or a credential, the capture SHALL refuse with a code that names the secret, and SHALL NOT store altered bytes.
+
+#### Scenario: A digest-bound Source text holds a card number
+
+- **WHEN** a caller saves Source text holding a card number, with the digest of that text
+- **THEN** the capture is refused, the refusal names the card number or credential, and nothing is stored
 
 ### Requirement: Kept text never holds a labelled credential
 

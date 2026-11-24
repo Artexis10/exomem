@@ -101,11 +101,16 @@ def _mask_cards(text: str) -> tuple[str, int]:
 
     def replace(match: re.Match[str]) -> str:
         nonlocal count
-        digits = re.sub(r"[ \u00a0-]", "", match.group(0))
-        if not _is_card_number(digits):
-            return match.group(0)
-        count += 1
-        return f"[card number removed, ends {digits[-4:]}]"
+        found = match.group(0)
+        digits = re.sub(r"[ \u00a0-]", "", found)
+        if _is_card_number(digits):
+            count += 1
+            return f"[card number removed, ends {digits[-4:]}]"
+        if len(digits) == 19 and _is_card_number(digits[:16]):
+            # A 4-4-4-4 card followed by a 3-digit group is a card and its security code, so both go.
+            count += 1
+            return f"[card number removed, ends {digits[12:16]}]"
+        return found
 
     return _CARD_CANDIDATE.sub(replace, text), count
 

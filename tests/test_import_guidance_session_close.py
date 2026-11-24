@@ -898,7 +898,9 @@ def test_completion_reads_the_reply_so_a_refused_upload_never_counts_as_kept() -
     prepared = replied({"handoff_status": "handoff_prepared", "next": [{"step": "page", "url": "https://x/upload/send#t"}]})
     no_transport = replied({"error": {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "message": "no HTTP session"}})
     refused = replied({"error": {"code": "INVALID_PRESERVE", "message": "bad scope"}})
-    assert custody("keep", [prepared])["custody_completed_same_turn"] == checks.PASS
+    stored = replied({"files": [{"state": "stored", "stored_path": "Evidence/warranty/proof/label.png"}]})
+    assert custody("keep", [stored])["custody_completed_same_turn"] == checks.PASS
+    assert custody("keep", [prepared])["custody_completed_same_turn"] == checks.UNKNOWN
     assert custody("keep", [no_transport])["custody_completed_same_turn"] == checks.UNKNOWN
     assert custody("keep", [refused])["custody_completed_same_turn"] == checks.FAIL
     assert custody("keep", [refused])["custody_attempted_same_turn"] == checks.PASS
@@ -917,13 +919,14 @@ def test_a_transcription_a_late_keep_or_an_upload_that_lands_nowhere_fails_the_a
         assert custody("keep", calls)["custody_attempted_same_turn"] == checks.FAIL
 
 
-def test_a_card_photo_fails_if_the_run_saves_evidence_or_asks_for_an_evidence_upload() -> None:
+def test_a_card_photo_fails_if_the_run_keeps_it_as_evidence_or_as_a_source() -> None:
     assert custody("withhold", [tool_call("search_memory", 0, query="card")]) == {"card_not_kept": checks.PASS}
-    assert custody("withhold", [tool_call("upload_files", 0, lane="source")]) == {"card_not_kept": checks.PASS}
     for kept in (
         tool_call("save_evidence", 1, scope="receipts", category="card", files=[{"file_id": "f1", "download_url": "u"}]),
         tool_call("save_evidence", 1, scope="receipts", category="card", name="card.txt", text="4111"),
         tool_call("upload_files", 0, lane="evidence"),
+        tool_call("upload_files", 0, lane="source"),
+        tool_call("save_source", 0, title="Card", files=[{"file_id": "f1", "download_url": "u"}]),
     ):
         assert custody("withhold", [kept]) == {"card_not_kept": checks.FAIL}
 

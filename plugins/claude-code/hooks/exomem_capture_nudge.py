@@ -161,6 +161,7 @@ _KB_WRITES = (
     "save_evidence",
     "save_source",
     "supersede_note",
+    "upload_files",
 )
 #: The capture check, one short line on every fire. It names the rules that prevent known
 #: incidents and points at the installed skill or portable operating contract.

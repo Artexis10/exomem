@@ -24,7 +24,7 @@ from exomem import (
     server_transfer,
     upload_handoff,
 )
-from exomem.governance import principal
+from exomem.governance import capture_redaction, principal
 
 LABEL = b"\x89PNG\r\n\x1a\n invented serial label NW7-2611-0042"
 NOTE = "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat.md"
@@ -334,3 +334,22 @@ def test_the_send_page_script_parses_as_javascript(tmp_path):
     script.write_text(server_transfer._SEND_PAGE_SCRIPT, encoding="utf-8")
     checked = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
     assert checked.returncode == 0, checked.stderr
+
+
+def test_a_card_followed_by_its_security_code_is_removed_with_the_code():
+    # Failure caught: the 3-digit group after a card made a 19-digit candidate that failed the check, so both stayed.
+    kept = capture_redaction.redact("Card 4111 1111 1111 1111 123, sent to 4111 1111 1111 1111 567 Elm St.")
+    assert kept.removed == ("payment_card",)
+    assert "4111" not in kept.text and " 123" not in kept.text
+    assert kept.text.count("[card number removed, ends 1111]") == 2
+
+
+def test_source_text_with_a_digest_and_a_card_is_refused_by_name(upload_env, source_schema):
+    # Failure caught: a digest mismatch that blamed the bytes and sent the caller to a file path that keeps the card.
+    vault, who, _app = upload_env
+    text = "Paid with card 4111 1111 1111 1111, order NW-2611."
+    with principal.request_scope(who), pytest.raises(ValueError, match="SECRET_IN_SOURCE_TEXT"):
+        commands.op_capture_source(
+            vault, source_schema, title="Northwind order", source_kind="receipt", content=text,
+            expected_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        )

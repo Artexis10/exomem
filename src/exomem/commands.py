@@ -9189,6 +9189,10 @@ def op_observe_memory(
     if content:
         kept_content, _caption, _text, observation_warnings = _preserve_module().redact_capture_text(content=content)
         content = content if kept_content is None else kept_content
+    if isinstance(context, str) and context:
+        kept_context, _caption, _text, context_warnings = _preserve_module().redact_capture_text(content=context)
+        context = context if kept_context is None else kept_context
+        observation_warnings += [warning.replace("from the text", "from the context") for warning in context_warnings]
     try:
         result = observe_memory_module.observe_memory(
             vault_root,
@@ -9466,6 +9470,12 @@ def op_capture_source(
     elif content:
         kept_content, _caption, _text, source_redaction_warnings = _preserve_module().redact_capture_text(content=content)
         content = content if kept_content is None else kept_content
+    if source_redaction_warnings and expected_sha256 is not None and not files:
+        # The digest promises these exact bytes, and storing other bytes would break it; a file would keep the secret.
+        raise ValueError(
+            "SECRET_IN_SOURCE_TEXT: the text holds a card number or a credential, which is never kept; "
+            "remove it and send the text again without expected_sha256"
+        )
     if source_identity is not None:
         if files or adoption is not None:
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")

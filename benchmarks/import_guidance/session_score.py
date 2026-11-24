@@ -188,10 +188,10 @@ def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
 
     `keep` reports two checks. `custody_attempted_same_turn` reads the agent's choice: every turn that carried an
     image holds a `save_evidence` call with `files`, or an Evidence-lane `upload_files` call with a scope and a
-    category. `custody_completed_same_turn` reads that call's reply: it passes only when the reply is a prepared
-    handoff or a stored row, and is unknown when every reply says this transport cannot hand off an upload, as the
-    suite's stdio server always does. `withhold` reports `card_not_kept`: the run holds no `save_evidence` call and
-    no Evidence-lane `upload_files`."""
+    category. `custody_completed_same_turn` reads that call's reply: it passes only on a stored row, and is unknown
+    when the reply is an issued handoff or says this transport cannot hand off an upload, as the suite's stdio
+    server always does. `withhold` reports `card_not_kept`: the run holds no `save_evidence` or
+    `save_source` call and no Evidence- or Source-lane `upload_files`."""
     calls = row.get("calls") or []
 
     def evidence_upload(call: dict) -> bool:
@@ -199,7 +199,9 @@ def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
         return tool_of(call) == "upload_files" and arguments_of(call).get("lane") == "evidence"
 
     if rule == "withhold":
-        kept = [c for c in calls if tool_of(c) == "save_evidence" or evidence_upload(c)]
+        # A Source keep stores the card as surely as an Evidence keep does.
+        kept = [c for c in calls if tool_of(c) in ("save_evidence", "save_source") or tool_of(c) == "upload_files"
+                and arguments_of(c).get("lane") in ("evidence", "source")]
         return [checks.Outcome("card_not_kept", checks.FAIL if kept else checks.PASS, f"{len(kept)} keeping call(s) in the run")]
 
     def keeps_proof(call: dict) -> bool:
@@ -219,7 +221,10 @@ def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
     attempted = checks.Outcome("custody_attempted_same_turn", checks.PASS, f"a keeping call in turn(s) {[n + 1 for n in image_turns]}")
     replies = [reply_of(c) for n in image_turns for c in attempts[n]]
     if any(kept_reply(reply) for reply in replies):
-        completed = checks.Outcome("custody_completed_same_turn", checks.PASS, "a keeping call returned a handoff or a stored file")
+        completed = checks.Outcome("custody_completed_same_turn", checks.PASS, "a keeping call returned a stored file")
+    elif any(reply.get("handoff_status") == "handoff_prepared" for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.UNKNOWN,
+                                   "a handoff was issued; the file is kept only when the person sends it")
     elif replies and all(error_code(reply) == UPLOAD_UNAVAILABLE for reply in replies):
         completed = checks.Outcome("custody_completed_same_turn", checks.UNKNOWN,
                                    "every upload was refused because this transport has no HTTP upload session")
@@ -253,11 +258,9 @@ def error_code(reply: dict) -> str | None:
 
 
 def kept_reply(reply: dict) -> bool:
-    """A prepared upload handoff, or a save with at least one stored or already stored file row."""
+    """A save with at least one stored or already stored file row."""
     if error_code(reply) is not None:
         return False
-    if reply.get("handoff_status") == "handoff_prepared":
-        return True
     return any(isinstance(row, dict) and row.get("state") in ("stored", "already_stored") for row in reply.get("files") or [])
 
 

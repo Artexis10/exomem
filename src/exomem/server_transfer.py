@@ -993,7 +993,7 @@ form.onsubmit = async (event) => {
   try {
     const reply = await fetch("../upload", {method: "POST", body, headers: {Authorization: "Bearer " + ticket}});
     const receipt = await reply.json();
-    const refusal = (receipt.save && receipt.save.reason) || receipt.reason || "the server refused it";
+    const refusal = ((receipt.save && receipt.save.reason) || receipt.reason || "the server refused it").replace(/[.\s]+$/, "");
     out.textContent = receipt.stored_path
       ? "Saved: " + receipt.stored_path + " (SHA-256 " + receipt.hash + ")"
       : "Not saved: " + refusal + ". Tell the assistant.";
@@ -1027,6 +1027,15 @@ SEND_PAGE_HEADERS = {
 }
 
 
+def _same_bytes(path: Path, sha256: str) -> bool:
+    """Whether the file already at `path` holds these bytes, so a resend is a repeat, not a second photo."""
+    try:
+        with path.open("rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest() == sha256
+    except OSError:
+        return False
+
+
 def _save_on_arrival(vault_root: Path, held: dict, destination: dict) -> dict:
     """Save a just-held evidence upload where its ticket says, with the same command `save_evidence` runs.
 
@@ -1047,7 +1056,13 @@ def _save_on_arrival(vault_root: Path, held: dict, destination: dict) -> dict:
             return {"state": "failed", "code": getattr(exc, "code", type(exc).__name__), "reason": str(exc)[:300]}
 
     row = save(held["file"])
-    if row.get("code") == "ARTIFACT_EXISTS":
+    from . import preserve as preserve_module
+
+    name, _protected = preserve_module._artifact_name(
+        vault_root, destination["scope"], destination["category"], str(held["file"]["file_name"]), raw_protection=False,
+    )
+    taken = preserve_module.evidence_folder(vault_root, destination["scope"], destination["category"]) / name
+    if row.get("code") == "ARTIFACT_EXISTS" and not _same_bytes(taken, held["hash"]):
         # Phones name many photos alike (`image.jpg`); other bytes under the same name get the digest in theirs.
         name = Path(str(held["file"]["file_name"]))
         row = save({**held["file"], "file_name": f"{name.stem}-{held['hash'][:12]}{name.suffix}"})

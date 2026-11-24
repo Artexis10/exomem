@@ -58,8 +58,8 @@ Image turns:
 - `c13-proof-attachment` shares a product box label to register a warranty. `c14-card-in-photo` shares a payment card to keep with a receipt. Both replay the incident of 24 Nov 2026, where the agent transcribed a shared photo and never kept the image as Evidence.
 - A key may add `evidence`: `keep` (c13) or `withhold` (c14). The scorer then reads the recorded tool calls, each with the turn that made it, and adds these checks to the run:
   - `custody_attempted_same_turn` (`keep`): the image turn holds a `save_evidence` call with `files`, or an `upload_files` call with lane `evidence`, a scope and a category. This is the agent's choice, and it decides the case.
-  - `custody_completed_same_turn` (`keep`): that call's reply is a prepared handoff or a stored file. It is unknown when every reply says the transport has no HTTP upload session, which this suite's stdio server always says, so the suite cannot show a file actually kept.
-  - `card_not_kept` (`withhold`): the run holds no `save_evidence` call and no Evidence-lane `upload_files` call.
+  - `custody_completed_same_turn` (`keep`): that call's reply holds a stored file. An issued handoff is unknown, because the person still has to send the file. It is unknown when every reply says the transport has no HTTP upload session, which this suite's stdio server always says, so the suite cannot show a file actually kept.
+  - `card_not_kept` (`withhold`): the run holds no `save_evidence` or `save_source` call and no Evidence- or Source-lane `upload_files` call.
 - The report adds an `evidence custody` measure. It is not applicable to every other case.
 
 `--client-mode plugin` is the default. It appends the arm's skill and installs its Stop and UserPromptSubmit hooks. Omitting `--hook-turn` keeps those hooks; that flag adds a separate synthetic close ask. `--client-mode tool-only` keeps the same strict real MCP server, stages no plugin hooks, and appends no skill. It requests `disableAllHooks: true` in the supplied settings file. Combining tool-only with `--hook-turn` is rejected before launch.
