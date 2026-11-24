@@ -75,7 +75,25 @@
     | 100,000 | external | 1,000, lower bound | not run | 69.5 / 74.7 | not run | 30.5 / 32.0 | not run | 20.2 / 25.5 |
 
   - Reading: every point is under the 1 s budget at p95, up to 100,000 citing rows. The owner's read of a page that every row cites drops from 1.2 s to 39 ms at 20,000 rows, with an exact count. That count is an index-only count, about 40 ms over the page read alone at 100,000 rows. The external reader stops counting at 1,000 visible rows, so its read stays flat from 5,000 rows on. The before arm was not run at 100,000 rows: it decides every citing row, about 6 s a read by its 20,000-row slope.
-  - Reading: in this scenario the external reader sees all but one citing row. A reader who sees few of them decides about the limit divided by its visible share, up to every citing row. A reader who sees 1 row in 100 would therefore pay about the before arm's cost. That case was not measured; design.md names it under Risks.
+  - Reading: in this scenario the external reader sees all but one citing row. The third round below adds a reader who sees 3 of them.
+
+  - Row-governed citation reads, third review round. The read above still decided each citing row for a reader whose release varies by row, so a reader who saw few of them could run out of time. Under the 200 ms interactive deadline, a page with thousands of withheld citing rows then read as `unavailable` while its twin read as `ready`. Now a summary or log collection is counted and paged through a row filter that governance builds once a read (design.md).
+  - Instrument: the same harness and scenario as the tables above, now under the shipped query profiles. For the third reader the scope names every row but the first 3 by ref, so the external reader sees 3 citing rows. Before is `3a308cd8c`, after is the fix. The after arm ran each size in its own process, and the before arm ran both sizes in one. The 100,000-row point is the after arm only. "Count" is the page every row cites, before → after; "exact" means `count_complete: true`.
+
+    | Rows | Reader | Count, before → after | Page every row cites, before | after | Page no row cites, before | after | Page read alone, before | after |
+    |---|---|---|---|---|---|---|---|---|
+    | 5,000 | owner | 5,000 → 5,000 | 33.5 / 36.1 | 32.6 / 35.5 | 31.7 / 33.2 | 29.5 / 34.7 | 27.5 / 33.8 | 27.6 / 29.9 |
+    | 5,000 | external, sees all but 1 | 1,000, lower bound → 4,999, exact | 73.3 / 77.8 | 39.4 / 43.0 | 34.1 / 38.1 | 33.2 / 38.7 | 27.2 / 33.2 | 30.5 / 34.8 |
+    | 5,000 | external, sees 3 | `unavailable` → 3, exact | 222.5 / 229.8 | 56.0 / 63.1 | 22.9 / 37.9 | 32.0 / 41.1 | 17.7 / 20.3 | 29.2 / 33.3 |
+    | 20,000 | owner | 20,000 → 20,000 | 26.8 / 36.8 | 38.7 / 42.9 | 18.9 / 23.8 | 28.3 / 33.2 | 22.9 / 28.0 | 30.0 / 42.9 |
+    | 20,000 | external, sees all but 1 | 1,000, lower bound → 19,999, exact | 60.2 / 69.3 | 64.0 / 71.9 | 26.4 / 31.6 | 39.5 / 90.7 | 19.0 / 22.8 | 30.6 / 37.3 |
+    | 20,000 | external, sees 3 | `unavailable` → 3, exact | 222.1 / 231.1 | 138.8 / 149.5 | 21.0 / 23.1 | 34.5 / 39.9 | 17.0 / 20.9 | 31.6 / 34.7 |
+    | 100,000 | owner | not run → 100,000 | not run | 51.6 / 56.7 | not run | 17.8 / 24.4 | not run | 14.6 / 20.9 |
+    | 100,000 | external, sees all but 1 | not run → 99,999, exact | not run | 125.4 / 133.1 | not run | 20.5 / 23.2 | not run | 16.4 / 18.1 |
+    | 100,000 | external, sees 3 | not run → `unavailable` | not run | 88.9 / 100.7 | not run | 19.3 / 23.2 | not run | 16.0 / 16.6 |
+
+  - Reading: before, the reader who sees 3 citing rows ran out of the deadline at 222 ms and read `unavailable`, at 5,000 and at 20,000 rows. After, it reads `ready` with the exact count 3, at 63 and 150 ms p95. The external reader now gets an exact count at every size, at 133 ms p95 or less up to 100,000 rows. The owner is unchanged within the run-to-run spread, which the page read alone shows at about 10 ms.
+  - Reading: the reader who sees 3 still pays for the rows that the scope names by ref, about 5 µs a row. At 100,000 rows with 99,997 named, its read runs out of time and reads `unavailable`, while a page that the collection does not cite reads `ready`. design.md names this bound under Risks. A scope that withholds rows by tag costs one decision per distinct value instead: a separate run with 100,000 tag-withheld citing rows read `ready` in 130 to 150 ms of CPU.
 
   - Reading: every warm public call stays under 1 s at p95 except the 21,000-row `recall_context` before (one tail of 1.38 s, a single run) and the filter on a link field, which scans the collection on both arms (1.4 s at 21,000 rows). The change adds 5 to 15 ms to a page read, a search and a recall at 5,000 rows, and nothing visible to the filter or the edit. The filter on a link field at 5,000 rows is 261 and 269 ms p95 after against 263 and 268 before (two paired runs of 60). Two paired recall runs at 21,000 rows with server timings put the change at 23 to 38 ms on the server and 11 to 12 ms outside it, though the merge base's membership graph was still warming in those runs, so they do not compare like with like.
 - [x] 1.10 Outcome check on a disposable vault: a row written with a page title stores the ref and resolves after a rename, the page lists the row, a recall hit shows it, a withheld collection's row is absent, and a plan item's `results` resolves.
