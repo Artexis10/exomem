@@ -9,6 +9,8 @@ startup coverage assertion rejects each way the entries can drift from the lease
 from __future__ import annotations
 
 import dataclasses
+import subprocess
+import sys
 
 import pytest
 
@@ -278,3 +280,17 @@ def test_startup_fails_when_the_lease_would_treat_a_read_variant_as_a_write() ->
 
     with pytest.raises(RuntimeError, match=r"\('import', 'start'\) in read_records classifies"):
         commands.validate_operation_entries([moved])
+
+
+def test_more_reads_as_continuation_on_a_surface_built_before_the_commands_register() -> None:
+    """The first caller builds the cached surface; one that imports no command builds it from the rows alone."""
+    code = (
+        "from exomem.public_surface import public_surface\n"
+        "call = {'operation': 'schema.inspect', 'arguments': {'subject': 'planning-values', 'more': 'x'}}\n"
+        "print(public_surface().unspell('inspect_memory', call)[1].get('continuation'))\n"
+    )
+
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "x"

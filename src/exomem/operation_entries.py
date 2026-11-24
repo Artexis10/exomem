@@ -115,6 +115,12 @@ class OperationEntry:
         return self.action == action and all(item.matches(arguments) for item in self.constraints)
 
 
+#: `(synonym, leaf)` pairs: a second name every rendering accepts for a leaf field, never published.
+#: A typed tool names its paging cursor `more`; a grouped operation names it `continuation`.
+#: It lives here, beside the rows, because a surface can be built before any command registers.
+LEAF_SYNONYMS = (("more", "continuation"),)
+
+
 @dataclass(frozen=True, slots=True)
 class RenderingSpec:
     """A public tool spelling of a grouped command: one side of its operations."""
@@ -127,8 +133,6 @@ class RenderingSpec:
     tool_arguments: tuple[str, ...] = ()
     #: Wire field names that would otherwise collide with the operation discriminator.
     field_aliases: tuple[tuple[str, str], ...] = ()
-    #: `(synonym, leaf)` pairs: a second name a caller may send for a leaf field, never published.
-    field_synonyms: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +149,6 @@ class Rendering:
     #: Arguments the tool takes beside `operation`, from the grouped command's own signature.
     tool_arguments: tuple[str, ...] = ()
     field_aliases: tuple[tuple[str, str], ...] = ()
-    field_synonyms: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         wire = [name for name, _ in self.field_aliases]
@@ -159,7 +162,7 @@ class Rendering:
             raise ValueError("a leaf kind field needs an alias to preserve the discriminator")
         if set(wire) & fields:
             raise ValueError("a field alias collides with another leaf field")
-        if any(synonym in fields for synonym, _ in self.field_synonyms):
+        if any(synonym in fields for synonym, _ in LEAF_SYNONYMS):
             raise ValueError("a field synonym collides with a leaf field")
 
     def leaf_fields(self, kind: str, fields: Mapping[str, Any]) -> dict[str, Any]:
@@ -170,7 +173,7 @@ class Rendering:
         """
         result = dict(fields)
         taken = set().union(*(variant.fields for variant in self.variants if variant.kind == kind))
-        for synonym, leaf in self.field_synonyms:
+        for synonym, leaf in LEAF_SYNONYMS:
             if synonym in result and leaf in taken:
                 if leaf in result:
                     raise ValueError(f"conflicting fields {synonym!r} and {leaf!r}; send one")
@@ -328,7 +331,6 @@ class CommandOperations:
                 variants=tuple(entry for entry in self.entries if entry.rendering == spec.name),
                 tool_arguments=spec.tool_arguments,
                 field_aliases=spec.field_aliases,
-                field_synonyms=spec.field_synonyms,
             )
             for spec in self.renderings
         )
@@ -941,15 +943,8 @@ def _maintenance_rows():
     return "mode", tuple(rows)
 
 
-def register_operations(
-    command: str,
-    parameters: Iterable[Any] | None = None,
-    field_synonyms: tuple[tuple[str, str], ...] = (),
-) -> CommandOperations | None:
-    """Read source metadata, completing and retaining signature fields when supplied.
-
-    `field_synonyms` is the command spec's `(synonym, leaf)` pairs; see `Rendering.leaf_fields`.
-    """
+def register_operations(command: str, parameters: Iterable[Any] | None = None) -> CommandOperations | None:
+    """Read source metadata, completing and retaining signature fields when supplied."""
     if command in OPERATIONS:
         return OPERATIONS[command]
     if command == "schema_memory":
@@ -984,8 +979,7 @@ def register_operations(
             tool_arguments += ("response_detail",)
         aliases = (("unit_kind", "kind"),) if command == "observe_memory" else (("file_kind", "kind"),) if command == "manage_memory_file" else ()
         specs.append(RenderingSpec(name, variants[0].effect, title,
-                                   description + " Select one operation.kind.", tool_arguments, aliases,
-                                   field_synonyms))
+                                   description + " Select one operation.kind.", tool_arguments, aliases))
     capture_write = _REMAINING.get(command, ())[2:] == (True,)
     result = CommandOperations(command, selector, tuple(entries), tuple(specs), capture_write)
     if retain:
