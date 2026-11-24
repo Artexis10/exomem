@@ -239,12 +239,10 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
     promotion_id, entry = promotions.find(vault_root, ref)
     kind = str(entry["kind"])
     if kind not in {"edge", "entity"}:
-        # A surface that lists no schema tool names none, rather than ending on an empty hint.
-        tools = capabilities.active_tools_text("schema_memory", "write")
-        route = f"through {tools}, not curation" if tools else "outside curation"
         raise ValueError(
-            f"INVALID_REVIEW_ACTION: a registry addition reverts {route}; "
-            "read the item context for the call"
+            "INVALID_REVIEW_ACTION: a registry addition reverts through "
+            f"{capabilities.active_tools_text('schema_memory', 'write')}, "
+            "not curation; read the item context for the call"
         )
     proofs = promotion_proof.subjects(vault_root, kind, entry["subjects"])
     if any(proof.status == "unverified" for proof in proofs):

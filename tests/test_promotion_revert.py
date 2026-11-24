@@ -780,27 +780,3 @@ def test_current_absence_settles_a_notice_even_when_its_introduction_is_no_longe
     assert context["item"]["subjects"] == []
     assert context["revert"] is None
     assert context.get("findings") is None, "proved current absence is not an unknown incarnation"
-
-
-def test_a_registry_revert_through_curation_names_no_tool_when_the_surface_lists_none(
-    vault: Path,
-) -> None:
-    """The refusal ends on a hint; a surface with no schema tool must not leave that hint empty."""
-    from test_recent_promotions import _save_relation
-
-    from exomem import capabilities, promotion_revert
-
-    _save_relation(vault, "vault.accounts_for", parent="supports")
-    ref = _entry_ref(vault, "registry")
-
-    def refusal(product_commands: tuple[str, ...]) -> str:
-        descriptor = capabilities.ActiveSurfaceDescriptor(
-            surface="mcp", profile="test", tier2_enabled=False,
-            product_commands=product_commands, tool_shape="public",
-        )
-        with capabilities.active_surface(descriptor), pytest.raises(ValueError) as raised:
-            promotion_revert.build(vault, ref)
-        return str(raised.value)
-
-    assert "reverts through manage_memory, not curation;" in refusal(("manage_memory",))
-    assert "reverts outside curation;" in refusal(("edit_note",))

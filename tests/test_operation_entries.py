@@ -14,7 +14,7 @@ import sys
 
 import pytest
 
-from exomem import commands, operation_entries
+from exomem import capabilities, commands, operation_entries
 from exomem.cli_ops import OpError
 from exomem.command_surface import UnresolvedInvocation, resolve_invocation
 from exomem.public_surface import public_surface
@@ -294,3 +294,20 @@ def test_more_reads_as_continuation_on_a_surface_built_before_the_commands_regis
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "x"
+
+
+def test_prose_names_no_tool_when_the_serving_surface_lists_none() -> None:
+    """A bound typed surface can omit a tool; a sentence built on its name must not read "with , or with ."."""
+
+    def listed(*product_commands: str) -> tuple[str, tuple[str, ...]]:
+        descriptor = capabilities.ActiveSurfaceDescriptor(
+            surface="mcp", profile="test", tier2_enabled=False,
+            product_commands=product_commands, tool_shape="public",
+        )
+        with capabilities.active_surface(descriptor):
+            return (capabilities.active_tools_text("schema_memory", "write"),
+                    capabilities.active_tools("schema_memory", "write"))
+
+    assert listed("manage_memory") == ("manage_memory", ("manage_memory",))
+    # Code that must tell "none listed" apart still reads the empty tuple.
+    assert listed("edit_note") == (capabilities.NO_LISTED_TOOL, ())

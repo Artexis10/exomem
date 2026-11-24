@@ -629,7 +629,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
         sibling = next(
             (
                 # The tool that serves the other side on this surface; a grouped call names the rendering.
-                (capabilities.active_tools_text(command.name, other.effect)
+                ("/".join(capabilities.active_tools(command.name, other.effect))
                  if capabilities.current_tool_shape() != "grouped" else "") or other.name
                 for other in command.renderings
                 if other is not rendering and other.variant_for(kind, fields) is not None
