@@ -2210,12 +2210,18 @@ def resolve_saved_view(
 
     A view's names are its author's, so it resolves against `manifest`. `readable` is `manifest`
     after the caller's field plan. A view that names a part `readable` lacks refuses exactly as an
-    undeclared view does, so the reply never tells which withheld names exist.
+    undeclared view does, so the reply never tells which withheld names exist. So does a view
+    that is invalid for its author, unless the caller reads the whole manifest.
     """
     if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
+    withholding = readable is not None and readable is not manifest
     for diagnostic in manifest.view_diagnostics:
         if diagnostic.location == f"views.{name}":
+            # A reason is free text that can name any field of the view, and the view never parsed,
+            # so its names cannot be checked against `readable`: only a whole-manifest reader sees it.
+            if withholding:
+                raise _saved_view_not_found()
             raise CollectionError(diagnostic.code, diagnostic.reason)
     definition = manifest.normalized_views.get(name)
     if definition is None:
@@ -2227,7 +2233,7 @@ def resolve_saved_view(
     plain_definition = _plain_json_value(definition)
     assert isinstance(plain_definition, dict)
     normalized_definition = _normalize_saved_view_against(manifest, plain_definition)
-    if readable is not None and readable is not manifest:
+    if withholding:
         try:
             _normalize_saved_view_against(readable, plain_definition)
         except CollectionError:

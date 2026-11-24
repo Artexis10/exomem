@@ -948,3 +948,25 @@ def test_a_saved_view_that_names_a_withheld_field_is_not_found_like_a_missing_on
     # The owner runs the view the guest is refused.
     owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, view="located")
     assert [row["place"]["label"] for row in owner["rows"]] == ["invented-place", "invented-place"]
+
+
+def test_a_saved_view_its_author_cannot_run_is_not_found_for_a_guest_like_a_missing_one(tmp_path, store):
+    """A broken view's reason can name a field the guest may not read, so the guest gets the missing-view reply."""
+    from test_collection_query_index_migrations import _import_files
+
+    # The store refuses to save a broken view, so this one arrives with a file collection that already had it.
+    front, body, _ = vault.parse_frontmatter(manifest_text(), strict=True)
+    front["item_schema"]["fields"]["zone"] = {"type": "enum", "enum": ["north", "south"], "classification": "location"}
+    front["views"] = {"stale": {"query": {"filters": [{"column": "zone", "op": "eq", "value": "west"}]}}}
+    _import_files(tmp_path, store, {"title": KEY, "zone": "north"},
+                  text="---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body)
+
+    def refused(who, view):
+        with pytest.raises(Exception, match="SAVED_VIEW") as raised:
+            tool(store, "record_memory", who=who, action="query", collection=CID, view=view)
+        return str(raised.value)
+
+    # Only the name the caller sent differs, so the reply names no field of the view.
+    assert refused(GUEST, "stale").replace("stale", "absent") == refused(GUEST, "absent")
+    # The owner still learns why the view cannot run.
+    assert "zone" in refused(OWNER, "stale")
