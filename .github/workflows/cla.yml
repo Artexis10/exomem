@@ -37,4 +37,5 @@ jobs:
           # The action's default locks every pull request that closes, merged or not.
           lock-pullrequest-aftermerge: false
           # Exact logins only: the action's wildcard match is an unanchored substring match.
-          allowlist: Artexis10,evermatter-release-bot[bot],dependabot[bot]
+          # The release App was renamed; drop exomem-release-bot[bot] once a release has run as the new name.
+          allowlist: Artexis10,evermatter-release-bot[bot],exomem-release-bot[bot],dependabot[bot]

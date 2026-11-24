@@ -31,7 +31,7 @@ from .cloud_import_job import _private_json
 # The production Cloud endpoints, defined here once for `exomem cloud import` and `exomem cloud export`.
 # The Cloud owner confirmed both. The MCP URL is the resource of the Cloud plugin definition, which a
 # test compares. The API base is Substrate's public origin, where the Cloud routes under /api/exomem are served.
-PRODUCTION_MCP_URL = "https://mcp.evermatter.ai/mcp"
+PRODUCTION_MCP_URL = "https://exomem.substratesystems.io/mcp"
 PRODUCTION_API_BASE_URL = "https://substratesystems.io"
 
 # Where a run is when it fails; the failure report names it.

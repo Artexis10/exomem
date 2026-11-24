@@ -485,7 +485,7 @@ def test_cloud_openai_schema_and_public_archives(tmp_path: Path) -> None:
     assert extension["publication"]["countries"] == []
     assert extension["publication"]["release_notes"].strip()
     assert json.loads((tmp_path / "openai/mcp.json").read_text())["mcpServers"] == {
-        "exomem": {"type": "streamable-http", "url": "https://mcp.evermatter.ai/mcp"}
+        "exomem": {"type": "streamable-http", "url": "https://exomem.substratesystems.io/mcp"}
     }
     archives = [tmp_path / "claude.zip", tmp_path / "claude-hooks.zip", tmp_path / "openai.zip"]
     assert_public_artifacts_clean(
