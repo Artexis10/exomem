@@ -1508,8 +1508,7 @@ class OperationAuthorization:
 
     def holds_every_field(self, manifest) -> bool:
         """Whether this caller's field plan admits every field of ``manifest``, the full stored manifest."""
-        plan = self.field_plan(manifest)
-        return plan.owner or plan.whole_fields == set(manifest.schema.fields)
+        return self.field_plan(manifest).holds_every_field(manifest)
 
     def reads_whole_row(self, cid: str, subject: CanonicalSubject | None) -> bool:
         """Whether this caller reads the row ``subject`` of ``cid`` whole: at full disclosure, every field.

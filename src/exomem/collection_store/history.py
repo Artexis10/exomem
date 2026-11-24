@@ -370,7 +370,7 @@ def agent_history(writer, manifest):
     events, complete = [], assessment["status"] != "history_incomplete"
     control_release = {}
     field_plan = writer._operation.field_plan(manifest)
-    if not field_plan.owner and field_plan.whole_fields != set(manifest.schema.fields):
+    if not field_plan.holds_every_field(manifest):
         return {"status": "history_incomplete", "complete": False, "truncated": False, "events": []}
 
     def released(row_id):
