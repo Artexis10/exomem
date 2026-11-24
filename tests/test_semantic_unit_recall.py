@@ -123,11 +123,11 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
         reads.append(path.relative_to(root).as_posix())
         return raw_get(path, root)
 
-    def counted_statistics(corpus, base):
+    def counted_statistics(corpus, base, *changed):
         nonlocal unit_builds
         if corpus and all(ref.startswith(memory_refs.REF_PREFIX) for ref in corpus):
             unit_builds += 1
-        return build_unit_statistics(corpus, base)
+        return build_unit_statistics(corpus, base, *changed)
 
     def unexpected_parse(*_args, **_kwargs):
         raise AssertionError("unit selection reparsed canonical Markdown")

@@ -247,7 +247,7 @@ def test_unit_statistics_after_seeded_parent_edits_equal_a_count_of_the_winning_
         return (
             statistics.pages,
             statistics.average_length.hex(),
-            list(statistics.document_frequency.items()),
+            sorted(statistics.document_frequency.items()),
             statistics.idf_floor.hex(),
         )
 
@@ -268,6 +268,14 @@ def test_unit_statistics_after_seeded_parent_edits_equal_a_count_of_the_winning_
             )):
                 corpus.setdefault(str(unit.unit_ref), str(row[2]).split())
             view.require_complete()
+            # A store with nothing retained merges every parent: the incremental merge must equal it.
+            scratch = lexstore.LexicalStore(tmp_path)
+            whole = scratch._admitted_unit_statistics(
+                connection, "kb", parents, lexstore._SelectedUnits(tmp_path, connection, admitted=parents)
+            )
+            assert dict(entry.representatives) == dict(whole.representatives)
+            assert dict(entry.occurrences) == dict(whole.occurrences)
+            assert figures(entry.statistics) == figures(whole.statistics)
             return figures(entry.statistics), figures(bm25.CorpusStatistics.of(corpus))
         finally:
             connection.close()

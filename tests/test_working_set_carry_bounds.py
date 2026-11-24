@@ -490,7 +490,8 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in later.items()})
 
     assert statistics.pages == oracle.pages and statistics.average_length == oracle.average_length
-    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    # The counts are looked up; the order the idf floor sums in is checked through the floor, to the last bit.
+    assert dict(statistics.document_frequency) == dict(oracle.document_frequency)
     assert "zeta" not in statistics.document_frequency
     assert statistics.idf_floor == oracle.idf_floor
     assert dict(postings.lengths) == {path: len(text.split()) for path, text in later.items()}
@@ -526,6 +527,36 @@ def test_a_corpus_past_the_word_bound_keeps_no_base_and_its_figures_stay_exact(
     assert statistics.idf_floor == oracle.idf_floor
 
 
+def test_an_incremental_idf_floor_equals_rank_bm25_to_the_last_bit() -> None:
+    """The floor that incremental builds keep equals `BM25Okapi`'s, which sums its own idf terms in its own order.
+
+    `CorpusStatistics.of` shares `from_counts` with the incremental builds, so only the library itself can
+    catch a term summed in another order or computed another way.
+    """
+    import random
+
+    from rank_bm25 import BM25Okapi
+
+    words = ["harbor", "tide", "gauge", "chain", "buoy", "reef", "pier", "swell", "keel", "mast", "quay", "hull"]
+    paths = [f"Notes/page-{index:02d}.md" for index in range(10)]
+    for seed in range(40):
+        chosen = random.Random(seed)
+        rows = {path: " ".join(chosen.choices(words, k=chosen.randint(1, 9))) for path in chosen.sample(paths, 5)}
+        base = None
+        for _step in range(25):
+            statistics, _postings, base = lexstore._admitted_corpus(
+                rows, {path: lexstore._text_digest(text) for path, text in rows.items()}, base
+            )
+            library = BM25Okapi([rows[path].split() for path in sorted(rows)])
+            assert statistics.idf_floor.hex() == (library.epsilon * library.average_idf).hex()
+            rows = dict(rows)
+            path = chosen.choice(paths)
+            if path in rows and len(rows) > 1 and chosen.random() < 0.3:
+                del rows[path]
+            else:
+                rows[path] = " ".join(chosen.choices(words, k=chosen.randint(1, 9)))
+
+
 def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_and_renames() -> None:
     """Each corpus built from the previous one's base equals `CorpusStatistics.of` over its texts, bit for bit.
 
@@ -541,7 +572,7 @@ def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_an
         return (
             statistics.pages,
             statistics.average_length.hex(),
-            list(statistics.document_frequency.items()),
+            sorted(statistics.document_frequency.items()),
             statistics.idf_floor.hex(),
         )
 
