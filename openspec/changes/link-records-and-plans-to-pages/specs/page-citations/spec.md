@@ -50,7 +50,7 @@ The `item_references` index SHALL hold one entry per distinct canonical ref in e
 
 ### Requirement: Citation coverage is reported honestly
 
-While a link field's backfill is incomplete, `inbound_citations` SHALL report the state `warming`, never an empty list. A collection's `inspect` SHALL report, per link field, the number of indexed values and the number of non-canonical values that are not indexed.
+While a link field's backfill is incomplete, `inbound_citations` SHALL report the state `warming`, never an empty list. A collection's `inspect` SHALL report, per link field, the number of indexed values and the number of non-canonical values that are not indexed. A link field that the index never holds, such as one of a derived collection, SHALL report the state `not_indexed` and count every value as not indexed.
 
 #### Scenario: The index is warming
 

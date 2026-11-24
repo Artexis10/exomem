@@ -203,6 +203,17 @@ def test_link_entries_rebuild_exactly_from_rows_and_inspect_counts_what_is_index
     assert links["page"]["relation"] == "cites" and "relation" not in links["pages"]
 
 
+def test_a_derived_collections_link_fields_read_as_never_indexed_not_as_warming(store):
+    """A derived collection's rows bypass the index, so a link field there would otherwise warm forever."""
+    feed = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    store.create_collection(path("Feed"), collection_text(feed, "Feed", "label", LINKS, extra="derived: true\n"),
+                            why="declare", scaffold=False)
+    with request_scope(owner_principal()):
+        links = {entry["link"]: entry for entry in store.inspect_collection(feed)["links"]}
+    assert {name: (entry["state"], entry["indexed"]) for name, entry in links.items()} == {
+        "page": ("not_indexed", 0), "pages": ("not_indexed", 0)}
+
+
 def test_an_import_stores_refs_and_reports_the_values_it_stored_as_written(store):
     from test_collection_store_importer import CID, ndjson, run, setup, start, status
     page(store.root, "Notes/Alpha.md", "Alpha", ALPHA)

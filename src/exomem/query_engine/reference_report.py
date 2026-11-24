@@ -14,7 +14,7 @@ from collections import Counter
 from contextlib import closing
 
 from ..collection_store import reference_index, typed_storage
-from ..structured_collections import declared_links, declared_references
+from ..structured_collections import declared_links, declared_references, indexed_fields
 from . import reductions, reference_resolution, runtime
 from .errors import QueryError
 from .reference_resolution import unresolved_values
@@ -118,7 +118,8 @@ def check_links(root, store_path, collection_id) -> list:
 
     A title or a path is not indexed (`reference_index.link_match`), so a field's ``not_indexed`` count
     says how many of its values no inbound-citation read can find. ``indexed`` is None while the index
-    is warming, because the partly built index is not the count of what it will hold.
+    is warming, because the partly built index is not the count of what it will hold. A field the index
+    never holds, such as one of a derived collection, reads ``not_indexed`` and counts every value there.
     """
     try:
         with runtime.read_session(root, store_path) as session:
@@ -130,7 +131,9 @@ def check_links(root, store_path, collection_id) -> list:
 def _check_links(session, collection_id) -> list:
     report = []
     admitted = session.admit(collection_id)
-    for declaration in declared_links(session.admit_lookup(collection_id).manifest.schema):
+    manifest = session.admit_lookup(collection_id).manifest
+    held = {declaration.dotted for declaration in indexed_fields(manifest.schema, derived=manifest.derived)}
+    for declaration in declared_links(manifest.schema):
         entry = {"link": declaration.dotted,
                  **({"relation": declaration.relation} if declaration.relation is not None else {})}
         state = session.connection.execute(
@@ -154,10 +157,13 @@ def _check_links(session, collection_id) -> list:
                 except (typed_storage.TypedStorageError, ValueError, TypeError) as error:
                     raise QueryError("QUERY_UNAVAILABLE") from error
                 for value in values:
-                    if reference_index.link_match(value) is None:
+                    if declaration.dotted not in held or reference_index.link_match(value) is None:
                         not_indexed += 1
                     else:
                         indexed += 1
+        if declaration.dotted not in held:
+            report.append({**entry, "state": "not_indexed", "indexed": 0, "not_indexed": not_indexed})
+            continue
         ready = state is not None and bool(state[0])
         report.append({**entry, "state": "ready" if ready else "warming",
                        "indexed": indexed if ready else None, "not_indexed": not_indexed})
