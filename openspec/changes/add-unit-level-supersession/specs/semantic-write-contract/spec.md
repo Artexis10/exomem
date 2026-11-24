@@ -160,3 +160,38 @@ marked as replaced by its successor.
 - **WHEN** `search_memory` runs with the filter `unit.dimension` equal to `currency` and a query
   that names the page's subject
 - **THEN** the result holds the replaced unit, marked replaced by its successor
+
+### Requirement: Only A Claim Item Converts In Place
+
+A list item that holds a markdown relation, only links, a Dataview inline field (`key:: value`) or
+text past its first line SHALL NOT convert to a unit. The span target and the audit facet check
+SHALL share this one rule, and compare by character offset. A span inside such an item SHALL refuse
+with `SUPERSEDE_TARGET_NOT_A_CLAIM`, and the remediation SHALL name the next step.
+
+#### Scenario: A span inside a relation line refuses
+- **WHEN** the span lies inside a markdown relation line such as `- supplies [[Cedar Two]]`, a
+  link-only item or a Dataview inline field
+- **THEN** the operation refuses with `SUPERSEDE_TARGET_NOT_A_CLAIM`, names the line's own edit as
+  the next step, and the page is unchanged
+
+### Requirement: A Profile Page Claim Is Corrected After A Preview
+
+On a page that requires a profile preview, `supersede_observation` and `assess_observation` SHALL
+accept `preview`. The review that the preview returns SHALL commit the same call.
+
+#### Scenario: A profile page claim is corrected after a preview
+- **WHEN** `edit_note(action="supersede_observation")` targets a claim on a profile page without
+  `review`
+- **THEN** it refuses with `PROFILE_PREVIEW_REQUIRED` and the page is unchanged
+- **AND** the same call with `preview` returns a review and writes nothing
+- **AND** the same call with that review commits the replacement unit
+
+### Requirement: Same-Page Supersession Targets Resolve As Recall Does
+
+Every reader of a same-page `supersedes` target SHALL resolve it as recall does. The units part, the
+supersede guard and revision history SHALL therefore read `[[#a]]` and `[[#^a]]` as the same unit.
+
+#### Scenario: A block-reference target names the same unit
+- **WHEN** unit B carries `supersedes: [[#^a]]` and unit A has anchor `a`
+- **THEN** `read_page(part="units")` shows A with `superseded_by` holding B's id
+- **AND** a second supersede of A refuses with `SUPERSEDE_TARGET_ALREADY_SUPERSEDED` and names B

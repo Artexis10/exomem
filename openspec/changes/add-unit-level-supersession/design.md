@@ -33,7 +33,9 @@ compact grammar; automatic application of the facet migration to any vault.
 4. **Span targets become units in place.** A span must fall inside exactly one list item that is
    not already a unit. The operation converts that item to `- [<section category>] <text> ^<anchor>`.
    It adds bytes only around the item's unchanged text. The category comes from the item's `##`
-   heading, so no list in code decides it. The audit fix uses the same conversion.
+   heading, so no list in code decides it. The audit fix uses the same conversion. One
+   eligibility rule, compared by character offset, also excludes markdown relations, link-only
+   items, Dataview inline fields and items that run past one line.
 5. **Entity admission sits beside role `compiled`, not inside it.** Minimum-unit and compiled
    intent rules keep reading role `compiled`. `observe_memory` admits role `entity` as a unit
    target. A compact add on any admitted page is a server-side append, which already needs no
@@ -66,9 +68,10 @@ compact grammar; automatic application of the facet migration to any vault.
 - Entity pages gain rich units at the end of the body. Readers that render entity pages already
   render rich units on compiled pages.
 - The facet fix touches many lines on a large vault. It runs only through a previewed plan, in
-  guarded chunks, with the plan id the owner applies.
-- A same-page supersession used to count as a census smell. That count now excludes `replaces`
-  edges only.
+  guarded chunks, with the plan id the owner applies. It is a layer on top of the page's other
+  fixes, so a local apply still writes those.
+- A same-page supersession used to count as a census smell. That count now excludes unit-to-unit
+  `replaces` edges only; a page that supersedes itself still counts.
 
 ## Migration
 
