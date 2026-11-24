@@ -12,6 +12,12 @@ The serving HTTP process SHALL accept a save durably when the vault mutation bou
 - **AND** `user_summary` starts with "Queued, not saved yet"
 - **AND** the reply names no page title or id
 
+#### Scenario: A save during start-up comes back queued
+
+- **WHEN** the serving process has just started, or taken over after an upgrade, and still waits for retrieval to be ready
+- **AND** the owner sends an eligible save that meets a busy boundary
+- **THEN** the save is queued as during a long hold, because the drainer starts before the start-up waits
+
 ### Requirement: Only eligible saves are accepted
 
 A save SHALL be accepted only when the intake is enabled, a drainer runs in the same process, the command registry marks the command and the operation it selects as queueable, the refusal is `MUTATION_BUSY`, `MUTATION_WARMING` or `COLLECTION_STORE_BUSY` with `committed: false`, the principal is the vault owner without a delegated authorization session, the call is keyed, and its arguments fit within 4 MiB. Any save that is not accepted SHALL keep the existing `MUTATION_BUSY` contract.
