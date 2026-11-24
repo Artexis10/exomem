@@ -3445,13 +3445,14 @@ class _AdmittedStatisticsEntry:
 
 #: Unique-term references that one scope's admitted-corpus base may keep. A corpus past it keeps no base, so every
 #: build after a write tokenizes and counts every page again: about 1.7 s more CPU a recall on a synthetic
-#: 15,600-page corpus of 4.5 million references (2026-11-24). Measured with natural vocabularies, a base holds
-#: about 88 MiB at 3.4 million references and 218,000 words, and about 196 MiB at 10.6 million references and
-#: 465,000 words, so this bound keeps a base for a vault about three times the size of a 17,000-page one.
+#: 15,600-page corpus of 4.5 million references (2026-11-24). On synthetic Zipf corpora a base holds about 88 MiB
+#: at 3.4 million references and 218,000 words, and about 196 MiB at 10.6 million references and 465,000 words.
+#: Under both bounds the worst case, a uniform vocabulary of a million words, holds about 290 MiB for one base and
+#: its statistics entry, and about 540 MiB for four. A 17,000-page live vault held 3.7 million references.
 _ADMITTED_BASE_TERMS_MAX = 12_000_000
 #: Words a kept base may count. Its introducer maps (`_DocumentFrequency`) grow with the vocabulary, not with the
 #: references, so a corpus whose text is mostly unique tokens, such as hashes or identifiers, keeps no base.
-#: Natural text reaches about 465,000 words at 10.6 million references.
+#: The 17,000-page live vault held 244,000 distinct stemmed words at its 3.7 million references (2026-11-24).
 _ADMITTED_BASE_WORDS_MAX = 1_000_000
 #: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
 #: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
