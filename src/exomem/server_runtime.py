@@ -225,6 +225,9 @@ class LocalRuntimeActivation:
             return
         from .cloud_cell import cloud_mode_enabled
 
+        # First: HTTP serves saves before activation ends, and the waits below can last minutes
+        # after an upgrade. A save that meets a busy boundary is queued only while the drainer runs.
+        self._start_component("write intake", self._start_write_intake)
         if cloud_mode_enabled():
             from .catalogue_prewarm import adopt_at_boot
 
@@ -289,10 +292,6 @@ class LocalRuntimeActivation:
             self._stop_background_workers()
             return
         self._start_component("maintenance jobs", self._recover_maintenance_jobs)
-        if self._shutdown.is_set():
-            self._stop_background_workers()
-            return
-        self._start_component("write intake", self._start_write_intake)
         if self._shutdown.is_set():
             self._stop_background_workers()
             return

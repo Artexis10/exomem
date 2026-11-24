@@ -1346,6 +1346,38 @@ def _quiet_starters(monkeypatch: pytest.MonkeyPatch, calls: list[str]) -> None:
     )
 
 
+def test_a_save_during_a_long_startup_wait_finds_the_write_intake_running(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the drainer started after required admission, so after an upgrade a busy save was refused for minutes."""
+    from exomem import write_intake
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _quiet_starters(monkeypatch, [])
+    activation = server_runtime.LocalRuntimeActivation(vault)
+    activation.serves_upload_sessions = True
+    waiting = threading.Event()
+    release = threading.Event()
+
+    def held_admission() -> None:
+        # The retrieval catalogue is still being repaired: activation waits here.
+        waiting.set()
+        release.wait(10)
+
+    monkeypatch.setattr(activation, "_wait_for_required_admission", held_admission)
+    try:
+        activation.start()
+        assert waiting.wait(10)
+        # What the intake's admission reads: without a running drainer a busy save keeps the refusal.
+        assert write_intake.drainer_for(vault) is not None
+    finally:
+        release.set()
+        activation._thread.join(10)
+        write_intake.stop(vault)
+        readiness.reset()
+
+
 def test_original_fixity_runs_its_own_pass_where_media_extraction_is_off(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
