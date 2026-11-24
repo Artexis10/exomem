@@ -183,6 +183,20 @@ def test_an_undo_and_a_field_addition_do_not_count_toward_the_daily_bound(work):
     assert work.refused(steps=retitle("Beds"), automatic=True)["bound"] == "daily"
 
 
+def test_an_automatic_undo_of_an_undo_counts_toward_the_daily_bound_and_a_plain_undo_does_not(work):
+    """Two sessions that undo each other's last change flip the shape back and forth; the bound must stop that."""
+    work.restructure(steps=retitle("Plants"), automatic=True)
+    second = work.restructure(steps=retitle("Garden"), automatic=True)
+    undo = work.restructure(undo=second["shape"]["id"], automatic=True)
+    third = work.restructure(steps=retitle("Yard"), automatic=True)
+
+    flipped = work.refused(undo=undo["shape"]["id"], automatic=True)
+
+    assert flipped["code"] == "AUTOMATIC_RESTRUCTURE_REFUSED"
+    assert flipped["bound"] == "daily" and flipped["restructures"] == automatic_collection.MAX_RESTRUCTURES_PER_WINDOW
+    assert work.restructure(undo=third["shape"]["id"], automatic=True)["shape"]["origin"] == "automatic"
+
+
 def test_a_restructure_older_than_a_day_leaves_room(work, monkeypatch):
     for title in ["Plants", "Garden", "Yard"]:
         work.restructure(steps=retitle(title), automatic=True)

@@ -27,7 +27,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import unicodedata
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Never
@@ -458,13 +458,20 @@ def window_start() -> str:
     return (dt.datetime.now(dt.UTC) - WINDOW).strftime(_STAMP)
 
 
-def counts_toward_window(entry: Mapping[str, Any]) -> bool:
-    """Whether the daily bound counts a shape-history entry: an automatic restructure that is not an undo or a field addition.
+def counts_toward_window(entry: Mapping[str, Any], undos: Collection[str]) -> bool:
+    """Whether the daily bound counts a shape-history entry: an automatic restructure that adds no field only.
+
+    A plain undo is not counted: it puts back a change that was counted. An undo of an undo is counted like any
+    restructure, since two sessions that each undo the other's last change flip the shape back and forth (design
+    decision 4). `undos` holds the id of each entry that is itself an undo.
 
     `shape_history.counted_since` states the same rule as SQL over the entry's indexed columns. This copy serves
     file-only collections and goes with file mode when move-structured-collections-to-sqlite retires it (phase P6).
     """
-    return entry["origin"] == "automatic" and entry["undoes"] is None and not restructure.adds_only(entry["steps"])
+    return (
+        entry["origin"] == "automatic" and not restructure.adds_only(entry["steps"])
+        and (entry["undoes"] is None or entry["undoes"] in undos)
+    )
 
 
 def _field_total(vault_root: Path, path: str, text: str) -> int | None:
@@ -539,11 +546,12 @@ def require_restructure_bounds(
         # of a collection drafted from one row (`require_bounds`).
         if change.created and (begun is None or not begun(change)):
             require_daily_room(vault_root, connection, refuse=_refuse_split)
-    if undoes is not None or restructure.adds_only(steps):
+    undos = {entry["id"] for entry in history if entry["undoes"] is not None}
+    if restructure.adds_only(steps) or (undoes is not None and undoes not in undos):
         return
     cutoff = window_start()
     recent = counted(cutoff) if counted is not None else sum(
-        1 for entry in history if entry["at"] >= cutoff and counts_toward_window(entry)
+        1 for entry in history if entry["at"] >= cutoff and counts_toward_window(entry, undos)
     )
     if recent >= MAX_RESTRUCTURES_PER_WINDOW:
         _refuse_restructure(

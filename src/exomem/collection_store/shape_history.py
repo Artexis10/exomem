@@ -114,12 +114,15 @@ def newest(conn, collection_ids: Sequence[str], *, limit: int) -> dict[str, dict
 def counted_since(conn, collection_ids: Sequence[str], *, since: str, origin: str) -> dict[str, int]:
     """For each collection, its entries of `origin` from `since` on that the daily bound counts, in one statement.
 
-    An undo and an entry that only adds fields are not counted, as the automatic-restructure bound states.
+    An entry that only adds fields is not counted, nor is a plain undo; an undo of an undo is, as the
+    automatic-restructure bound states (`automatic_collection.counts_toward_window`, which is this rule in Python).
     """
     rows = conn.execute(
         "WITH wanted(collection_id) AS (SELECT DISTINCT value FROM json_each(:ids)) "
         "SELECT w.collection_id, COUNT(h.entry_id) FROM wanted w "
         "LEFT JOIN collection_shape_history h ON h.collection_id=w.collection_id AND h.committed_at>=:since "
-        "AND h.origin=:origin AND h.undoes IS NULL AND h.adds_only=0 GROUP BY w.collection_id",
+        "AND h.origin=:origin AND h.adds_only=0 AND (h.undoes IS NULL OR EXISTS ("
+        "SELECT 1 FROM collection_shape_history u WHERE u.entry_id=h.undoes AND u.undoes IS NOT NULL)) "
+        "GROUP BY w.collection_id",
         {"ids": json.dumps(list(collection_ids)), "since": since, "origin": origin}).fetchall()
     return {cid: count for cid, count in rows}
