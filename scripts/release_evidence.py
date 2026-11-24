@@ -48,7 +48,7 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
         event_name == "pull_request"
         and (
             head == RELEASE_BRANCH
-            or (base.startswith("release-cuts/") and head == f"release-please--branches--{base}")
+            or (base.startswith(CUT_PREFIX) and head == f"release-please--branches--{base}")
         )
     )
     # A merge queue dispatch (scripts/merge_queue.py) runs what a push to main runs, not Full.
@@ -63,14 +63,19 @@ def full_dispatch_refusal(event_name: str, event: dict) -> str | None:
     A Full run takes about 90 jobs; on a feature branch it holds the shared runner pool and
     delays the merge queue and release cuts. A merge queue dispatch is not Full.
     """
-    if event_name != "workflow_dispatch" or (event.get("inputs") or {}).get("queue"):
+    if event_name != "workflow_dispatch":
         return None
     branch = str(event.get("ref", "")).removeprefix("refs/heads/")
+    if (event.get("inputs") or {}).get("queue"):
+        # The queue input selects the push-to-main tier, so only the queue's own branches carry it.
+        if branch.startswith(MERGE_QUEUE_PREFIX):
+            return None
+        return f"Only a {MERGE_QUEUE_PREFIX} branch may pass the queue input, not {branch!r}."
     if branch == "main" or branch.startswith(CUT_PREFIX):
         return None
     return (
         f"Full runs only on main, on schedule and on release cuts, not on {branch!r}. "
-        "The merge queue runs every core and harness shard before a pull request lands."
+        "To prove a fix to a Full-only check, fix forward on main and dispatch Full there."
     )
 
 
@@ -471,11 +476,12 @@ def main() -> int:
     repository = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     os.environ["GH_REPO"] = repository
     if args.command == "scope":
-        refusal = full_dispatch_refusal(os.environ["GITHUB_EVENT_NAME"], event_payload())
+        event = event_payload()
+        refusal = full_dispatch_refusal(os.environ["GITHUB_EVENT_NAME"], event)
         if refusal:
             print(f"::error::{refusal}")
             return 1
-        selected = ci_scope(os.environ["GITHUB_EVENT_NAME"], event_payload())
+        selected = ci_scope(os.environ["GITHUB_EVENT_NAME"], event)
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             for key, value in selected.items():
                 output.write(f"{key}={str(value).lower()}\n")

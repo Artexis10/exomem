@@ -278,8 +278,9 @@ One scope job selects the CI policy: Full runs only on schedule or dispatch.
 After its required gate passes, a Full run retains `full-ci-evidence-RUN-ATTEMPT`
 with the actual checkout commit and Git tree. The selector verifies repository,
 workflow, issuer gate, full scope, and the tested commit. It compares that tested
-tree with merged main. Release evidence is a Full run on main, or a Full run
-dispatched on the source branch whose tree equals the merged tree. Identical
+tree with merged main. Release evidence is a Full run on main or on the release
+cut, or a retained receipt from an earlier Full run on the pull request's head
+whose tree equals the merged tree. Identical
 trees reuse proof after squash; a changed tree, expired receipt, or incomplete
 proof uses the Full fallback. Legacy receipt-free evidence remains eligible only
 for a scheduled or dispatched Full run at its exact main commit. A feature

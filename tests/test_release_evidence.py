@@ -443,6 +443,7 @@ def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatc
         ("workflow_dispatch", {"ref": "refs/heads/main", "inputs": {"queue": ""}}, False),
         ("workflow_dispatch", {"ref": "refs/heads/release-cuts/" + "a" * 40, "inputs": {}}, False),
         ("workflow_dispatch", {"ref": "refs/heads/merge-queue/abc-1", "inputs": {"queue": "batch 1@" + "a" * 40}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": "batch 1@" + "a" * 40}}, True),
         ("schedule", {"ref": "refs/heads/main"}, False),
     ],
 )

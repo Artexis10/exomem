@@ -2,7 +2,7 @@
 
 ### Requirement: Pull requests run the partial tier and Full evidence comes from main
 
-CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other than the core and harness shards, and the test modules that the pull request adds or changes together with a fixed, declared set of repository-wide guard modules: core modules on the supported floor Python (`requires-python`) and the newest supported runtime, and harness modules on the floor. A docs-only pull request SHALL run no guard module. A pull request SHALL run no core or harness shard. Every push to main SHALL run every core and harness shard on the floor Python. A failure that only the shards on main or the Full tier catch SHALL be fixed forward on main, and a failing required gate on a push to main SHALL open or update one tracking issue that a later passing gate closes. Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. A reconciliation PR, which the cut controller opens from the same repository against `main`, SHALL run no test job only while merging it onto its base gives exactly the controller's projection of the accepted release origin for its source; code from the base SHALL check this, and any other content SHALL fail the required gate. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
+CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other than the core and harness shards, and the test modules that the pull request adds or changes together with a fixed, declared set of repository-wide guard modules: core modules on the supported floor Python (`requires-python`) and the newest supported runtime, and harness modules on the floor. A docs-only pull request SHALL run no guard module. A pull request SHALL run no core or harness shard. Every push to main SHALL run every core and harness shard on the floor Python. A failure that only the shards on main or the Full tier catch SHALL be fixed forward on main, and a failing required gate on a push to main SHALL open or update one tracking issue that a later passing gate closes. Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch on main or a release cut; CI SHALL refuse a Full dispatch on any other branch and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. A reconciliation PR, which the cut controller opens from the same repository against `main`, SHALL run no test job only while merging it onto its base gives exactly the controller's projection of the accepted release origin for its source; code from the base SHALL check this, and any other content SHALL fail the required gate. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
 
 #### Scenario: A pull request is opened or updated
 - **WHEN** a source PR, draft or ready, that is not docs-only, is opened, reopened or updated
@@ -26,9 +26,14 @@ CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other
 - **AND** a failure that only these shards or the Full tier catch is fixed forward on main
 
 #### Scenario: Full runs only on schedule and dispatch
-- **WHEN** CI runs for a schedule or a manual dispatch
+- **WHEN** CI runs for a schedule, or a manual dispatch on main or a release cut
 - **THEN** the Full tier runs both supported Python runtimes and every specialized Full job against the checked-out commit
 - **AND** its receipt claims Full only after every required Full dependency succeeds
+
+#### Scenario: A feature branch cannot dispatch Full
+- **WHEN** someone dispatches CI's Full tier on a branch other than main or a release cut
+- **THEN** the first job fails with a message that names the allowed branches
+- **AND** no Full job runs and no receipt is issued
 
 #### Scenario: Long jobs keep their cases
 - **WHEN** CI divides long-running Full work using measured case durations
@@ -58,3 +63,23 @@ CI SHALL run, for each pull request, draft or ready, the partial-tier jobs other
 #### Scenario: A reconciliation-named PR carries other content
 - **WHEN** a PR on a reconciliation branch changes anything the controller's projection does not produce
 - **THEN** the release evidence check fails the required gate and the change must land through an ordinary PR
+
+### Requirement: Reuse complete evidence for the actual tested tree
+
+Release acceptance SHALL reuse successful full CI when its actual tested tree equals the selected source tree. The evidence SHALL identify the repository, workflow, run, attempt, tested commit, tree, and full scope. Partial or unavailable evidence SHALL select a full run. Release metadata validation and a short integration check SHALL still run.
+
+#### Scenario: Full source proof survives a squash merge
+- **WHEN** a retained receipt from a Full run on a pull request's head succeeded and its tested tree equals the merged tree
+- **THEN** the release reuses that evidence without running the corpus again
+
+#### Scenario: Partial PR checks do not become full proof
+- **WHEN** a successful PR run omits part of the full suite
+- **THEN** release acceptance does not describe or accept that run as full evidence
+
+#### Scenario: Changed tree needs fresh evidence
+- **WHEN** the merged tree differs from the tested tree, or complete proof cannot be established
+- **THEN** the release obtains a full run for the selected tree
+
+#### Scenario: A retry retains an earlier successful gate
+- **WHEN** the latest successful workflow attempt inherits an earlier successful Full gate and receipt
+- **THEN** acceptance retains the receipt's issuing attempt and names the successful retry separately
