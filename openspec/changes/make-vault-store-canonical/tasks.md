@@ -251,7 +251,7 @@
 - [ ] 5.1 Add the unit row table (moved from 1.1). Merge the lexical unit rows and graph unit nodes into one unit row set under today's identity rule (authored anchor, else fingerprint-bound reference), and prove it reproduces both for the same bytes.
 - [ ] 5.2 Resolve links to `[[Page#^anchor]]` as unit-level edges; make claim-level writes change the page and the unit in one transaction.
   - Owner decision (2026-11-24): stage 2 makes relationships stored rows (D10, "Stored relationships"); unit-canonical storage stays open. Stage 2 starts after the owner's vault switches.
-  - The claim-level operations of change `add-unit-level-supersession` add every relationship through one store function, so they need no change when it starts writing rows.
+  - Planned: the claim-level operations now in development will add every relationship through one store function, so they need no change when that function starts writing rows.
 - [ ] 5.5 Add the stored relationship table with per-relationship history and two-ended visibility; route the claim-level operations' relationship writes to it; write an anchor into a unit when it gains its first stored relationship.
 - [ ] 5.6 Project a bounded relations block into each page and a complete relations file beside it; import relationship edits from that file; keep an orphaned relationship and open a review item; read relations files in a cold derivation and project them before a rollback.
 - [ ] 5.3 Add the canonicity table (moved from 1.1). Record origin, hash, size, format and derivation for every stored file, mapped onto the existing Evidence custody fields; add the governed write that supersedes a false original and keeps the copy as derived.
@@ -293,7 +293,7 @@ These do not gate the owner's switch:
 - the restricted-caller read budgets in 3.2, because no restricted caller reads the owner's vault. Because file mode stays the default, they gate making store mode the default for other vaults;
 - 3.2's store route for `collections rollback`, which is later work, and `writer_lease._durable_graph_outcome`, which no store-mode route reaches;
 - 6.3 (native Windows), because the owner's vault runs on Linux;
-- 5.1 to 5.4 (stage 2), 6.2 (Cloud cells), 8.1 and 8.2;
+- 5.1 to 5.6 (stage 2), 6.2 (Cloud cells), 8.1 and 8.2;
 - the other Left items of 2.5 and 3.1, which are old debt, background work, performance only or err on the safe side; none overwrites data.
 
 - [ ] 7.1 Rehearse on a disposable copy of a real vault: the replayed write stream, hard kills, the recall canary cases and the graph-lane cases.
