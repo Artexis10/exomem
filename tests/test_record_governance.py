@@ -866,7 +866,7 @@ def test_saved_view_child_authorization_fails_closed_when_row_shape_is_unresolve
     monkeypatch.setattr(
         collections,
         "resolve_saved_view",
-        lambda _manifest, _name: collections.SavedView(
+        lambda _manifest, _name, **_: collections.SavedView(
             "ambiguous", {"query": query}, "0" * 64
         ),
     )

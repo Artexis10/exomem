@@ -1599,10 +1599,10 @@ def query_collection(
                 root, manifest, policy=policy, allow_cold_index=not late_link_projection,
                 authorize_path=authorize_path, visible_path=visible_path,
             )
+            readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
             view = kwargs.get("view")
             if view is not None:
-                _authorize_saved_view(root, manifest, view, links)
-            readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
+                _authorize_saved_view(root, manifest, view, links, readable=readable)
             try:
                 result = record_formats.query_collection(
                     root,
@@ -1645,11 +1645,17 @@ def _authorize_saved_view(
     manifest: collections.CollectionManifest,
     name: object,
     links: _LinkProjector,
+    *,
+    readable: collections.CollectionManifest | None = None,
 ) -> collections.SavedView:
-    """Refuse a saved view if link projection would change its query meaning."""
+    """Refuse a saved view if link projection would change its query meaning.
+
+    Every check reads the author's whole `manifest`; `readable` only hides a view that names a
+    part the caller cannot read, as `collections.resolve_saved_view` describes.
+    """
     if type(name) is not str:
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
-    view = collections.resolve_saved_view(manifest, name)
+    view = collections.resolve_saved_view(manifest, name, readable=readable)
     query = view.definition.get("query")
     if not isinstance(query, Mapping):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")

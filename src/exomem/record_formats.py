@@ -2820,7 +2820,8 @@ def query_collection(
     `readable` is `manifest` after the caller's field plan. A query that names a column or a
     child table may name only one of `readable`, so a withheld one refuses as an undeclared
     one does. A saved view's names are the manifest author's, not the caller's, so they are
-    checked against `manifest`.
+    checked against `manifest`. Rows carry only what the caller may read, so `readable` also
+    shapes their child tables.
 
     `late_link_projection` is an internal-only opt-in from a trusted caller
     (never a value a public tool's request parameters can reach -- no tool
@@ -2957,7 +2958,9 @@ def query_collection(
             records=tuple(
                 replace(
                     record,
-                    values=_safe_presentation_values(record.values, manifest, project_child_value),
+                    values=_safe_presentation_values(
+                        record.values, manifest if readable is None else readable, project_child_value
+                    ),
                 )
                 for record in parsed.records
             ),
