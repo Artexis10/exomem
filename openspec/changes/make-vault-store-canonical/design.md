@@ -231,7 +231,7 @@ Recall can therefore return units with their page context, and graph edges can p
 
 *Option chosen for stage 2:* page bytes stay the source of unit text, and relationships become stored rows.
 
-*Planned next stage: units as the source (owner decision, 2026-11-24).* After stage 2, the store becomes the source of units and composes each page from them, so a page can be composed from units, one unit can appear in several pages, and a page can be a generated view. It is planned for December 2026 or January 2027 and gets its own change when its work starts, informed by a measurement of byte-exact page reassembly. It assumes that agents write nearly every change. A hand edit of a projected page stays allowed and takes a simple, safe path: an edited unit is replaced by a new unit, and the old unit's stored relationships go to a review item. No similarity matching decides which old unit an edited paragraph was. Stage 2 carries over unchanged: relationship rows and anchored identities stay.
+*Next stage (owner decision, 2026-11-24):* units become the source of their own identity in the change `make-semantic-units-canonical`, whose design supersedes the plan that stood here.
 
 ### D11. Originals record their canonicity
 

@@ -1,23 +1,23 @@
 ## Context
 
-`make-vault-store-canonical` makes one SQLite store canonical for a vault's page bytes. Its stage 2 (D10) adds one derived row per semantic unit and stores typed relationships as rows. In stage 2 the page bytes stay the source of a unit's text and identity. A unit's identity is its reference (`unit_ref`): the authored anchor when the unit carries one, otherwise a reference bound to a fingerprint of its text. A unit that gains its first stored relationship gets an anchor, so its reference survives an edit.
+`make-vault-store-canonical` makes one SQLite store canonical for a vault's page bytes. Its stage 2 (D10) adds one derived row per semantic unit and stores typed relationships as rows. A stored relationship keys on a store-assigned unit id, and a table maps each anchored unit to its id. In stage 2 the page bytes stay the source of a unit's text. A unit's reference (`unit_ref`) is its anchor, or a reference bound to a fingerprint of its text. When a unit becomes either end of its first stored relationship, it gets an anchor.
 
-This change makes the store the source of each unit's identity and lifecycle. A page can then embed units from other pages, and a page can be generated from a stored definition. Agents change a unit by naming it. A hand edit in an editor stays allowed and takes a light rule with no similarity matching.
+This change gives every unit a record with a stable unit id, a lifecycle and a lineage, whether or not it carries an anchor. A page can embed units of other pages. Agents change a unit by naming it. A hand edit in an editor stays allowed and takes a light rule with no similarity matching.
 
 ### Words used here
 
 - **Unit**: a semantic unit as the parser finds it: a one-line compact unit or a rich section block.
-- **Unit record**: the canonical store row of one unit: its unit id, home page, lifecycle and lineage.
-- **Unit id**: the opaque id that the store assigns to a unit record. It does not depend on the text or the page.
+- **Unit record**: the store row of one unit: its unit id, placement, state and lineage.
+- **Unit id**: the opaque id that the store assigns to a unit. It does not depend on the text or the page. For an anchored unit it is the id that stage 2 assigned.
 - **Unit reference**: today's `unit_ref`, derived from the page bytes. Readers keep using it.
 - **Placement**: where a unit sits: its page, ordinal and byte span in the page bytes.
 - **Segment**: the page bytes between placements: frontmatter, headings, prose and other text.
-- **Split**: the placements that a parse of a page gives. Its **split version** names the parser version and the registry fingerprint it used.
+- **Split**: the placements that a parse of a page gives. Its **split version** names the parser version and the registry fingerprint that it used.
 - **Light rule**: exact bytes, then anchor, then slot (U3).
-- **Referenced unit**: a unit that a stored relationship, a link or embed in another page, or a generated page names.
-- **Declaration**: a writer's statement of which unit id each unit it changed keeps.
+- **Referenced unit**: a unit that a stored relationship (at either end), an embed or a unit-level link in another page names. Every referenced unit carries an anchor (U6).
+- **Soft reference**: a unit reference that recall state saves, such as a working-set entry, a memory reference, a correction or a conversation reference. It does not make a unit referenced.
+- **Declaration**: a writer's statement of which unit id each unit that it wrote keeps, adds or retires.
 - **Embed**: an Obsidian block embed, `![[Page#^anchor]]`.
-- **Generated page**: a page whose bytes the store renders from a stored definition.
 
 ### What a measurement on a real vault showed
 
@@ -34,20 +34,22 @@ A spike on 2026-11-24 used a copy of a real vault of 17,329 pages.
 ## Goals / Non-Goals
 
 **Goals**
-- A unit keeps one unit id through agent edits, light hand edits, page moves and moves between pages.
+- A unit keeps one unit id through agent edits, light hand edits, page moves, trash and recovery, and moves between pages.
 - An agent changes a unit by naming its unit id, and keeps the id by construction.
-- A hand edit takes the light rule. A replaced referenced unit opens a review item. No similarity score decides identity.
-- A page can embed units of other pages, and a page can be generated from a stored definition.
+- A hand edit takes the light rule. A retired referenced unit opens a review item. No similarity score decides identity.
+- A page can embed units of other pages.
 - Every derived row stays equal to a cold derivation of the page bytes. Markdown stays a byte-exact projection.
+- The canonical write transaction and its hold of the vault mutation boundary stay as stage 1 bounds them.
 - Rollback to stage 2 and to file mode keeps every byte and exports what only the store holds.
 
 **Non-Goals**
-- No change to the unit reference rule, the unit syntax, the relation vocabulary or any derived row.
+- No change to the unit reference rule, the unit syntax, the relation vocabulary or any derived row apart from a `unit_id` column.
 - No inline copies of one unit's text in several pages (U7).
 - No assembly of page bytes at read time (U1).
 - No similarity or model-based matching.
 - No anchor written into a unit that nothing references (U6).
 - No unit-level write binding: a write still binds its page (U5).
+- No generated pages. A page rendered from a stored selection of units is a follow-up change that waits for the outcome evaluation (owner decision).
 
 ## Decisions
 
@@ -55,7 +57,9 @@ A spike on 2026-11-24 used a copy of a real vault of 17,329 pages.
 
 A page that holds units keeps its exact bytes in `store_pages.body`, as stage 1 stores them. Its units are unit records with one placement each. The segments are the body's bytes between placements, kept raw, line endings included. A page with no unit has no records and keeps its bytes whole. That covers 81.5% of pages in the measured vault.
 
-The store assembles a page at write time, not at read time. A unit operation splices the unit's new bytes into the body at its placement and moves the later placements by the length difference in one statement. Every byte reader (`read.StoreSnapshot.page`, `page_sources`, `bodies`, the projector, the derivation, rollback, media bindings and page admission) therefore reads the body unchanged.
+Records exist only for the pages whose derivation writes unit rows today, by the derivation's corpus rule. Compiled-history images, logs and other pages that the rule leaves out of indexing get no records, so a retained before-image never mints a copy of a unit.
+
+The store assembles a page at write time, not at read time. A unit operation splices the unit's new bytes into the body at its placement. Every byte reader (`read.StoreSnapshot.page`, `page_sources`, `bodies`, the projector, the derivation, rollback, media bindings and page admission) therefore reads the body unchanged.
 
 *Alternative rejected: segment rows.* A table of ordered segments and units, with or without the body, matches the model word for word. Without the body, every byte reader changes and every page read joins and concatenates rows. With the body, the store keeps two copies of the same bytes that must agree. Neither buys anything while each unit lives in one page (U7).
 
@@ -63,165 +67,205 @@ The store assembles a page at write time, not at read time. A unit operation spl
 
 ### U2. A unit record is the source of a unit's identity and lifecycle
 
-Each unit record holds its unit id, its placement, the hash of its bytes, the revision that created it, its state (`live`, `trashed`, `retired`) and its lineage: `replaces`, `moved_from`, `folded_into` or `retired_by`. A history table maps every unit reference that a unit ever had to its unit id, with the revisions between which it held. Stored relationships, embeds and generated pages name unit ids.
+Each unit record holds its unit id, its placement, the hash of its bytes, the revision that created it, its state and its lineage. The store schema declares the states (`live`, `trashed`, `retired`) and the lineage kinds (`replaces`, `moved_from`, `retired_by`) as closed sets that code implements. A history table maps every unit reference that a unit had to its unit id, with the revisions between which it held. Stored relationships and embeds name unit ids.
 
-The unit reference stays a derived value. Search, graph, context packs and the other readers that key on it keep working, because their rows still derive from the bytes. A reader that resolves a reference stored earlier, such as a memory reference, a conversation reference or a relationship end, resolves it through the history. The agent-facing unit id (`page_ids.part_id`) takes its head from the unit id, so it stays the same across edits.
+The unit reference stays a derived value. Search, graph, context packs and the other readers that key on it keep working, because their rows still derive from the bytes. A reader that resolves a reference stored earlier, such as a soft reference or a relationship end, resolves it through the history. The agent-facing unit id (`page_ids.part_id`) takes its head from the unit id, so it stays the same across edits.
 
-### U3. Split before the boundary, match inside the transaction
+The history keeps its rows while their unit record exists. A retired record and its history rows are dropped 180 days after it retires, when nothing names its unit id. The history grows with edits of unanchored units only, because an anchored unit keeps its reference.
 
-The light rule matches each new unit of a page to the page's live unit records, in this order:
+### U3. The store thread matches identity when it derives the page
 
-1. **Exact bytes.** A new unit whose bytes equal an unmatched record's bytes takes its unit id, wherever it moved on the page.
-2. **Anchor.** A new unit whose anchor equals the anchor of exactly one unmatched record takes its unit id.
-3. **Slot.** A new unit that sits between the same matched neighbours as an unmatched record, and differs from it only in whitespace or in at most one word, takes its unit id. A word is a run of characters without whitespace.
+The canonical commit stays as stage 1 defines it: page bytes, audit rows, projection intents and derivation intents in one transaction. It writes no unit record. A writer's declaration rides on the page's derivation intent, in the row that the commit already writes. The commit's statements therefore do not grow with a page's units, and the stage-1 scenario of a 1-unit and a 400-unit page still runs the same number of statements.
+
+The store thread writes the records when it derives the page. The derivation already parses each page for its unit rows (`semantic_index.current_parent_index_state`), so the split adds no parse. In the same derivation transaction, the store thread reads the page's live records and their unit rows, matches the new split against them, and writes the records with one set-based statement per kind for the batch. The derivation takes whole revisions, up to 32 pages per transaction, without the vault mutation boundary. No split or match therefore runs under the boundary, and no writer that hands bytes to the commit changes. A rename of a hub with 10,000 linking pages costs no more boundary time than in stage 1. Its derivation already parses each linking page in batches.
+
+The light rule matches each new unit to an unmatched live record of the same page, in this order:
+
+1. **Exact bytes.** A new unit whose bytes equal a record's bytes takes its unit id, wherever it moved on the page.
+2. **Anchor.** A new unit whose anchor equals the anchor of exactly one record takes its unit id.
+3. **Slot.** A new unit that sits between the same matched neighbours as a record takes its unit id when the two differ only in whitespace, or by one inserted, deleted or substituted run of at most 12 characters that holds no whitespace. The character bound covers a one-word change in text that separates words with spaces. It also bounds the rule in text without spaces, such as Chinese or Japanese, where a "word" bound alone would keep any rewrite.
+
+Then, across the pages of one revision, a new unit that nothing matched takes the unit id of an unmatched record from another page of that revision when its bytes are equal, or its anchor names exactly one such record. Its lineage says `moved_from`. A curation fold or a move of a unit between pages therefore needs no declaration.
 
 A new unit that none of these match gets a new unit id. An unmatched record retires. When exactly one new unit took its slot, the new unit's lineage says `replaces`.
 
-The writer splits the new bytes before it takes the vault mutation boundary. The split is a pure function of the bytes, the parser version and the registry. It cuts byte spans from the raw bytes, so CRLF and a byte-order mark survive. The commit then matches the split against the records at the base revision inside its transaction. The match touches only the units that changed, so the transaction's statements grow with the changed units, not with the page's units. If the registry or the parser changed between split and commit, the commit splits again under the boundary. That is rare and costs one parse per page of the change.
+A declaration replaces the light rule for the units that it names. It may carry a unit id that the writer minted for a unit it adds, so the writer's reply can name the id before the derivation runs. A derivation refuses a declaration that does not fit the split. It keeps the intent as failed with `UNIT_DECLARATION_INVALID`, and status reports it. A later commit that coalesces with a pending intent drops that intent's declaration, and the match applies the light rule to the later bytes. That happens only when a derivation failed, because the store thread derives each commit's intents before its next request.
 
-A writer that knows which units it changed sends a declaration with its bytes. `observe_memory` declares the unit it updated. A link rewrite declares that every unit keeps its place. The commit checks a declaration against the split and refuses a declaration that does not fit with `UNIT_DECLARATION_INVALID`. A valid declaration replaces the light rule for the units it names.
+Identity cannot be derived from the bytes alone, because a cold derivation has no history to match against. Its inputs are all durable before the derivation runs: the stored bytes, the intent with its declaration, the live records and, when a page is behind its split (U9), the prior bytes. A kill at any point leaves the intent, and the next start derives it with the same result. Rollback exports the records, because nothing can rebuild them (U11).
 
-Identity is not derived. A cold derivation has no history to match against, so the records commit with the bytes and are never rebuilt from them, apart from the upgrade pass (U11). Unit records are not the derived identity rows that the store change keeps out of the write transaction: those rows, unit references among them, still follow the derivation intents. The transaction's statements still do not grow with a page's unchanged units, as that requirement asks.
+A unit operation or a page-level read of unit ids on a page whose intent is pending or failed refuses with `UNITS_BEHIND` and a retry hint. A read request waits for derived records as stage 1's reads wait for derived rows.
 
 ### U4. A hand edit imports through the same commit
 
-The importer keeps its job: a file whose hash differs from the manifest imports as an outside-editor write, or is held. The commit applies the light rule to the imported bytes against the records at the hold's or the manifest's base revision, so a person's edit is matched against the bytes they saw. When the rule retires a referenced unit, the commit keeps everything that references it and opens one review item. The review item names the unit, what references it, and the new unit that took its slot, if one did. When another page holds a unit with the same anchor, the review item names that unit too. Its two choices are: attach the references to a named unit, or retire them.
+The importer keeps its job: a file whose hash differs from the manifest imports as an outside-editor write, or is held. The derivation matches the imported bytes against the records of the bytes that the person saw, because an import commits only while the store has not moved past the manifest. When the match retires a referenced unit, the store keeps everything that references it and opens one review item. The review item names the unit, what references it, and the new unit that took its slot, if one did. When another page holds a unit with the same anchor, the review item names that unit too.
 
-The watcher imports a page that holds units only once its bytes have stayed the same for 2 seconds, as the collection views' edit-back does. An editor saves while a person types, and a settle window keeps a half-typed unit from replacing the old one.
+A referenced unit that the slot rule keeps but whose anchor the edit removed also opens a review item, for example when a person types after the anchor. Its embeds and unit-level links would otherwise point at nothing, and the stage-2 relations file could not name the unit.
+
+A review item resolves through the repair tool, as a held item does, with one of three choices:
+
+- **Restore the anchor**: write the unit's old anchor back at the end of the kept unit.
+- **Attach**: give a named unit on the same page the old anchor, and move the stored relationships to its unit id. Embeds and links then resolve again with one page write. A named unit on another page is a move (U5).
+- **Retire**: retire the stored relationships with the caller's reason. Embeds and links stay as text that names nothing, as file mode leaves a link to a deleted page.
+
+The watcher imports a page that holds units only after its bytes stay the same for the collection views' edit-back settle window (`edit_back.SETTLE_SECONDS`, 2 seconds). An editor saves while a person types, and the window keeps a half-typed unit from replacing the old one.
 
 A keep-mine resolution of a held item takes the same path. The held list names the referenced units that a keep-mine would retire.
 
 ### U5. Agents name units
 
-A store change gains unit operations: update a unit, insert a unit after a unit or at the end of a section, retire a unit, and move a unit to another page. Each binds the page revision, as a page write does today, and names the unit id with its version. `observe_memory` and the stage-2 claim operations use them. A move keeps the unit id. It rewrites the embeds of that unit in other pages in the same transaction, up to a bound, and refuses beyond it with a remediation.
+A unit operation is a page write that a writer builds from the unit's record and sends with a declaration. Each binds the page revision and the page's records revision, and names the unit id with its version:
 
-A governed write that would retire a referenced unit without saying so refuses with `UNIT_SUCCESSOR_REQUIRED`. The refusal names the unit and the two choices: declare the successor, or retire the references. This control prevents a silent detachment that a review item would surface only later, after the agent's context is gone. When it fires wrongly, the agent pays one retry. A hand edit cannot answer a refusal, so it opens a review item instead (U4).
+- **Update** splices the unit's new bytes at its placement and declares that the unit keeps its id.
+- **Insert** splices a new unit after a named unit or at the end of a section, and declares a minted id.
+- **Retire** removes the unit's bytes and retires its stored relationships with a reason.
+- **Move** removes the unit from one page and inserts it in another in one commit, and declares that it keeps its id. It rewrites the unit's embeds in other pages in the same commit, up to 256 embedding pages. Beyond that it refuses with `UNIT_MOVE_TOO_WIDE`, which names the count and the curation plan that moves in steps.
+- **Embed** writes an embed of a named unit into a page. When the unit has no anchor, the same commit writes its anchor in the home page.
+
+`observe_memory` add, update and remove use these operations, and so do the stage-2 claim operations.
+
+A semantic write checks referenced units in its preflight, which already parses the page before and after. It runs the light rule over those parses, for all the pages of its change, and reads the inbound unit links through the stage-1 rule that link reads do not trust rows that lag their page. A write that would retire a referenced unit, or remove the anchor of one it keeps, refuses with `REFERENCED_UNIT_CHANGED`. The refusal names the unit and the two ways forward: change the unit with `observe_memory` update, which keeps its id, or name it in the page-edit tools' `retire_units` argument. This control prevents a detachment that a review item would surface only later, after the agent's context is gone. When it fires wrongly, the agent pays one retry. A writer outside the semantic writer, such as a media sidecar or a link rewrite, does not check. A link rewrite keeps each anchor, so it cannot retire a referenced unit. If any such write does, its derivation opens a review item.
 
 *Design source.* The primary-source roster row "The model keeps misusing a tool/MCP surface" points to "Writing effective tools for agents": return stable identifiers, and offer one obvious operation. A unit id that survives edits, and one unit operation per intent, follow it.
 
 ### U6. An anchor is written only when the store must name a unit
 
-The store writes an anchor into a unit's bytes when the unit has none and gains its first reference: a stored relationship (stage 2), an embed, or a pin by a generated page. The write that adds the reference writes the anchor in the same transaction. A unit that nothing references keeps its bytes. A replaced unit that nothing references costs nothing, so anchoring every unit would rewrite about 17% of units in the measured vault for no gain. Every referenced unit carries an anchor, so the measured rate with an anchor on every unit, 17 replaced units per 100 hand edits, is the rate that matters for review items.
+The store writes an anchor into a unit's bytes when the unit has none and becomes either end of its first stored relationship (stage 2), or gains its first embed. The write that adds the reference writes the anchor in the same commit. A unit that nothing references keeps its bytes, and a soft reference never writes an anchor. Every referenced unit therefore carries an anchor, so the measured rate with an anchor on every unit, 17 replaced units per 100 hand edits, is the rate that matters for review items.
 
 ### U7. A page embeds a unit; the unit keeps one home
 
-A unit lives in one page, its home. Another page shows it with an embed. Obsidian renders the embed, so the person sees the unit's current text in every page without a second copy of the bytes. A hand edit of the unit can therefore happen only at its home, where it takes the light rule. A hand edit of an embed line is an edit of a segment of the embedding page: it removes or changes that page's embed and nothing else. Retiring a unit that other pages embed opens a review item that names those pages (U4, U5). An embed is a unit-level link, which stage 2 resolves (its task 5.2), so the graph sees it.
+A unit lives in one page, its home. Another page shows it with an embed. Obsidian renders the embed, so the person sees the unit's current text in every page without a second copy of the bytes. A hand edit of the unit can therefore happen only at its home, where it takes the light rule. A hand edit of an embed line is an edit of a segment of the embedding page: it removes or changes that page's embed and nothing else. An embed is a unit-level link, which stage 2 resolves (its task 5.2), so the graph sees it.
 
-A page read can expand embeds. It returns each embedded unit's bytes from its home, in one batched read, up to 64 embeds and 256 KiB per page, and says when it stopped at the bound.
+A page read can expand embeds. It returns each embedded unit's bytes from its home, in one batched read, up to 64 embeds and 256 KiB per page, and says when it stopped at the bound. A review item lists the pages that embed its unit 50 at a time, with a count of all of them.
 
 *Alternative rejected: inline copies.* The text of a shared unit would sit in every page that shows it. A hand edit in one copy must then either change every copy, which writes and projects every page and turns a concurrent edit of any of them into a held correction, or fork the unit. A rebuild in file mode would see several units with one anchor. Both break the byte and rollback guarantees that an embed keeps for free.
 
-### U8. A generated page renders a stored definition
+### U8. Trash, recovery and purge
 
-A generated page's definition is a stored row: a selector over unit records and their derived rows, an order and a heading layout. A selector names only registry values (categories, tags, relationship types) and page scopes. The order and the layout come from closed sets that the definition schema declares. The store renders the page as headings and embeds, within a bound of 500 members, and says in the page when it stopped at the bound.
-
-A store-thread job re-renders a generated page when its member set changes. A change of a member's text needs no render, because the embed shows it. The job runs in bounded batches, as the registry job does, and status reports pending renders.
-
-A hand edit of a generated page is held. Keep-store renders the page again. Keep-mine detaches the definition, and the page becomes an ordinary page with the person's bytes. A governed page write to a generated page refuses with `PAGE_IS_GENERATED`, which names the definition operations.
+A trash moves a page into the trash folder. The derivation of that move sets the page's records to `trashed` and keeps their unit ids and stored relationships. A trashed unit is not visible, so a relationship with a trashed end is not served, as two-ended visibility requires. A recovery moves the page back, and its records become `live` with the same unit ids. A purge or a governed deletion retires the records and their stored relationships with lineage `retired_by` and the operation's name. Its result lists the stored relationships that it retired. It opens no review item, because the caller chose it.
 
 ### U9. A registry or parser change splits pages again
 
-The split depends on the registry: a bullet whose category the registry does not know is a segment, not a unit. The store records each page's split version. A commit that changes a registry source, and a release whose parser version differs from the store's, queue a split pass. The pass takes the vault mutation boundary for one bounded batch at a time, as the projector does. It splits each page of the batch again, applies the light rule, and retires or creates records. A retired referenced unit opens a review item. Status reports `splitting` with counts until the pass ends. A unit operation on a page that the pass has not reached refuses with `UNITS_BEHIND` and a retry hint.
+The split depends on the registry: a bullet whose category the registry does not know is a segment, not a unit. The store records each page's split version. A commit that changes a registry source, and a release whose parser version differs from the store's, queue a split pass. The pass runs on the store thread under the derived-row authority, one bounded batch at a time with its cursor, as the registry job does. It splits each page of the batch again at the new version and applies the light rule. A retired referenced unit opens a review item that names the registry or parser change as its cause. Status reports `splitting` with counts until the pass ends.
+
+A write can reach a page before the pass does. That page's records still reflect the old split version, and a match of the new bytes would retire the units of a removed category as if the writer had removed them. So, while a pass is pending, the commit keeps the prior bytes of each page in its change whose split version is behind, in one set-based statement for the whole change. The derivation of that page first applies the pass's step to the prior bytes, with the review items of the registry change. Then it matches the new bytes. The semantic writer's preflight parses both versions at the current registry, so it never blames the writer either. The upgrade pass follows the same order (U11).
 
 ### U10. Parity invariants
 
-The store keeps four invariants and checks each one in verification, in the rollback drills and in a periodic store-thread audit:
+The store keeps four invariants:
 
 1. **Placements.** The live placements of a page lie inside its body, in ordinal order, without overlap, and the bytes at each span hash to its record's hash.
 2. **Split.** A parse of the body at the page's split version gives exactly the live placements.
 3. **References.** Every derived unit row's reference maps to exactly one live unit record.
 4. **Derived rows.** The derived rows equal a cold derivation of the bodies, as in stage 1. This change adds a `unit_id` column to derived unit rows and changes no other column.
 
-A failed check is a defect, not a repair trigger. The audit reports it in status with the page path count and the invariant's name, and unit operations on that page refuse until the defect is fixed.
+Verification checks them after a migration and after the upgrade pass, and the rollback drills check them. A store-thread audit checks them in bounded batches with a cursor. A failed check shows in status with the invariant's name and the number of pages. Unit operations on that page refuse, because a splice at a wrong span would corrupt the page. The operator remedy is `exomem store-mode resplit --page PATH`. It splits the page again by the light rule against its records and opens review items for referenced units that retire.
 
 ### U11. Migration, compatibility and rollback
 
-An upgrade pass moves a stage-2 store to this change. It creates the tables, then assigns unit records to every page that holds units, in path order, one bounded batch at a time under the boundary, with a cursor that commits with each batch. A commit to a page that the pass has not reached assigns that page's records first. A stage-2 relationship keyed by unit reference moves to the unit id in the same batch. Activation records the compatibility id `vault-store-v2`, so a build without this change refuses to serve the store and names the rollback.
+The upgrade pass moves a stage-2 store to this change. It first records the compatibility id `vault-store-v2`, so a build without this change refuses to serve the store from the first batch onward and names the rollback. It then creates the tables and assigns unit records to every page that holds units, in path order, one bounded batch at a time with its cursor, under the derived-row authority. Each anchored unit adopts the unit id that stage 2's anchor-to-id table holds, so every stored relationship stays attached. Each other unit gets a new unit id. A derivation of a page that the pass has not reached assigns that page's records first, then matches its new bytes.
+
+The store keeps stage 2's anchor-to-id table in step: each derivation writes the rows of the anchored records it changed. A rollback to stage 2 therefore finds the table current, even after unit moves.
 
 A file-mode migration assigns records in its load step and checks U10 in its verification.
 
-Rollback to stage 2 exports the unit records, the reference history, the lineage, the generated-page definitions and the open review items as files beside the vault, then drops this change's tables and records `vault-store-v1`. The bodies are untouched, so stage 2 serves on. Rollback to file mode adds the same exports to D8's. It refuses while review items remain open, unless the operator exports them. File mode sees embeds as links and generated pages as ordinary pages. A later migration reads an identity export when one is present and its span hashes match the bytes, so unit ids survive a round trip.
+Rollback to stage 2 exports the unit records with their bytes, the reference history, the lineage and the open review items as files beside the vault. It then drops this change's tables, and it removes `vault-store-v2` after that commit. The bodies are untouched, so stage 2 serves on. Rollback to file mode adds the same exports to D8's. Both refuse while review items are open, unless `--export-review` exports them, as `--export-held` does for held items. File mode sees embeds as links.
+
+A later migration that finds an identity export matches it to the file's split by the light rule, with the exported records as the previous records. A line that file mode added at the top of a page therefore moves the placements and keeps every unit id.
 
 ### U12. Cloud cells
 
-A Cloud cell holds the same bodies, so per-write projection can stay off and export on request reads the bodies. A cell has no editor, so the importer and its review items do not arise from hand edits. Agent writes take the same commit. An owner export carries the identity export of U11, and an import into another cell reads it.
+A Cloud cell holds the same bodies, so per-write projection can stay off and export on request reads the bodies. A cell has no editor, so review items do not arise from hand edits there. Agent writes take the same commit and derivation. An owner export carries the identity export of U11, and an import into another cell reads it.
 
 ### U13. Scale
 
 The load target stays the store's: 20,000 pages, about 100,000 units and 120,000 edges, with a hub of 10,000 links.
 
-- A commit's identity work grows with the units it changes. The split runs before the boundary.
+- The canonical commit runs the same statements as in stage 1, plus one set-based statement while a split pass is pending. The vault mutation boundary holds no split and no match.
+- The derivation writes records with one set-based statement per kind for each batch of up to 32 pages.
 - A unit read by id, a placement lookup and a reference lookup are each one indexed query. Records are indexed by unit id, by page and ordinal, and history by reference.
 - An embed expansion reads all its units in one batched query, within its bound.
-- A generated page renders within its member bound, and its job runs in bounded batches.
-- The split pass and the upgrade pass hold the boundary per batch, as the projector does (69 ms per hold in its served test).
-- A unit move that would rewrite more embeds than its bound refuses with a remediation, so one write cannot hold the boundary for a hub.
+- A unit move rewrites at most 256 embedding pages. A review item pages its embedding pages 50 at a time.
+- The split pass, the upgrade pass and the audit run in bounded batches with a cursor.
+
+## The closest option: stage 2's anchor table
+
+Stage 2 already gives every referenced unit a stable id through its anchor-to-id table, and U6 anchors every referenced unit. For referenced units, placements, the slot rule, the history and the split pass therefore add nothing that the anchor table lacks.
+
+Full records pay off only for units that carry no anchor:
+
+- **Soft references keep their unit.** A working-set entry, a memory reference, a correction or a conversation reference names a unit by its reference. Today the reference of an unanchored unit changes with every edit, so the soft reference stops resolving. The working set saves such references on recall (`working_set.py`), a read path. The anchor option would have to write an anchor into a page on that read path, which means a page write, a projection and a possible held correction against a file that the person has open. Records keep the reference through the history and write no byte.
+- **Agent ids stay put.** An agent's unit id for an unanchored unit changes with each edit today, so the agent must read again before its next change.
+- **Lineage.** A unit records what it replaced, where it moved from, and what retired it.
+
+The spike's result files do not count soft references that name unanchored units. Task 0.2 counts them on a real-vault copy before group 1 starts. If few soft references name unanchored units, the owner can choose the anchor option for them instead. That option costs about 2 to 3.5 weeks at the same pace: an anchor written when a soft reference is saved, the unit operations and embeds of U5 to U7 keyed by anchor, and their acceptance. It needs no placements, slot rule, history or split pass.
 
 ## What stage 2 builds that this change reuses
 
 - The derived unit row set (stage 2 task 5.1). It gains a `unit_id` column and stays derived.
 - Unit-level link edges (5.2). Embeds are unit-level links.
-- The stored relationship table, its history, two-ended visibility and the one store function for claim operations (5.5).
-- The anchor written for a first stored relationship (5.5). U6 extends the same write to embeds and generated pages.
-- The relations block, the relations file, the import of relationship edits and the review item for an orphaned relationship (5.6). The commit's light rule replaces the orphan detection; the review item is reused.
-- From stage 1: the one commit function, the projector, the importer and held flow, the registry job's batch and cursor pattern, the owner-schema version, verification, rollback exports and the availability rules.
-
-Stage 2 lowers this change's cost if it keys stored relationships by a store-assigned unit id from the start, with a small id table for anchored units. U11 then has nothing to re-key, and the anchor match of U3 already exists.
+- The stored relationship table keyed by store-assigned unit id, the anchor-to-id table, history, two-ended visibility and the one store function for claim operations (5.5).
+- The anchor written for either end of a first stored relationship (5.5). U6 extends the same write to embeds.
+- The relations block, the relations file, the import of relationship edits and the review item for an orphaned relationship (5.6). The derivation's light rule replaces the orphan detection; the review item is reused.
+- From stage 1: the one commit function, the derivation intents and their store-thread drain, the projector, the importer and held flow, the registry job's batch and cursor pattern, the owner-schema version, verification, rollback exports and the availability rules.
 
 ## Estimate
 
-Sizes use the store change's pace, the Records and Planning move's, which landed mostly one PR at a time. They assume stage 2 ships as D10 plans it.
+Sizes use the store change's pace, the Records and Planning move's, which landed mostly one PR at a time. Stage 2 keys stored relationships by unit id, so no re-key is planned.
 
 | Package | Size | Weeks | Why |
 | --- | --- | ---: | --- |
-| Unit records, placements, history, lineage; upgrade pass; compatibility id; verification of U10; rollback exports | M | 0.5–1 | Reuses the owner-schema pass, the object list and the export path. New: tables, a pass under the boundary. |
-| Split before the boundary and match in the commit; declarations; lineage; review-item hook | L | 1–1.5 | The spike fixes the rule and the round trip. Real bytes add CRLF, rich blocks, registry drift and kill points. |
-| Unit operations and their callers; agent-facing ids; refusal of an undeclared retirement | M | 0.5–1 | `observe_memory` already addresses units by id and splices bytes; the change moves the splice into the store. |
-| Split pass for registry and parser changes | M | 0.5 | Reuses the registry job; adds the boundary per batch. |
-| Readers: reference history, unit lineage read, embed expansion, held list | S | 0.5 | One indexed lookup each. |
-| Import: settle window, review items from the commit | S | 0.5 | Watcher and commit hooks only. |
-| Embeds: anchor on first embed, retirement guard, move rewrite with its bound | S–M | 0.5–1 | Needs stage 2's unit-level links. |
-| Generated pages: definitions, render, job, hold, export | M–L | 1–2 | New surface; the job and hold follow existing patterns. |
-| Acceptance on a real-vault copy | M | 1–1.5 | Upgrade, parity, replay of the spike's generated edits through the real importer, kills, both rollbacks, commit hold before and after. |
+| Unit records, placements, history, lineage; upgrade pass with the compatibility id first; the stage-2 table in step; verification of U10; rollback exports | M | 0.5–1 | Reuses the owner-schema pass, the object list and the export path. |
+| Match in the derivation: light rule with its character bound, cross-page match in a revision, declarations from intents, prior bytes of behind pages, lineage, review items, anchor-loss review | L | 1–1.5 | The spike fixes the rule and the round trip. Real bytes add CRLF, rich blocks, registry drift and kill points. |
+| Writer side: declarations on `PagePut` and intents; `observe_memory` and the claim operations; move and embed operations; the preflight check with `retire_units`; agent-facing ids | M | 1–1.5 | `observe_memory` already splices bytes by unit; the semantic preflight already parses before and after. |
+| Split pass for registry and parser changes; the resplit command | M | 0.5–1 | Reuses the registry job. |
+| Trash, recovery and purge of records | S | 0.25–0.5 | Lifecycle moves already reach the derivation. |
+| Readers: reference history, lineage read, embed expansion, held list, paged review list | S | 0.5 | One indexed lookup each. |
+| Import: the settle window and the repair-tool choices | S | 0.25–0.5 | Watcher and review hooks only. |
+| Embeds: anchor on first embed, attach by anchor, the move bound | S–M | 0.5–1 | Needs stage 2's unit-level links. |
+| Acceptance on a real-vault copy | M | 1–1.5 | Upgrade, parity, replay of the spike's generated edits through the real importer, kills, a downgrade during the upgrade pass, both rollbacks, boundary hold before and after. |
 | Contracts, specs, skill scaffold guidance, Cloud identity export | S | 0.5 | |
 
-**Result.** 6.5 to 10 weeks at that pace with generated pages, 5.5 to 8 without them. If stage 2 keys relationships by unit id, subtract about half a week.
+**Result.** 6 to 9.5 weeks at that pace. Plan for the upper end. Generated pages are a follow-up change of 1 to 2 weeks after the outcome evaluation.
 
 **Parallel schedule.** With three workstreams, as the store change planned:
 
 1. Week 1: the tables, the upgrade pass and the specs, which fix the contract that the others share.
-2. Weeks 2 and 3: the split and match with the import changes; the unit operations with the readers; the split pass with embeds.
-3. Week 4: acceptance on a real-vault copy.
+2. Weeks 2 and 3: the match in the derivation with trash and import; the writer side with the readers; the split pass with embeds.
+3. Weeks 4 and 5: acceptance on a real-vault copy.
 
-That is about four weeks of elapsed time without generated pages, five at the upper ends. Generated pages add one to two weeks after it. Stage 1 reached its gate-lift release 13 days after its first code. The five rows it covered measure 6 to 7.5 weeks at this pace, so building may run faster. Its acceptance on a real-vault copy was still open 16 days after its first code, so acceptance should not be planned shorter.
+Stage 1 reached its gate-lift release 13 days after its first code. The five rows it covered measure 6 to 7.5 weeks at this pace, so building may run faster. Its acceptance on a real-vault copy was still open 16 days after its first code, so acceptance keeps its two weeks.
 
-**What drives the spread.** Generated pages (0 to 2 weeks). The real-byte edge cases of the match, which the spike's round trip does not cover. The acceptance tail on a real-vault copy. The final shape of stage 2's relationship keys and review item.
+**What drives the spread.** The real-byte edge cases of the match, which the spike's round trip does not cover. The acceptance tail on a real-vault copy. The writer-side changes of U5, which touch the semantic preflight and the page-edit tools. The count of task 0.2, which can shrink the whole change to the closest option.
 
 ## Risks / Trade-offs
 
 - **Two identities for one unit.** The unit id and the unit reference both exist. Readers that only read derived rows keep the reference; readers that hold a reference over time resolve it through the history. The agent sees one id. A reader that compares references across revisions without the history sees a new reference after an edit of an unanchored unit, as it does today.
-- **Commit hold.** The match runs under the boundary. The split runs before it, so the added hold is a lookup per changed unit. Acceptance measures the hold before and after on the same instrument.
-- **Typing in an editor.** Text typed after an anchor ends the anchor (4 of 100 generated edits). The review item names the unit in the slot that holds the old anchor text, so the fix is one choice. The settle window keeps half-typed states out.
-- **Registry drift.** A registry change can turn segments into units or units into segments. The split pass settles it in the background and opens review items only for referenced units.
-- **Downgrade.** A build without this change must not write a store that has it. The compatibility id refuses it. Rollback to stage 2 is an explicit command.
-- **Generated pages.** A selector that grows with the vault needs its bound. A page at the bound says so.
-- **Split and merge by hand.** The light rule keeps the id on the piece that keeps the anchor. The other piece is new. This keeps 10 of 100 generated edits out of review. The design accepts that a split's other half starts a new identity.
+- **Records lag their bytes.** Records follow the derivation, like every derived row in stage 1. A unit operation on a page that lags refuses with `UNITS_BEHIND`, and a read waits or says what lags. The store thread derives each commit's intents before its next request, so the lag is one derivation.
+- **Typing in an editor.** Text typed after an anchor ends the anchor (4 of 100 generated edits). For a referenced unit, a review item offers to restore it. The settle window keeps half-typed states out.
+- **Registry drift.** A registry change can turn segments into units or units into segments. The split pass settles it in the background and blames the registry change, not a writer.
+- **Downgrade.** A build without this change must not write a store that has it. The compatibility id refuses it from the upgrade pass's first batch. Rollback to stage 2 is an explicit command.
+- **Embeds at hub scale.** A move rewrites at most 256 embedding pages, and a retirement leaves embeds as text. Attaching to a unit on the same page needs one page write.
+- **Split and merge by hand.** The light rule keeps the id on the piece that keeps the anchor. The other piece is new (owner decision). This keeps 10 of 100 generated edits out of review.
 
 ## Migration Plan
 
-1. Stage 2 ships and the owner's vault runs it.
+1. The owner's vault switches to store mode, then stage 2 ships and the vault runs it.
 2. This change ships behind its release capability. File mode and stage 2 stay the defaults.
-3. `exomem store-mode upgrade-units --plan` reports the pages and units that the pass would assign. `--apply` runs the upgrade pass with the service up, in batches, and records `vault-store-v2` when it ends.
+3. `exomem store-mode upgrade-units --plan` reports the pages and units that the pass would assign. `--apply` records `vault-store-v2`, then runs the upgrade pass with the service up, in batches.
 4. Verification checks U10 on the whole store before unit operations serve.
 5. Rollback to stage 2 or to file mode follows U11.
 
 ## Owner decisions (2026-11-24)
 
 - A shared unit appears in other pages as an embed of its one home (U7), not as copied text.
-- Generated pages ship only after the outcome evaluation shows that composed pages help agents (task 8.5).
+- Generated pages wait for the outcome evaluation and go to a follow-up change.
 - A hand split or merge keeps the anchored piece's unit id; the other piece is a new unit.
 - The order is: the owner's switch to store mode, then stage 2 of `make-vault-store-canonical`, then this change.
 
+## Open Questions
+
+- Should soft references to unanchored units keep their unit through full records, or through anchors written when they are saved (the closest option)? Task 0.2 measures the count that decides it.
+
 ## Design sources
 
-The roster row "The model keeps misusing a tool/MCP surface" ("Writing effective tools for agents") shapes U5. No row of the primary-source roster's pick-by-problem table covers a storage data model, so none applies to U1 to U4 and U9 to U11. The motivation for composed pages is the subject-page result in [The components of agent memory](https://www.anthropic.com/research/components-of-agent-memory), which the store change's D6 cites. That study did not isolate links or embeds, so this change measures before it ships generated pages.
+The roster row "The model keeps misusing a tool/MCP surface" ("Writing effective tools for agents") shapes U5. No row of the primary-source roster's pick-by-problem table covers a storage data model, so none applies to U1 to U4 and U8 to U11. The motivation for embeds is the subject-page result in [The components of agent memory](https://www.anthropic.com/research/components-of-agent-memory), which the store change's D6 cites. That study did not isolate links or embeds.
