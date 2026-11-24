@@ -60,8 +60,8 @@ Each run acts only on the newest published release. Steps:
 
 1. Read the cell image digest that the newest release published.
 2. Verify the digest's attestation with `gh attestation verify`. The signer must be this repository's release workflow, on the release tag. This is the identity that the deploy tier checks (`make-cloud-cells-operator-resistant` D6).
-3. Read the rollout view. If its `cell_image` equals the digest, set nothing and succeed.
-4. If the rollout is paused, set nothing, and fail with the pause's error code (D8).
+3. Read the rollout view. If the rollout is paused, set nothing, and fail with the pause's error code (D8). A re-run for the release that the rollout paused on fails too.
+4. If the view's `cell_image` equals the digest, or its `release` equals the tag, set nothing and succeed.
 5. Apply the platform gate (D2) and the barrier check (D3).
 6. Send `PUT cloud-release` with `{cellImage, release}`, where `release` is the verified tag. If Substrate answers `CELL_IMAGE_SEEN` or `CELL_RELEASE_OLDER`, the release is not newer than the fleet. The run then sets nothing, logs the code and succeeds.
 7. Poll the rollout view until its `canary_on_target` is true, which means that the canary runs the target and is Ready. Fail on a pause or on the poll timeout.
@@ -431,7 +431,7 @@ The command reads the live release from Helm's release metadata, not from the pl
 - A pass that could not observe every cell sends no transition, so it resolves no alert. This is the rule of the existing alerts.
 - A person clears the pause. Neither `cellctl` nor the workflow clears it.
 
-**The workflow** also reports a pause. It fails when it finds the rollout paused (D1 step 4), or when the rollout pauses during its poll (D1 step 7). It prints only the pause's error code.
+**The workflow** also reports a pause. It fails when it finds the rollout paused (D1 step 3), or when the rollout pauses during its poll (D1 step 7). It prints only the pause's error code.
 
 ### D9. Later: prepare the cell before its stop
 

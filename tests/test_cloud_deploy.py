@@ -214,6 +214,16 @@ def test_a_paused_rollout_sets_nothing_and_fails_with_the_pause_code(capsys) -> 
     assert log.splitlines()[-1] == "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT"
 
 
+def test_a_rerun_for_the_release_the_rollout_paused_on_fails_with_the_pause_code(capsys) -> None:
+    # Catches a re-run that reports success while the fleet is paused on this very release.
+    recorded = Recorded(["substrate_rollout_paused_on_the_release"])
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT"
+
+
 def test_a_pause_during_the_poll_fails_with_the_pause_code(capsys) -> None:
     recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_behind", "substrate_rollout_paused"])
 
