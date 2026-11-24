@@ -165,13 +165,19 @@ LISTED_BUDGET = 300
 
 
 def listed_within(names: Iterable[str]) -> str:
-    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET`."""
+    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET`.
+
+    When the first name alone passes the budget, nothing is listed and the text is the count:
+    a cut name would read as a real one.
+    """
     names = list(names)
     shown: list[str] = []
     for name in names:
         if len(", ".join([*shown, name])) > LISTED_BUDGET:
             break
         shown.append(name)
+    if names and not shown:
+        return f"{len(names)} item" if len(names) == 1 else f"{len(names)} items"
     more = f" and {len(names) - len(shown)} more" if len(shown) < len(names) else ""
     return f"{', '.join(shown)}{more}"
 
