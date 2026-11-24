@@ -19,6 +19,7 @@ from test_collection_store_writer import manifest_path
 from test_collection_store_writer import store as store  # noqa: F401 - the fixture, by name
 from test_planning_mutation import _manifest as planning_manifest
 from test_restructure import make_file_work, make_store_work
+from test_restructure_identity import TARGET, other
 from test_restructure import mode as mode  # noqa: F401 - the fixture, by name
 from test_restructure import work as work  # noqa: F401 - the fixture, by name
 from test_single_purpose_tools_mcp import _call, _session
@@ -143,6 +144,21 @@ def test_an_automatic_step_may_not_change_what_the_user_chose_or_undo_it(work):
     assert work.manifest()["item_schema"]["fields"] == fields
     # What the user decided nothing about stays open to the agent.
     assert work.restructure(steps=RETIRE_COUNT, automatic=True)["shape"]["origin"] == "automatic"
+
+
+def test_an_automatic_merge_may_not_rename_a_field_the_user_chose(store):
+    work = make_store_work(store)
+    work.restructure(steps=[{"step": "add_field", "field": "price", "type": "number"}])
+    target = other(store, "view-per-row")
+    rows, target_rows = work.rows(), target.rows()
+
+    renamed = work.refused(steps=[{"step": "merge_into", "target": TARGET, "mapping": {"price": "cost"}}], automatic=True)
+
+    assert renamed["code"] == "AUTOMATIC_RESTRUCTURE_REFUSED" and renamed["bound"] == "decision"
+    assert (work.rows(), target.rows()) == (rows, target_rows)
+    # A merge that keeps every name changes none of what the user chose.
+    merged = work.restructure(steps=[{"step": "merge_into", "target": TARGET}], automatic=True)
+    assert merged["shape"]["origin"] == "automatic"
 
 
 def test_the_fourth_automatic_restructure_of_a_collection_in_a_day_is_refused_and_a_plain_one_is_not(work):

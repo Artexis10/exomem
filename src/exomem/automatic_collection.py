@@ -418,13 +418,17 @@ def _refuse_split(bound: str, reason: str, **details: Any) -> Never:
 
 
 def _domains(step: Mapping[str, Any]) -> set[tuple[str, ...]]:
-    """What a step changes: the fields it names, the collection's key, or the collection itself.
+    """What a step changes: the fields it names, the collection's key, or the collection (and the fields it renames).
 
-    Read from the parameters that the step schema gives each kind, never from a field or a collection name.
+    Read from the parameters that the step schema gives each kind, never from a field or a collection name. A merge or
+    its undo renames each field its `mapping` names, so those fields are in its domains beside the collection.
     """
     if "field" in step:
         return {("field", name) for name in (step["field"], step.get("to")) if name is not None}
-    return {("key",)} if "key" in step else {("collection",)}
+    if "key" in step:
+        return {("key",)}
+    mapping = step.get("mapping") or {}
+    return {("collection",), *(("field", name) for name in (*mapping, *mapping.values()))}
 
 
 def _decision_changed(history: Sequence[Mapping[str, Any]], steps: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
