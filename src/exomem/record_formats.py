@@ -2817,10 +2817,10 @@ def query_collection(
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
 
-    `readable` is `manifest` after the caller's field plan. A query that names a column may
-    name only a column of `readable`, so a withheld column refuses as an undeclared one does.
-    A saved view's columns are the manifest author's, not the caller's, so they are checked
-    against `manifest`.
+    `readable` is `manifest` after the caller's field plan. A query that names a column or a
+    child table may name only one of `readable`, so a withheld one refuses as an undeclared
+    one does. A saved view's names are the manifest author's, not the caller's, so they are
+    checked against `manifest`.
 
     `late_link_projection` is an internal-only opt-in from a trusted caller
     (never a value a public tool's request parameters can reach -- no tool
@@ -2871,9 +2871,10 @@ def query_collection(
             "definition": saved_view.definition,
             "identity": saved_view.identity,
         }
-    selected_child = _resolve_child_selector(manifest, expand_children, expand_child)
+    checked = readable if readable is not None and view is None else manifest
+    selected_child = _resolve_child_selector(checked, expand_children, expand_child)
     _validate_query_projection_fields(
-        readable if readable is not None and view is None else manifest,
+        checked,
         selected_child=selected_child,
         filters=filters,
         columns=columns,
@@ -3644,6 +3645,7 @@ def _resolve_child_selector(
             if (
                 isinstance(descriptor, Mapping)
                 and descriptor.get("container_field") == expand_child
+                and expand_child in manifest.schema.fields
             ):
                 return expand_child
         raise collections.CollectionError(
@@ -3666,8 +3668,10 @@ def _resolve_child_selector(
         return tables[0].field
     if manifest.storage.strategy == "markdown-log":
         descriptor = manifest.storage.descriptor.get("child_rows")
-        if isinstance(descriptor, Mapping) and type(descriptor.get("container_field")) is str:
-            return descriptor["container_field"]
+        container = descriptor.get("container_field") if isinstance(descriptor, Mapping) else None
+        # The container is a schema field, so a field plan that withholds it leaves no eligible child.
+        if type(container) is str and container in manifest.schema.fields:
+            return container
     raise collections.CollectionError(
         "INVALID_RECORD_QUERY", "expand_children has no eligible child field"
     )
