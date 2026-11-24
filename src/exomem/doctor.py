@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from . import __version__, cuda_containment, install_info, process_memory
+from . import __version__, cuda_containment, install_info, media_types, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
 from .kbdir import managed_join, managed_root, managed_root_rel
@@ -352,7 +352,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", *media_types.PDF_READERS, "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -4257,7 +4257,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
             _check_dependency("pillow", "media", import_name="PIL"),
-            _check_dependency("pymupdf", "media", import_name="fitz"),
+            *(_check_dependency(module, "media") for module in media_types.PDF_READERS),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),
             _check_asr_backend(),

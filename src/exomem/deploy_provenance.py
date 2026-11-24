@@ -29,7 +29,7 @@ from typing import Any
 # so probing these stays cheap even for the heavy ML packages.
 _EXTRA_PROBES: dict[str, tuple[str, ...]] = {
     "embeddings": ("sentence_transformers", "torch"),
-    "media": ("faster_whisper", "fitz"),
+    "media": ("faster_whisper", "pypdfium2"),
     "vision": ("PIL",),
 }
 

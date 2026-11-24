@@ -366,6 +366,12 @@ def defer_until_terminal_persisted(work: Callable[[], list[object]]) -> bool:
     return True
 
 
+def terminal_follows() -> bool:
+    """Whether this context runs a mutation whose terminal can carry deferred work and report it
+    (``defer_until_terminal_persisted`` would accept work)."""
+    return _ACTIVE_POST_TERMINAL_FANOUT.get() is not None
+
+
 def _drain_post_terminal_fanout(queue: list[Any]) -> tuple[list[Any], bool]:
     """Run every deferred item once, in order, swallowing failures.
 
@@ -9573,7 +9579,7 @@ def invoke_command(
         try:
             try:
                 if vault_store_mode.store_mode_for_reads(injected[0]):
-                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0]))
+                    snapshot_scope.enter_context(vault_store_read.request_snapshot(injected[0], catch_up=True))
                 # Fixed phase labels carry timing only, never caller or vault data.
                 with body_meter as measured, call_spans.span("command.body", measured):
                     result = _invoke()

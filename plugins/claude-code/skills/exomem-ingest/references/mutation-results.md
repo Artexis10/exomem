@@ -106,6 +106,9 @@ Do not reread solely to confirm a successful commit. Use one bounded final
 verification of the whole requested outcome, and extra reads only when content,
 warnings or missing concurrency guards actually require them.
 
+Only a committed result is a save. A call that could not run, failed in transport,
+or returned no committed result saved nothing; say so, never report it saved.
+
 `graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
 failed canonical write. They appear under `diagnostics.operational` and in no
 other part of the reply. Continue independent work and ordinary recall; do not

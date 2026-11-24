@@ -17,13 +17,14 @@ from pathlib import Path
 
 import pytest
 from _public_call import public_call
-from _vault_backend import backend_writer, delete_page, prepare_vault
+from _vault_backend import backend_writer, delete_page, prepare_vault, write_page
 from _vault_backend import coordinator_url as coordinator_url
 from _vault_backend import vault_backend as vault_backend
 
 from exomem import commands, memory_refs, query_log, writer_lease
 from exomem.governance import egress, membership, policy, projection_timing, receipts
 from exomem.governance.principal import RequestPrincipal, library_scope, request_scope
+from exomem.vault_store import derivation, read
 
 READ_MEMORY = next(item for item in commands.PRODUCT_COMMANDS if item.name == "read_memory")
 EXTERNAL = RequestPrincipal(audience_id="external", surface="mcp")
@@ -102,6 +103,54 @@ def test_restricted_refusals_complete_at_the_floor_and_read_alike(
     with library_scope():
         owner_elapsed, _body = _timed_refusal(vault, page)
     assert owner_elapsed < 1.0
+
+
+@pytest.mark.parametrize("vault_backend", ["store"], indirect=True)
+def test_pending_rows_never_tell_a_restricted_caller_withheld_from_missing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restricted caller's reads of one path, withheld and then deleted, while a save's rows are
+    pending. A missing page that refused for the lag, beside a withheld one that answered as
+    missing, told that caller which of the two exists."""
+    identity = memory_refs.new_id()
+    page = "Knowledge Base/Notes/Hidden/withheld-example.md"
+    _write_page(vault, page, identity)
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    # The commits' rows stay pending, and no store thread in this process derives them.
+    monkeypatch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+    write_page(vault, "Knowledge Base/Notes/Open/pending-example.md", b"# Pending\n\nA save.\n")
+    with read.snapshot(vault) as view:
+        assert derivation.lag(view.connection)[0] == 1, "a save's rows must be pending to mean anything"
+
+    with request_scope(EXTERNAL):
+        withheld = _timed_refusal(vault, page)
+    delete_page(vault, page)
+    with request_scope(EXTERNAL):
+        missing = _timed_refusal(vault, page)
+
+    assert withheld[1] == missing[1]
+    assert "NOT_FOUND" in missing[1]
+
+
+def test_fetch_names_a_withheld_page_as_it_names_an_absent_one(vault: Path) -> None:
+    """`fetch` echoed a withheld page's id as the caller spelled it and an absent page's with the
+    `.md` the suffix rule adds, so a spelling without one told the two apart."""
+    page = "Knowledge Base/Notes/Hidden/withheld-example.md"
+    _write_page(vault, page, memory_refs.new_id())
+    _restrict_external(vault, folder="Hidden", ceiling=egress.LEVEL_NONE)
+    fetch = next(item for item in commands.COMMANDS if item.name == "fetch")
+
+    def refusal() -> str:
+        with request_scope(EXTERNAL), pytest.raises(ValueError) as caught:
+            writer_lease.invoke_command(fetch, vault, id=page.removesuffix(".md"))
+        return str(caught.value)
+
+    withheld = refusal()
+    delete_page(vault, page)
+    missing = refusal()
+
+    assert withheld == missing
+    assert "NOT_FOUND" in missing
 
 
 def _door_arguments(name: str, target: str) -> dict:

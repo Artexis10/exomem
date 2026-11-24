@@ -5479,9 +5479,10 @@ class EpistemicGraphIndex:
             attempts += 1
             # Read before this attempt samples its epoch: whole-vault debt that
             # already exists now is paid by the publication this attempt makes.
-            marker = deferred_index.graph_full_rebuild_details(
-                self.vault_root, deadline=time.monotonic() + 0.05,
-            )
+            # No deadline: this read holds no boundary, so it waits out a brief
+            # lock (another connection's close checkpoints the WAL) instead of
+            # stopping the whole rebuild on it.
+            marker = deferred_index.graph_full_rebuild_details(self.vault_root)
             self._check_graph_rebuild_destination(marker)
             covered_marker = marker.token if marker is not None else None
             prepared_recall = freshness.prepare_recall_publication(self.vault_root, "vault")
@@ -5788,6 +5789,14 @@ class EpistemicGraphIndex:
             "graph publication did not stabilize after "
             f"{REBUILD_PUBLICATION_ATTEMPTS} attempts; {graph_sync._RECONCILE_HINT}",
         )
+
+    def publish_recall_projection(self) -> None:
+        """Make the vault's recall projection live in this process, as a whole rebuild does.
+
+        A drain proves its repair against the live projection and declines without one. A service's
+        watcher makes it live; an offline lease holder (a migration) has to do it here.
+        """
+        self._reconcile_recall_publication()
 
     def _reconcile_recall_publication(self) -> None:
         """Seed/reconcile recall outside publication authority, then rebuild fresh."""

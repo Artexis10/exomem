@@ -1147,7 +1147,11 @@ def ensure_index(
     registry_changed = (
         index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
     )
-    if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
+    if (
+        registry_changed
+        or (freshness_stamp and index.freshness_stamp() != freshness_stamp)
+        or _store_readable_again(root, index)
+    ):
         built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         if not refreshed and visible is not None:
@@ -1162,6 +1166,19 @@ def ensure_index(
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+def _store_readable_again(root: Path, index: working_set_index.WorkingSetIndex) -> bool:
+    """Whether the catalogue missed store collections that this process can now read.
+
+    The build that missed them recorded its freshness stamp all the same, so the first request after a writer
+    is admitted builds once more; a host that never gets a writer never rebuilds for it.
+    """
+    if not index.store_unread():
+        return False
+    from .collection_store import runtime as store_runtime
+
+    return store_runtime.writer_admitted(root)
 
 
 #: The registry checkpoint each freshness stamp was derived from, oldest first.

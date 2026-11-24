@@ -17,9 +17,11 @@ from __future__ import annotations
 import atexit
 import datetime as dt
 import importlib.util
+import itertools
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -372,8 +374,8 @@ def read_pdf_bounded(path: Path) -> PdfEvidence:
     The deadline, the memory cap and a crash each yield their reason, so a hostile PDF never holds or
     grows the service. Each child reads one PDF and exits.
     """
-    if importlib.util.find_spec("fitz") is None:
-        # An install without PyMuPDF pays no process start for a read that cannot happen.
+    if any(importlib.util.find_spec(module) is None for module in media_types.PDF_READERS):
+        # An install without a PDF reader pays no process start for a read that cannot happen.
         return PdfEvidence(unavailable=NO_EXTRACTOR)
     deadline = time.monotonic() + READ_DEADLINE_SECONDS
     if not _read_slots.acquire(timeout=READ_DEADLINE_SECONDS):
@@ -393,14 +395,14 @@ def read_pdf_bounded(path: Path) -> PdfEvidence:
     return _evidence_from_child(reader.returncode, output)
 
 
-#: One idle reader that has already imported PyMuPDF, about 100 ms of the read's cost, so a capture
+#: One idle reader that has already imported the PDF readers, about 90 ms of the read's cost, so a capture
 #: pays only the parse. It starts on the first read and is replaced as each read takes it.
 _spare: subprocess.Popen | None = None
 _spare_lock = threading.Lock()
 
 
 def _start_reader() -> subprocess.Popen:
-    # Its stderr is discarded: a damaged file can make MuPDF warn without end.
+    # Its stderr is discarded: a damaged file can make a PDF reader warn without end.
     return subprocess.Popen(  # noqa: S603 - fixed interpreter and module; the path arrives on stdin
         [sys.executable, "-P", "-m", "exomem.document_identity", str(READ_MEMORY_BYTES)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -429,7 +431,11 @@ def _retire_spare() -> None:
 
 
 def _evidence_from_child(returncode: int, output: bytes) -> PdfEvidence:
-    """The evidence the child printed, or `failed` when it died or printed something else."""
+    """The evidence the child printed, `too_large` when PDFium aborted it, or `failed` when it died otherwise."""
+    if returncode == -signal.SIGABRT:
+        # PDFium answers a failed allocation of its own by aborting the process; the child's data cap is the only
+        # way one fails here. An abort for another reason reads the same, and `too_large` is then the wrong word.
+        return PdfEvidence(unavailable=TOO_LARGE)
     try:
         value = json.loads(output) if returncode == 0 else None
     except ValueError:
@@ -455,38 +461,105 @@ def read_pdf(path: Path) -> PdfEvidence:
     `read_pdf_bounded` starts. One boundary turns every failure into a reason.
     """
     try:
-        import fitz  # PyMuPDF
+        import pypdfium2 as pdfium
     except ImportError:
         return PdfEvidence(unavailable=NO_EXTRACTOR)
 
     try:
-        with fitz.open(path) as doc:
-            if doc.needs_pass:
-                return PdfEvidence(unavailable=ENCRYPTED)
-            pages = tuple(
-                media_types.pdf_page_text(doc[number])[:MAX_PAGE_CHARS]
-                for number in range(min(PAGES_READ, doc.page_count))
-            )
+        with pdfium.PdfDocument(path) as doc:
+            pages = tuple(_page_text(doc, number) for number in range(min(PAGES_READ, len(doc))))
             if not any(media_types.has_text_layer(text) for text in pages):
                 return PdfEvidence(unavailable=NO_TEXT_LAYER)
-            information = {
-                name: value[:MAX_PAGE_CHARS] for name, value in (doc.metadata or {}).items() if isinstance(value, str)
-            }
-            try:
-                packet = doc.get_xml_metadata() or ""
-            except Exception:  # noqa: BLE001 - an XMP stream that inflates past the memory cap is hostile: no packet
-                packet = ""
-    except Exception as error:  # noqa: BLE001 - PyMuPDF raises many types for damaged input; each means unreadable
-        exhausted = isinstance(error, MemoryError) or media_types.pymupdf_allocation_failure(error)
-        return PdfEvidence(unavailable=TOO_LARGE if exhausted else UNREADABLE)
+            information = _information(doc)
+        try:
+            packet = _xmp_packet(path)
+        except Exception:  # noqa: BLE001 - an XMP stream that inflates past the memory cap is hostile: no packet
+            packet = ""
+    except Exception as error:  # noqa: BLE001 - a damaged PDF fails in many ways; each means unreadable
+        # PDFium reports a file that needs a password as its own load error code, not as a message.
+        if isinstance(error, pdfium.PdfiumError):
+            if error.err_code == pdfium.raw.FPDF_ERR_PASSWORD:
+                return PdfEvidence(unavailable=ENCRYPTED)
+            if error.err_code != pdfium.raw.FPDF_ERR_SECURITY:
+                # PDFium could not read the file, and encryption is not why: pypdf may still repair it.
+                return _read_damaged_pdf(path)
+        return PdfEvidence(unavailable=TOO_LARGE if isinstance(error, MemoryError) else UNREADABLE)
     # A title is untrusted text that the Source page stores in frontmatter: keep printable characters only.
-    title = "".join(ch for ch in " ".join((information.get("title") or "").split()) if ch.isprintable())
+    title = "".join(ch for ch in " ".join((information.get("Title") or "").split()) if ch.isprintable())
     title = title[:MAX_TITLE_CHARS].strip() or None
     return PdfEvidence(
         pages=pages,
         metadata_values=(*information.values(), *xmp_values(packet)),
         title=title,
     )
+
+
+def _read_damaged_pdf(path: Path) -> PdfEvidence:
+    """The first pages of a PDF that PDFium refused to open, as far as pypdf can repair the file.
+
+    A file cut short keeps no trailer, so it has no document information or XMP packet to read: the
+    printed text alone is the evidence. A file that pypdf cannot read either stays `unreadable`.
+    """
+    try:
+        pages = tuple(
+            text[:MAX_PAGE_CHARS] for text in itertools.islice(media_types.damaged_pdf_page_texts(path), PAGES_READ)
+        )
+    except MemoryError:
+        return PdfEvidence(unavailable=TOO_LARGE)
+    except Exception:  # noqa: BLE001 - pypdf fails on a file it cannot repair in many ways; each means unreadable
+        return PdfEvidence(unavailable=UNREADABLE)
+    if not any(media_types.has_text_layer(text) for text in pages):
+        return PdfEvidence(unavailable=UNREADABLE)
+    return PdfEvidence(pages=pages)
+
+
+def _information(doc: Any) -> dict[str, str]:
+    """The non-empty standard entries of the document information, capped.
+
+    `PdfDocument.get_metadata_dict` decodes strictly and raises on the unpaired surrogate that a broken
+    producer writes. The raw call keeps the surrogate in the string, where `_SUFFIX_STOPS` ends a DOI.
+    """
+    import ctypes
+
+    from pypdfium2 import raw
+
+    entries = {}
+    for key in doc.METADATA_KEYS:
+        name = (key + "\x00").encode()
+        size = raw.FPDF_GetMetaText(doc, name, None, 0)
+        buffer = ctypes.create_string_buffer(size)
+        raw.FPDF_GetMetaText(doc, name, buffer, size)
+        # The buffer is UTF-16LE with a two-byte terminator.
+        value = bytes(buffer)[: max(size - 2, 0)].decode("utf-16-le", errors="surrogatepass")
+        if value:
+            entries[key] = value[:MAX_PAGE_CHARS]
+    return entries
+
+
+def _page_text(doc: Any, number: int) -> str:
+    page = doc[number]
+    try:
+        return media_types.pdf_page_text(page)[:MAX_PAGE_CHARS]
+    finally:
+        page.close()
+
+
+def _xmp_packet(path: Path) -> str:
+    """The XMP packet of the PDF's catalog, or "" when it holds none.
+
+    PDFium has no call for it, so pypdf reads the raw stream; its own XMP parser is not used,
+    because the packet goes to `xmp_values` and `defusedxml`. The reader gets an open file so that
+    it seeks to what it needs instead of loading the whole PDF.
+    """
+    from pypdf import PdfReader
+
+    with open(path, "rb") as stream:
+        reader = PdfReader(stream)
+        # PDFium has opened the file, so its user password is empty; pypdf must say so too.
+        if reader.is_encrypted and not reader.decrypt(""):
+            return ""
+        metadata = reader.trailer["/Root"].get("/Metadata")
+        return "" if metadata is None else metadata.get_object().get_data().decode("utf-8", errors="replace")
 
 
 def xmp_values(packet: str) -> tuple[str, ...]:
@@ -513,7 +586,7 @@ def xmp_values(packet: str) -> tuple[str, ...]:
 
 
 def _child(argv: Sequence[str]) -> int:
-    """A reader: cap the data segment, import PyMuPDF, then read the one PDF named on stdin and print JSON."""
+    """A reader: cap the data segment, import the PDF readers, then read the one PDF named on stdin and print JSON."""
     from . import media_brakes
 
     try:
@@ -521,7 +594,9 @@ def _child(argv: Sequence[str]) -> int:
     except ImportError:
         pass  # No RLIMIT on this platform (Windows): the parent's deadline still bounds the read.
     try:
-        import fitz  # noqa: F401 - imported before the request, so a spare reader answers at once
+        # Imported before the request, so a spare reader answers at once.
+        import pypdf  # noqa: F401
+        import pypdfium2  # noqa: F401
     except ImportError:
         pass
     request = sys.stdin.buffer.read()

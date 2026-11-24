@@ -29,18 +29,12 @@ In store mode, each vault SHALL have one SQLite database, the per-vault collecti
 - **AND** the next write through the served door succeeds
 
 ### Requirement: One transaction per governed write
-A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. The writing request SHALL derive its own intents after it releases the boundary and before it acknowledges; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
-
-#### Scenario: Search and graph see the write when it returns
-- **WHEN** a governed write that adds a page and a link returns success
-- **THEN** a lexical search for a term in the page returns the page
-- **AND** the graph returns the new edge from that page
-- **AND** neither depends on a watcher event or repair
+A governed write in store mode SHALL commit every file it changes, one audit row per file, one projection intent per file and one derivation intent per file in one `BEGIN IMMEDIATE` transaction, and SHALL acknowledge only after that transaction is durable. That transaction SHALL NOT write lexical, graph, identity, inbound-link, prior-path or page-fact rows; they follow from the derivation intents. The vault mutation boundary of a governed write SHALL hold only the checks that bind the write and that transaction. The number of statements the transaction runs SHALL NOT grow with a page's units or links, with the pages that link to it or with the size of the vault. A request that the store thread serves SHALL acknowledge once that transaction is durable, before the store thread derives its intents. A governed trash or recovery, an upload and a request that the store thread does not serve SHALL derive their own intents after they release the boundary and before they acknowledge; when that derivation fails or passes its deadline, the write SHALL acknowledge with its derived state `pending` or `failed`. The full-detail reply of a store-mode governed write SHALL carry the writer's result under `diagnostics.leaf_result`, the state of its lexical, identity and graph rows under `diagnostics.derived_components` and the derived state as `derived_sync` under `diagnostics.operational`, the shape of file mode's derived acknowledgement; its compact reply SHALL NOT change.
 
 #### Scenario: The boundary hold does not grow with derivation
 - **WHEN** a governed write runs once with an instant derivation and once with a derivation slowed by seconds
 - **THEN** the two boundary holds differ by less than half the added derivation time
-- **AND** the slow write still returns with its rows derived
+- **AND** the slow write's rows are derived after it releases the boundary
 
 #### Scenario: A full reply says where the derived rows stand
 - **WHEN** a store-mode delete returns at full detail
@@ -119,8 +113,8 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 - **AND** a retry after room returns derives them
 
 #### Scenario: A reader during a drain is told what lags
-- **WHEN** a search runs while a committed page's derivation intent is pending
-- **THEN** the search answers from its snapshot's rows with the derived-behind notice and the pending count
+- **WHEN** a search's snapshot holds a committed page's pending derivation intent once any wait for it has ended
+- **THEN** the search answers from its snapshot's rows with the derived-behind notice, the pending count and the oldest intent's age
 - **AND** the notice names no path
 
 #### Scenario: A clean stop leaves no due intent
@@ -141,6 +135,54 @@ One intent SHALL stand for each path, keeping its oldest queue time. A failed de
 #### Scenario: A governed trash whose rows stay underived says so
 - **WHEN** a governed trash's rows are still pending or failed when its request settles it
 - **THEN** its reply carries the not-exact warning and the content stays tombstoned until reconcile
+
+### Requirement: A read reflects the writes acknowledged before it, or says what lags
+While a store thread in its process derives rows, a store-mode read request SHALL wait at its door, holding no store connection, for at most one second and half its remaining budget, until no intent at or below the revision it first read is pending. If intents stay pending, a ranked read SHALL answer with the derived-behind notice, and an unrestricted caller's direct page read that finds no page SHALL refuse with `VAULT_STORE_DERIVED_BEHIND`.
+
+#### Scenario: Search and graph see the write after acknowledgement
+- **WHEN** a governed write that adds a page and a link returns success and a lexical search for a term in the page starts after that
+- **THEN** the search returns the page and the graph returns the new edge
+- **AND** neither depends on a watcher event or repair
+
+#### Scenario: A write replies before its rows are derived
+- **WHEN** a governed write that the store thread serves runs once with an instant derivation and once with a derivation slowed by seconds
+- **THEN** the two replies differ by less than half the added derivation time
+- **AND** each reply says that its derived state is `pending`
+
+#### Scenario: A slow derivation is reported, not hidden
+- **WHEN** a governed write's derivation has not finished when a later search's wait ends
+- **THEN** the search answers with the derived-behind notice, its counts and its age, and with no path, title or content
+- **AND** a read of the new page's path, reference or short id returns the page from its stored bytes, with the page's own reference and short id, not a missing page
+- **AND** the owner's read of a moved page's old path refuses with `VAULT_STORE_DERIVED_BEHIND`, not as a missing page
+
+#### Scenario: The lag tells a restricted caller nothing about withheld pages
+- **WHEN** a restricted caller reads a withheld page and an absent one while derivation intents are pending
+- **THEN** both reads answer `NOT_FOUND` alike, as they do with no intent pending
+
+#### Scenario: A recall during the lag answers and says what lags
+- **WHEN** a recall's wait ends before a save's rows are derived, and its conversation cites the new page's short id or a ref that names no page
+- **THEN** the recall returns its packet with the derived-behind notice
+- **AND** no ref, hint, brief seed or anchor refuses for the lag
+
+#### Scenario: A read with no drainer answers at once
+- **WHEN** derivation intents are pending and no store thread in the reader's process derives them
+- **THEN** the read answers at once with the derived-behind notice
+
+#### Scenario: A waiting reader holds no store connection
+- **WHEN** a search waits for the derivation of an earlier write
+- **THEN** it holds no store connection while it waits
+
+#### Scenario: A failed derivation holds no reader back
+- **WHEN** a page's derivation failed and waits for its retry
+- **THEN** a read does not wait for it
+
+#### Scenario: A reader does not wait for later writes
+- **WHEN** a write commits after a read began
+- **THEN** the read does not wait for that write's derivation
+
+#### Scenario: A write and a drain never wait for rows
+- **WHEN** a write, a drain, the store thread or an internal read such as a warm-up or a cache build reads the store while derivation intents are pending
+- **THEN** it reads at once, without waiting for any derivation intent
 
 ### Requirement: Markdown is a byte-exact projection
 In store mode, Exomem SHALL write each committed file to the vault as a byte-exact projection after the transaction commits. A projector SHALL make the projected file durable before it records the file's hash, size, modification time and revision in the projection manifest. At startup the projector SHALL remove its own unfinished temporary files and SHALL project every intent still queued. Several revisions of one file that queue before projection MAY coalesce into the latest one.
@@ -323,6 +365,15 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 - **WHEN** an operator reverts with `--export-held` a vault where a person changed a file whose page the store has since removed or moved
 - **THEN** the revert moves that file into the vault trash by one rename, never a copy and a removal, and the export names where it went
 - **AND** a move that is refused stops the revert before the vault leaves store mode, and names the file
+
+### Requirement: Migration catches up queued file-mode index work
+Before it stages, the migration SHALL drain the graph repair that a stopped file-mode service left queued, so the sidecar it copies matches the files. It SHALL refuse before staging, and name the reconcile command, when the graph index is not current after a bounded catch-up; receipts left while the graph is current do not refuse. A dry run SHALL report the queue's depth and the oldest receipt's age, and SHALL NOT refuse for a queue that the apply will drain.
+
+#### Scenario: Migrate catches up queued file-mode index work before it stages
+- **WHEN** an operator migrates a file-mode vault whose stopped service left graph repair queued
+- **THEN** the migration drains that queue into the graph index before it copies any sidecar, and the derived rows then equal the files
+- **AND** a graph index that is still not current after the catch-up refuses before staging and names the reconcile command
+- **AND** a dry run reports the queue's depth and age and drains nothing
 
 ### Requirement: Knowledge writes share the store's availability
 In store mode, knowledge writes SHALL take the collection store's writer lease and transaction owner. When the store cannot accept writes, because its engine is unsupported, its sync is pending, it has diverged or its custody is unknown, a store-mode knowledge write SHALL refuse with the store's reason. Store mode SHALL refuse to start or activate while multi-host writer-lease coordination is configured, because file replication does not carry the store. The collection store's in-vault replica SHALL NOT include page, lexical, graph or derivation-intent tables; the Markdown projection is the in-vault copy of pages.

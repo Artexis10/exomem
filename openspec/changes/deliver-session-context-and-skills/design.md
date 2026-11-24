@@ -72,7 +72,7 @@ So pushing turn leads on every prompt would add a second of hook time for little
 In native activation mode the start-of-turn hook does two things:
 
 1. It fetches session context: a `recall_context` call with an empty turn and the held continuity token. An empty turn runs no turn stage, so the response carries only the map, stance and skills blocks, each `unchanged` when the caller already holds its generation. Measured on the installed service, this takes about 50 ms of server time warm and 360 ms cold. The hook injects only the blocks that changed, under a session-context data header that does not claim the turn was activated, and then the activation text.
-2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks.
+2. It replaces "call `recall_context` once" with a per-subject pull: when the user's turn opens a subject the injected context does not cover, the agent calls `recall_context` with that subject as `conversation.focus`, or `search_memory` with its own query, before it answers. The server instructions carry the same rule for clients without hooks, through `recall_context` and `conversation.focus` only, because their 900-character bound leaves no room for the `search_memory` alternative.
 
 The fetch has its own wall budget, separate from the turn packet's. The budget covers credential discovery as well as the request, because reading the service's environment file can block. The fetch sends one request to the first credentialed lane and never retries. A timeout, a transport failure, an HTTP error or a host with no credentialed REST lane injects the activation text alone, as today, and logs the outcome. Clients without a lane still receive session context from their first `recall_context` call.
 
@@ -122,3 +122,32 @@ The service already logs reads and writes locally (`reads.jsonl`, `writes.jsonl`
 - Agent level, real models: the same cases run through the session-close bench, scoring whether the agent followed the contract and wrote to the keyed destination.
 - Installed: an ordinary turn on the installed service serves the matching vault skill with its contract, and the owner readout shows its use evidence.
 - Decision model: the method-fit judgment on the same cases with a local placement and an API placement; the per-case exact-match difference against no judgment, with its interval, decides which placement to recommend.
+
+## Catalogue first, selector optional
+
+The agent the owner is talking to is the strongest model in the loop, so Exomem shows it the owner's skills and collections and lets it choose, as Agent Skills clients do with installed skills. This works in every MCP client, with no hooks, no selector model, no provider egress and no added latency.
+
+Evidence, 2026-11-23, invented seed vault, one draw:
+
+- A bounded selector on 24 held-out cases: no selector 8/24 exact, embedding similarity 9/24, GPT-5-nano 17/24, local qwen3:14b 20/24, Claude Haiku 5.5 22/24 (+0.58 [+0.33, +0.79] over none, 2.65 s median).
+- Embedding similarity is too weak to cut the catalogue: the right skill is in the top 3 of 11 for 11 of 16 held-out positives.
+- End to end with a tool-only Sonnet client on the same cases, before the pointer: the catalogue alone 19/24, the catalogue plus the Haiku selector 21/24; selector minus catalogue +0.08 [−0.08, +0.25], which includes zero.
+- On 20 development cases, a `next_action` that points the catalogue's turn at the catalogue lifted the catalogue from 15/20 to 18/20 (+0.15 [0.00, +0.30], 3 won, 0 lost).
+- Decision run on 24 fresh held-out cases with the finished catalogue: the catalogue alone 19/24, with the Haiku selector 20/24; selector minus catalogue +0.04 [−0.08, +0.17], which includes zero. A blind judge of what the session then wrote, which sees page edits only, gives 16/24 and 18/24, +0.08 [−0.08, +0.25]. Run records `catalogue-e2e-iter1` and `catalogue-e2e-d2` in the owner's eval-runs collection.
+
+So the catalogue leads, and the selector stays an off-by-default deployment option for the start-of-turn hook path. A catalogue that fits is listed whole, because it is cheap; one that overflows a real vault (about 90 Records collections) keeps one turn-independent listing, so it is still sent once per conversation and pointed at once, and names beside it, on each turn, the unlisted items of the turn's touched domains from the domain registry (then those the task context reached), within their own small bound. No vocabulary enters code.
+
+Text a person or agent reads says skill and collection. The packet keeps its existing field names, such as `task_context.methods`, because renaming them would break every client and hook for no gain to the reader.
+
+## A later subject in a client without hooks
+
+A client without hooks sends Exomem nothing until the agent calls a tool. In the scale run, both misses were conversations that opened with a general question and then turned to the user's own life: the agent made no Exomem call in the whole session. The server therefore has no signal from which to detect the switch, and no word list over the turn may stand in for one. The lever is the text the agent already holds.
+
+The server instructions now ask for recall before answering, per subject, even mid-conversation, and say that the balanced and maximal levels recall on any subject of the user's life or work; before, they defined only the off and light levels. The text stays within its 900-character bound by trimming other wording; every phrase an earlier ruling protects is kept, and the drop of `search_memory` from this text is recorded in the requirement.
+
+Evidence, 2026-11-23, tool-only Sonnet client, one draw, at the balanced level, run record `subject-switch-s1`:
+
+- 12 fresh cases (8 positive, 4 negative) against main: 9/12 exact against 7/12, 2 won and 0 lost, +0.17 [0.00, +0.42]. The interval includes zero, so by itself this is no change. The text ships on the rule written before the run: no fresh case lost and no general-only case gains a write. Both wins were sessions in which main made no Exomem call. No fresh negative made a call on either arm.
+- The 24 scale cases, against the earlier shipped run (an older base, before the recall tool description was trimmed): exact unchanged at 12/24. Positives fully delivered rose from 14/16 to 16/16, but the gain is the two cases the text was tuned on; on the other 22, exact went up on 2 and down on 3. No write was attempted to a wrong collection on either arm.
+- Precision: 7 of 8 scale negatives made an Exomem call, against 6 of 8. The new text also recalled once on a general first turn of a fresh case. The cost is one recall's latency on some general turns, with no writes.
+- One fresh case still makes no call after a general first turn on either arm.

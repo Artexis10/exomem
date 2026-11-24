@@ -195,6 +195,11 @@ def test_bytes_that_do_not_match_their_hash_fail_and_are_deleted(vault, monkeypa
 
     assert state["state"] == "failed" and state["code"] == "UPLOAD_SHA256_MISMATCH"
     assert "receipt" not in state
+    # The session records its failure first and deletes the bytes right after, so the
+    # delete can trail the visible state by a moment.
+    deadline = time.monotonic() + 5
+    while _parts(vault) and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert _parts(vault) == []
 
 

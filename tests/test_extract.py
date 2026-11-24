@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _identity_pdf import make_pdf
 
 from exomem import (
     asr_runtime,
@@ -124,7 +125,7 @@ def test_extract_text_routes_by_media_type(monkeypatch: pytest.MonkeyPatch) -> N
         lambda p, mt, vault_root=None: extract.ExtractResult("T", mt, "whisper"),
     )
     monkeypatch.setattr(extract, "_ocr_image", lambda p: extract.ExtractResult("O", "image", "tesseract"))
-    monkeypatch.setattr(extract, "_extract_pdf", lambda p: extract.ExtractResult("P", "pdf", "pymupdf"))
+    monkeypatch.setattr(extract, "_extract_pdf", lambda p: extract.ExtractResult("P", "pdf", "pdfium"))
     monkeypatch.setattr(extract, "_extract_document", lambda p, mt: extract.ExtractResult("D", mt, "markitdown"))
     monkeypatch.setattr(extract, "_extract_textfile", lambda p: extract.ExtractResult("X", "text", "text"))
     monkeypatch.setattr(extract, "_extract_eml", lambda p: extract.ExtractResult("E", "email", "email"))
@@ -623,29 +624,13 @@ def test_a_language_the_model_does_not_publish_is_refused_not_replaced_by_detect
 def test_pdf_text_names_each_page_including_a_page_read_by_ocr(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import types
-
-    class _Page:
-        def __init__(self, text: str) -> None:
-            self._text = text
-
-        def get_text(self) -> str:
-            return self._text
-
-    class _Document(list):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc) -> None:
-            return None
-
-    pages = _Document([_Page("The first page holds enough text."), _Page(""), _Page("The third page holds more text.")])
-    monkeypatch.setitem(
-        sys.modules, "fitz", types.SimpleNamespace(open=lambda _path: pages)
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(
+        tmp_path / "case.pdf", ["The first page holds enough text.", "", "The third page holds more text."]
     )
     monkeypatch.setattr(extract, "_ocr_pdf_page", lambda _page: "scanned words")
 
-    result = extract._extract_pdf(tmp_path / "case.pdf")
+    result = extract._extract_pdf(pdf)
 
     assert result.text == (
         "[page 1]\nThe first page holds enough text.\n\n"
@@ -1240,39 +1225,133 @@ def test_a_memory_error_inside_markitdown_is_a_memory_stop(monkeypatch) -> None:
         extract.extract_text(_SAMPLES / "sample.html")
 
 
-def test_a_corrupt_pdf_in_a_folder_named_after_an_allocator_is_not_a_memory_stop(tmp_path) -> None:
-    # PyMuPDF's errors name the file, so a folder called realloc-notes must not turn a
-    # corrupt PDF into a memory stop that marks it over budget.
-    pytest.importorskip("fitz")
-    folder = tmp_path / "realloc-notes"
-    folder.mkdir()
-    (folder / "minutes.pdf").write_bytes(b"not a pdf at all")
+def test_a_scanned_page_that_exhausts_memory_while_rendering_is_a_memory_stop(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdfium = pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "scan.pdf", ["A page with a text layer.", ""])
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+
+    def exhaust(_page, *_args, **_kwargs):
+        raise MemoryError  # the raster's buffer does not fit the child's data limit
+
+    monkeypatch.setattr(pdfium.PdfPage, "render", exhaust)
+
+    with pytest.raises(MemoryError):
+        extract.extract_text(pdf)
+
+
+def test_a_scanned_page_that_tesseract_refuses_is_named_and_the_other_pages_are_kept(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import ocr_models
+
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "scan.pdf", ["A page with a text layer.", "", "Another page with text."])
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+
+    def refuse(_cmd: str, _image: Path):
+        raise ocr_models.OcrFailed("Tesseract exited 1")
+
+    monkeypatch.setattr(ocr_models, "read_image", refuse)
+
+    result = extract.extract_text(pdf)
+
+    assert result.text == "[page 1]\nA page with a text layer.\n\n[page 3]\nAnother page with text."
+    assert result.warnings == ["OCR refused scanned page(s) 2; they are not in the text"]
+
+
+def test_a_repaired_pdf_reads_a_page_object_whose_generation_is_not_zero(tmp_path: Path) -> None:
+    # A file saved by incremental updates can hold page objects of a later generation.
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pypdf")
+    whole = make_pdf(tmp_path / "whole.pdf", ["The first page holds enough text."]).read_bytes()
+    regenerated = whole.replace(b"\n4 0 obj", b"\n4 1 obj")
+    cut = tmp_path / "cut.pdf"
+    cut.write_bytes(regenerated[: regenerated.index(b"\nxref\n")])
+
+    result = extract.extract_text(cut)
+
+    assert result.text == "[page 1]\nThe first page holds enough text."
+
+
+def test_a_missing_ocr_engine_loses_only_the_scanned_pages_and_never_blocks_the_text_pages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "case.pdf", ["A page with a text layer.", "", "Another page with text."])
+
+    def no_tesseract(_page) -> str:
+        raise extract.ExtractionUnavailable("Tesseract binary not found")
+
+    monkeypatch.setattr(extract, "_ocr_pdf_page", no_tesseract)
+
+    result = extract.extract_text(pdf)
+
+    assert result.text == "[page 1]\nA page with a text layer.\n\n[page 3]\nAnother page with text."
+    assert result.warnings == ["OCR is unavailable for scanned page(s) 2; they are not in the text"]
+
+
+def test_a_pdf_with_no_text_layer_waits_when_no_ocr_engine_is_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
+    pdf = make_pdf(tmp_path / "scan.pdf", ["", ""])
+
+    def no_tesseract(_page) -> str:
+        raise extract.ExtractionUnavailable("Tesseract binary not found")
+
+    monkeypatch.setattr(extract, "_ocr_pdf_page", no_tesseract)
+
+    with pytest.raises(extract.ExtractionUnavailable):
+        extract.extract_text(pdf)
+
+
+def test_a_corrupt_pdf_is_a_failure_and_not_a_memory_stop(tmp_path) -> None:
+    # A memory stop marks the file over budget; a damaged file must stay a failure of its own.
+    pytest.importorskip("pypdfium2")
+    (tmp_path / "minutes.pdf").write_bytes(b"not a pdf at all")
 
     with pytest.raises(Exception) as raised:
-        extract.extract_text(folder / "minutes.pdf")
+        extract.extract_text(tmp_path / "minutes.pdf")
 
     assert not isinstance(raised.value, MemoryError)
 
 
+def test_a_pdf_cut_short_keeps_the_text_that_can_be_repaired_and_warns(tmp_path: Path) -> None:
+    # PDFium cannot open a file with no trailer; pypdf rebuilds it, so the pages that survive are not lost.
+    pytest.importorskip("pypdfium2")
+    pytest.importorskip("pypdf")
+    whole = make_pdf(tmp_path / "whole.pdf", ["The first page holds enough text.", "The second page holds enough text."])
+    cut = tmp_path / "cut.pdf"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size * 6 // 10])
+
+    result = extract.extract_text(cut)
+
+    assert result.text.startswith("[page 1]\nThe first page holds enough text.")
+    assert result.engine == "pypdf"
+    assert result.warnings
+
+
 def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path, monkeypatch) -> None:
     # Tesseract runs under its own data limit beside the media child. A rendered A0 page
-    # at 200 dpi is about 186 MB; a child that keeps it during OCR holds two budgets.
-    fitz = pytest.importorskip("fitz")
+    # at 200 dpi is about 59 MB as gray; a child that keeps it during OCR holds two budgets.
+    pdfium = pytest.importorskip("pypdfium2")
     import gc
     import weakref
 
     from exomem import ocr_models
 
-    with fitz.open() as doc:
-        doc.new_page()  # no text layer, as a scanned page has none
-        doc.save(tmp_path / "scan.pdf")
+    pdf = make_pdf(tmp_path / "scan.pdf", [""])  # no text layer, as a scanned page has none
     rendered: list[weakref.ref] = []
-    render = fitz.Page.get_pixmap
+    render = pdfium.PdfPage.render
 
-    def get_pixmap(page, *args, **kwargs):
-        pixmap = render(page, *args, **kwargs)
-        rendered.append(weakref.ref(pixmap))
-        return pixmap
+    def render_page(page, *args, **kwargs):
+        bitmap = render(page, *args, **kwargs)
+        # The pixels live in the buffer, which a Pillow image of the page may still share
+        # after the bitmap wrapper is gone, so the buffer is what must be released.
+        rendered.append(weakref.ref(bitmap.buffer))
+        return bitmap
 
     alive_when_tesseract_starts: list[int] = []
 
@@ -1281,14 +1360,48 @@ def test_a_scanned_pdf_page_releases_its_raster_before_tesseract_starts(tmp_path
         alive_when_tesseract_starts.append(sum(ref() is not None for ref in rendered))
         return ocr_models.OcrReading("harbour lantern was repaired", ())
 
-    monkeypatch.setattr(fitz.Page, "get_pixmap", get_pixmap)
+    monkeypatch.setattr(pdfium.PdfPage, "render", render_page)
     monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
     monkeypatch.setattr(ocr_models, "read_image", read_image)
 
-    result = extract.extract_text(tmp_path / "scan.pdf")
+    result = extract.extract_text(pdf)
 
     assert result.text == "[page 1]\nharbour lantern was repaired"
     assert alive_when_tesseract_starts == [0]
+
+
+def test_a_scanned_pdf_page_reaches_tesseract_as_dark_text_on_white_at_the_ocr_resolution(
+    tmp_path, monkeypatch
+) -> None:
+    # The neighbouring tests stub Tesseract and never open the image, so a blank or inverted raster would
+    # read as an empty page, and that empty text would be stored as the page's extraction.
+    pdfium = pytest.importorskip("pypdfium2")
+    from PIL import Image
+
+    from exomem import ocr_models
+
+    pdf = make_pdf(tmp_path / "page.pdf", ["A study of harbour lanterns."])
+    seen: dict[str, object] = {}
+
+    def read_image(_cmd: str, image: Path) -> ocr_models.OcrReading:
+        with Image.open(image) as page:
+            gray = page.convert("L")
+            seen["size"] = gray.size
+            seen["corner"] = gray.getpixel((2, 2))
+            seen["darkest"] = gray.getextrema()[0]
+        return ocr_models.OcrReading("harbour lantern", ())
+
+    monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
+    monkeypatch.setattr(ocr_models, "read_image", read_image)
+
+    document = pdfium.PdfDocument(pdf)
+    try:
+        assert extract._ocr_pdf_page(document[0]) == "harbour lantern"
+    finally:
+        document.close()
+
+    assert seen["size"] == (1700, 2200)  # a 612 x 792 pt page at 200 dpi
+    assert seen["corner"] == 255 and seen["darkest"] < 64
 
 
 def test_dark_text_on_a_transparent_image_reaches_tesseract_dark_on_white(tmp_path, monkeypatch) -> None:

@@ -47,12 +47,12 @@ MAX_CANDIDATES = 12
 MAX_COLLECTION_CARRIERS = 48
 #: How much of a collection manifest's body the judgment reads as its description: enough for what one item is.
 COLLECTION_DESCRIPTION_CHARS = 600
-RESET_ADVICE = "Discard held methods."
+RESET_ADVICE = "Discard the skills, collections and approaches you hold."
 READ_ADVICE = "Retrieval lead; read the source and its current state before using it."
 #: The `kind` of a method item that is a whole vault skill rather than one unit of a page.
-SKILL_KIND = "skill"
+SKILL_KIND = vault_skills.KIND_SKILL
 #: The `kind` of a method item that is a whole collection manifest: the collection's authored contract.
-COLLECTION_KIND = "collection"
+COLLECTION_KIND = vault_skills.KIND_COLLECTION
 #: The `selection` of a method that the method-fit judgment chose for this turn, rather than retrieval.
 METHOD_FIT = "method_fit"
 

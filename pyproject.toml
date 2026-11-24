@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.200.0" # x-release-please-version
+version = "0.201.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -86,7 +86,8 @@ Issues = "https://github.com/Artexis10/exomem/issues"
 [project.optional-dependencies]
 image-codecs = [
     "pillow>=11.1.0",
-    "pillow-heif==1.8.1",
+    # HEIF decode only: its wheels bundle LGPL libheif and libde265 and no encoder.
+    "pi-heif==1.4.0",
     # Camera raw (DNG) through LibRaw. It publishes no Intel macOS wheel, and building LibRaw
     # from source is not something an install should attempt; those Macs keep raw undecodable.
     "rawpy>=0.28,<0.29; sys_platform != 'darwin' or platform_machine != 'x86_64'",
@@ -148,11 +149,12 @@ nli = [
 media-cpu = [
     "exomem[frame-codecs]",  # shared image/video codecs, without a model
     "onnx-asr[cpu]==0.12.0",  # pinned Whisper adapter and CPU execution provider
-    "pymupdf>=1.24",
+    "pypdfium2>=5.15,<6",  # PDFium (BSD-3-Clause, Apache-2.0): page text, page rendering for OCR, information dictionary
+    "pypdf>=7.1,<8",       # BSD-3-Clause: the XMP packet only, which PDFium has no call for
     "defusedxml>=0.7.1",  # XMP packets of captured PDFs: parsed with entity expansion refused
     # docx/xlsx/pptx/html/epub → markdown (Microsoft MarkItDown, MIT). The per-format extras
     # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
-    # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
+    # PDFium (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
     "markitdown[docx,xlsx,pptx]>=0.1.1",
     "odfdo>=3.26",       # OpenDocument text, spreadsheet and presentation (Apache-2.0)
     "striprtf>=0.0.33",  # RTF (BSD-3-Clause)

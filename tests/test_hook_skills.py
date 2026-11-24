@@ -44,6 +44,27 @@ def test_a_block_with_nothing_new_to_say_renders_no_skills(state):
     assert "skills" not in _render({"map": MAP, "skills": _skills(state)})
 
 
+def test_the_services_advice_frames_the_listing_and_an_older_service_gets_the_fallback():
+    """One text says how to use the catalogue: the service's own advice, naming the read tool it serves."""
+    advised = _render({"map": MAP, "skills": _skills(advice="Open a covering item with read_memory(path='<ref>').")})
+    older = _render({"map": MAP, "skills": _skills()})
+
+    assert "Open a covering item with read_memory(path='<ref>')." in advised
+    assert hook._SKILLS_FALLBACK_ADVICE not in advised
+    assert hook._SKILLS_FALLBACK_ADVICE in older
+
+
+def test_turn_items_render_on_a_turn_whose_listing_the_client_already_holds():
+    """An overflowing catalogue is held once; the turn's unlisted items still reach every turn that has them."""
+    turn = [{"kind": "collection", "name": "Game nights", "summary": "Tabletop evenings.", "ref": "Records/Game Nights/_collection.md"}]
+
+    text = _render({"map": MAP, "skills": _skills("unchanged", turn_items=turn)})
+
+    assert "for this turn" in text
+    assert "- collection Game nights: Tabletop evenings. [Records/Game Nights/_collection.md]" in text
+    assert "- skill alpha" not in text
+
+
 def test_the_skills_do_not_take_room_from_the_map():
     without = _render({"map": MAP}, room=200)
     with_skills = _render({"map": MAP, "skills": _skills()}, room=200)
@@ -58,7 +79,7 @@ def test_a_malformed_block_larger_than_a_vault_may_set_is_cut_to_whole_lines():
     text = hook._format_skills_block({"state": "ready", "items": items, "omitted": 0})
 
     lines = text.splitlines()
-    assert len(text) <= hook._SKILLS_MAX_CHARS + len(hook._SKILLS_HEADER) + 1
+    assert len(text) <= hook._SKILLS_MAX_CHARS + len(hook._SKILLS_FRAME + hook._SKILLS_FALLBACK_ADVICE) + 1
     assert 1 < len(lines) < 80 and all(line.endswith("/SKILL.md]") for line in lines[1:])
 
 
@@ -79,12 +100,26 @@ def test_a_projected_skill_is_quoted_page_text_with_its_read_route():
     assert "Skills/zeta/SKILL.md" in text and "load it with read_page" in text
 
 
-@pytest.mark.parametrize("summary", ["Use when reviewing a pull request.", ""])
-def test_the_hook_spends_exactly_what_the_service_counted_for_each_skill(summary):
+def test_a_collection_is_listed_under_its_kind_beside_the_skills():
+    collection = {"kind": "collection", "name": "Depot stock", "summary": "Observations of depot stock.", "ref": "Records/Depot Stock/_collection.md"}
+    skills = _skills()
+    skills["items"].append(collection)
+
+    lines = _render({"map": MAP, "skills": skills}).splitlines()
+
+    assert "- skill alpha: Use when rating lines. [Skills/alpha/SKILL.md]" in lines
+    assert "- collection Depot stock: Observations of depot stock. [Records/Depot Stock/_collection.md]" in lines
+    assert "skills and collections" in hook._SKILLS_FRAME
+
+
+@pytest.mark.parametrize(("kind", "summary"), [
+    ("skill", "Use when reviewing a pull request."), ("skill", ""), ("collection", "Observations of depot stock."), ("collection", ""),
+])
+def test_the_hook_spends_exactly_what_the_service_counted_for_each_item(kind, summary):
     """The service marks every admitted item delivered; a hook line longer than its count drops an item for good."""
     from exomem import vault_skills
 
-    item = {"name": "review", "summary": summary, "ref": "exomem://memory/00000000-0000-0000-0000-000000000001"}
+    item = {"kind": kind, "name": "review", "summary": summary, "ref": "exomem://memory/00000000-0000-0000-0000-000000000001"}
 
     assert hook._skill_line(item) == vault_skills.item_line(item)
 

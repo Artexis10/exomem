@@ -58,7 +58,7 @@ class _Engine:
         if self.fail_with is not None:
             raise self.fail_with
         if media_type == "pdf":
-            return extract.ExtractResult(text="[page 1]\nnew words", media_type="pdf", engine="pymupdf")
+            return extract.ExtractResult(text="[page 1]\nnew words", media_type="pdf", engine="pdfium")
         if multilingual:
             facts = AsrFacts(
                 language="et", language_source="requested", language_mode="multilingual",

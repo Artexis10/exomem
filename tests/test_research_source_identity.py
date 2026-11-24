@@ -28,8 +28,8 @@ PRINTED_PAGE = "A study of harbour lanterns. Published at https://doi.org/10.555
 
 
 @pytest.fixture(autouse=True)
-def _needs_pymupdf() -> None:
-    pytest.importorskip("fitz")
+def _needs_pdf_reader() -> None:
+    pytest.importorskip("pypdfium2")
 
 
 def _stage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pdf: Path, filename: str = "paper.pdf") -> None:

@@ -1984,7 +1984,7 @@ def test_cloud_job_blocked_on_an_engine_names_no_install(vault: Path, monkeypatc
     store.enqueue(_job(vault))
     claimed = store.claim_next()
     assert claimed is not None
-    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pypdfium2 not installed")
 
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     [row] = media_jobs.status(vault)["jobs"]
