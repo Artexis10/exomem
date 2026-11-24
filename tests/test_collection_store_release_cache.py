@@ -641,3 +641,40 @@ def test_unknown_sql_rebuilds_portable_filename_occupancy_with_duplicate_keys(st
         conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
     freed = store.append_record(CID, item={"title": "Strasse", "count": 4}, why="capture")
     assert freed["affected_paths"] == [f"{source}/Strasse.md"]
+
+
+def test_a_commit_from_another_connection_after_a_rolled_back_write_is_decided_again(store, monkeypatch):
+    """A rolled-back write that changed no rows must not absorb another connection's commit, which a
+    repair tool or migration can land just after the ROLLBACK. The warm released rows would then
+    still release a row that commit withheld."""
+    text = manifest_text().replace("    count:", "    tags: {type: array, items: {type: string}}\n    count:")
+    store.create_collection(manifest_path(), text, why="create")
+    store.append_record(CID, item={"title": "One", "tags": []}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Two", "tags": []}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + "tags: [secret]\n")
+    write_rule(store.root, ceiling=0)
+    cache = store.handle.release_cache
+    finish, elsewhere = cache.finish, []
+
+    def commit_elsewhere_then_finish(committed):
+        if not committed and not elsewhere:
+            other = sqlite3.connect(store.handle.path, timeout=5, isolation_level=None)
+            try:
+                other.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
+                              ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
+            finally:
+                other.close()
+            elsewhere.append(OTHER)
+        return finish(committed)
+
+    with request_scope(_external()), preview_store(store.root, store.handle):
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 2
+        assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
+        monkeypatch.setattr(cache, "finish", commit_elsewhere_then_finish)
+        with pytest.raises(RuntimeError), store.handle.transaction():
+            raise RuntimeError("a write that changes no rows")
+        assert elsewhere
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 1
+        assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1
