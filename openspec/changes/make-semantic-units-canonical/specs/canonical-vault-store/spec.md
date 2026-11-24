@@ -17,37 +17,57 @@ In store mode, each unit of a page that its derivation gives unit rows SHALL hav
 - **WHEN** a semantic write retains a compiled-history image of a page that holds units
 - **THEN** the image has no unit records
 
-### Requirement: A commit keeps the page versions that identity needs
-The canonical transaction of a write SHALL write no unit record. In one set-based statement, it SHALL keep an identity step, the current bytes and pending declaration, for each page of its change that has a pending intent or whose records are behind the registry. A page SHALL keep at most 16 steps without a declaration, dropping the oldest, and SHALL keep every step with one.
+### Requirement: A page keeps its page id across moves
+In store mode, each stored page SHALL carry a store-assigned page id. A put that creates a page SHALL assign one, and a page move SHALL carry it to the new path. Unit records and kept versions SHALL key on the page id, so a rename, folder move, trash, recovery or paired hand rename SHALL keep every unit id. A commit that removes a page SHALL name its page id on the path's intent.
+
+#### Scenario: A rename keeps the page's unit ids
+- **WHEN** a page with units is renamed and the drain derives the source and destination paths one at a time
+- **THEN** every unit keeps its unit id and its stored relationships
+
+#### Scenario: A trash and a recovery keep the page's unit ids
+- **WHEN** a page with a referenced unit is trashed and later recovered, and each move's batch is split path by path
+- **THEN** the unit's record is `trashed` after the trash and `live` after the recovery, with the same unit id
+
+### Requirement: A commit keeps the page versions that units need
+The canonical transaction SHALL write no unit record. In one set-based statement it SHALL keep a version, the current bytes and pending declaration, of each page of its change that holds records or a pending declaration and has a pending intent, or whose records are behind the registry. It SHALL reserve room for those bytes. A page with no records SHALL never be behind.
 
 #### Scenario: A large page runs no more statements at commit
 - **WHEN** one write stores a page with one unit and another stores a page with 400 units
 - **THEN** both canonical transactions run the same number of statements
-- **AND** each page has its unit records once its identity derivation ends
+- **AND** each page has its unit records once its unit derivation ends
 
 #### Scenario: Two commits in one request keep both declarations
 - **WHEN** one request updates a unit through a unit operation and then commits the same page again before its derivation runs
-- **THEN** the identity derivation applies the first commit's declaration to its own bytes and then matches the second commit's bytes
+- **THEN** the unit derivation applies the first commit's declaration to its own bytes and then matches the second commit's bytes
 - **AND** the unit keeps its unit id
 
-### Requirement: Identity derives from every page version in order
-The store thread SHALL derive a page's identity in its own transaction, before the rows of its batch, by walking the page's identity steps in revision order and then its current bytes. A row failure SHALL NOT hold identity back. A new unit id SHALL be a hash of the store's id, the page path, the revision and the unit's ordinal in the first version that holds the unit.
+### Requirement: Kept versions stay bounded without changing ids
+A page SHALL keep at most 16 versions. A version older than the page's newest declared version SHALL NOT be dropped. Past the bound, the oldest undeclared version newer than that one SHALL merge into the next, and a unit operation that would add a declared version SHALL refuse with `UNITS_BUSY` and a retry hint.
 
-#### Scenario: A failed row derivation leaves identity current
-- **WHEN** a page's row derivation fails with `no_room` and retries while two more edits commit
-- **THEN** the page's records reflect all three versions in order
+#### Scenario: A declared version keeps the versions it depends on
+- **WHEN** a unit operation declares an id that an earlier kept version minted, and later writes push the page past 16 versions
+- **THEN** that earlier version stays
+- **AND** the declared unit keeps its unit id
+
+### Requirement: Units derive from every page version in order
+The store thread SHALL select pages for the unit derivation by their records revision, apart from the row queue's retry times, and derive them in their own transaction before the rows. It SHALL walk a page's kept versions in revision order, then its current bytes. It SHALL NOT advance the store revision. A new unit id SHALL hash the store's id, the page id, the revision and the unit's ordinal.
+
+#### Scenario: A failed row derivation leaves units current
+- **WHEN** a page's row derivation fails with `no_room` and waits for its retry while no other write touches the page
+- **THEN** the page's records reflect its latest bytes before that retry
 - **AND** a unit operation on the page proceeds
 
-#### Scenario: A kill before the derivation keeps identity
-- **WHEN** the process is killed after a write commits and before its identity derivation commits
-- **THEN** after restart the derivation gives every unit the same unit id, new units included
+#### Scenario: A kill between the two transactions repeats nothing
+- **WHEN** the process is killed after the unit transaction commits and before the rows transaction commits
+- **THEN** after restart the unit derivation selects none of that batch's pages
+- **AND** every unit keeps the unit id that it had
 
 #### Scenario: A split batch gives the same identity
 - **WHEN** the drain re-runs a failed batch one path at a time
 - **THEN** every page's records equal those that the whole batch would have given
 
 ### Requirement: Unit identity follows the light rule
-For each page version, the identity derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by the page that the resolver gives it, through its prior-path step. It SHALL NOT match across pages or by similarity.
+For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by its target page's id, keeping its fragment and alias, and resolve an old target through the audit trail's moves. It SHALL NOT match across pages or by similarity.
 
 #### Scenario: A typo keeps the unit
 - **WHEN** a person fixes one letter in a unit that has no anchor
@@ -64,7 +84,8 @@ For each page version, the identity derivation SHALL give each unit the id of an
 
 #### Scenario: A rename keeps the units that cite the page
 - **WHEN** a page moves to another folder under a new title, and link rewrites change two links inside an unanchored unit that cites it
-- **THEN** the citing unit keeps its unit id
+- **THEN** the citing unit keeps its unit id, even when the drain derives the citing page alone
+- **AND** a link's fragment and alias take part in the comparison
 
 ### Requirement: A declaration takes the place of the light rule
 A writer SHALL be able to send, with a page's bytes, a declaration of the unit id that each unit it wrote keeps, adds, retires, moves or folds. A move or fold SHALL declare its whole effect on each page's intent. A declaration that fits its version's split SHALL replace the light rule. One that does not SHALL fall back to the light rule and be recorded as `UNIT_DECLARATION_INVALID` in status and the audit trail.
@@ -111,7 +132,7 @@ A semantic write SHALL check, in its preflight and across the pages of its chang
 - **AND** a review item names the registry change for each referenced unit of that category
 
 ### Requirement: Agents change a unit by its unit id
-A writer SHALL be able to update, insert, retire, move and embed a unit by its unit id and version, as a page write with a declaration that binds the page revision and the page's records revision. A pending identity SHALL be computed in memory from the durable inputs. A move SHALL rewrite the unit's embeds in up to 256 other pages, else refuse with `UNIT_MOVE_TOO_WIDE`. A page whose identity is `unknown` SHALL refuse with `UNITS_UNKNOWN`.
+A writer SHALL be able to update, insert, retire, move and embed a unit by its unit id and version, as a page write with a declaration that binds the page revision and the page's records revision. Pending units SHALL be computed in memory from the durable inputs, at most 16 parses of that page. A move SHALL rewrite the unit's embeds in up to 256 other pages, else refuse with `UNIT_MOVE_TOO_WIDE`. A page whose units are `unknown` SHALL refuse with `UNITS_UNKNOWN`.
 
 #### Scenario: A stale version refuses
 - **WHEN** an agent updates a unit with a version that a later write replaced
@@ -122,15 +143,15 @@ A writer SHALL be able to update, insert, retire, move and embed a unit by its u
 - **THEN** the move refuses with `UNIT_MOVE_TOO_WIDE` and names the count
 
 #### Scenario: An unknown identity names its remedy
-- **WHEN** an agent updates a unit on a page whose current bytes do not parse
+- **WHEN** an agent updates a unit on a page whose current bytes do not parse, so its units are `unknown`
 - **THEN** the update refuses with `UNITS_UNKNOWN`
 - **AND** the refusal names `exomem store-mode resplit --page`
 
 ### Requirement: A page read serves its units during lag
-A page read SHALL never refuse because a page's identity lags its bytes. It SHALL serve the page and its units, and SHALL mark each unit of a page whose identity is pending as `pending`, with no unit id. When the page's identity is `unknown`, it SHALL mark its units `unknown`.
+A page read SHALL never refuse because a page's units lag its bytes. It SHALL serve the page and its units, and SHALL mark each unit of a page whose units are pending as `pending`, with no unit id. When the page's units are `unknown`, it SHALL mark them `unknown`.
 
 #### Scenario: A read right after a write
-- **WHEN** a page read with units runs while the page's identity derivation is pending
+- **WHEN** a page read with units runs while the page's unit derivation is pending
 - **THEN** the read returns the page bytes and every unit
 - **AND** each unit is marked `pending` and carries no unit id
 
@@ -159,7 +180,7 @@ A unit SHALL live in one home page. Another page SHALL show it with a block embe
 - **AND** the unit stays live in its home page
 
 ### Requirement: Trash keeps unit records
-A trash SHALL set its page's unit records to `trashed` and keep their unit ids and stored relationships, which SHALL NOT be served while an end is trashed. Its result SHALL name the referenced units it hides. A recovery SHALL make them `live` with the same unit ids. A removal of a page from the store SHALL retire its records, and a retired referenced unit SHALL open a review item.
+A trash SHALL keep its page's page id, set its unit records to `trashed` and keep their unit ids and stored relationships, which SHALL NOT be served while an end is trashed. Its result SHALL name the referenced units it hides. A recovery SHALL make them `live` with the same unit ids. A removal of a page from the store SHALL retire its records, and a retired referenced unit SHALL open a review item.
 
 #### Scenario: A recovered page keeps its relationships
 - **WHEN** a page whose unit carries a stored relationship is trashed and then recovered
@@ -170,7 +191,7 @@ A trash SHALL set its page's unit records to `trashed` and keep their unit ids a
 - **THEN** the trash's result names that unit and its relationship count
 
 ### Requirement: The registry job settles units after a registry or parser change
-After a change to a registry source or the parser version, the registry job SHALL split each page again by the light rule in its unit step, in its bounded batches, and blame the change in its review items. A page's rows and records SHALL come from one registry view. A derivation of a behind page SHALL apply that step to its oldest identity step before it matches newer bytes.
+After a change to a registry source or the parser version, the registry job SHALL split each page again by the light rule in its unit step, in its bounded batches, and blame the change in its review items. A page's rows and records SHALL come from one registry view. A derivation of a behind page SHALL apply that step to its oldest kept version before it matches newer bytes.
 
 #### Scenario: A new category turns bullets into units
 - **WHEN** a registry change adds a category that existing bullets use
@@ -198,7 +219,7 @@ The store SHALL keep four invariants: live placements lie in the body in order, 
 - **AND** `exomem store-mode resplit --page` on it restores the invariants and opens review items for retired referenced units
 
 ### Requirement: The upgrade pass is safe to interrupt and downgrade
-Before its first batch, the upgrade pass SHALL record `vault-store-v2`, and a build without this change SHALL then refuse to serve the store. The pass SHALL adopt stage 2's unit id for each anchored unit and give every other unit its deterministic unit id. A derivation of a page beyond its cursor SHALL assign that page's records first. The store SHALL keep stage 2's anchor-to-id table in step with the anchored records.
+Before its first batch, the upgrade pass SHALL record `vault-store-v2`, and a build without this change SHALL then refuse to serve the store. The pass SHALL give every page a page id, adopt stage 2's unit id for each anchored unit and give every other unit its deterministic unit id. A derivation of a page beyond its cursor SHALL assign that page's records first. The store SHALL keep stage 2's anchor-to-id table in step with the anchored records.
 
 #### Scenario: An older build cannot write during the pass
 - **WHEN** a build without this change starts while the upgrade pass is half done
