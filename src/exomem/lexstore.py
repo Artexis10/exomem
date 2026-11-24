@@ -3546,8 +3546,11 @@ class _UnitMerge:
     that moved: the inputs it read (`digest` of the admitted set, the interpretations' `dependency`, each parent's
     revision and units), and each ref's winning tokens, first occurrence and every occurrence.
 
-    The mappings are that build's statistics entry's own, which `_admitted_statistics` retains while it holds the
-    entry, so a merge keeps memory of its own only for an entry that was evicted, one per scope.
+    `corpus`, `representatives` and `occurrences` are that build's own, which its statistics entry also holds while
+    `_admitted_statistics` keeps it. `revisions` is the merge's alone, and after a stopped or owner-only build the
+    merge also keeps the parents it read. At 62,400 units over 15,600 parents, `revisions`, `representatives` and
+    `occurrences` held about 12.5 MiB on synthetic data (2026-11-24). `_UNIT_BASE_BYTES_MAX` does not count it; one
+    merge per scope bounds it.
     """
 
     digest: str
@@ -3641,6 +3644,8 @@ def _patched_merge(
     def units_now(path: str) -> tuple[_UnitContribution, ...]:
         return fresh.get(path, ()) if path in reread else held[path].units
 
+    tokens_of: dict[str, dict[int, tuple[str, ...]]] = {}
+
     moved = {path for path, _revision in revisions.items() ^ merged.revisions.items()}
     corpus = dict(merged.corpus)
     representatives = dict(merged.representatives)
@@ -3648,8 +3653,9 @@ def _patched_merge(
     entering: dict[str, list[tuple[int, str, str]]] = {}
     changed: set[str] = set()
     for path in moved:
-        if path in merged.revisions:
-            changed.update(unit.ref for unit in merged.parents[path].units)
+        # A parent the merge read but did not keep, an owner-only one that emitted no unit, added no unit.
+        if (parent := merged.parents.get(path)) is not None and path in merged.revisions:
+            changed.update(unit.ref for unit in parent.units)
         if path in revisions:
             for unit in units_now(path):
                 changed.add(unit.ref)
@@ -3668,7 +3674,9 @@ def _patched_merge(
         occurrences[ref] = tuple(combined)
         rowid, path, _key = combined[0]
         representatives[rowid] = ref
-        corpus[ref] = next(unit.tokens for unit in units_now(path) if unit.rowid == rowid)
+        if (tokens := tokens_of.get(path)) is None:
+            tokens = tokens_of[path] = {unit.rowid: unit.tokens for unit in units_now(path)}
+        corpus[ref] = tokens[rowid]
     return corpus, representatives, occurrences, changed
 
 
@@ -3746,7 +3754,7 @@ def _document_frequency(
     left: Mapping[str, Sequence[str]],
     entered: Iterable[str],
 ) -> _DocumentFrequency:
-    """The document counts of `documents` (key -> distinct terms), in the order `CorpusStatistics.of` gives.
+    """The document counts of `documents` (key -> distinct terms), and the order `CorpusStatistics.of` meets them in.
 
     With no base, every document is counted. With a base, `left` maps each document the base counted that is now
     gone or changed to the terms the base counted for it, and `entered` names each new or changed document; every
@@ -3847,16 +3855,16 @@ def _in_order(
                 ordered[key] = tuple(map(frequency.__getitem__, words))
             else:
                 ordered.pop(key, None)
-        patched: dict[str, list[int]] = {}
+        patched: dict[str, tuple[list[int], dict[str, int]]] = {}
         for word in changed:
             key = introducer[word]
             if key in moved:
                 continue
-            block = patched.get(key)
-            if block is None:
-                block = patched[key] = list(ordered[key])
-            block[introduced[key].index(word)] = frequency[word]
-        for key, block in patched.items():
+            if (found := patched.get(key)) is None:
+                found = patched[key] = (list(ordered[key]), {word: index for index, word in enumerate(introduced[key])})
+            block, place = found
+            block[place[word]] = frequency[word]
+        for key, (block, _place) in patched.items():
             ordered[key] = tuple(block)
     counts = itertools.chain.from_iterable(map(ordered.__getitem__, sorted(ordered)))
     return _DocumentFrequency(
@@ -3872,7 +3880,7 @@ def _admitted_corpus(
     A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
     and the word counts and their order move by exactly the pages that left or entered (`_document_frequency`).
     `rows` need hold only those pages.
-    The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    The result equals `CorpusStatistics.of` over the same texts: the same counts and the same idf floor, to the last bit.
     """
     from . import bm25 as bm25_module
 
@@ -11823,14 +11831,21 @@ class LexicalStore:
             changed: set[str] | None = None
             if (
                 merged is not None and merged.digest == digest and merged.dependency == dependency
-                # A parent that the view interprets for its caller alone sends the build through every parent.
-                and all(path not in interpreted or _keeps_interpretation(view, path) for path in reread)
+                # A parent that the view interprets for its caller alone and that emits a unit sends the build
+                # through every parent; one that emits none adds nothing and is never kept.
+                and all(
+                    path not in interpreted or _keeps_interpretation(view, path) or not fresh.get(path)
+                    for path in reread
+                )
             ):
                 corpus, representatives, occurrences, changed = _patched_merge(
                     merged, revisions, held, fresh, set(reread)
                 )
                 kept_parents = dict(held)
-                kept_parents.update((path, _parent_units(revisions[path], fresh.get(path, ()))) for path in reread)
+                kept_parents.update(
+                    (path, _parent_units(revisions[path], fresh.get(path, ()))) for path in reread
+                    if path not in interpreted or _keeps_interpretation(view, path)
+                )
                 private = False
             else:
                 corpus: dict[str, tuple[str, ...]] = {}
