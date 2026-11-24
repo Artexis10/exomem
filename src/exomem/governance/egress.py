@@ -7047,6 +7047,9 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "update": "mutation",
         "remove": "mutation",
         "validate": "structure",
+        # A claim correction with `validate_only` is its preview, which writes nothing.
+        "supersede": "validation",
+        "assess": "validation",
     },
     ("maintain_memory", "mode"): {
         "audit": "structure",

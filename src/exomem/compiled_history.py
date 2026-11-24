@@ -148,6 +148,12 @@ def plan_entry(
     after_units = {
         unit.unit_ref: unit for unit in preflight.after.document.units if unit.unit_ref is not None
     }
+    # A unit a same-page `supersedes` edge names is affected even when its own
+    # bytes stand unchanged: the transition changed its derived superseded
+    # state, which is exactly what the entry must answer for later.
+    supersession_touched = _supersession_touched_refs(
+        preflight.before, preflight.after, preflight.path
+    )
     affected = [
         {
             "unit_ref": ref,
@@ -157,6 +163,7 @@ def plan_entry(
         for ref in sorted(before_units.keys() | after_units.keys())
         if getattr(before_units.get(ref), "fingerprint", None)
         != getattr(after_units.get(ref), "fingerprint", None)
+        or ref in supersession_touched
     ]
     metadata = provenance.parse_origin(preflight.before_source, managed=True)
     entry = {
@@ -179,6 +186,29 @@ def plan_entry(
     if "exomem_version" in token:
         entry["exomem_version"] = token["exomem_version"]
     return _new_entry_write(root, path, entry)
+
+
+def _superseded_refs(state: Any, path: str) -> set[str]:
+    """The unit_refs a page's own units mark superseded, read in the page's selected relation registry."""
+    from . import relation_registry, working_set_currency
+
+    registry = (
+        state.definitions.snapshots["relations"].typed
+        if state.definitions is not None
+        else relation_registry.core_registry()
+    )
+    return {
+        target.unit_ref
+        for _successor, target in working_set_currency.same_page_supersessions(
+            state.document, path, registry
+        )
+        if target.unit_ref
+    }
+
+
+def _supersession_touched_refs(before: Any, after: Any, path: str) -> set[str]:
+    """Units whose derived superseded state the transition changed."""
+    return _superseded_refs(before, path) ^ _superseded_refs(after, path)
 
 
 def plan_episode_entry(

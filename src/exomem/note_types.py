@@ -122,6 +122,15 @@ def compiled(note_type: NoteType) -> bool:
     return note_type.role == "compiled"
 
 
+def entity_role(note_type: NoteType) -> bool:
+    return note_type.role == "entity"
+
+
+def accepts_unit_writes(note_type: NoteType) -> bool:
+    """Set J: pages `observe_memory` mutates at unit level: compiled pages and entity hubs."""
+    return compiled(note_type) or note_type.role == "entity"
+
+
 def governed_endpoint(note_type: NoteType) -> bool:
     """Set C: active governed graph endpoints, relation debt and stable identity."""
     return note_type.role == "compiled" or note_type.role == "entity"
