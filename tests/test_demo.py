@@ -39,7 +39,7 @@ def test_packaged_sample_vault_present() -> None:
     assert demo.SAMPLE_VAULT.parent == Path(exomem.__file__).resolve().parent
     assert demo.SAMPLE_VAULT.is_dir()
     assert (demo.SAMPLE_VAULT / "Knowledge Base" / "_Schema" / "SKILL.md").is_file()
-    assert (demo.SAMPLE_VAULT / demo.TARGET_PATH).is_file()
+    assert (demo.SAMPLE_VAULT / demo.target_path()).is_file()
 
 
 def test_sample_vault_shows_proof_without_treating_sources_as_evidence() -> None:
@@ -175,7 +175,7 @@ def test_keep_flag_keeps_temp_dir_and_replays_with_its_retained_sibling_state(
     retained_state = kept_path.with_name(f"{kept_path.name}-state")
     try:
         assert kept_path.is_dir()
-        assert (kept_path / demo.TARGET_PATH).is_file()
+        assert (kept_path / demo.target_path()).is_file()
         assert retained_state.is_dir()
         assert demo.run_demo(vault=kept_path, echo=lambda *_: None) == 0
         assert calls == [kept_path]
@@ -220,7 +220,7 @@ def test_corrupted_vault_missing_target_path_fails_at_find(tmp_path: Path) -> No
     expected hit, and the demo exits 1."""
     corrupted = tmp_path / "corrupted"
     shutil.copytree(demo.SAMPLE_VAULT / "Knowledge Base", corrupted / "Knowledge Base")
-    (corrupted / demo.TARGET_PATH).unlink()
+    (corrupted / demo.target_path()).unlink()
     state_migration.migrate_vault_state_offline(
         corrupted,
         authority=state_migration.assert_offline_migration_authority(
