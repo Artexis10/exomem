@@ -152,7 +152,7 @@ def plan_entry(
     # bytes stand unchanged: the transition changed its derived superseded
     # state, which is exactly what the entry must answer for later.
     supersession_touched = _supersession_touched_refs(
-        preflight.before.document, preflight.after.document, preflight.path
+        preflight.before, preflight.after, preflight.path
     )
     affected = [
         {
@@ -188,29 +188,22 @@ def plan_entry(
     return _new_entry_write(root, path, entry)
 
 
-def _superseded_refs(document: Any, path: str) -> set[str]:
-    """The unit_refs a page's own units mark superseded through same-page `replaces` edges."""
+def _superseded_refs(state: Any, path: str) -> set[str]:
+    """The unit_refs a page's own units mark superseded, read in the page's selected relation registry."""
     from . import relation_registry, working_set_currency
 
-    anchored = {
-        unit.anchor: unit.unit_ref
-        for unit in document.units
-        if unit.anchor and unit.unit_ref
-    }
-    refs: set[str] = set()
-    for unit in document.units:
-        targets = working_set_currency.relation_targets(
-            (
-                {"kind": relation.kind, "target": relation.target}
-                for relation in unit.relations
-            ),
-            registry=relation_registry.core_registry(),
+    registry = (
+        state.definitions.snapshots["relations"].typed
+        if state.definitions is not None
+        else relation_registry.core_registry()
+    )
+    return {
+        target.unit_ref
+        for _successor, target in working_set_currency.same_page_supersessions(
+            state.document, path, registry
         )
-        for target in targets:
-            fragment = working_set_currency._target_fragment(target, path)
-            if fragment in anchored:
-                refs.add(anchored[fragment])
-    return refs
+        if target.unit_ref
+    }
 
 
 def _supersession_touched_refs(before: Any, after: Any, path: str) -> set[str]:

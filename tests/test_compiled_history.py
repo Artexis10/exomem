@@ -549,8 +549,12 @@ def test_resealed_history_claim_cannot_borrow_an_unrelated_primary(
     history = compiled_history.plan_entry(
         tmp_path,
         preflight=SimpleNamespace(
-            path=PAGE, before=SimpleNamespace(document=before_state.document),
-            after=SimpleNamespace(document=after_state.document, source_hash=vault.content_hash(after)),
+            path=PAGE,
+            before=SimpleNamespace(document=before_state.document, definitions=before_state.definitions),
+            after=SimpleNamespace(
+                document=after_state.document, definitions=after_state.definitions,
+                source_hash=vault.content_hash(after),
+            ),
             before_source=source, exact_before_source=source, before_hash=vault.content_hash(source),
             after_source=after, operation="edit", committed_replay=False,
         ),

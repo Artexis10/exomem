@@ -356,7 +356,7 @@ def observe_memory(
                 else relation_registry.core_registry()
             )
             superseding = _superseding_unit(
-                current.document, rel_registry, editable.rel_path, resolved.anchor
+                current.document, rel_registry, editable.rel_path, resolved.unit
             )
             if superseding is not None:
                 raise ObserveMemoryError(
@@ -942,7 +942,6 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
             ),
         }
     units = [unit for unit in selected.document.units if unit.unit_ref]
-    anchored = {unit.anchor: unit for unit in units if unit.anchor}
     rel_registry = (
         selected.definitions.snapshots["relations"].typed
         if selected.definitions is not None
@@ -952,20 +951,12 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
     # the only record; nothing writes a back-pointer into the target.
     supersedes: dict[str, list[str]] = {}
     superseded_by: dict[str, list[str]] = {}
-    for unit in units:
-        for target in working_set_currency.relation_targets(
-            (
-                {"kind": relation.kind, "target": relation.target}
-                for relation in unit.relations
-            ),
-            registry=rel_registry,
-        ):
-            fragment = working_set_currency._target_fragment(target, path)
-            target_unit = anchored.get(fragment) if fragment else None
-            if target_unit is None:
-                continue
-            supersedes.setdefault(unit_id(unit), []).append(unit_id(target_unit))
-            superseded_by.setdefault(unit_id(target_unit), []).append(unit_id(unit))
+    for successor, target_unit in working_set_currency.same_page_supersessions(
+        selected.document, path, rel_registry
+    ):
+        if successor.unit_ref and target_unit.unit_ref:
+            supersedes.setdefault(unit_id(successor), []).append(unit_id(target_unit))
+            superseded_by.setdefault(unit_id(target_unit), []).append(unit_id(successor))
     return [
         {
             "id": unit_id(unit),
@@ -1234,24 +1225,16 @@ def _superseding_unit(
     document: Any,
     rel_registry: relation_registry.RelationRegistry,
     path: str,
-    anchor: str | None,
+    unit: Any | None,
 ) -> Any | None:
-    """The unit already superseding `anchor` on this page, if one exists."""
-    if not anchor:
+    """The unit already superseding `unit` on this page, if one exists; a converted item has none."""
+    if unit is None or unit.unit_ref is None:
         return None
-    for unit in document.units:
-        targets = working_set_currency.relation_targets(
-            (
-                {"kind": relation.kind, "target": relation.target}
-                for relation in unit.relations
-            ),
-            registry=rel_registry,
-        )
-        if any(
-            working_set_currency._target_fragment(target, path) == anchor
-            for target in targets
-        ):
-            return unit
+    for successor, target in working_set_currency.same_page_supersessions(
+        document, path, rel_registry
+    ):
+        if target.unit_ref == unit.unit_ref:
+            return successor
     return None
 
 

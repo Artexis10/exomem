@@ -687,6 +687,59 @@ def test_page_units_show_both_ends_of_a_supersession(tmp_path: Path) -> None:
     assert successor["superseded_by"] == []
 
 
+def test_a_block_reference_supersession_is_read_like_an_anchor_one(tmp_path: Path) -> None:
+    """Recall resolves `#^anchor` as `#anchor`; the unit list and the supersede guard agree."""
+    page = _write_page(
+        tmp_path,
+        source=_page_source(
+            "# Observe\n\n## Observations\n\n- [vendors] Juniper takes preorders. ^claim-1\n\n"
+            "## Correction\n- category: vendors\n- id: newer\n"
+            "- relations: supersedes: [[#^claim-1]]\n\nCedar Two takes preorders.\n"
+        ),
+    )
+    before = page.read_bytes()
+
+    units = _units_of(tmp_path, PAGE)
+    target = next(unit for unit in units if "Juniper" in unit["text"])
+    successor = next(unit for unit in units if "Cedar" in unit["text"])
+    assert target["superseded_by"] == [successor["id"]]
+    with request_scope(owner_principal(surface="cli")), pytest.raises(
+        ValueError, match="SUPERSEDE_TARGET_ALREADY_SUPERSEDED"
+    ):
+        _edit_note(tmp_path, action="supersede_observation", unit="claim-1", text="Opens at eleven.")
+    assert page.read_bytes() == before
+
+
+def test_history_counts_a_supersession_through_a_vault_extension(tmp_path: Path) -> None:
+    """The history entry reads the page's own relation registry, not the core one."""
+    _write_page(
+        tmp_path,
+        rel="Knowledge Base/_Schema/relation-registry.yaml",
+        source=(
+            "schema_version: 1\nextensions:\n"
+            "  x.retires: {parent: supersedes, description: Retires an earlier view}\n"
+        ),
+    )
+    _write_page(
+        tmp_path,
+        source=_page_source("# Observe\n\n## Observations\n\n- [vendors] Juniper takes preorders. ^claim-1\n"),
+    )
+
+    with request_scope(owner_principal(surface="cli")):
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add", kind="correction", category="vendors",
+            content="Cedar Two takes preorders.",
+            relations=[{"kind": "x.retires", "target": "[[#claim-1]]"}],
+            reason="the preorder moved",
+        )
+        history = commands.op_read_memory(tmp_path, path=PAGE, include_history=True)[
+            "revision_history"
+        ]["revisions"]
+
+    affected = {unit["unit_ref"].rsplit("#", 1)[-1] for unit in history[0]["affected_units"]}
+    assert "claim-1" in affected
+
+
 def test_the_currency_dimension_groups_the_same_page_pair(tmp_path: Path) -> None:
     from exomem import epistemic_graph, graph_sync
     from exomem import find as find_module
