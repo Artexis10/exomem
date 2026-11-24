@@ -89,6 +89,29 @@ need attention:
 
 The skill never cascades automatically. It only flags.
 
+## Superseding one claim inside a page
+
+A single stale claim inside a note — including an entity page — supersedes at
+unit level, without a new page. `edit_note(action="supersede_observation")`
+targets the unit by its unit id or `anchor` from `read_page(part="units")`, or
+by `span` (the item's exact text) when the claim is still plain list prose; a
+span target converts to a compact unit in place under its `##` section's
+category. One call appends a replacement unit that carries
+`supersedes: [[#<anchor>]]`; the target's bytes stay untouched and
+`read_page(part="units")` derives `superseded_by` for it. Recall, search and
+the graph read the edge, and history records `why`.
+
+Two leaf actions finish the claim-level family on the same target resolver:
+
+- `edit_note(action="assess_observation")` records a `verdict` (and optional
+  `check_by` and evidence `links`) on the claim itself.
+- `edit_note(action="link_observation")` adds typed `links` to the claim's
+  relations; links are added, never removed.
+
+Both keep the claim's text. A compact target gains a rich block appended at the
+body end under its same anchor when the assessment needs rich metadata; every
+other unit's id and text are unchanged.
+
 ## Archival vs. supersession
 
 Sometimes a page is no longer relevant but isn't being replaced — the topic has

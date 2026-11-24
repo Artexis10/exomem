@@ -9107,6 +9107,7 @@ def op_observe_memory(
     id: str | None = None,
     unit_ref: str | None = None,
     unit: str | None = None,
+    span: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -9115,6 +9116,7 @@ def op_observe_memory(
     relation_review_reason: str | None = None,
     reason: str | None = None,
     target_fingerprints: dict[str, str] | None = None,
+    validate_only: bool = False,
 ) -> dict:
     """Check or edit one semantic unit on a compiled note.
 
@@ -9123,7 +9125,7 @@ def op_observe_memory(
 
     Args:
         path: Parent path or memory ref.
-        operation: add/update/remove/validate.
+        operation: add/update/remove/validate/supersede/assess.
         kind: Governed rich kind; omitted means compact observation.
         tags: Replaces on update.
         context: Replaces on update.
@@ -9135,6 +9137,7 @@ def op_observe_memory(
         id: Parent-unique anchor; derived on add if omitted.
         unit_ref: Unit ref for update/remove or existing-unit preview; otherwise validate previews an add.
         unit: Unit id from a read or a write reply, for update/remove. It stands for unit_ref and both guards.
+        span: Exact claim text for supersede/assess when the unit id is unknown; names the one list item it lies in.
         expected_fingerprint: Current fingerprint for update/remove and existing-unit preview.
         expected_hash: Current parent hash for update/remove.
         transition_token: From validate.
@@ -9144,6 +9147,7 @@ def op_observe_memory(
         reason: Rationale kept with the prior interpretation.
         target_fingerprints: Exact corrective refs/current fingerprints.
             Omit for page/heading links; echo for episode unit leaves.
+        validate_only: Preview a supersede or assess without writing; echo its transition_token.
 
     Returns:
         The unit, its stable reference, parent hashes and feedback. Echo
@@ -9211,6 +9215,7 @@ def op_observe_memory(
             id=id,
             unit_ref=unit_ref,
             unit=unit,
+            span=span,
             expected_fingerprint=expected_fingerprint,
             expected_hash=expected_hash,
             transition_token=transition_token,
@@ -9219,6 +9224,7 @@ def op_observe_memory(
             relation_review_reason=relation_review_reason,
             reason=reason,
             target_fingerprints=target_fingerprints,
+            validate_only=validate_only,
         )
         if result.get("mutated"):
             query_log.log_write_call(

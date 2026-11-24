@@ -34,6 +34,20 @@ class MarkdownPositionError(ValueError):
     """A parser-owned position could not be bound to the original document."""
 
 
+# CommonMark's own line endings, which markdown-it numbers its token `map` lines by.
+_LINE_ENDING = re.compile(r"\r\n|\r|\n")
+
+
+def line_bounds(text: str) -> tuple[list[int], list[int]]:
+    """The start and end offset of each line, numbered as markdown-it numbers token `map` lines."""
+    starts, ends = [0], []
+    for ending in _LINE_ENDING.finditer(text):
+        ends.append(ending.start())
+        starts.append(ending.end())
+    ends.append(len(text))
+    return starts, ends
+
+
 def _may_have_code(text: str) -> bool:
     return any(marker in text for marker in ("`", "~", "\t", "    "))
 
@@ -41,12 +55,7 @@ def _may_have_code(text: str) -> bool:
 class _Locations:
     def __init__(self, text: str) -> None:
         self.text = text
-        self.starts = [0]
-        self.ends = []
-        for ending in re.finditer(r"\r\n|\r|\n", text):
-            self.ends.append(ending.start())
-            self.starts.append(ending.end())
-        self.ends.append(len(text))
+        self.starts, self.ends = line_bounds(text)
         self.code: list[Span] = []
         self.offsets: tuple[Span, ...] | None = None
         self.inline_views = iter(())

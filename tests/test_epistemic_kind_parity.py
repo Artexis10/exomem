@@ -72,14 +72,16 @@ def kind_vault(tmp_path: Path) -> Path:
 # The 28 portable kinds and the compact `observation`, with the description
 # every schema read shows for each.
 CORE_KINDS = (
-    "claim finding evidence decision assumption inference constraint risk open_question "
-    "hypothesis prediction result metric failure pattern record case timeline_event "
-    "requirement action definition procedure source experiment entity project media_segment"
+    "claim correction finding evidence decision assumption inference constraint risk "
+    "open_question hypothesis prediction result metric failure pattern record case "
+    "timeline_event requirement action definition procedure source experiment entity "
+    "project media_segment"
 ).split() + ["belief"]  # FLIPS slice4: `belief` joins; was absent
 
 # Every heading spelling that names a kind other than the kind's own key.
 HEADING_SPELLINGS = {
     "claims": "claim",
+    "corrections": "correction",
     "findings": "finding",
     "proof": "evidence",
     "proofs": "evidence",

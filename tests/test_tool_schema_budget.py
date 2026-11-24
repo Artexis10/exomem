@@ -58,10 +58,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
 # their title,
 # added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
-# Proof files saved in one call added 135 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
+# `edit_note`'s claim-level family — `supersede_observation`, `assess_observation` and
+# `link_observation` plus their `unit`, `span`, `verdict`, `check_by`, `kind` and `as_of` fields —
+# added 1,067 B on 2026-11-24 (add-unit-level-supersession): one claim inside a note now supersedes,
+# assesses and links at unit level instead of needing a whole new page. `supersede_note` gained a
+# one-line pointer to it (+73 B).
+# Proof files saved in one call added 166 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
 # `scope`, `category` and `description` so an evidence send saves on arrival instead of needing a held-handle save,
 # and `save_evidence` says to keep proof in the turn it arrives.
-TOTAL_BUDGET = 30_070
+TOTAL_BUDGET = 31_168
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -72,7 +77,9 @@ TOOL_CEILINGS: dict[str, int] = {
     "create_note": 1850,
     "decide_review_item": 1000,
     "download_files": 550,
-    "edit_note": 2700,
+    # Claim-level supersede/assess/link actions joined edit_note on 2026-11-24
+    # (add-unit-level-supersession).
+    "edit_note": 3700,
     "edit_plan_item": 750,
     "edit_record": 850,
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
@@ -88,7 +95,9 @@ TOOL_CEILINGS: dict[str, int] = {
     "save_evidence": 1320,
     "save_source": 1550,
     "search_memory": 1050,
-    "supersede_note": 1300,
+    # A pointer to edit_note's supersede_observation joined 2026-11-24
+    # (add-unit-level-supersession).
+    "supersede_note": 1400,
     "upload_files": 940,
 }
 

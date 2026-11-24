@@ -115,6 +115,9 @@ def test_edit_note_discovery_is_one_discriminated_operation(
         "fill_row",
         "edit_observation",
         "remove_observation",
+        "supersede_observation",
+        "assess_observation",
+        "link_observation",
     }
     for field in ("edits", "links", "preview", "detail", "unlinked_reason"):
         assert field in schema["properties"]

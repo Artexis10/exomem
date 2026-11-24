@@ -3103,6 +3103,9 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "update": False,
             "remove": False,
             "validate": True,
+            # A claim correction writes unless it carries `validate_only`, which makes it its preview.
+            "supersede": False,
+            "assess": False,
         },
         ("maintain_memory", "mode"): {
             "audit": True,
@@ -3178,6 +3181,9 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     )
     assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
     assert not commands.invocation_is_read_only(manage, {"operation": "move"})
+    assert commands.invocation_is_read_only(
+        product["observe_memory"], {"operation": "supersede", "validate_only": True}
+    )
 
     assert registry[("schema_memory", "operation")] == {
         "infer": "save-conditional",

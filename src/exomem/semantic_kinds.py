@@ -38,6 +38,8 @@ KIND_TRAITS = frozenset(
         # `position` marks a unit as the person's own standing position, which recall carries with
         # attribution. A category can carry it as well as a kind.
         "position",
+        # The kind a supersede uses when the caller names none: the one admitted kind carrying it.
+        "replacement",
     )
 )
 

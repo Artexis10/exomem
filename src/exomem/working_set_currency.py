@@ -78,6 +78,29 @@ def relation_targets(relations: Sequence[Mapping[str, Any]] | None, *,
     return tuple(out)
 
 
+def same_page_supersessions(
+    document: semantic_units.SemanticUnitDocument,
+    path: str,
+    registry: relation_registry.RelationRegistry,
+) -> tuple[tuple[semantic_units.SemanticUnit, semantic_units.SemanticUnit], ...]:
+    """Each (successor, target) pair that the page's own `supersedes` relations name.
+
+    `registry` is the page's selected relation registry. A target resolves as
+    recall resolves it (`annotate`): through the document's exact fragment
+    resolver, so `#anchor`, `#^anchor` and `#unit-<fingerprint>` all name a
+    unit. A unit that names itself is no pair.
+    """
+    pairs: list[tuple[semantic_units.SemanticUnit, semantic_units.SemanticUnit]] = []
+    for unit in document.units:
+        authored = ({"kind": relation.kind, "target": relation.target} for relation in unit.relations)
+        for target in relation_targets(authored, registry=registry):
+            fragment = _target_fragment(target, path)
+            resolved = document.resolve_fragment(fragment).unit if fragment else None
+            if resolved is not None and resolved is not unit:
+                pairs.append((unit, resolved))
+    return tuple(pairs)
+
+
 def _page_names(path: str) -> frozenset[str]:
     """Every spelling that names `path` as a link target, casefolded."""
     folded = path.casefold()
