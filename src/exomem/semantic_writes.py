@@ -3865,7 +3865,7 @@ def _grandfathered(
             status_basis=status_basis,
         )
 
-    if held(page.path, page.source_hash):
+    if held(page.path, page.baseline_hash):
         return True
     # The frozen frontmatter holds tuples, which `page_lineage.entries` refuses, so the
     # entries are parsed from the text below.
@@ -3891,7 +3891,7 @@ def _grandfathered(
             text = page_lineage.remove_latest(text, prior)
         except page_lineage.LineageError:
             return False
-        if held(prior, vault.content_hash(text)):
+        if held(prior, activation_manifest.baseline_hash(text)):
             if vault.served_page_bytes(root, prior) is not None:
                 return False
             claimants = prior_claims.current(root).claimants(prior.removesuffix(".md"))
@@ -4797,7 +4797,7 @@ def preflight_recovery(
             and activation_manifest.is_grandfathered(
                 root,
                 after.path,
-                source_hash=after.source_hash,
+                source_hash=after.baseline_hash,
                 exomem_id=after.identity,
                 manifest=manifest,
                 census=after_corpus.activation_census,

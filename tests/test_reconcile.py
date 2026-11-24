@@ -22,6 +22,7 @@ from exomem import (
     freshness,
     graph_sync,
     index_sync,
+    memory_refs,
     relation_review,
     review_state,
     semantic_contract,
@@ -184,6 +185,27 @@ def test_reconcile_marks_direct_post_activation_page_current_and_not_grandfather
 
     assert payload["semantic_activation"] == "current"
     assert payload["semantic_contract_findings"][0]["grandfathered"] is False
+
+
+def test_reconcile_keeps_a_stamped_legacy_page_grandfathered(vault: Path) -> None:
+    page = vault / "Knowledge Base/Notes/Insights/legacy-stamped.md"
+    page.write_text(
+        _semantic_page("00000000-0000-4000-8000-000000000204").replace(
+            "exomem_id: 00000000-0000-4000-8000-000000000204\n", ""
+        ),
+        encoding="utf-8", newline="\n",)
+    reconcile_module.reconcile(vault)
+    assert activation_manifest.load_manifest(vault) is not None
+
+    memory_refs.backfill_ids(vault, dry_run=False)
+
+    assert "exomem_id:" in page.read_text(encoding="utf-8")
+    payload = reconcile_module.reconcile(vault, dry_run=True).as_dict()
+    findings = [
+        finding for finding in payload["semantic_contract_findings"]
+        if finding["path"] == "Knowledge Base/Notes/Insights/legacy-stamped.md"
+    ]
+    assert findings and all(finding["grandfathered"] is True for finding in findings)
 
 
 def test_reconcile_does_not_report_relation_disposition_for_inactive_external_draft(
