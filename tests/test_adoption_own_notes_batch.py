@@ -24,13 +24,18 @@ COLLECTION = "Coll"
 KB = "Knowledge Base"
 
 
-def _chunk(tmp_path: Path, count: int = 3) -> tuple[Path, list[adopt.DraftNote], str]:
+def _chunk(
+    tmp_path: Path, count: int = 3, *, one_heading: str | None = None
+) -> tuple[Path, list[adopt.DraftNote], str]:
     """A vault whose chunk has its Sources on disk and no note yet, as an import leaves it.
 
     The notes are held back through the run's own per-note step, so the Sources and the
-    plan are the real ones; nothing else is faked.
+    plan are the real ones; nothing else is faked. `one_heading` gives every file that heading.
     """
-    files = {f"Coll/Journal/entry-{n}.md": f"# Entry {n}\n\nText {n}.\n" for n in range(count)}
+    files = {
+        f"Coll/Journal/entry-{n}.md": f"# {one_heading or f'Entry {n}'}\n\nText {n}.\n"
+        for n in range(count)
+    }
     root = _vault(tmp_path, files)
     run_id, planned = _import(root, path="Coll", include=[JOURNAL_RULE])
     held_back = pytest.MonkeyPatch()
@@ -51,6 +56,11 @@ def _chunk(tmp_path: Path, count: int = 3) -> tuple[Path, list[adopt.DraftNote],
         for item in planned["plan"]["items"]
     ]
     return root, notes, planned["plan"]["date"]
+
+
+def _stem(item: adopt.DraftNote) -> str:
+    """The note's planned page, as the index and the log name it: below the managed root, no extension."""
+    return Path(item.planned["note"]["target_path"]).relative_to(KB).with_suffix("").as_posix()
 
 
 def _refuse_every_note(*_args: object, **_kwargs: object) -> None:
@@ -124,14 +134,13 @@ def test_a_chunk_of_notes_commits_with_one_bullet_and_one_log_entry_per_note(
     assert len(_notes(root)) == 3
     recent = _recent_activity(root)
     entries = _log_entries(root)
-    for n in range(3):
-        stem = f"Notes/Insights/entry-{n}"
+    stems = [_stem(item) for item in notes]
+    for stem in stems:
         assert sum(stem in line for line in recent) == 1
         assert sum(line.endswith(f"note | {stem}") for line in entries) == 1
     # Newest first, as after three single commits; the Sources bullet stays below them.
-    assert [stem for line in recent[:3] for stem in ("entry-2", "entry-1", "entry-0") if stem in line] == [
-        "entry-2", "entry-1", "entry-0",
-    ]
+    newest_first = stems[::-1]
+    assert [stem for line in recent[:3] for stem in newest_first if stem in line] == newest_first
     assert "- Notes: 3" in (root / KB / "index.md").read_text(encoding="utf-8")
 
 
@@ -150,9 +159,10 @@ def test_a_target_taken_by_another_writer_refuses_that_note_and_commits_the_othe
     assert outcomes[1].error.code == "TARGET_OCCUPIED"
     assert squatter.read_text(encoding="utf-8") == "someone else's page\n"
     assert len(_notes(root)) == 3  # the two new notes and the squatter
-    assert sum("Notes/Insights/entry-1" in line for line in _recent_activity(root)) == 0
-    assert sum("Notes/Insights/entry-0" in line for line in _recent_activity(root)) == 1
-    assert sum("Notes/Insights/entry-2" in line for line in _recent_activity(root)) == 1
+    recent = _recent_activity(root)
+    assert sum(_stem(notes[1]) in line for line in recent) == 0
+    assert sum(_stem(notes[0]) in line for line in recent) == 1
+    assert sum(_stem(notes[2]) in line for line in recent) == 1
 
 
 def test_two_notes_that_plan_one_file_give_the_outcomes_of_creating_them_one_by_one(
@@ -169,7 +179,7 @@ def test_two_notes_that_plan_one_file_give_the_outcomes_of_creating_them_one_by_
     assert outcomes[1].error.code == "TARGET_OCCUPIED"
     assert len(_notes(root)) == 1
     assert len(_log_entries(root)) == 2  # the Sources entry and the one note's entry
-    assert sum("Notes/Insights/entry-0" in line for line in _recent_activity(root)) == 1
+    assert sum(_stem(notes[0]) in line for line in _recent_activity(root)) == 1
 
 
 def test_a_failure_while_the_batch_installs_leaves_no_note_and_each_is_then_made_once(
@@ -366,3 +376,18 @@ def test_a_manifest_in_a_tuple_refuses_a_write_whose_bytes_differ_from_its_claim
 
     with pytest.raises(ValueError, match="VOCABULARY_AUXILIARY_CHANGED"):
         vocabulary_auxiliaries.validate(tmp_path, images, (first, second))
+
+
+def test_a_note_numbered_by_its_plan_carries_the_file_name_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
+    root, notes, date_iso = _chunk(tmp_path, count=2, one_heading="Entry")
+
+    outcomes = adopt.create_draft_notes(root, notes, collection=COLLECTION, date_iso=date_iso)
+
+    first, second = (outcome.created for outcome in outcomes)
+    assert [Path(first.path).name, Path(second.path).name] == ["Entry.md", "Entry-2.md"]
+    assert not [warning for warning in first.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    (adjusted,) = [warning for warning in second.warnings if warning.startswith("FILENAME_ADJUSTED")]
+    assert "'Entry-2'" in adjusted and "a number was added" in adjusted

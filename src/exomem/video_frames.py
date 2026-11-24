@@ -93,7 +93,7 @@ def _probe_duration(source: Path | BinaryIO) -> float | None:
     return None
 
 
-def _encode_jpeg(img, max_side: int | None) -> bytes:
+def _encode_jpeg(img, max_side: int | None, *, inline_bytes: int | None = None) -> bytes:
     """JPEG encode of a PIL image, its longest side at most `max_side` (None keeps its size)."""
     try:
         from PIL import Image  # noqa: F401 — decoded frames are PIL images
@@ -102,9 +102,17 @@ def _encode_jpeg(img, max_side: int | None) -> bytes:
     out = img.convert("RGB")
     if max_side is not None:
         out.thumbnail((max_side, max_side))
-    buf = io.BytesIO()
-    out.save(buf, format="JPEG", quality=FRAME_JPEG_QUALITY)
-    return buf.getvalue()
+
+    def encode(image) -> bytes:
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=FRAME_JPEG_QUALITY)
+        return buf.getvalue()
+
+    if inline_bytes is None:
+        return encode(out)
+    from .image_view import fit_jpeg
+
+    return fit_jpeg(out, inline_bytes, encode)[0]
 
 
 def get_frames(
@@ -112,7 +120,7 @@ def get_frames(
     start_sec: float | None = None, end_sec: float | None = None,
     max_side: int | str | None = None,
 ) -> FramesResult:
-    from . import cloud_cell, originals
+    from . import cloud_cell
 
     side = resolve_side(max_side)  # refused alike on Cloud, which then keeps its own edge
     if cloud_cell.cloud_mode_enabled():
@@ -120,22 +128,8 @@ def get_frames(
 
         return _within_call_bytes(cloud_frames(vault_root, path, max_frames=max_frames,
                                                start_sec=start_sec, end_sec=end_sec))
-    from .media_store import open_original
-
-    if originals.binding_for(vault_root) is None:
-        return _within_call_bytes(_get_frames_local(vault_root, path, max_frames=max_frames,
-                                                    start_sec=start_sec, end_sec=end_sec, max_side=side))
-    try:
-        target, relative = resolve_under_vault(vault_root, path)
-        if access.refuse_if_excluded(vault_root, relative):
-            raise VideoFramesError("NOT_FOUND", "video does not exist")
-        with open_original(vault_root, target):
-            return _within_call_bytes(_get_frames_local(vault_root, path, max_frames=max_frames,
-                                                        start_sec=start_sec, end_sec=end_sec, max_side=side))
-    except VaultPathError as error:
-        raise VideoFramesError(error.code, error.reason) from error
-    except reserved_paths.ReservedPathLeafError as error:
-        raise VideoFramesError("NOT_FOUND", "video does not exist") from error
+    return _within_call_bytes(_get_frames_local(vault_root, path, max_frames=max_frames,
+                                                start_sec=start_sec, end_sec=end_sec, max_side=side))
 
 
 def _get_frames_local(
@@ -163,10 +157,10 @@ def _get_frames_local(
         raise VideoFramesError("BAD_RANGE", "start_sec must be >= 0")
     if end_sec is not None and end_sec <= (start_sec or 0.0):
         raise VideoFramesError("BAD_RANGE", "end_sec must be greater than start_sec")
+    from . import media_store, originals
+
     try:
-        abs_path, rel_path = resolve_under_vault(
-            vault_root, path, must_exist=True, must_be_file=True
-        )
+        _target, rel_path = resolve_under_vault(vault_root, path)
     except VaultPathError as e:
         raise VideoFramesError(e.code, e.reason) from e
     # `excluded` paths (_access.yaml) refuse identically to a missing path —
@@ -175,22 +169,26 @@ def _get_frames_local(
     if access.refuse_if_excluded(vault_root, rel_path):
         raise VideoFramesError("NOT_FOUND", f"path does not exist: {rel_path}")
     try:
-        snapshot = reserved_paths.read_generic_bytes(vault_root, rel_path)
+        abs_path, rel_path = originals.resolve_original_path(vault_root, rel_path)
+    except VaultPathError as error:
+        raise VideoFramesError(error.code, error.reason) from error
+    if media_type_for(abs_path) != "video":
+        raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
+    try:
+        with media_store.open_original(vault_root, rel_path, read=True) as source:
+            return sample_stream(source.stream, rel_path, max_frames=max_frames,
+                                 start_sec=start_sec, end_sec=end_sec, max_side=max_side)
     except reserved_paths.ReservedPathLeafError:
         raise VideoFramesError(
             "NOT_FOUND", f"path does not exist: {rel_path}"
         ) from None
-    if media_type_for(abs_path) != "video":
-        raise VideoFramesError("NOT_A_VIDEO", f"not a video file: {rel_path}")
-
-    return sample_stream(io.BytesIO(snapshot.data), rel_path, max_frames=max_frames,
-                         start_sec=start_sec, end_sec=end_sec, max_side=max_side)
 
 
 def sample_stream(
     source: BinaryIO, rel_path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None, end_sec: float | None = None,
     resize_candidates: bool = False, max_side: int | None = DEFAULT_MAX_SIDE,
+    inline_bytes: int | None = None,
 ) -> FramesResult:
     """Sample one retained seekable stream; the caller owns custody and disclosure.
 
@@ -254,7 +252,11 @@ def sample_stream(
         idx = sorted(set(np.linspace(0, len(kept) - 1, effective).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     try:
-        frames = [Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img, max_side)) for ts, img in kept]
+        encode_limits = {} if inline_bytes is None else {"inline_bytes": inline_bytes}
+        frames = [
+            Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img, max_side, **encode_limits))
+            for ts, img in kept
+        ]
     except embeddings.ClipUnavailable as e:
         raise VideoFramesError(
             "VIDEO_DEPS_MISSING", f"{e} — install the media extra to encode frames"

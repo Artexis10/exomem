@@ -310,6 +310,18 @@ def test_default_attention_union_is_pinned() -> None:
 
     `original_fixity` joins after it by the verify-stored-originals contract: a
     missing or damaged original is what every note citing it rests on.
+
+    `source_identity_conflict` joins after `original_fixity` by the verify-research-source-identity
+    `attention-queue` delta: a Source whose document names a different work than
+    its metadata misleads every note that cites it. It reports only a recorded
+    `conflict`, so Sources captured before the check add nothing.
+
+    `ownership_review` joins last by the add-ownership-review contract: a backlog whose
+    intake the daily rotation bounds, shown to a client that names no category.
+
+    `name_drift` joins after it by the align-names-with-titles `attention-queue` delta: one
+    item for the whole vault, whose call renames the next batch, so it adds one row however
+    many names drifted. A stale name is housekeeping, so it sits below a page's home.
     """
     assert attention_module.DEFAULT_ATTENTION_CATEGORIES == (
         "bridge_review",
@@ -326,6 +338,9 @@ def test_default_attention_union_is_pinned() -> None:
         "transient_state_review",
         "collection_view_corrections",
         "original_fixity",
+        "source_identity_conflict",
+        "ownership_review",
+        "name_drift",
     )
 
 
@@ -668,13 +683,12 @@ def test_every_spelling_the_parser_accepts_is_surfaced(vault: Path, row: str) ->
     assert findings[0].meta["check_by"] == "2026-08-02"
 
 
-def test_partitioned_and_unpartitioned_signals_compose_one_row() -> None:
-    """A note flagged by a partitioned queue AND a page-level queue is ONE item.
+def test_a_partitioned_finding_and_a_page_level_finding_take_separate_rows() -> None:
+    """A note flagged by a partitioned queue AND a page-level queue has two rows.
 
-    `_rank` anchors a partitioned finding on `path\\0partition`, which shares no
-    key with the same page's unpartitioned findings. Left alone, the note takes
-    two rows of the daily surface and its RRF votes never sum — contradicting
-    the attention-queue capability's additivity requirement.
+    The partition promises one item per page with its own id. Merged into the page-level
+    row, the partitioned finding hid that queue's signal behind an id its own listing never
+    handed out, and a decision on the merged row settled signals the person never saw.
     """
     findings = [
         audit_module.AuditFinding(
@@ -696,56 +710,17 @@ def test_partitioned_and_unpartitioned_signals_compose_one_row() -> None:
 
     report = attention_module._rank(findings)
 
-    assert [item.path for item in report.items] == ["N.md"]
-    item = report.items[0]
-    assert item.categories == ["prediction_window", "stale_review"]
-    assert len(item.reasons) == 2
-    assert item.severity == "warn"  # max over the merged reasons
+    by_category = {tuple(item.categories): item for item in report.items}
+    assert set(by_category) == {("prediction_window",), ("stale_review",)}
     k = attention_module._RRF_K
-    assert item.score == round(1.0 / (k + 1) + 1.0 / (k + 1), 6)
+    assert {item.path for item in report.items} == {"N.md"}
+    assert by_category[("prediction_window",)].score == round(1.0 / (k + 1), 6)
+    assert by_category[("prediction_window",)].severity == "info"
+    assert by_category[("stale_review",)].severity == "warn"
 
 
-def test_merged_row_outranks_a_singly_flagged_one() -> None:
-    """The whole point of summing: a doubly-flagged note must rise."""
-    findings = [
-        audit_module.AuditFinding(
-            category="prediction_window",
-            severity="info",
-            path="both.md",
-            detail="due",
-            proposed_fix="x",
-            meta={"review_partition": "unit-a", "signal_version": "unit-a"},
-        ),
-        audit_module.AuditFinding(
-            category="prediction_window",
-            severity="info",
-            path="only.md",
-            detail="due",
-            proposed_fix="x",
-            meta={"review_partition": "unit-b", "signal_version": "unit-b"},
-        ),
-        audit_module.AuditFinding(
-            category="stale_review",
-            severity="info",
-            path="both.md",
-            detail="stale",
-            proposed_fix="x",
-        ),
-    ]
-
-    report = attention_module._rank(findings)
-
-    paths = [item.path for item in report.items]
-    assert paths.index("both.md") < paths.index("only.md")
-    assert paths.count("both.md") == 1
-
-
-def test_page_signals_attach_to_each_of_several_partitioned_items() -> None:
-    """N due predictions still give N triageable items, each carrying page context.
-
-    The page-level reason must not vanish, and it must not become a phantom
-    extra row either.
-    """
+def test_each_partitioned_finding_keeps_its_own_row_beside_the_page_level_row() -> None:
+    """N due predictions are N triageable rows, and the page's own signal is one more."""
     findings = [
         audit_module.AuditFinding(
             category="prediction_window",
@@ -768,23 +743,28 @@ def test_page_signals_attach_to_each_of_several_partitioned_items() -> None:
 
     report = attention_module._rank(findings)
 
-    assert [item.path for item in report.items] == ["N.md", "N.md"]
-    for item in report.items:
-        assert "relation_debt" in item.categories
-        assert "prediction_window" in item.categories
-    partitions = {
+    assert sorted(tuple(item.categories) for item in report.items) == [
+        ("prediction_window",),
+        ("prediction_window",),
+        ("relation_debt",),
+    ]
+    partitions = sorted(
         reason["meta"]["review_partition"]
         for item in report.items
         for reason in item.reasons
         if (reason.get("meta") or {}).get("review_partition")
-    }
-    assert partitions == {"unit-a", "unit-b"}
+    )
+    assert partitions == ["unit-a", "unit-b"]
 
 
-def test_due_prediction_and_page_signal_are_one_row_over_a_real_vault(
+def test_a_due_prediction_and_a_page_signal_take_their_own_rows_over_a_real_vault(
     vault: Path,
 ) -> None:
-    """End to end: the collision the default-union promotion made routine."""
+    """End to end: every ref a listing hands out resolves to the row that carries its finding.
+
+    The bare relation-debt ref used to resolve to nothing once the page also had a due
+    prediction, because the prediction row had absorbed the debt.
+    """
     rel = _prediction_page(
         vault, "autovacuum", _prediction_block("p1", check_by="2026-08-02")
     )
@@ -793,10 +773,13 @@ def test_due_prediction_and_page_signal_are_one_row_over_a_real_vault(
         vault, categories=["prediction_window", "relation_debt"], today=TODAY
     )
 
-    rows = [item for item in report.items if item.path == rel]
-    assert len(rows) == 1, [item.as_dict() for item in rows]
-    assert set(rows[0].categories) == {"prediction_window", "relation_debt"}
+    rows = {tuple(item.categories): item for item in report.items if item.path == rel}
+    assert set(rows) == {("prediction_window",), ("relation_debt",)}
     assert len({item.item_id for item in report.items}) == len(report.items)
+    debt_only = attention_module.attention(vault, categories=["relation_debt"], today=TODAY)
+    [debt] = [item for item in debt_only.items if item.path == rel]
+    resolved = attention_module.item_by_ref(vault, debt.ref, today=TODAY)
+    assert (resolved.ref, resolved.categories) == (rows[("relation_debt",)].ref, ["relation_debt"])
 
 
 # ---- m6: the scope guards the ADDED requirements assert with SHALL ----

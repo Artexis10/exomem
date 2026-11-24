@@ -17,11 +17,13 @@ import re
 import secrets
 import stat
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from exomem import __version__, held_fs, mutation_lock
 
+from ..kbdir import managed_join, managed_root_rel
 from . import authorization_serving_membership
 from .authorization_serving_membership import ServingMembershipEpoch
 
@@ -139,6 +141,10 @@ class AuthorizationCustodyUnavailable(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("authorization session custody is unavailable")
+
+
+class AuthorizationCustodyUnreadable(AuthorizationCustodyUnavailable):
+    """A filesystem read failure prevented custody verification."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,7 +344,6 @@ def standalone_attachment_id(vault_root: Path) -> str:
     """
 
     root = Path(vault_root)
-    acquired: held_fs.HeldResult[held_fs.HeldFilesystem] | None = None
     try:
         before = os.lstat(root)
         reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -348,10 +353,7 @@ def standalone_attachment_id(vault_root: Path) -> str:
             or getattr(before, "st_file_attributes", 0) & reparse
         ):
             raise AuthorizationCustodyUnavailable
-        acquired = held_fs.acquire(root)
-        if not acquired.ok:
-            raise AuthorizationCustodyUnavailable
-        with acquired.require() as filesystem:
+        with held_fs.acquire(root).require() as filesystem:
             identity = filesystem.root_identity
             after = os.lstat(root)
             if (
@@ -384,7 +386,13 @@ def standalone_attachment_id(vault_root: Path) -> str:
             return f"attachment-v1-{digest}"
     except AuthorizationCustodyUnavailable:
         raise
-    except (OSError, RuntimeError, UnicodeError, ValueError, held_fs.HeldFsError):
+    except OSError:
+        raise AuthorizationCustodyUnreadable from None
+    except held_fs.HeldFsError as error:
+        if error.code == "IO_REFUSED":
+            raise AuthorizationCustodyUnreadable from None
+        raise AuthorizationCustodyUnavailable from None
+    except (RuntimeError, UnicodeError, ValueError):
         raise AuthorizationCustodyUnavailable from None
 
 
@@ -507,7 +515,9 @@ def _load_private_artifact(
         return _LoadedCustodyFile(path, data, _stat_identity(after))
     except AuthorizationCustodyUnavailable:
         raise
-    except (OSError, ValueError, TypeError):
+    except OSError:
+        raise AuthorizationCustodyUnreadable from None
+    except (ValueError, TypeError):
         raise AuthorizationCustodyUnavailable from None
     finally:
         if held is not None:
@@ -862,6 +872,7 @@ def load_authorization_custody(
     vault_root: Path,
     *,
     now: int,
+    require_readable_membership: bool = False,
 ) -> AuthorizationCustody:
     """Load and authenticate the complete external session-custody bundle.
 
@@ -874,18 +885,24 @@ def load_authorization_custody(
     Retrying a fail-closed read cannot turn a real failure into a pass: the
     second attempt re-reads and re-authenticates every file under the same
     rules, so an expired, forged or genuinely absent bundle refuses twice.
+
+    Callers retaining accepted bytes can request a typed membership read failure.
     """
 
+    load = _load_authorization_custody_once
+    if require_readable_membership:
+        load = partial(load, require_readable_membership=True)
     try:
-        return _load_authorization_custody_once(Path(vault_root), now=now)
+        return load(Path(vault_root), now=now)
     except AuthorizationCustodyUnavailable:
-        return _load_authorization_custody_once(Path(vault_root), now=now)
+        return load(Path(vault_root), now=now)
 
 
 def _load_authorization_custody_once(
     vault_root: Path,
     *,
     now: int,
+    require_readable_membership: bool = False,
 ) -> AuthorizationCustody:
     external = load_external_custody(Path(vault_root))
     keyring = parse_keyring(external.keyring)
@@ -900,6 +917,7 @@ def _load_authorization_custody_once(
             keyring=keyring,
             control=control,
             now=now,
+            require_readable=require_readable_membership,
         )
     )
     custody = AuthorizationCustody(
@@ -928,6 +946,7 @@ def _load_optional_serving_membership(
     keyring: AuthorizationKeyring,
     control: AuthorizationControlRecord,
     now: int,
+    require_readable: bool,
 ) -> tuple[ServingMembershipEpoch | None, str | None, Path | None]:
     """Load session-only fleet state without blocking standing-policy content.
 
@@ -959,10 +978,13 @@ def _load_optional_serving_membership(
         if not any(item.replica_id == replica_id for item in record.replicas):
             raise AuthorizationCustodyUnavailable
         return record, replica_id, membership_path
+    except (AuthorizationCustodyUnreadable, OSError):
+        if require_readable:
+            raise AuthorizationCustodyUnreadable from None
+        return None, None, None
     except (
         AuthorizationCustodyUnavailable,
         authorization_serving_membership.ServingMembershipUnavailable,
-        OSError,
         RuntimeError,
         TypeError,
         ValueError,
@@ -2056,11 +2078,11 @@ def _governance_negative_scan(vault_root: Path) -> None:
         if not acquired.ok:
             raise AuthorizationCustodyUnavailable
         with acquired.require() as filesystem:
-            kb_result = filesystem.parent("Knowledge Base")
+            kb_result = filesystem.parent(managed_root_rel())
             if not kb_result.ok:
                 raise AuthorizationCustodyUnavailable
             with kb_result.require() as knowledge_base:
-                governance = filesystem.parent("Knowledge Base/_Governance")
+                governance = filesystem.parent(managed_join("_Governance"))
                 if governance.ok:
                     governance.require().close()
                     raise AuthorizationCustodyUnavailable

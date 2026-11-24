@@ -21,6 +21,7 @@ import pytest
 from exomem import doctor as doctor_module
 from exomem import vault
 from exomem.__main__ import main
+from exomem.kbdir import kb_dirname
 
 
 @pytest.fixture(autouse=True)
@@ -1093,7 +1094,7 @@ def test_orphan_remediation_names_the_command_that_actually_reclaims(
     Asserted through the check itself rather than by reading the source: what
     matters is the string an operator is handed, not how it gets assembled.
     """
-    kb = tmp_path / doctor_module.kb_dirname()
+    kb = tmp_path / kb_dirname()
     kb.mkdir(parents=True)
     stale = time.time() - (vault.REBUILD_TEMP_STALE_AGE_SECONDS + 600)
     # FAIL takes either count or bytes. The live incident tripped it on bytes
@@ -1125,7 +1126,7 @@ def test_a_fresh_rebuild_temporary_is_not_reported_as_an_orphan(
     the check, an operator following the remediation would stop the service
     mid-rebuild and delete a file that was still being written.
     """
-    kb = tmp_path / doctor_module.kb_dirname()
+    kb = tmp_path / kb_dirname()
     kb.mkdir(parents=True)
     (kb / ".lexical.sqlite.rebuild-29cf190343754d70ac4bdf2e40358384.tmp").write_bytes(
         b"x" * 4096

@@ -21,6 +21,9 @@ def main(path: str) -> None:
     if "release_rollout" in report["stages"]:
         release_rollout(report)
         return
+    if "catalogue_prewarm" in report["stages"]:
+        catalogue_prewarm(report)
+        return
     outcome = report["outcome"]
     print("## Exomem Cloud P3 rehearsal\n")
     print(f"- valid rehearsal: **{report['valid_rehearsal']}** {'; '.join(report['invalid_reasons'])}")
@@ -163,6 +166,46 @@ def raw_import(report: dict) -> None:
                 print(f"\n**losses in {group}, {cause}** ({found['count']}): " + "; ".join(found["listed"][:10]))
     for name, value in (("local arm", local.get("headline")), *((f"cloud arm, {k} vault", (v or {}).get("cloud")) for k, v in run.get("targets", {}).items())):
         print(f"\n**{name}**\n\n```json\n{json.dumps(value, indent=2, ensure_ascii=False)}\n```")
+
+
+def _mib(value: int | None) -> str:
+    return "unknown" if value is None else f"{value / 1048576:.0f}"
+
+
+def catalogue_prewarm(report: dict) -> None:
+    stage = report["stages"]["catalogue_prewarm"]
+    run = stage.get("evidence") or {}
+    print("## Catalogue pre-warm (warm-cell-catalogue task 3.1)\n")
+    print(f"- verdict: **{run.get('state', 'none: the run did not finish')}** (a partial proof; steps 3 to 12 did not run)")
+    if run.get("failure"):
+        print(f"- failure: {str(run['failure'])[:600]}")
+    if stage.get("status") == "failed" and not run:
+        print(f"- **stage failed:** {(stage.get('failure') or {}).get('message', '')[:600]}")
+    fixture = run.get("fixture") or {}
+    print(f"- vault: {fixture.get('notes', 'not recorded')} synthetic notes, {fixture.get('bytes', 'not recorded')} bytes")
+    environment = (run.get("configuration") or {}).get("cellctl_environment") or {}
+    print(f"- cellctl settings read back: {json.dumps(environment)}")
+    print("\n| scenario | state | build outcome | build start | build end | build s | build timeout s | hold started "
+          "| new pod ready | hold to ready s | CPU peak (cores) | memory peak MiB |\n" + "|---" * 12 + "|")
+    for name, scenario in (run.get("scenarios") or {}).items():
+        build, stop, peaks = scenario.get("build") or {}, scenario.get("stop") or {}, scenario.get("peaks") or {}
+        cells = [scenario.get("state"), build.get("outcome"), build.get("started_at"), build.get("ended_at"),
+                 build.get("seconds"), build.get("timeout_seconds"), stop.get("hold_started_at"),
+                 stop.get("new_pod_ready_at"), stop.get("hold_to_ready_seconds")]
+        # A scenario whose build never ran records that state instead of peaks.
+        figures = [peaks["state"]] * 2 if "state" in peaks else [peaks.get("cpu_cores_peak"), _mib(peaks.get("memory_peak_bytes"))]
+        print(f"| {name} | " + " | ".join("unknown" if cell is None else str(cell) for cell in [*cells, *figures]) + " |")
+    for name, scenario in (run.get("scenarios") or {}).items():
+        failed = [check for check, passed in (scenario.get("checks") or {}).items() if not passed]
+        if scenario.get("failure") or failed:
+            print(f"\n- **{name}**: {scenario.get('failure') or ''} {'unmet checks: ' + ', '.join(failed) if failed else ''}".rstrip())
+        for note, result in (scenario.get("observations") or {}).items():
+            if not result["ok"]:
+                print(f"- {name} observation {note}: {result['detail']}")
+    for name, scenario in (run.get("scenarios") or {}).items():
+        print(f"\n**{name}**\n\n```json\n{json.dumps(scenario, indent=2, default=str)}\n```")
+    for deviation in run.get("deviations", []):
+        print(f"- deviation: {deviation}")
 
 
 if __name__ == "__main__":

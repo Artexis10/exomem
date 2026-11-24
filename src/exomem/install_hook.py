@@ -27,7 +27,7 @@ off by default — wiring the hook does not turn either mode on:
 - `EXOMEM_RETRIEVE_INJECT=working_set` → working-set mode: one
   `activate_context` call, whose compiled packet REPLACES the reminder under a
   fixed data header, bounded by `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default
-  4,000 characters, whole items only). The packet's continuity token is kept per
+  6,000 characters, whole items only). The packet's continuity token is kept per
   client and session beside the continuation checkpoint and dropped by that hook
   on each session lifecycle event. A standalone hook copy older than this mode
   reads `working_set` as merely truthy and runs stub mode, which is why the two
@@ -542,6 +542,11 @@ def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
     return any(marker in haystack for marker in markers)
 
 
+# The checkpoint core requires --client. The plugin generator imports this so both
+# Claude command builders pass the same argument.
+CLAUDE_CONTINUATION_CLIENT_ARG = "--client claude"
+
+
 def _continuation_command(
     hook_dir: Path,
     client: str,
@@ -570,7 +575,7 @@ def _continuation_command(
         windows = _command_windows_for(_CONTINUATION_SCRIPT, hook_dir, client=client)
         return f"{command} --client codex", f"{windows} --client codex"
     command = _command_for(_CONTINUATION_WRAPPER, hook_dir, client=client)
-    return f"{command} --client claude", None
+    return f"{command} {CLAUDE_CONTINUATION_CLIENT_ARG}", None
 
 
 def _continuation_items(

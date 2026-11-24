@@ -87,7 +87,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `upload_url`, open the prefilled browser upload form or give its URL to the user for a
   manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
-  (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
+  (Whisper), OCRs images (Tesseract), reads PDFs (PDFium), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),
   and CLIP-embeds images and per-keyframe video frames for visual search — all
   server-side after upload, filling an embedded sidecar so any upload becomes
@@ -127,17 +127,18 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
          `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
          holds the file. It prints the reply.
        - When installing is not possible, or the installed release has no
-         `--handoff-file`, send the request that the CLI sends: one multipart `POST` to the
-         handoff's `upload_url`, with the header `Authorization: Bearer <token>` and
-         the form fields `file`, `hold=1` and `lane` (the handoff's `lane`), and no other
-         field such as `scope` or `category`; the service refuses them.
+         `--handoff-file`, run the `shell` line of the handoff's `next` send step. Replace
+         `<file>` with the file's path and `<token>` with `$TOKEN`, which the shell reads so
+         that the token stays out of the conversation:
 
          ```
          TOKEN=$(python3 -c 'import json; print(json.load(open("handoff.json"))["token"])')
-         URL=$(python3 -c 'import json; print(json.load(open("handoff.json"))["upload_url"])')
-         LANE=$(python3 -c 'import json; print(json.load(open("handoff.json"))["lane"])')
-         curl -sS -H "Authorization: Bearer $TOKEN" -F "file=@<file>" -F hold=1 -F "lane=$LANE" "$URL"
          ```
+
+         Add no other field, such as `scope` or `category`: the service refuses it, and a
+         refused send uses up the handoff. A handoff without `next` takes the same request
+         by hand: one multipart `POST` to its `upload_url`, with the header
+         `Authorization: Bearer <token>` and the form fields `file`, `hold=1` and `lane`.
     5. Check the reply: `state` is `held`, `hash` equals the digest and `size` equals the
        file's size. Pass its `file` object unchanged to
        `save_source(title="...", source_kind="...", files=[<file>], options={"expected_sha256": "<digest>"})`.
@@ -254,6 +255,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what do I have on X," "find my notes on Y," "have I covered Z" → **find**
 - "why was this note changed," "show the history of this page" → **get** (`read_page(part="history")`)
 - "what did I used to think about X," "show me the superseded version" → **find** (`prefer_active=false`)
+- "give me everything on X," "what do my notes conclude about X," "what is still open on X" → **get** (`read_page(part="brief")`)
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
@@ -279,7 +281,7 @@ reference for the canonical operation leaves that product commands route to.
 - a decision is made or a problem just got solved -> stepping-stone: capture via **save_source**/**create_note**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 - the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
-- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection, else create a minimal one under `proactive_capture`; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **save_source** and ask whether to compile only if there is a durable

@@ -408,6 +408,74 @@ Published admitted sets for structured eligibility and the activation carry are 
 Proof compares the installed request ledger before and after the change, on the same concurrency buckets: alone, 1.5 to 3, and 3 to 6. Each tool needs at least 100 calls per arm, with the write count per window and a bootstrap 95% interval. Each site also has a span check: its span leaves request calls, or its p90 falls. Model-free tests guard each freshness and release guarantee above.
 
 
+### 10. Background passes give way to requests
+
+The service runs its request threads and its background threads in one process, so they share one interpreter lock. A background pass that runs beside a request takes CPU time from it. Recalls that overlapped background passes ran 1.4 to 2.2 times slower than recalls that did not. The operator measured this on the installed service; this change does not repeat it.
+
+`foreground_priority` already holds the mechanism: a pass runs inside `bulk()` and waits for requests in flight at each `yield_to_foreground()`, within a progress floor. This decision applies it to the remaining passes and adds no mechanism. The rule for every site: the pass only waits. It skips, reorders and drops no work, and its cancellation and budgets work as before.
+
+A yield never parks a thread that holds a lock, mutation boundary, single-flight build or connection that a request can wait on. A site with no safe point is left unchanged.
+
+| Pass (thread) | Unit that yields | Held at the yield | Left unchanged |
+|---|---|---|---|
+| Working-set warm (`exomem-working-set-warm`) | Each page of the page walk and each fold of the context catalogue | Nothing; the index write starts after the walks | The index write itself |
+| Graph drain (`exomem-graph-drain`) | Each drain pass, and each single-receipt replay | Nothing; each pass is its own `bulk()` scope, because an idle wait inside one long scope would earn wait allowance it never used | `drain_paths`, which runs under the mutation boundary |
+| Vocabulary recovery (`exomem-vocabulary-recovery`) | Each job | Nothing; the page of jobs is a closed snapshot and no claim is open | Shutdown still ends the loop between jobs |
+| Freshness reconcile (`kb-freshness-reconcile`) | Each entry of the stat walk, and one wait before the deferred drain and before each lexical warm | The replacement lock, which its waiters wait on inside `awaiting_bulk` | The startup seed, which gates admission; the delta dispatch and the media reconcile, which a yield would stretch |
+| Watcher flush (`kb-file-watcher`) | One wait before each batch | Nothing | The batch itself, which withdraws and republishes availability; the startup catch-up and final flushes |
+| Identity catalogue warm (`exomem-identity-catalogue-warm`) | Each directory entry of the optimistic walk | Nothing; followers of the single flight wait inside `awaiting_bulk` | The locked fail-safe scan, which holds a boundary |
+| Matrix load (`exomem-matrix-load`) | Every 512 rows of the read that runs off the index lock | The read snapshot only; a caller that holds the index lock never yields | The load a caller runs inline under the lock |
+
+The derived drain takes the boundary in turns and ends a turn between units. A turn now also ends when a request is in flight (`foreground_elsewhere()`), not only when a writer waits. The drain then waits for the request outside the boundary, unless the turn is a loan from a long mutation, whose lender is itself foreground work.
+
+The share of its elapsed time that a pass may wait (`MAX_WAIT_SHARE`, 0.5) is a setting, `EXOMEM_BULK_WAIT_SHARE`, read from the process environment at each call. Unset, malformed or out-of-range values keep 0.5. A pass that sets its own `PassBudget` keeps it.
+
+The new yields also fire inside bulk scopes that already existed, because the walks and loops they sit in are shared: governed maintenance jobs (`background_job()`), the derived-drain dispatch, the whole-vault graph pass and the graph proofs of the scheduled catalogue fold. In each, a yield only waits, within that scope's own progress floor. The identity walk is also the locked fail-safe scan's walk. That scan holds a boundary, so its yields never wait, but it now has cancellation points that it had none of.
+
+A leader's stop is its own. A stoppable pass can lead the single-flight identity build, and its stop then ends only its own pass. The flight records the stop as cancelled, not as an error: a follower never re-raises it, because it is a `BaseException` that its caller may not handle and that would end the caller's own pass. A follower with no request budget (a background caller) claims the build itself, or follows the next leader, and gets the inventory it got before the walk had cancellation points. A follower on a request budget never walks past its deadline: it follows the next leader, or takes the typed unavailable outcome that it takes when its wait runs out. The matrix-load join and the freshness replacement-lock wait carry no outcome from the thread they wait on, so they cannot broadcast one.
+
+A parked yield ends on its scope's stop. The stop is a `foreground_priority.StopEvent`, whose `set()` notifies the one condition that parked yields wait on, so no thread polls and no stop site needs a second call. The graph drain, derived drain, file watcher, maintenance jobs, original fixity and the server runtime's vocabulary and shutdown stops are `StopEvent`s. The working-set builds stop on the server runtime's shutdown event. A scope whose stop is a plain `threading.Event` still ends at the wait's cap, and a scope that carries no stop keeps the plain condition wait.
+
+The spans and the log line that time a background pass count its waits for requests as work: `embeddings.matrix_load.rows`, `reserved.identity.baseline_build`, the background `catalogue.fold` and the matrix background-load log line. Each carries `waited_ms`, the wait inside it, so a later comparison separates work from waiting.
+
+Risks that remain open.
+- A longer identity walk can see more token mismatches and fall back to the locked scan more often.
+- The matrix load keeps its read snapshot open while it waits, which delays a WAL checkpoint. A stretched off-lock read also gives writers more time to outrun it, so `_full_load_locked` becomes more likely.
+- Warm windows get longer under traffic: a warm that waits for requests stays unwarm for longer, and so do the readers that join it.
+- `graph_drain.seconds_until_pass()` ignores the new initial yield, so it can report a pass as due while that pass is still waiting for a request.
+
+Proof: one model-free test per pass shows no progress while a request is in flight and the same result after; the installed comparison belongs to task 3.16.
+
+### 11. Corpus statistics stay exact under incremental order maintenance
+
+A write moves the snapshot generation, so the next recall rebuilds its BM25 figures for each admitted page set and for the unit corpus. A rebuild re-tokenized only the changed pages, but then walked every term of every page to restore the first-seen order of the words, and the unit figures counted the whole unit corpus again. The figures must equal `rank_bm25` 0.2.2 to the last bit: the idf floor sums over the words in first-seen order, scanning the documents sorted by key.
+
+A base now also keeps the introducer of each word: the first document, in key order, that holds it. It also keeps the words that each document introduces, in that document's term order. One helper updates both for a change set, and both builders call it:
+
+- A word that an entered document holds moves there if that document comes before its introducer.
+- A word whose introducer left or dropped it moves to the next document that holds it. One forward pass from the earliest such introducer finds all of them.
+- A word that no document holds any more leaves the counts.
+
+The helper then reads the per-document lists in key order, which is the order `CorpusStatistics.from_counts` sums in. A rebuild costs the changed documents plus one pass over the vocabulary. The unit corpus keeps each ref's winning tokens, so only the refs whose winner changed are counted again. `CorpusStatistics.of` stays the single definition, and seeded edit sequences compare every field with it bit for bit.
+
+The bounds stay as they were. With no base, or past `_ADMITTED_BASE_TERMS_MAX` or `_UNIT_BASE_BYTES_MAX`, a build counts every document in order, as before. A corpus that holds an owner-only parent's units never enters the shared unit base.
+
+### 12. A catch-up that writes outran stays a catch-up
+
+The repair worker answers a lagging catalogue with a lag-only catch-up and runs the whole-corpus pass only when the catalogue then fails its exact-current proof. A write that lands between the catch-up's last read and that proof fails it too: the projection moved, but the catalogue is not wrong. An installed service on 2026-11-22 ran five whole-corpus passes in eight hours with about 330 writes. Three of them followed a catch-up whose proof then failed while writes held the mutation lock. A request-path repair request with no cause started the fourth, and the fifth was the warm after a promotion. They ran 233 to 1,773 s each, and readiness reported lagging in 58 of 120 samples over one hour.
+
+When the proof fails after a successful catch-up, the worker re-reads the lag the same way the catch-up does. A lag that is not empty means a write landed after the catch-up, so the worker queues another lag-only catch-up and logs the result `advanced`. No lag means the catalogue is wrong at the live checkpoint, and the whole-corpus pass runs as before. Any refusal of the re-read (schema, identity, instance, incomplete history, source proof) also keeps the pass and logs its own reason. Each re-queue needs a new write, so the chain ends when writes stop. A lagging catalogue stays reported as lagging, and only the strict proof admits it.
+
+Proof: `tests/test_lexical_deferred_upsert.py` injects a save between the catch-up and its proof and checks that no whole-corpus pass runs and that the catalogue ends exactly current. A sibling test refuses the proof with nothing lagging and checks that the pass still runs. The installed comparison belongs to task 3.24.
+
+### 13. A search query does not queue behind the shared model turn
+
+Every model call takes one process-wide execution turn. A bulk encode takes it one batch at a time, and a model load takes it for the whole load. Page search encoded its text query and its image query on that turn, so each waited out whatever held it. On an installed service on 2026-11-22, between 19:00 and 21:30 UTC, the text query waited p50 1.46 s, p90 3.8 s and at most 9.8 s for its turn, for an encode of about 0.1 s. Query preparation outside the text encode, mostly the image query, took p50 2.1 s more. One search, a minute after a worker promotion, waited 31.4 s while the warm-up loaded the reranker. The reranker loader held the turn across its tokenizer guard and its framework import, and it took the turn even to return a resident model.
+
+Every search query encode now goes through one helper, `embeddings.encode_query`, which marks the encode as a search query's (`query_turn`) and selects the index's encoder space. Page search's prepared and fallback sites, find's own fallbacks and passage search all call it, and page search's image query runs under the same mark. The mark holds no turn. Each batch takes its turn inside the encode, so the wait is measured as `execution_wait_us`, and the turn follows the encoder that actually runs. On an encoder that runs inferences side by side (an ONNX Runtime session), the batch takes the query lane and waits only for other queries. The image query tower is such an encoder: its tokenizer is configured once at load. Any other encoder takes the shared turn, as before. A previous encoder during a re-embed keeps its own gate, so a query on the serving sidecar still never waits behind a build batch. The reranker and image query loaders return a resident model without the turn. The reranker loader runs its guard and imports before the turn, so the turn covers only the load, as in `get_model`.
+
+Proof: `tests/test_passage_evidence.py` holds the shared turn with a capture inference and checks that a page search and the managed query preparation on a concurrent encoder still answer. `tests/test_command_path_spans.py` checks that a query waiting for its lane reports the wait as `execution_wait_us`. `tests/test_embedding_migration.py` holds the shared turn with a build batch and checks that a query on the serving sidecar still answers. Two tests in `tests/test_model_preload_offline.py` check that a query takes the turn while a cold reranker runs its guard and its import, and that a resident reranker returns while a batch holds the turn. `tests/test_clip_query.py` holds the turn with a batch and checks that page search's image query preparation still answers. Each fails without its part of the change. The installed comparison belongs to task 3.25.
+
 ## Risks / Trade-offs
 
 - Retention or observation failure can bias percentiles → Expose partial coverage and forbid complete-population claims.

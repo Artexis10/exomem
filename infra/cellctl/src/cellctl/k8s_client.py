@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
+import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import httpx
@@ -53,6 +56,7 @@ from .manifests import (
     HOLD_STARTED_ANNOTATION,
     INIT_CONTAINER_NAME,
     JOB_KIND_LABEL,
+    JOB_KIND_RESTIC_VERIFY,
     MEDIA_EDGE_ACCESS_LABEL,
     NAMESPACE_PREFIX,
     PRE_UPGRADE_SNAPSHOT_ANNOTATION,
@@ -61,19 +65,25 @@ from .manifests import (
     RELOCATION_ANNOTATION,
     RENDER_DIGEST_ANNOTATION,
     RENDER_DIGEST_APPLIED_AT_ANNOTATION,
+    RESTIC_VERIFICATION_ANNOTATION,
+    RESTIC_VERIFICATION_JOB_NAME_RE,
     RESTORE_JOB_NAME,
     RESTORED_SNAPSHOT_ANNOTATION,
     ROW_GENERATION_ANNOTATION,
+    SNAPSHOT_ID_RE,
     SNAPSHOT_NAME,
     TARGET_APPLIED_ANNOTATION,
     UPGRADE_PHASE_ANNOTATION,
+    UPGRADE_START_ANNOTATION_KEYS,
     UPGRADE_TARGET_ANNOTATION,
     UPGRADE_WINDOW_ANNOTATION,
     UPGRADE_WINDOW_AT_ANNOTATION,
     cell_id_from_namespace,
     clone_claim_name,
     hold_job_name,
+    is_restic_verification_pod_spec,
     namespace_name,
+    restic_verification_invocation,
     snapshot_backup_name,
 )
 from .media_edge import ACTIVE_SET_NAME, EdgeEvidence, read_edge_evidence
@@ -84,6 +94,7 @@ from .state import (
     MediaCensus,
     MediaCollection,
     PodPlacement,
+    ResticVerificationJob,
 )
 from .storage.topolvm import FamilyRequest, LocalVolumeState, LogicalVolume
 from .storage_config import DEFAULT_STORAGE, LocalStorage, StorageConfig
@@ -103,6 +114,16 @@ logger = logging.getLogger(__name__)
 # inside the 120 s liveness bound, instead of blocking the loop until
 # liveness restarts cellctl and discards its in-memory refusal parks.
 API_REQUEST_TIMEOUT = (5, 30)
+VERIFICATION_REQUEST_SECONDS = 2
+VERIFICATION_CENSUS_SECONDS = 5
+VERIFICATION_SLOT_NAME = "exomem-restic-verification-slot"
+VERIFICATION_SLOT_KEY = "reservation.json"
+VERIFICATION_LIST_LIMIT = 64
+VERIFICATION_MAX_PAGES = 2
+
+
+class VerificationCreateRejected(ValueError):
+    """Kubernetes refused the create without accepting this attempt."""
 
 # Tasks 5.5 and 5.6: a host alert reads one small /metrics page from each node's
 # pod (about 5 KB from node-exporter's mdadm collector, tens of KB from TopoLVM).
@@ -393,13 +414,23 @@ class ClusterClient:
         }
         return asyncio.run(_read_pages(urls, timeout=READINESS_TIMEOUT, max_bytes=READINESS_MAX_BYTES))
 
-    def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
-        """D4: set or remove (None) the window and candidate-since annotations on a
-        cell's StatefulSet metadata with a merge patch. It touches no pod template, so
-        no pod restarts, and a None removes the key whichever manager wrote it."""
+    def patch_statefulset_annotations(
+        self, namespace: str, annotations: dict[str, str | None], *, uid: str | None = None,
+    ) -> None:
+        """D4: set or remove (None) annotations on a cell's StatefulSet metadata. The
+        client sends a dict body as a strategic merge patch, which on this string map
+        sets or removes each key. It touches no pod template, so no pod restarts, and a
+        None removes the key whichever manager wrote it. A key whose value it changes
+        is owned by cellctl's Update entry, so a server-side apply that omits it keeps it.
+        Kubernetes rejects a different UID, binding the patch to the observed object."""
 
+        metadata: dict[str, object] = {"annotations": annotations}
+        options = {"field_manager": FIELD_MANAGER}
+        if uid is not None:
+            metadata["uid"] = uid
+            options["_request_timeout"] = VERIFICATION_REQUEST_SECONDS
         self._apps.patch_namespaced_stateful_set(
-            "cell", namespace, {"metadata": {"annotations": annotations}}, field_manager=FIELD_MANAGER
+            "cell", namespace, {"metadata": metadata}, **options,
         )
 
     def observe_import_jobs(self, namespace: str, import_id: str):
@@ -494,17 +525,8 @@ class ClusterClient:
         )
 
         selector = f"{JOB_KIND_LABEL}={JOB_KIND_CATALOGUE_BUILD}"
-        def pages(list_resources):
-            continuation = None
-            while True:
-                response = list_resources(label_selector=selector, limit=500, _continue=continuation)
-                yield from response.items
-                continuation = response.metadata._continue if response.metadata else None
-                if not continuation:
-                    return
-
-        jobs = pages(self._batch.list_job_for_all_namespaces)
-        pods = pages(self._core.list_pod_for_all_namespaces)
+        jobs = _list_labelled_pages(self._batch.list_job_for_all_namespaces, selector)
+        pods = _list_labelled_pages(self._core.list_pod_for_all_namespaces, selector)
         grouped = {}
         for job in jobs:
             if not CATALOGUE_BUILD_NAME_RE.fullmatch(job.metadata.name):
@@ -535,6 +557,82 @@ class ClusterClient:
                                                            for c in (status.conditions or [])))),
             ))
         return {namespace: tuple(family) for namespace, family in observed.items()}
+
+    def observe_restic_verifications(self) -> dict[str, tuple[ResticVerificationJob, ...]]:
+        """Read only verifier Jobs and Pods across the fleet. A failed list is unknown."""
+        selector = f"{JOB_KIND_LABEL}={JOB_KIND_RESTIC_VERIFY}"
+        deadline = time.monotonic() + VERIFICATION_CENSUS_SECONDS
+        jobs = {
+            (job.metadata.namespace, job.metadata.name): job
+            for job in _verification_pages(self._batch.list_job_for_all_namespaces, selector, deadline)
+            if cell_id_from_namespace(job.metadata.namespace)
+            and RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(job.metadata.name)
+        }
+        pods_by_job: dict[tuple[str, str], list] = {}
+        for pod in _verification_pages(self._core.list_pod_for_all_namespaces, selector, deadline):
+            name = (pod.metadata.labels or {}).get("batch.kubernetes.io/job-name", "")
+            namespace = pod.metadata.namespace
+            if cell_id_from_namespace(namespace) and RESTIC_VERIFICATION_JOB_NAME_RE.fullmatch(name):
+                pods_by_job.setdefault((namespace, name), []).append(pod)
+        observed: dict[str, list[ResticVerificationJob]] = {}
+        for key in jobs.keys() | pods_by_job.keys():
+            namespace, name = key
+            observation = _restic_verification_observation(
+                name, jobs.get(key), pods_by_job.get(key, []), self._core.api_client.sanitize_for_serialization,
+            )
+            observed.setdefault(namespace, []).append(observation)
+        return {namespace: tuple(family) for namespace, family in observed.items()}
+
+    def create_restic_verification_job(self, manifest: dict) -> str:
+        """A create conflict never adopts the other Job as this attempt."""
+        try:
+            job = self._batch.create_namespaced_job(
+                manifest["metadata"]["namespace"], manifest, _request_timeout=VERIFICATION_REQUEST_SECONDS,
+            )
+        except ApiException as error:
+            # API validation, admission, conflict and overload refusals did not create a new Job.
+            if error.status in (400, 401, 403, 404, 409, 422, 429):
+                raise VerificationCreateRejected(f"Kubernetes rejected verifier creation ({error.status})") from error
+            raise
+        uid = job.metadata.uid
+        if not uid:
+            raise ValueError("Kubernetes did not acknowledge a verifier Job UID")
+        return uid
+
+    def read_restic_verification_slot(self) -> tuple[str, str | None]:
+        slot = self._core.read_namespaced_config_map(
+            VERIFICATION_SLOT_NAME, GATEWAY_NAMESPACE, _request_timeout=VERIFICATION_REQUEST_SECONDS,
+        )
+        version = slot.metadata.resource_version
+        if not version:
+            raise ValueError("Kubernetes did not report the verifier slot resource version")
+        return version, (slot.data or {}).get(VERIFICATION_SLOT_KEY)
+
+    def patch_restic_verification_slot(self, version: str, reservation: str | None) -> str:
+        """Change only the named ConfigMap's reservation at the observed resource version."""
+        data = {} if reservation is None else {VERIFICATION_SLOT_KEY: reservation}
+        slot = self._core.patch_namespaced_config_map(
+            VERIFICATION_SLOT_NAME, GATEWAY_NAMESPACE, [
+                {"op": "test", "path": "/metadata/resourceVersion", "value": version},
+                {"op": "add", "path": "/data", "value": data},
+            ], _request_timeout=VERIFICATION_REQUEST_SECONDS,
+        )
+        if not slot.metadata.resource_version or (slot.data or {}) != data:
+            raise ValueError("Kubernetes did not acknowledge the verifier slot write")
+        return slot.metadata.resource_version
+
+    def delete_restic_verification_job(self, namespace: str, name: str, *, uid: str) -> None:
+        """Drain the observed Job and its Pods, without deleting a same-name replacement."""
+        try:
+            self._batch.delete_namespaced_job(
+                name, namespace, body=k8s.V1DeleteOptions(
+                    propagation_policy="Foreground", preconditions=k8s.V1Preconditions(uid=uid),
+                ),
+                _request_timeout=VERIFICATION_REQUEST_SECONDS,
+            )
+        except ApiException as error:
+            if not _not_found(error):
+                raise
 
     def delete_catalogue_build_job(self, namespace: str, name: str) -> None:
         """Foreground deletion keeps the Job observable until its dependent pods end."""
@@ -781,10 +879,11 @@ class ClusterClient:
         hold_kind = hold_started_at = previous_image = pre_upgrade_snapshot = None
         pre_upgrade_volume_snapshot = None
         target_applied_at = restored_snapshot = backup_retry_after = backup_outcome = relocation_volume = None
-        backup_family_request = None
+        backup_family_request = restic_verification = None
         backup_retry_minutes = render_digest = render_digest_applied_at = row_generation = grow_storage_gib = None
         upgrade_target = upgrade_phase = upgrade_window = upgrade_window_at = candidate_since = None
         started_raw = None
+        patched_hold: frozenset[str] = frozenset()
         if statefulset is not None:
             containers = statefulset.spec.template.spec.containers
             statefulset_image = containers[0].image if containers else None
@@ -799,6 +898,7 @@ class ClusterClient:
             annotations = statefulset.metadata.annotations or {}
             hold_kind = annotations.get(HOLD_ANNOTATION) or None
             backup_family_request = annotations.get(BACKUP_FAMILY_ANNOTATION) or None
+            restic_verification = annotations.get(RESTIC_VERIFICATION_ANNOTATION) or None
             started_raw = annotations.get(HOLD_STARTED_ANNOTATION)
             hold_started_at = _parse_timestamp(started_raw) if started_raw else None
             previous_image = annotations.get(PREVIOUS_IMAGE_ANNOTATION) or None
@@ -824,6 +924,7 @@ class ClusterClient:
             upgrade_window = annotations.get(UPGRADE_WINDOW_ANNOTATION) or None
             upgrade_window_at = annotations.get(UPGRADE_WINDOW_AT_ANNOTATION) or None
             candidate_since = _parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION))
+            patched_hold = _patch_owned_annotations(statefulset.metadata) & UPGRADE_START_ANNOTATION_KEYS
 
         pod_exists = len(pods) > 0
         live_pods = [pod for pod in pods if pod.metadata.deletion_timestamp is None]
@@ -920,6 +1021,7 @@ class ClusterClient:
             namespace_move_storage_class=namespace_annotations.get("exomem.io/move-storage-class"),
             namespace_move_accepted_volume=namespace_annotations.get("exomem.io/move-accepted-volume"),
             statefulset_exists=statefulset_exists,
+            statefulset_uid=getattr(statefulset.metadata, "uid", None) if statefulset_exists else None,
             statefulset_image=statefulset_image,
             statefulset_replicas=statefulset_replicas,
             statefulset_hold_kind=hold_kind,
@@ -930,6 +1032,7 @@ class ClusterClient:
             statefulset_target_applied_at=target_applied_at,
             statefulset_restored_snapshot=restored_snapshot,
             statefulset_backup_outcome=backup_outcome,
+            statefulset_restic_verification=restic_verification,
             statefulset_backup_family_request=backup_family_request,
             backup_family_secret_referenced=secret_referenced,
             statefulset_relocation_volume=relocation_volume,
@@ -944,6 +1047,7 @@ class ClusterClient:
             statefulset_upgrade_window=upgrade_window,
             statefulset_upgrade_window_at=upgrade_window_at,
             statefulset_candidate_since=candidate_since,
+            statefulset_patched_hold=patched_hold,
             pod_exists=pod_exists,
             pod_ready=pod_ready,
             pod_terminating=pod_terminating,
@@ -1406,6 +1510,20 @@ def _node_selector_matches_node(selector, node, *, unknown_matches: bool = False
                for term in selector.node_selector_terms or [])
 
 
+def _patch_owned_annotations(metadata) -> frozenset[str]:
+    """The annotation keys that cellctl's own patches own on an object, read from
+    managedFields. "Update" is the API's operation for a patch ("Apply" is a
+    server-side apply), and fieldsV1 names each annotation as "f:<key>"."""
+
+    owned: set[str] = set()
+    for entry in getattr(metadata, "managed_fields", None) or ():
+        if entry.manager != FIELD_MANAGER or entry.operation != "Update":
+            continue
+        annotations = ((entry.fields_v1 or {}).get("f:metadata") or {}).get("f:annotations") or {}
+        owned.update(key.removeprefix("f:") for key in annotations if key.startswith("f:"))
+    return frozenset(owned)
+
+
 def _pod_ready(pod) -> bool:
     if pod.status.phase != "Running":
         return False
@@ -1512,6 +1630,107 @@ def _media_collection(message: str | None) -> MediaCollection | None:
 def _report_line(message: str | None, index: int) -> str:
     lines = (message or "").split("\n")
     return lines[index] if index < len(lines) else ""
+
+
+def _list_labelled_pages(list_resources, selector: str):
+    continuation = None
+    while True:
+        response = list_resources(label_selector=selector, limit=500, _continue=continuation)
+        yield from response.items
+        continuation = response.metadata._continue if response.metadata else None
+        if not continuation:
+            return
+
+
+def _verification_pages(list_resources, selector: str, deadline: float):
+    continuation = None
+    for _ in range(VERIFICATION_MAX_PAGES):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("restic verification census exceeded its deadline")
+        response = list_resources(
+            label_selector=selector, limit=VERIFICATION_LIST_LIMIT,
+            _continue=continuation,
+            _request_timeout=min(VERIFICATION_REQUEST_SECONDS, remaining),
+        )
+        yield from response.items
+        continuation = response.metadata._continue if response.metadata else None
+        if not continuation:
+            return
+    raise ValueError("restic verification census exceeded its page budget")
+
+
+def _verification_invocation(pod_spec, serialize) -> str | None:
+    if pod_spec is None or not is_restic_verification_pod_spec(serialize(pod_spec)):
+        return None
+    container, = pod_spec.containers
+    repository = next(entry for entry in container.env if entry.name == "RESTIC_REPOSITORY")
+    if not repository.value or repository.value_from:
+        return None
+    fingerprint = hashlib.sha256(repository.value.encode()).hexdigest()
+    return restic_verification_invocation(container.image, container.command, fingerprint)
+
+
+def _verified_container_finish(job, pod, status) -> datetime | None:
+    """Bind the clock and native runtime digest to the same terminated container."""
+    terminal = status.state.terminated
+    if not terminal or terminal.exit_code != 0 or not status.container_id or terminal.container_id != status.container_id:
+        return None
+    _, digest_separator, expected = pod.spec.containers[0].image.rpartition("@")
+    reported = (status.image_id or "").removeprefix("docker-pullable://").removeprefix("containerd://")
+    actual = reported.rpartition("@")[2]
+    if (not digest_separator or not expected.startswith("sha256:")
+            or not SNAPSHOT_ID_RE.fullmatch(expected[7:]) or actual != expected):
+        return None
+    times = tuple(_parse_timestamp(value) for value in (
+        job.metadata.creation_timestamp, pod.metadata.creation_timestamp, pod.status.start_time,
+        terminal.started_at, terminal.finished_at,
+    ))
+    if all(times) and all(earlier <= later for earlier, later in zip(times[:-1], times[1:], strict=True)):
+        return times[-1]
+    return None
+
+
+def _restic_verification_observation(name: str, job, pods: list, serialize) -> ResticVerificationJob:
+    uid = job.metadata.uid if job is not None else None
+    deleting = job is not None and job.metadata.deletion_timestamp is not None
+    conditions = [
+        condition for condition in (job.status.conditions or [])
+        if condition.status == "True" and condition.type in ("Complete", "Failed")
+    ] if job is not None and job.status is not None else []
+    owners = [
+        owner for owner in (job.metadata.owner_references or [])
+        if owner.api_version == "apps/v1" and owner.kind == "StatefulSet" and owner.name == "cell"
+    ] if job is not None else []
+    statefulset_uid = owners[0].uid if len(owners) == 1 else None
+    invocation = _verification_invocation(job.spec.template.spec, serialize) if job is not None else None
+    # A Job with no Pods can still create one.
+    active = bool(job is not None and not conditions) or any(
+        not pod.status or pod.status.phase not in ("Succeeded", "Failed") for pod in pods
+    )
+    observation = ResticVerificationJob(name, uid, statefulset_uid, invocation, active, deleting)
+    if active or deleting or not uid or len(conditions) != 1 or not invocation:
+        return observation
+    condition, = conditions
+    if condition.type == "Failed":
+        return replace(observation, outcome="failed")
+    owned_pods = [
+        pod
+        for pod in pods
+        if any(owner.api_version == "batch/v1" and owner.kind == "Job" and owner.controller is True
+               and owner.name == name and owner.uid == uid
+               for owner in (pod.metadata.owner_references or []))
+    ]
+    if len(owned_pods) == 1:
+        pod, = owned_pods
+        statuses = pod.status.container_statuses or []
+        if (pod.metadata.uid and pod.status.phase == "Succeeded" and len(statuses) == 1
+                and statuses[0].name == JOB_KIND_RESTIC_VERIFY and statuses[0].state
+                and _verification_invocation(pod.spec, serialize) == invocation):
+            finished = _verified_container_finish(job, pod, statuses[0])
+            if finished:
+                return replace(observation, outcome="success", pod_uid=pod.metadata.uid, finished_at=finished)
+    return replace(observation, outcome="unknown")
 
 
 def _parse_timestamp(value) -> datetime | None:

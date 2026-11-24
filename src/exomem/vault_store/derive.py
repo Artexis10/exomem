@@ -1,11 +1,11 @@
-"""The derived-row half of one store-mode commit (OpenSpec make-vault-store-canonical D2).
+"""The derived rows of store-mode pages (OpenSpec make-vault-store-canonical D2).
 
-``apply`` runs inside ``write.commit``'s transaction, after the page tables hold the commit's own
-bytes. It writes the lexical, graph and identity rows of every page that the commit gives bytes to,
-drops the rows of every page that it removes, and re-derives the graph rows of the pages whose
-links the commit re-resolves. It reads the transaction's own tables for pages (and the disk for a
-page that the store does not own), so a reader that sees the commit sees its rows, and a kill leaves
-no row without its page.
+``derive_paths`` runs on the store thread, in a drain transaction of its own after the commit that
+queued the paths (``derivation.drain``). It writes the lexical, graph and identity rows of every page
+that the store holds at a path, drops the rows of every path that it no longer holds, and re-derives
+the graph rows of the pages whose links those paths re-resolve. It reads the transaction's own tables
+for pages (and the disk for a page that the store does not own), so the rows always follow the bytes
+that the store holds when the drain runs, and a kill leaves the intent to derive them again.
 
 The registries (traversal profiles, the type basis) and the access policy are the exception: the
 owners' builders read them from disk, while the schema overlay under ``_Schema`` is store-owned. A
@@ -19,11 +19,12 @@ The owners' builders do the deriving (``lexstore.page_rows``, ``epistemic_graph.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import json
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from sqlite3 import Connection
-from typing import TYPE_CHECKING
+from typing import NamedTuple
 
 from .. import (
     epistemic_graph,
@@ -37,13 +38,51 @@ from .. import (
 from ..find_types import ParsedPage
 from ..governance import page_admission
 from ..semantic_index import SemanticParentIndexState
-from . import read
-
-if TYPE_CHECKING:
-    from .write import StoreChange
+from . import read, resident_catalogue
 
 #: A page's parse and its parent state: what ``page_rows`` and ``page_graph_rows`` both take.
 _Parsed = tuple[ParsedPage | None, SemanticParentIndexState | None]
+
+
+class _LexicalPage(NamedTuple):
+    page: ParsedPage | None
+    state: SemanticParentIndexState | None
+    rows: lexstore.PageRows | None
+
+
+ReserveGraph = Callable[[str, tuple[epistemic_graph.PageGraphRecords, ...]], None]
+
+
+def prepare_lexical_page(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _LexicalPage:
+    """Prepare exactly the lexical rows the commit writes for an original."""
+    in_kb, in_vault = lexstore.page_membership(rel)
+    if not (in_kb or in_vault):
+        return _LexicalPage(None, None, None)
+    page, state = _parse(root, rel, raw, mtime_ns, type_basis)
+    rows = lexstore.page_rows(
+        root, rel, raw, page=page, state=state, mtime_ns=mtime_ns, in_kb=in_kb, in_vault=in_vault,
+    )
+    return _LexicalPage(page, state, rows)
+
+
+def _parse(
+    root: Path, rel: str, raw: bytes, mtime_ns: int, type_basis: note_types.Basis,
+) -> _Parsed:
+    page = find_corpus.parse_page(
+        root / rel, mtime_ns / 1e9, root, content=raw, resolved_relative=rel,
+    )
+    if page is None:
+        return None, None
+    try:
+        state = semantic_index.current_parent_index_state(
+            root, rel, source=raw.decode("utf-8"), owner_type_basis=type_basis,
+        )
+    except (OSError, UnicodeError, ValueError):
+        # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
+        state = None
+    return page, state
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,24 +102,51 @@ class ResolverDelta:
 
     entries: tuple[tuple[str, str | None], ...]
     deleted: tuple[str, ...]
+    #: The catalogue's ``(path, title)`` rows and the resolver over them as the commit leaves them, for
+    #: ``resident_catalogue.remember``. Set when the derivation was given the vault triple that it started from.
+    catalogue: tuple[dict[str, str | None], vault.WikilinkResolver] | None = field(
+        default=None, compare=False, repr=False
+    )
 
 
-def apply(tx: Connection, root: Path, change: StoreChange, existing: frozenset[str]) -> ResolverDelta:
-    """Derive the rows of ``change`` into ``tx``, and return the commit's resolver delta.
+def derive_paths(
+    tx: Connection,
+    root: Path,
+    *,
+    written: list[str],
+    removed: list[str],
+    refreshed: list[str],
+    before: tuple | None = None,
+    prepared_lexical: Mapping[str, _LexicalPage] | None = None,
+    reserve_graph: ReserveGraph | None = None,
+    metered: frozenset[str] = frozenset(),
+) -> ResolverDelta:
+    """Derive the rows of the paths that a drain batch names into ``tx``, and return its resolver delta.
 
-    ``existing`` is the set of the change's page paths that the store held before the commit, which
-    tells a new page from an edited one.
+    ``written`` are the paths that the store holds a page at, ``removed`` the ones that it does not
+    any more, ``refreshed`` the files that it does not own. ``before`` is the vault triple that the
+    batch starts at; a caller that gives it derives from the catalogue resolver that the last batch
+    left and carries the new one out (``resident_catalogue.remember``).
+
+    ``reserve_graph`` charges the graph rows of the ``metered`` paths (an original, and the source a
+    move of it vacates) and of the pages outside the batch that re-derive because they link to them,
+    directly or through a prior path that the original's lineage claims. Other pages of the batch draw
+    on no room.
+
+    The derived catalogue tells a new page from an edited one: no path counts as held before, so a
+    page that the catalogue does not hold re-resolves every link that may name it.
     """
     return _Derivation(
         tx,
         Path(root),
-        written=[*(put.rel for put in change.puts), *(move.dst for move in change.moves)],
-        removed=[
-            *(delete.rel for delete in change.deletes),
-            *(move.src for move in change.moves),
-        ],
-        refreshed=list(change.refresh),
-        existing=existing,
+        written=written,
+        removed=removed,
+        refreshed=refreshed,
+        existing=frozenset(),
+        before=before,
+        prepared_lexical=prepared_lexical,
+        reserve_graph=reserve_graph,
+        metered=metered,
     ).run()
 
 
@@ -106,8 +172,16 @@ class _Derivation:
         removed: list[str],
         refreshed: list[str],
         existing: frozenset[str],
+        before: tuple | None = None,
+        prepared_lexical: Mapping[str, _LexicalPage] | None = None,
+        reserve_graph: ReserveGraph | None = None,
+        metered: frozenset[str] = frozenset(),
     ) -> None:
         self.tx, self.root, self.existing = tx, root, existing
+        self.before_triple = before
+        self.prepared_lexical = prepared_lexical or {}
+        self.reserve_graph = reserve_graph
+        self.metered = metered if reserve_graph is not None else frozenset()
         self.written, self.removed, self.refreshed = written, removed, refreshed
         # A store that an older build set up has no link tables until the registry pass creates
         # them and derives every page's rows (``rederive``), so a commit before then writes none.
@@ -118,6 +192,44 @@ class _Derivation:
         self.admission = tx.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'page_admission'"
         ).fetchone() is not None
+        # Likewise the prior-path index: the registry pass creates it and derives every page's rows.
+        self.priors = tx.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prior_paths'"
+        ).fetchone() is not None
+        self._relayout: object | None = None
+        #: The prior paths whose claimants this commit changes; links naming them re-resolve.
+        self.prior_changed: set[str] = set()
+        # The prior paths that a metered page claims or gives up: links that name one re-resolve to it.
+        self.metered_prior_changed: set[str] = set()
+        # One basis for the commit, so that the registry loads once and not once per page parse.
+        self.type_basis = epistemic_graph.producer_type_basis(root)
+
+    def relayout(self) -> object:
+        """The relayout record as this transaction sees it, read once per commit."""
+        if self._relayout is None:
+            from .. import relayout_record
+
+            def record_bytes(rel: str) -> bytes | None:
+                found = self.source(rel)
+                return None if found is None else found[0]
+
+            self._relayout = relayout_record.load(self.root, read_bytes=record_bytes)
+        return self._relayout
+
+    def _replace_priors(self, rel: str, raw: bytes | None) -> None:
+        if self.priors:
+            before = {
+                row[0]
+                for row in self.tx.execute(
+                    "SELECT prior_path FROM prior_paths WHERE path = ?", (rel,)
+                ).fetchall()
+            }
+            rows = () if raw is None else memory_refs.prior_path_rows(rel, raw, self.relayout())
+            memory_refs.replace_prior_rows(self.tx, rel, rows)
+            changed = before ^ {row[0] for row in rows}
+            self.prior_changed |= changed
+            if rel in self.metered:
+                self.metered_prior_changed |= changed
 
     # ------------------------------------------------------------------ sources
 
@@ -137,7 +249,9 @@ class _Derivation:
     # ------------------------------------------------------------------ run
 
     def run(self) -> ResolverDelta:
-        before = self._resolver_entries()
+        held = resident_catalogue.held(self.root, self.before_triple)
+        # The rows and resolver that the catalogue held before this commit: kept ones are read here, never edited.
+        before, before_resolver = held if held is not None else (self._resolver_entries(), None)
         derived = self._write_lexical_and_identity()
         if self.links:
             self._write_inbound()
@@ -148,21 +262,35 @@ class _Derivation:
             tuple(after_entries.items()),
             (*self.removed, *(rel for rel in derived if rel not in after_entries)),
         )
-        resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
-        before_resolver = resolver.fork()
+        if before_resolver is None:
+            before_resolver = vault.WikilinkResolver.from_entries(self.root, before.items())
+        resolver = before_resolver.fork()
         resolver.on_entries_changed(delta.entries, delta.deleted)
+        if self.before_triple is not None:
+            after_rows = {**before, **dict(delta.entries)}
+            for rel in delta.deleted:
+                after_rows.pop(rel, None)
+            # A fork, so that the claims bound below stay with this transaction's graph and not the resident.
+            delta = replace(delta, catalogue=(after_rows, resolver))
+            resolver = resolver.fork()
+        if self.priors:
+            from .. import prior_claims
+
+            # The graph resolves prior paths by the claims this commit leaves, as a cold build does.
+            resolver.bound_claims = prior_claims.from_connection(self.root, self.tx)
         graph = _GraphInputs(
             resolver=resolver,
             stamps=epistemic_graph.graph_registry_stamps(self.root),
-            type_basis=epistemic_graph.producer_type_basis(self.root),
+            type_basis=self.type_basis,
             landing=epistemic_graph.landing_from_bytes(self.root, self.page_bytes),
         )
         for rel in self.removed:
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         for rel in derived:
-            self._write_graph(rel, graph)
-        for rel in self._dependents(before, after_entries, before_resolver, resolver):
-            self._write_graph(rel, graph)
+            self._write_graph(rel, graph, charge=rel in self.metered)
+        dependents, linking = self._dependents(before, after_entries, before_resolver, resolver)
+        for rel in dependents:
+            self._write_graph(rel, graph, charge=rel in linking)
         return delta
 
     def _resolver_entries(self) -> dict[str, str | None]:
@@ -184,6 +312,7 @@ class _Derivation:
         for rel in self.removed:
             lexstore.delete_page_rows(self.tx, rel)
             memory_refs.replace_identity_row(self.tx, rel, None)
+            self._replace_priors(rel, None)
             if self.admission:
                 page_admission.replace_row(self.tx, rel, None)
         derived: dict[str, tuple[str | None, bool]] = {}
@@ -192,20 +321,19 @@ class _Derivation:
             lexstore.delete_page_rows(self.tx, rel)
             if found is None:
                 memory_refs.replace_identity_row(self.tx, rel, None)
+                self._replace_priors(rel, None)
                 if self.admission:
                     page_admission.replace_row(self.tx, rel, None)
                 derived[rel] = (None, False)
                 continue
             raw, mtime_ns = found
             in_kb, in_vault = lexstore.page_membership(rel)
-            rows = None
-            page = None
-            if in_kb or in_vault:
-                page, state = self.parse(rel, raw, mtime_ns)
-                rows = lexstore.page_rows(
-                    self.root, rel, raw, page=page, state=state, mtime_ns=mtime_ns,
-                    in_kb=in_kb, in_vault=in_vault,
+            prepared = self.prepared_lexical.get(rel)
+            if prepared is None:
+                prepared = prepare_lexical_page(
+                    self.root, rel, raw, mtime_ns, self.type_basis,
                 )
+            page, rows = prepared.page, prepared.rows
             if rows is not None:
                 lexstore.write_page_rows(self.tx, rows)
             if self.admission:
@@ -216,6 +344,7 @@ class _Derivation:
                 page_admission.replace_row(self.tx, rel, raw, page)
             identity = memory_refs.identity_row(self.root, rel, raw)
             memory_refs.replace_identity_row(self.tx, rel, identity)
+            self._replace_priors(rel, raw if identity is not None else None)
             derived[rel] = (
                 None if rows is None else rows.columns["title"],
                 rows is not None and in_vault,
@@ -236,31 +365,26 @@ class _Derivation:
 
     def parse(self, rel: str, raw: bytes, mtime_ns: int) -> _Parsed:
         """The parsed page and its parent state, as file mode derives them from the same bytes."""
-        page = find_corpus.parse_page(
-            self.root / rel, mtime_ns / 1e9, self.root, content=raw, resolved_relative=rel
-        )
-        if page is None:
-            return None, None
-        try:
-            state = semantic_index.current_parent_index_state(
-                self.root, rel, source=raw.decode("utf-8")
-            )
-        except (OSError, UnicodeError, ValueError):
-            # Lexical derivation keeps such a page without unit rows; the graph keeps none for it.
-            state = None
-        return page, state
+        return _parse(self.root, rel, raw, mtime_ns, self.type_basis)
 
     # ------------------------------------------------------------------ graph rows
 
-    def _write_graph(self, rel: str, graph: _GraphInputs) -> None:
+    def _write_graph(self, rel: str, graph: _GraphInputs, *, charge: bool = False) -> None:
         """Replace the graph rows of ``rel`` with the ones its bytes derive, or drop them."""
         rows = None
+        prepared = self.prepared_lexical.get(rel)
         found = self.source(rel)
         # File mode builds the graph from the Knowledge Base walk alone: a refreshed page outside it
         # has lexical rows and no graph rows, or it would get a node under a path that has no file.
         if found is not None and lexstore.page_membership(rel)[0]:
             raw, mtime_ns = found
-            page, state = self.parse(rel, raw, mtime_ns)
+            if prepared is None:
+                page, state = self.parse(rel, raw, mtime_ns)
+                structure = None
+            else:
+                page, state = prepared.page, prepared.state
+                summary = prepared.rows.structure_json if prepared.rows is not None else None
+                structure = json.loads(summary) if summary is not None else None
             if page is not None and state is not None:
                 rows = epistemic_graph.page_graph_rows(
                     self.root,
@@ -272,11 +396,19 @@ class _Derivation:
                     type_basis=graph.type_basis,
                     target_exists=self.target_exists,
                     landing=graph.landing,
+                    prepared_structure=structure,
                 )
         if rows is None:
+            if charge and self.reserve_graph is not None:
+                self.reserve_graph(rel, ())  # the page's own rows go; their leaves draw on the reservation
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
-            epistemic_graph.write_page_graph_rows(self.tx, rows, graph.stamps)
+            epistemic_graph.write_page_graph_rows(
+                self.tx, rows, graph.stamps,
+                # Pages that link to an original re-derive in the same transaction, so their
+                # graph rows draw on the same reservation as the original's own.
+                before_write=self.reserve_graph if charge else None,
+            )
 
     # ------------------------------------------------------------------ dependents
 
@@ -286,14 +418,16 @@ class _Derivation:
         after: dict[str, str | None],
         before_resolver: vault.WikilinkResolver,
         after_resolver: vault.WikilinkResolver,
-    ) -> list[str]:
+    ) -> tuple[list[str], set[str]]:
         """The pages outside the commit whose links re-resolve, from the transaction's own tables.
 
         A page that appears, goes or changes its title can move any link, in either direction: the
         links that start resolving to it and the links that stop. Any other edit moves only the
         links that name a unit of the page with a ``#`` fragment, as file mode re-derives them.
+        Also returns the ones among them that re-resolve because of a metered path.
         """
-        moved: set[str] = set(self.removed)
+        # A prior path that gains or loses a claimant moves the links that name it.
+        moved: set[str] = set(self.removed) | self.prior_changed
         edited: set[str] = set()
         for rel in (*self.written, *self.refreshed):
             if rel not in self.existing and rel not in before:
@@ -307,7 +441,17 @@ class _Derivation:
         resolvers = (before_resolver, after_resolver)
         found = epistemic_graph.dependent_paths(self.tx, moved, resolvers)
         found |= epistemic_graph.dependent_paths(self.tx, edited, resolvers, fragments_only=True)
+        linking: set[str] = set()
+        if self.metered:
+            # Only the pages that link to an original re-derive on its account; the dependents of the
+            # batch's other pages draw on no room, as in a batch that carries no original.
+            linking = epistemic_graph.dependent_paths(
+                self.tx, (moved & self.metered) | self.metered_prior_changed, resolvers
+            )
+            linking |= epistemic_graph.dependent_paths(
+                self.tx, edited & self.metered, resolvers, fragments_only=True
+            )
         # A page of the commit is derived already; the rest follow in path order, so a kill-free
         # replay of the same commit writes the same rows.
-        return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed))
+        return sorted(found - set(self.written) - set(self.refreshed) - set(self.removed)), linking
 

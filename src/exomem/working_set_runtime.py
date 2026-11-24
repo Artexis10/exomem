@@ -75,6 +75,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
+from .governance import principal
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +140,39 @@ def activation_released_corpus_tasks() -> bool:
 _DEFERRED_BUILDS: ContextVar[dict[Path, str] | None] = ContextVar(
     "activation_deferred_index_builds", default=None
 )
+
+
+#: The vectors this activation encoded, by the text each one encodes, held by `turn_vector_scope` so a later stage
+#: reads a vector and never encodes the turn a second time. A box shared by reference, so a stage that runs in a
+#: copy of the request's context still writes where the request reads.
+_TURN_VECTOR: ContextVar[dict[str, Any] | None] = ContextVar("activation_turn_vector", default=None)
+
+
+@contextmanager
+def turn_vector_scope() -> Iterator[None]:
+    """Hold the activation's encoded vectors for the stages that run inside this scope."""
+    token = _TURN_VECTOR.set({})
+    try:
+        yield
+    finally:
+        _TURN_VECTOR.reset(token)
+
+
+def remember_turn_vector(text: str, vector: Any) -> None:
+    """Record the vector the activation encoded for `text`; a no-op outside `turn_vector_scope`.
+
+    Two stages encode the same turn (the signature lane and the task-context dense lane) with the same
+    encoder, so the first vector stands.
+    """
+    box = _TURN_VECTOR.get()
+    if box is not None and vector is not None:
+        box.setdefault(text, vector)
+
+
+def remembered_turn_vector(turn: str) -> Any:
+    """The vector the activation encoded for exactly `turn`, or None when no stage encoded it."""
+    box = _TURN_VECTOR.get()
+    return None if box is None else box.get(turn)
 
 
 #: The vaults whose lexical catalogue a pinned request asked to repair (`pin_lexical_checkpoint`).
@@ -213,6 +247,11 @@ CONTINUITY_ABSENT = "absent"
 CONTINUITY_MAX_CHARS = 8192
 CONTINUITY_MAX_REFS = 32
 CONTINUITY_MAX_ROLES = 32
+#: The profile generations a token holds (the most recently served), and the longest domain key or generation it
+#: accepts. Sixteen entries at these bounds stay far under `CONTINUITY_MAX_CHARS`, so only the method versions
+#: ever shrink to fit it. An older held profile is sent again when a later turn touches it.
+CONTINUITY_MAX_PROFILES = 16
+CONTINUITY_PROFILE_FIELD_MAX_CHARS = 64
 
 #: The token's THREAD: an opaque random value naming one keyless caller's
 #: conversation, echoed back on every turn so a caller that supplies no
@@ -410,6 +449,50 @@ def identity_for(vault_root: Path) -> str:
         conn.close()
 
 
+def held_session_generation(block: Mapping[str, Any] | None) -> str | None:
+    """The generation a caller holds once it has been served a session block (stance or skills).
+
+    A `ready` or `unchanged` block names what the caller now holds; an empty or unavailable block is owed again.
+    """
+    if isinstance(block, Mapping) and block.get("state") in ("ready", "unchanged"):
+        return block.get("generation")
+    return None
+
+
+def held_profile_generations(
+    block: Mapping[str, Any] | None, held: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The profiles a caller holds after a domain profiles block: those it was just served, then those it held before.
+
+    A `ready` or `unchanged` entry names what the caller now holds. A held profile this turn did not touch is
+    kept, so a later turn on its domain repeats nothing. At most `CONTINUITY_MAX_PROFILES` are kept, the most
+    recently served first, and the oldest are dropped.
+    """
+    served = {}
+    if isinstance(block, Mapping):
+        served = {
+            entry["domain"]: entry["generation"]
+            for entry in block.get("profiles") or ()
+            if isinstance(entry, Mapping) and entry.get("state") in ("ready", "unchanged")
+            and isinstance(entry.get("domain"), str) and isinstance(entry.get("generation"), str)
+        }
+    kept = {**served, **{domain: generation for domain, generation in (held or {}).items() if domain not in served}}
+    return dict(list(kept.items())[:CONTINUITY_MAX_PROFILES])
+
+
+def _profile_generations(value: object) -> dict[str, str]:
+    """The valid entries of a profile-generations map, at most `CONTINUITY_MAX_PROFILES`. Never raises."""
+    if not isinstance(value, Mapping):
+        return {}
+    bound = CONTINUITY_PROFILE_FIELD_MAX_CHARS
+    valid = {
+        domain: generation for domain, generation in value.items()
+        if isinstance(domain, str) and isinstance(generation, str)
+        and 0 < len(domain) <= bound and 0 < len(generation) <= bound
+    }
+    return dict(list(valid.items())[:CONTINUITY_MAX_PROFILES])
+
+
 def encode_continuity(
     *,
     identity: str,
@@ -425,6 +508,8 @@ def encode_continuity(
     map_generation: str | None = None,
     method_versions: Sequence[Mapping[str, str]] = (),
     skills_generation: str | None = None,
+    stance_generation: str | None = None,
+    profile_generations: Mapping[str, str] | None = None,
 ) -> str:
     """Base64 of the compact JSON payload. No secret, and the refs unsigned.
 
@@ -469,6 +554,10 @@ def encode_continuity(
         payload["method_versions"] = [dict(item) for item in method_versions]
     if skills_generation:
         payload["skills_generation"] = str(skills_generation)
+    if stance_generation:
+        payload["stance_generation"] = str(stance_generation)
+    if profile_generations:
+        payload["profile_generations"] = _profile_generations(profile_generations)
     if minted_ns is not None:
         payload["minted_ns"] = int(minted_ns)
     if thread:
@@ -599,6 +688,11 @@ def decode_continuity(token: str | None) -> dict[str, Any] | None:
     # Optional: a token minted before the skills block rode the packet holds none, and its holder is sent the catalogue.
     if isinstance(payload.get("skills_generation"), str):
         decoded["skills_generation"] = payload["skills_generation"]
+    # Optional: a token minted before the stance was generation-gated holds none, and its holder is sent the stance.
+    if isinstance(payload.get("stance_generation"), str):
+        decoded["stance_generation"] = payload["stance_generation"]
+    # Optional: a token minted before domain profiles holds none, and its holder is sent each profile it touches.
+    decoded["profile_generations"] = _profile_generations(payload.get("profile_generations"))
     # Optional: a token minted before the capture policy rode the packet names none.
     if isinstance(payload.get("capture_policy"), str):
         decoded["capture_policy"] = payload["capture_policy"]
@@ -1053,7 +1147,11 @@ def ensure_index(
     registry_changed = (
         index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
     )
-    if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
+    if (
+        registry_changed
+        or (freshness_stamp and index.freshness_stamp() != freshness_stamp)
+        or _store_readable_again(root, index)
+    ):
         built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         if not refreshed and visible is not None:
@@ -1068,6 +1166,19 @@ def ensure_index(
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+def _store_readable_again(root: Path, index: working_set_index.WorkingSetIndex) -> bool:
+    """Whether the catalogue missed store collections that this process can now read.
+
+    The build that missed them recorded its freshness stamp all the same, so the first request after a writer
+    is admitted builds once more; a host that never gets a writer never rebuilds for it.
+    """
+    if not index.store_unread():
+        return False
+    from .collection_store import runtime as store_runtime
+
+    return store_runtime.writer_admitted(root)
 
 
 #: The registry checkpoint each freshness stamp was derived from, oldest first.
@@ -1471,9 +1582,9 @@ def _is_raw_material(path: str) -> bool:
     disagree about what raw material is. Backslashes are folded first, so a
     row written on Windows is recognised too.
     """
-    from .kbdir import kb_prefix
+    from .kbdir import managed_relative
 
-    inside = str(path).replace("\\", "/").removeprefix(kb_prefix())
+    inside = managed_relative(str(path).replace("\\", "/"))
     return inside.split("/", 1)[0] in CARRY_EXCLUDED_FOLDERS
 
 
@@ -2565,7 +2676,8 @@ def _schedule_build(
 
     def _warm() -> None:
         try:
-            with foreground_priority.cancellable(stop):
+            # A bulk pass: its walks yield to a request in flight, never under a lock one waits on.
+            with foreground_priority.bulk(stop=stop):
                 if job is None:
                     _warm_index(root, freshness_stamp, stop)
                 else:
@@ -2592,6 +2704,7 @@ def _schedule_build(
             log.warning("%s background build could not start", label, exc_info=True)
 
 
+@principal.invocation_scope()
 def serve(
     vault_root: Path,
     *,
@@ -2836,16 +2949,6 @@ def serve(
         heat_digest=heat_digest,
         conventions_turn_hash=conventions_registry.turn_hash,
     )
-    # The band depends on the audience under a governed policy, so one audience's
-    # banded packet is never served to another (`working_set.band_audience_allowed`).
-    cache_identity = (
-        str(root.absolute()),
-        key,
-        lexical_state,
-        index.token(),
-        working_set.band_audience_allowed(root),
-        leads_only,
-    )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
     # from nor stored in this cache: keying it by audience and purpose would be
@@ -2856,6 +2959,18 @@ def serve(
         and not with_conversation
         and not index_stale
         and trigger == "user_turn"
+    )
+    # The band depends on audience. Graph quotes depend on unrestricted source access,
+    # which can change while the same owner's anchor index and freshness key stay fixed.
+    quote_access = cacheable and working_set.graph_quote_access(root, purpose=purpose)
+    cache_identity = (
+        str(root.absolute()),
+        key,
+        lexical_state,
+        index.token(),
+        working_set.band_audience_allowed(root),
+        quote_access,
+        leads_only,
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None

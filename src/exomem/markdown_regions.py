@@ -237,10 +237,22 @@ class LocalLink:
     image: bool  # written `![...](...)`
 
 
-# One plain parser for link destinations. The region parser above is customised
-# to locate code at exact offsets and is not reused, so a link parse never pays
-# for that bookkeeping.
+# One plain parser for link destinations and code text. The region parser above is
+# customised to locate code at exact offsets and is not reused, so these parses never
+# pay for that bookkeeping.
 _LINK_PARSER = MarkdownIt("commonmark")
+
+
+def inline_code(text: str) -> tuple[str, ...]:
+    """The text of each inline code span in `text`, in source order, as CommonMark reads it."""
+    if "`" not in text:
+        return ()
+    return tuple(
+        child.content
+        for token in _LINK_PARSER.parse(text)
+        for child in token.children or ()
+        if child.type == "code_inline"
+    )
 
 
 def local_links(text: str) -> tuple[LocalLink, ...]:
@@ -275,6 +287,45 @@ def local_links(text: str) -> tuple[LocalLink, ...]:
 
     visit(_LINK_PARSER.parse(text))
     return tuple(links)
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalLink:
+    """A CommonMark link whose destination is a network location, as written."""
+
+    url: str
+    label: str  # the link's visible text
+
+
+def external_links(text: str) -> tuple[ExternalLink, ...]:
+    """Links in `text` that name a network location, in source order and first-seen per URL.
+
+    markdown-it owns what is a link, so code spans, reference definitions and escapes follow
+    CommonMark. A destination with a scheme and a network location is external; a file path, a
+    bare `#fragment` and an image are not.
+    """
+    found: dict[str, str] = {}
+
+    def visit(tokens) -> None:  # noqa: ANN001
+        url: str | None = None
+        label: list[str] = []
+        for token in tokens:
+            if token.type == "link_open":
+                href = token.attrGet("href")
+                parts = urlsplit(href) if isinstance(href, str) and href else None
+                url = href if parts is not None and parts.scheme and parts.netloc else None
+                label = []
+            elif token.type == "link_close":
+                if url is not None:
+                    found.setdefault(url, "".join(label).strip())
+                url = None
+            elif url is not None and token.type in {"text", "code_inline"}:  # nosemgrep: ep-word-set -- markdown-it's own token types, fixed by the parser
+                label.append(token.content)
+            if token.children:
+                visit(token.children)
+
+    visit(_LINK_PARSER.parse(text))
+    return tuple(ExternalLink(url, label) for url, label in found.items())
 
 
 # Obsidian's inline tag token: `#` opened at a line start or after whitespace, then

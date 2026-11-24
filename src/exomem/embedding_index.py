@@ -8,6 +8,8 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
 import json
 import logging
 import sqlite3
@@ -32,18 +34,59 @@ from . import (
     foreground_activity,
     foreground_priority,
     index_paths,
+    passage_matrix,
+    passage_terms,
     recall_space,
     reserved_paths,
     semantic_index,
     sidecar_store,
     vecstore,
 )
+from .cli_ops import OpError
 from .vector_index_common import vec_gate
 
 if TYPE_CHECKING:
     from .vault_store.vectors import Withheld
 
 log = logging.getLogger(__name__)
+
+_TRANSCRIPT_LAYOUT_PREFIX = "transcript-layout:"
+_TRANSCRIPT_LAYOUT_VERSION = 1
+_FILE_MTIMES = "SELECT file_path, MAX(file_mtime) AS file_mtime FROM chunks GROUP BY file_path"
+
+
+def _remember_transcript_layout(conn: sqlite3.Connection, paths: AbstractSet[str]) -> None:
+    if not paths:
+        return
+    # A full replacement writes chunk zero, including in versions that share the five-column table.
+    for event, row in (("INSERT", "NEW"), ("DELETE", "OLD")):
+        conn.execute(
+            f"CREATE TRIGGER IF NOT EXISTS transcript_layout_{event.lower()} AFTER {event} ON chunks "
+            f"WHEN {row}.chunk_idx = 0 BEGIN "
+            f"DELETE FROM meta WHERE key = '{_TRANSCRIPT_LAYOUT_PREFIX}' || {row}.file_path; END"
+        )
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+        ((_TRANSCRIPT_LAYOUT_PREFIX + path, _TRANSCRIPT_LAYOUT_VERSION) for path in paths),
+    )
+
+
+def ordered_chunk_digest(chunks: Iterable[str]) -> str:
+    """Hash ordered, length-framed UTF-8 text without retaining another text copy."""
+    digest = hashlib.sha256()
+    for text in chunks:
+        data = text.encode("utf-8")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
+class ChunkReceipt(NamedTuple):
+    digest: str
+    count: int
+    identity: recall_space.SpaceIdentity
+    token: tuple[int, int, int, int]
+
 
 
 def _sqlite_connect(database: Any, *args: Any, **kwargs: Any) -> sqlite3.Connection:
@@ -205,6 +248,10 @@ CATCHUP_MAX_ROUNDS = 8
 # that read; the wait starts short, so a transient failure (a busy lock) costs
 # seconds of dense recall, and doubles with each consecutive failure up to 64x.
 MATRIX_LOAD_RETRY_SECONDS = 5.0
+# Rows the background load copies between two yields to a request in flight. Measured
+# at 3.5 ms (dim 384) to 8.6 ms (dim 768), well inside a progress turn
+# (`foreground_priority.MAX_BULK_WORK_SECONDS`), so a request waits one short copy.
+MATRIX_LOAD_YIELD_ROWS = 512
 
 # --------------------------------------------------------------- generation meta
 #
@@ -243,6 +290,48 @@ class _EmbCache(NamedTuple):
     #: never on the stored cache: the paths whose rows changed after this
     #: matrix's generation. None means the matrix is the current publication.
     stale_paths: frozenset[str] | None = None
+    passage_admitted: bool = False
+
+
+class PageScorer:
+    """Pages scored against one resident matrix: the rows it vouches for a page, and each page's best chunk score.
+
+    A page withheld by the store or changed since the matrix (a lagging view's `stale_paths`) has no rows here.
+    `token` names everything a score read from this scorer depends on, so a result kept under it stays correct.
+    It names the withheld pages by a digest: a cache keyed on it keeps no copy of a set that a store census can
+    make large. `metadata` is sorted by file_path, so each page's rows are one block that bisection finds.
+    """
+
+    def __init__(self, resident: _EmbCache, withheld: frozenset[str]) -> None:
+        self._resident = resident
+        self._skip = withheld | (resident.stale_paths or frozenset())
+        self._withheld = withheld
+
+    @functools.cached_property
+    def token(self) -> tuple:
+        # Computed on first use: profile selection builds a scorer and never reads its token.
+        digest = hashlib.blake2b(digest_size=16)
+        for path in sorted(self._withheld):
+            digest.update(path.encode() + b"\0")  # NUL frames each path; a vault path cannot contain NUL
+        resident = self._resident
+        return (resident.epoch, resident.generation, resident.instance, resident.stale_paths, digest.digest())
+
+    def rows(self, path: str) -> np.ndarray | None:
+        if path in self._skip:
+            return None
+        metadata = self._resident.metadata
+        low = bisect_left(metadata, path, key=itemgetter(0))
+        high = bisect_right(metadata, path, key=itemgetter(0))
+        return self._resident.matrix[low:high] if low < high else None
+
+    def best_scores(self, query_vec: np.ndarray, paths: Iterable[str]) -> dict[str, float]:
+        query = np.asarray(query_vec, dtype=np.float32).reshape(-1)
+        best: dict[str, float] = {}
+        for path in set(paths):
+            block = self.rows(path)
+            if block is not None:
+                best[path] = float((block @ query).max())
+        return best
 
 
 class ChunkProof(NamedTuple):
@@ -259,6 +348,18 @@ class ChunkRef(NamedTuple):
     proof: ChunkProof
     path: str
     chunk: int
+
+
+class ChunkSelection(NamedTuple):
+    """Passage hits and the scoring backend that actually supplied them.
+
+    `lexical` holds the lexical hits of a fused selection, read in the same snapshot as the
+    dense hits, or None when the selection asked for none or the terms do not cover it.
+    """
+
+    hits: list[tuple[str, int, str | ChunkRef, float]]
+    scoring_mode: str
+    lexical: list[tuple[str, int, ChunkRef, float]] | None = None
 
 
 def _cache_covers_publication(
@@ -885,6 +986,37 @@ def _top_admitted(
     return [(metadata[row][0], metadata[row][1], float(scores[row])) for row in picked]
 
 
+class RecallSpaceUnread(Exception):
+    """This read could not decide which recall space is published; one may be."""
+
+
+def read_published_identity(vault_root: Path, *, wait_seconds: float = 0.0) -> recall_space.SpaceIdentity | None:
+    """Read only the serving space record; never initialize or migrate a sidecar.
+
+    None means no space is published. Raises RecallSpaceUnread when the store stays busy
+    for `wait_seconds` or the read fails, so a caller never reports a busy store as empty.
+    """
+    try:
+        path = index_paths.sidecar_path(vault_root, nonblocking=True)
+        with reserved_paths._subsystem_authority_scope("embedding_index"), reserved_paths._identity_coordination_scope(
+            vault_root, descriptor_ids=("embeddings-store",), identity_may_change=False,
+            deadline=time.monotonic() + wait_seconds,
+        ), reserved_paths._sqlite_owner_target_scope(vault_root, path, "embeddings-store", create=False) as retained:
+            with contextlib.closing(_sqlite_connect_owned(
+                f"{retained.as_uri()}?mode=ro", uri=True, timeout=0.0
+            )) as conn:
+                conn.execute("BEGIN")
+                identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            moved = index_paths.sidecar_path(vault_root, nonblocking=True) != path
+    except FileNotFoundError:
+        return None
+    except (OSError, sqlite3.DatabaseError, ValueError, RuntimeError, OpError) as error:
+        raise RecallSpaceUnread(type(error).__name__) from error
+    if moved:
+        raise RecallSpaceUnread("the serving sidecar changed during the read")
+    return identity if identity is not None and identity.dim > 0 else None
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -919,6 +1051,8 @@ class EmbeddingIndex:
         self._identity_read = False
         self._identity_token: tuple[int, int, int, int] | None = None
         self._cache: _EmbCache | None = None
+        self._matrix_invalidation = object()
+        self._passage_matrix_requested = False
         # One-slot memo for search()'s allowed-paths row mask (see _MaskCache).
         self._mask_cache: _MaskCache | None = None
         # The resident semantic-unit matrix (see `_unit_vectors`).
@@ -937,6 +1071,8 @@ class EmbeddingIndex:
         self._lock = threading.RLock()
         # Guards `_identity` and `_identity_token`, so observations stay ordered.
         self._identity_lock = threading.Lock()
+        self._chunk_receipts: dict[str, ChunkReceipt] = {}
+        self._chunk_receipts_lock = threading.Lock()
         # Serializes unit-matrix loads apart from `_lock`, so a unit reload never
         # stalls a chunk write's `_patch_cache`.
         self._unit_lock = threading.Lock()
@@ -949,6 +1085,13 @@ class EmbeddingIndex:
         self._catch_up_lock = threading.Lock()
         self._matrix_load_failed_at: float | None = None
         self._matrix_load_failures = 0
+        # Guards `_terms_backfill`, the one background lexical backfill (a leaf lock).
+        self._terms_lock = threading.Lock()
+        self._terms_backfill: threading.Thread | None = None
+        self._terms_failed_at: float | None = None
+        # The row counts at the token a search last read; replaced at the next token. It is
+        # cheap to build, so concurrent searches may each build one and keep the last.
+        self._terms_counts: passage_terms.Counts | None = None
         #: Matrix served or loaded: the use signal the idle reaper watches.
         self._hits = 0
         # vec0 backend state (see vec_gate): sync memo + per-instance retirement.
@@ -1014,6 +1157,7 @@ class EmbeddingIndex:
         # that a writer which bumps the generation without logging its paths is
         # DETECTED rather than silently caught up (see sidecar_store).
         sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
+        passage_terms.attach(conn)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
         ).fetchone()
@@ -1105,6 +1249,11 @@ class EmbeddingIndex:
 
     def _set_identity(self, identity: recall_space.SpaceIdentity | None) -> None:
         previous, self._identity = self._identity, identity
+        if previous != identity:
+            # Identity observation holds only the leaf lock; revoke without taking `_lock`.
+            self._matrix_invalidation = object()
+            with self._chunk_receipts_lock:
+                self._chunk_receipts.clear()
         if identity is None:
             return
         if self._vec.dim != identity.dim:
@@ -1305,8 +1454,11 @@ class EmbeddingIndex:
             current = _cache_covers_publication(cached, token, self._identity)
             # Same-epoch rows can catch up; a changed space or instance must reload.
             if not current and (
-                cached is None or cached.instance != instance or cached.epoch != epoch
+                cached is not None and (
+                    cached.instance != instance or cached.epoch != epoch or cached.space != self._identity
+                )
             ):
+                self._matrix_invalidation = object()
                 self._cache = cached = None
             mask = self._mask_cache
             # The memo names the metadata list it was computed over, so a
@@ -1324,6 +1476,7 @@ class EmbeddingIndex:
         identity: recall_space.SpaceIdentity,
         validate: Callable[[], bool] | None = None,
         store_stamps: dict[str, StoreStamp] | None = None,
+        transcript_layout: AbstractSet[str] = frozenset(),
     ) -> tuple[int, int, int, int] | None:
         """Publish one bounded group of prepared parents, then release old caches.
 
@@ -1384,6 +1537,9 @@ class EmbeddingIndex:
                 if unit_replacements:
                     sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
                 _write_store_stamps(conn, store_stamps or {})
+                _remember_transcript_layout(
+                    conn, {path for path, chunks, *_ in replacements if chunks and path in transcript_layout},
+                )
                 if validate is not None and not validate():
                     raise ValueError("embedding input drifted during publication")
                 own_token = self._build_token(conn)
@@ -1394,6 +1550,9 @@ class EmbeddingIndex:
         finally:
             conn.close()
         self._complete_publication(stored, own_token)
+        with self._chunk_receipts_lock:
+            for path, chunks, _vectors, _mtime in replacements:
+                self._chunk_receipts[path] = ChunkReceipt(ordered_chunk_digest(chunks), len(chunks), identity, own_token)
         # Write-request threads reach here too (`index_sync.upsert_after_write`),
         # so the splice never runs on this thread: it is handed to the
         # background loader, and the next read finds the matrix current.
@@ -1465,14 +1624,121 @@ class EmbeddingIndex:
         start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
         if start is None or start > token[1] or upto != current[1]:
             return set()
-        changed = set()
-        for path in paths:
-            row = conn.execute(
-                "SELECT generation FROM chunk_path_log WHERE file_path = ?", (path,),
-            ).fetchone()
-            if row is not None and int(row[0]) > token[1]:
-                changed.add(path)
+        changed = {
+            row[0] for row in conn.execute(
+                "SELECT file_path FROM chunk_path_log WHERE file_path IN "
+                "(SELECT value FROM json_each(?)) AND generation > ?",
+                (json.dumps(sorted(paths)), token[1]),
+            )
+        }
         return paths - changed
+
+    def chunk_inventory(self, expected: dict[str, tuple[str, int]], *, source_hashes: dict[str, str] | None = None) -> dict[str, tuple[str, int | None, str | None]]:
+        """Join compact receipts for one bounded page in one SQLite read snapshot."""
+        if not expected:
+            return {}
+        with self._chunk_receipts_lock:
+            receipts = {path: self._chunk_receipts.get(path) for path in expected}
+        # These states are the inventory protocol enum; no content meaning is inferred.
+        result = {path: ("unknown", None, None) for path in expected}
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return result
+        try:
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+        except (OSError, sqlite3.Error, ValueError):
+            return result
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if identity is None:
+                return result
+            space = identity.identity_digest
+            result = {path: ("unknown", None, space) for path in expected}
+            failures = StoreRecord(conn).stamps(expected) if source_hashes is not None else {}
+            for path, stamp in failures.items():
+                if stamp.owed and stamp.sha256 == source_hashes.get(path):
+                    result[path] = ("failed", None, space)
+            current = self._build_token(conn)
+            start, upto = sidecar_store.read_logged_run(conn, CHUNK_PATH_LOG)
+            candidates = []
+            for path, receipt in receipts.items():
+                if receipt is None or receipt.identity != identity:
+                    continue
+                token = receipt.token
+                if current[0] != token[0] or current[2] != token[2] or current[1] < token[1]:
+                    continue
+                if current[1] != token[1] and (start is None or start > token[1] or upto != current[1]):
+                    continue
+                candidates.append((path, token[1]))
+            unchanged = {row[0] for row in conn.execute(
+                "SELECT json_extract(j.value, '$[0]') FROM json_each(?) j "
+                "LEFT JOIN chunk_path_log l ON l.file_path = json_extract(j.value, '$[0]') "
+                "WHERE l.generation IS NULL OR l.generation <= json_extract(j.value, '$[1]')",
+                (json.dumps(candidates),),
+            )}
+            rows = {row[0]: row[1:] for row in conn.execute(
+                "SELECT file_path, COUNT(*), MIN(chunk_idx), MAX(chunk_idx), "
+                "SUM(typeof(chunk_idx) != 'integer' OR length(vector) != ?) "
+                "FROM chunks WHERE file_path IN (SELECT value FROM json_each(?)) GROUP BY file_path",
+                (identity.dim * 4, json.dumps(sorted(expected))),
+            )}
+            for path in unchanged:
+                if result[path][0] == "failed":
+                    continue
+                receipt = receipts[path]
+                count, low, high, invalid = rows.get(path, (0, None, None, 0))
+                if count != receipt.count or invalid or count and (low, high) != (0, count - 1):
+                    continue
+                state = "indexed" if (receipt.digest, receipt.count) == expected[path] else "not_yet_indexed"
+                result[path] = (state, count, space)
+            return result
+        except (sqlite3.Error, ValueError):
+            return result
+        finally:
+            conn.close()
+
+    def reconstruct_chunk_receipt(self, path: str, chunks: list[str], *, space: str) -> bool:
+        """Check one canonical parent's exact rows off the request path, without encoding."""
+        if not self.path.exists() or self.path != index_paths.sidecar_path(self.vault_root):
+            return False
+        try:
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.0)
+        except (OSError, sqlite3.Error, ValueError):
+            return False
+        try:
+            conn.execute("BEGIN")
+            identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+            if identity is None or identity.identity_digest != space:
+                return False
+            observed = self._exact_chunk_rows(conn, path, chunks, identity)
+            if observed is None:
+                return False
+            digest, count = observed
+            receipt = ChunkReceipt(digest, count, identity, self._build_token(conn))
+            with self._chunk_receipts_lock:
+                self._chunk_receipts[path] = receipt
+            return True
+        except (sqlite3.Error, ValueError):
+            return False
+        finally:
+            conn.close()
+
+
+    @staticmethod
+    def _exact_chunk_rows(conn, path: str, chunks: list[str], identity) -> tuple[str, int] | None:
+        """Bound text hydration by the canonical input, then verify ordered row structure."""
+        size = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0) FROM chunks WHERE file_path = ?", (path,),
+        ).fetchone()
+        if size[0] > len(chunks) or size[1] > sum(len(text.encode("utf-8")) for text in chunks):
+            return None
+        rows = list(conn.execute(
+            "SELECT chunk_idx, chunk_text, length(vector) FROM chunks WHERE file_path = ? ORDER BY chunk_idx", (path,),
+        ))
+        if any(type(number) is not int or number != ordinal or not isinstance(text, str) or width != identity.dim * 4
+               for ordinal, (number, text, width) in enumerate(rows)):
+            return None
+        return ordered_chunk_digest(row[1] for row in rows), len(rows)
 
     def parent_publication_from_source(
         self, chunks: list[str], state: semantic_index.SemanticParentIndexState,
@@ -1493,20 +1759,9 @@ class EmbeddingIndex:
             stored = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
             if stored != identity and (chunks or units or stored is not None):
                 return None
-            chunk_size = conn.execute(
-                "SELECT COUNT(*), COALESCE(SUM(length(CAST(chunk_text AS BLOB))), 0), "
-                "COALESCE(SUM(typeof(chunk_idx) != 'integer'), 0) "
-                "FROM chunks WHERE file_path = ?", (state.path,),
-            ).fetchone()
-            if chunk_size != (len(chunks), sum(len(text.encode("utf-8")) for text in chunks), 0):
+            if self._exact_chunk_rows(conn, state.path, chunks, identity) != (ordered_chunk_digest(chunks), len(chunks)):
                 return None
             width = identity.dim * 4
-            for number, row in enumerate(conn.execute(
-                "SELECT chunk_idx, chunk_text, length(vector) FROM chunks "
-                "WHERE file_path = ? ORDER BY chunk_idx", (state.path,),
-            )):
-                if row != (number, chunks[number], width):
-                    return None
             columns = OCCURRENCE_COLUMNS
             text_size = " + ".join(
                 f"COALESCE(length(CAST({column} AS BLOB)), 0)"
@@ -1568,6 +1823,10 @@ class EmbeddingIndex:
         """
         paths = sorted({path for path in rel_paths if path})
         target = connection_path if connection_path is not None else self.path
+        if target == self.path:
+            with self._chunk_receipts_lock:
+                for path in paths:
+                    self._chunk_receipts.pop(path, None)
         if not paths or not target.exists():
             return 0
         conn = self._connect(target)
@@ -1634,9 +1893,15 @@ class EmbeddingIndex:
         own_instance: int,
     ) -> None:
         """Drop a multi-path block from a warm matrix only when contiguous."""
+        if cloud_cell.resource_policy() == "service-v1":
+            self._hand_off_matrix_advance()
+            return
         with self._lock:
             cached = self._cache
             if cached is None:
+                return
+            if cached.passage_admitted:
+                self._hand_off_matrix_advance()
                 return
             if (
                 own_epoch != cached.epoch
@@ -1837,9 +2102,15 @@ class EmbeddingIndex:
         `all_vectors()` does a safe full reload. Leaves a cold (`None`) cache
         cold — the next read loads.
         """
+        if cloud_cell.resource_policy() == "service-v1":
+            self._hand_off_matrix_advance()
+            return
         with self._lock:
             c = self._cache
             if c is None:
+                return
+            if c.passage_admitted:
+                self._hand_off_matrix_advance()
                 return
             if own_epoch != c.epoch or own_instance != c.instance or own_gen != c.generation + 1:
                 log.info(
@@ -1894,7 +2165,6 @@ class EmbeddingIndex:
         if cloud_cell.resource_policy() == "service-v1":
             # Explicit audit consumers may read all rows transiently, but they
             # cannot turn subsequent ordinary writes into matrix replacements.
-            self.unload_cache()
             loaded = self._load_all_rows()
             return loaded
         from . import recall_policy
@@ -1912,7 +2182,9 @@ class EmbeddingIndex:
             loading = self._matrix_loading()
             if loading is not None and may_wait:
                 # Wait off the lock for the load already running, never a second one.
-                loading.join()
+                # The load yields to requests, and this one must not count as one.
+                with foreground_priority.awaiting_bulk():
+                    loading.join()
             with self._lock:
                 served = self._serve_or_catch_up_locked(policy_identity)
                 if served is not None:
@@ -1923,30 +2195,35 @@ class EmbeddingIndex:
                 return loaded
 
     def _resident_current(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it is the current publication, read without the lock.
 
-        Counts no use: the idle reaper must not read a publisher's check as a
+        `token` is the sidecar token the caller already read; without it, the token is
+        peeked. Counts no use: the idle reaper must not read a publisher's check as a
         reader.
         """
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
-        served = (
-            sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
-            if c is not None and c.recall_policy_identity == policy_identity
-            else None
-        )
+        if c is None or c.recall_policy_identity != policy_identity:
+            served = None
+        elif token is None:
+            served = sidecar_store.try_serve_cached(c, self.path, nonblocking=nonblocking)
+        else:
+            # The caller read the token in its own snapshot, so no second connection peeks it.
+            served = c if sidecar_store.cache_is_fresh(c, self.path, *token[:3]) else None
         if served is not None and _cache_covers_publication(served, self._identity_token, self._identity):
             return served
         return None
 
     def _serve_resident(
-        self, policy_identity: tuple[str, str], *, nonblocking: bool = False
+        self, policy_identity: tuple[str, str], *, nonblocking: bool = False,
+        token: tuple[int, ...] | None = None,
     ) -> _EmbCache | None:
         """The cache when it serves the current publication, read without the lock."""
-        served = self._resident_current(policy_identity, nonblocking=nonblocking)
+        served = self._resident_current(policy_identity, nonblocking=nonblocking, token=token)
         if served is not None:
             self._hits += 1
         return served
@@ -2090,20 +2367,27 @@ class EmbeddingIndex:
                 policy_identity = recall_policy.recall_policy_identity(self.vault_root)
                 for _attempt in range(3):
                     c = self._cache
-                    if c is None or c.recall_policy_identity != policy_identity:
+                    if c is None or c.recall_policy_identity != policy_identity or (
+                        self._passage_matrix_requested and not c.passage_admitted
+                    ):
                         return False
+                    witness = self._matrix_invalidation
                     fields: dict[str, int] = {}
                     with call_spans.span("embeddings.matrix_catch_up", fields):
                         patched = self._catch_up_cache(c, fields)
                     if patched is None:
                         return False
                     with self._lock:
-                        if self._cache is c:
+                        if self._cache is c and self._matrix_invalidation is witness:
                             self._cache = patched
                             swapped = (c, patched)
                             break
+                        if self._matrix_invalidation is not witness:
+                            return False
+        except passage_matrix.AdmissionDenied:
+            return False  # The streaming loader may fit with less replacement scratch.
         except Exception as e:  # noqa: BLE001 — see the docstring
-            log.warning("embedding matrix catch-up failed (%s); requests take the load path", e)
+            log.warning("embedding matrix catch-up failed (%s); requests take the load path", str(e))
             return False
         if swapped is None:
             return False
@@ -2188,6 +2472,15 @@ class EmbeddingIndex:
                 self._matrix_load = loading
             return loading
 
+    def prepare_passage_matrix(self) -> threading.Thread | None:
+        """Request optional background residency; callers continue scoring on disk."""
+        if not passage_matrix.ceiling() or not self.path.exists():
+            return None
+        self._passage_matrix_requested = True
+        if self._load_backing_off():
+            return self._matrix_loading()
+        return self.start_corpus_matrix_load()
+
     def _matrix_loading(self) -> threading.Thread | None:
         with self._matrix_load_lock:
             loading = self._matrix_load
@@ -2203,13 +2496,24 @@ class EmbeddingIndex:
         raise recall_space.CorpusMatrixCold("corpus matrix is loading")
 
     def _load_corpus_matrix(self) -> None:
+        """Prepare once, with one retry after releasing a stale cache owner's reference."""
+        if self._prepare_corpus_matrix():
+            self._prepare_corpus_matrix()
+
+    def _prepare_corpus_matrix(self) -> bool | None:
         """Read every row off `self._lock`, so writers and recall never wait on the read."""
         from . import recall_policy
 
         # Like every reader here, never create the sidecar it would read.
-        if not self.path.exists() or cloud_cell.resource_policy() == "service-v1":
+        passage = self._passage_matrix_requested
+        if not self.path.exists() or (
+            cloud_cell.resource_policy() == "service-v1" and not passage
+        ) or (passage and not passage_matrix.ceiling()):
             return
+        _ = self.identity  # Observe the initial space before capturing the invalidation witness.
+        witness = self._matrix_invalidation
         started = time.perf_counter()
+        waited = 0.0  # seconds the load paused for requests; what the log reports beside its duration
         try:
             policy_identity = recall_policy.recall_policy_identity(self.vault_root)
             # A resident matrix within the catch-up bound needs only its changed
@@ -2220,6 +2524,8 @@ class EmbeddingIndex:
             for _round in range(CATCHUP_MAX_ROUNDS):
                 advanced = self._advance_matrix()
                 caught_up = self._resident_current(policy_identity)
+                if passage and caught_up is not None and not caught_up.passage_admitted:
+                    caught_up = None
                 if caught_up is not None or not advanced:
                     break
             if caught_up is not None or advanced:
@@ -2242,36 +2548,76 @@ class EmbeddingIndex:
                     (time.perf_counter() - started) * 1000.0,
                 )
                 return
-            loaded = self._load_all_rows()
+            if self._matrix_invalidation is not witness:
+                return
+            before = self._cache
+            # Off `self._lock`: the read yields to a request in flight, which waits on no lock this holds.
+            with foreground_priority.bulk():
+                waited_before = foreground_priority.pass_waited()
+                loaded = self._load_all_rows(admit_passage=True) if passage else self._load_all_rows()
+                waited = foreground_priority.pass_waited() - waited_before
             with self._lock:
+                if self._matrix_invalidation is not witness:
+                    return
                 reason = sidecar_store.reload_reason(self._cache, loaded.epoch, loaded.generation)
-                served = self._serve_or_catch_up_locked(policy_identity)
+                served = self._resident_current(policy_identity) if passage else self._serve_or_catch_up_locked(policy_identity)
+                if passage and served is not None and not served.passage_admitted:
+                    served = None
                 if served is None:
-                    self._cache = loaded
-                    served = self._serve_or_catch_up_locked(policy_identity)
-                if served is None:
+                    if passage:
+                        if self._cache is not before or not _cache_covers_publication(
+                            loaded, self._identity_token, self._identity
+                        ):
+                            raise passage_matrix.AdmissionDenied("publication changed during passage matrix preparation")
+                        self._cache = served = loaded
+                    else:
+                        self._cache = loaded
+                        served = self._serve_or_catch_up_locked(policy_identity)
+                if served is None and not passage:
                     # Writes outran the read and the catch-up bound: read once
                     # more under the lock, which holds the writers' cache patches.
                     served = self._full_load_locked()
+        except passage_matrix.AdmissionDenied:
+            # A stale owner can prevent its own replacement from fitting. Readers
+            # retain their charge; the one bounded retry uses the streaming load.
+            with self._lock:
+                cached = self._cache
+                retire = self._matrix_invalidation is witness and cached is not None and cached.passage_admitted and (
+                    self._resident_current(policy_identity) is None
+                )
+                if retire:
+                    self._cache = None
+                    self._mask_cache = None
+                    self._matrix_invalidation = object()
+            del cached
+            self._matrix_load_failures += 1
+            self._matrix_load_failed_at = time.monotonic()
+            return retire
         except Exception:  # noqa: BLE001 — recall reports the failure until the backoff ends
             self._matrix_load_failures += 1
             self._matrix_load_failed_at = time.monotonic()
-            log.warning("background embedding matrix load failed", exc_info=True)
+            # Optional-load tracebacks can retain a failed preparation's large arrays.
+            if passage:
+                log.warning("background passage matrix load failed; disk scoring remains available")
+            else:
+                log.warning("background embedding matrix load failed", exc_info=True)
             return
         self._matrix_load_failed_at = None
         self._matrix_load_failures = 0
         log.info(
-            "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms",
+            "embedding matrix background load: reason=%s rows=%d gen=%d in %.0f ms, of which %.0f ms waiting for requests",
             reason,
             len(served.metadata),
             served.generation,
             (time.perf_counter() - started) * 1000.0,
+            waited * 1000.0,
         )
 
     def unload_cache(self) -> bool:
         """Drop the resident chunk and unit matrices without deleting sidecar rows."""
         with self._lock:
             loaded = self._cache is not None or self._unit_cache is not None
+            self._matrix_invalidation = object()
             self._cache = None
             self._unit_cache = None
             # The mask memo pins the metadata list by strong reference, so an
@@ -2351,122 +2697,172 @@ class EmbeddingIndex:
         which preserves the row count exactly. The count is a cheap secondary
         cross-check for insert/delete-shaped divergence only.
         """
-        prepare_started = time.perf_counter_ns()
-        try:
-            conn = self._connect()
+        with contextlib.ExitStack() as allocations:
+            prepare_started = time.perf_counter_ns()
             try:
-                conn.execute("BEGIN")
+                conn = self._connect()
                 try:
-                    delta = self._sidecar_delta(conn, c)
-                    if delta is None:
-                        return None
-                    (epoch, gen, instance), changed = delta
-                    replacements: dict[
-                        str, tuple[list[tuple[str, int]], np.ndarray | None]
-                    ] = {}
-                    for path in changed:
-                        rows = conn.execute(
-                            "SELECT chunk_idx, vector FROM chunks "
-                            "WHERE file_path = ? ORDER BY chunk_idx",
-                            (path,),
-                        ).fetchall()
-                        key = sys.intern(path)
-                        replacements[key] = (
-                            [(key, idx) for idx, _blob in rows],
-                            np.stack(
-                                [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
-                                axis=0,
+                    conn.execute("BEGIN")
+                    try:
+                        delta = self._sidecar_delta(conn, c)
+                        if delta is None:
+                            return None
+                        (epoch, gen, instance), changed = delta
+                        total_rows = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                        reservation = None
+                        if c.passage_admitted:
+                            path_bytes = conn.execute(
+                                "SELECT COALESCE(SUM(length(CAST(file_path AS BLOB))), 0) FROM chunks"
+                            ).fetchone()[0]
+                            changed_rows, changed_bytes = conn.execute(
+                                "SELECT COUNT(*), COALESCE(SUM(length(vector)), 0) FROM chunks "
+                                "WHERE file_path IN (SELECT value FROM json_each(?))",
+                                (json.dumps(changed),),
+                            ).fetchone()
+                            # Fetched blobs and replacement stacks overlap the final concatenation.
+                            numerical = total_rows * c.matrix.shape[1] * 4 + 2 * changed_bytes
+                            reservation = allocations.enter_context(passage_matrix._BUDGET.reserve(
+                                numerical,
+                                numerical + passage_matrix.metadata_bytes(total_rows, path_bytes)
+                                + changed_rows * 320 + len(c.metadata) * 16,
+                            ))
+                        replacements: dict[
+                            str, tuple[list[tuple[str, int]], np.ndarray | None]
+                        ] = {}
+                        for path in changed:
+                            rows = conn.execute(
+                                "SELECT chunk_idx, vector FROM chunks "
+                                "WHERE file_path = ? ORDER BY chunk_idx",
+                                (path,),
+                            ).fetchall()
+                            key = sys.intern(path)
+                            replacements[key] = (
+                                [(key, idx) for idx, _blob in rows],
+                                np.stack(
+                                    [np.frombuffer(blob, dtype=np.float32) for _idx, blob in rows],
+                                    axis=0,
+                                )
+                                if rows
+                                else None,
                             )
-                            if rows
-                            else None,
-                        )
-                    total_rows = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+                            if reservation is not None and replacements[key][1] is not None:
+                                reservation.retain(replacements[key][1])
+                            del rows
+                    finally:
+                        conn.rollback()  # read-only txn — release the snapshot
                 finally:
-                    conn.rollback()  # read-only txn — release the snapshot
+                    conn.close()
             finally:
-                conn.close()
-        finally:
-            fields["prepare_us"] = (time.perf_counter_ns() - prepare_started) // 1000
-        fields["paths"] = len(replacements)
-        fields["rows"] = total_rows
-        splice_started = time.perf_counter_ns()
-        try:
-            metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
-        finally:
-            fields["splice_us"] = (time.perf_counter_ns() - splice_started) // 1000
-        if len(metadata) != total_rows:
-            raise ValueError(
-                f"catch-up row count disagrees with the sidecar: {len(metadata)} "
-                f"spliced vs {total_rows} stored (gen {c.generation} -> {gen})"
+                fields["prepare_us"] = (time.perf_counter_ns() - prepare_started) // 1000
+            fields["paths"] = len(replacements)
+            fields["rows"] = total_rows
+            splice_started = time.perf_counter_ns()
+            try:
+                metadata, matrix = _splice_path_blocks(c.metadata, c.matrix, replacements)
+                if reservation is not None:
+                    reservation.retain(matrix)
+            finally:
+                fields["splice_us"] = (time.perf_counter_ns() - splice_started) // 1000
+            if len(metadata) != total_rows:
+                raise ValueError(
+                    f"catch-up row count disagrees with the sidecar: {len(metadata)} "
+                    f"spliced vs {total_rows} stored (gen {c.generation} -> {gen})"
+                )
+            log.info(
+                "embedding matrix catch-up: reason=%s paths=%d rows=%d gen=%d epoch=%d "
+                "cached_gen=%d delta=%d",
+                sidecar_store.CATCHUP_REASON,
+                len(replacements),
+                len(metadata),
+                gen,
+                epoch,
+                c.generation,
+                gen - c.generation,
             )
-        log.info(
-            "embedding matrix catch-up: reason=%s paths=%d rows=%d gen=%d epoch=%d "
-            "cached_gen=%d delta=%d",
-            sidecar_store.CATCHUP_REASON,
-            len(replacements),
-            len(metadata),
-            gen,
-            epoch,
-            c.generation,
-            gen - c.generation,
-        )
-        return _EmbCache(
-            epoch, gen, instance, c.mtime, c.recall_policy_identity, metadata, matrix, c.space
-        )
+            if reservation is not None:
+                del replacements
+            return _EmbCache(
+                epoch, gen, instance, c.mtime, c.recall_policy_identity, metadata, matrix, c.space, passage_admitted=c.passage_admitted
+            )
 
-    def _load_all_rows(self, policy_identity: tuple[str, str] | None = None) -> _EmbCache:
+    def _load_all_rows(
+        self, policy_identity: tuple[str, str] | None = None, *, admit_passage: bool = False
+    ) -> _EmbCache:
         """Load one serving snapshot directly into its final float32 matrix."""
-        with call_spans.span("embeddings.matrix_load.policy"):
-            if policy_identity is None:
-                from . import recall_policy
+        with contextlib.ExitStack() as allocations:
+            with call_spans.span("embeddings.matrix_load.policy"):
+                if policy_identity is None:
+                    from . import recall_policy
 
-                policy_identity = recall_policy.recall_policy_identity(self.vault_root)
-        with call_spans.span("embeddings.matrix_load.connect"):
-            conn = self._connect()
-        try:
-            with call_spans.span("embeddings.matrix_load.snapshot"):
-                conn.execute("BEGIN")
+                    policy_identity = recall_policy.recall_policy_identity(self.vault_root)
+            with call_spans.span("embeddings.matrix_load.connect"):
+                conn = self._connect()
             try:
                 with call_spans.span("embeddings.matrix_load.snapshot"):
-                    snapshot_token = self._build_token(conn)
-                    epoch, gen, instance = snapshot_token[:3]
-                    identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
-                    width = identity.dim if identity is not None else recall_space.current_dim()
-                    count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-                with call_spans.span("embeddings.matrix_load.allocate"):
-                    matrix = np.empty((count, width), dtype=np.float32)
-                    metadata: list[tuple[str, int]] = []
-                fields = {"expected_rows": count, "width_sum": width}
-                with call_spans.span("embeddings.matrix_load.rows", fields):
-                    try:
-                        cursor = conn.execute(
-                            "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
-                        )
-                        for row, (fp, idx, blob) in enumerate(cursor):
-                            if len(blob) != width * np.dtype(np.float32).itemsize:
-                                raise ValueError("embedding row width differs from stored space")
-                            if row >= count:
+                    conn.execute("BEGIN")
+                try:
+                    with call_spans.span("embeddings.matrix_load.snapshot"):
+                        snapshot_token = self._build_token(conn)
+                        epoch, gen, instance = snapshot_token[:3]
+                        identity = recall_space.read_identity(conn, tables=_VECTOR_TABLES)
+                        width = identity.dim if identity is not None else recall_space.current_dim()
+                        count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+                        reservation = None
+                        if admit_passage:
+                            path_bytes = conn.execute(
+                                "SELECT COALESCE(SUM(length(CAST(file_path AS BLOB))), 0) FROM chunks"
+                            ).fetchone()[0]
+                            # Streaming holds one fetched vector blob beside the final matrix.
+                            numerical = (count + 1) * width * 4
+                            reservation = allocations.enter_context(passage_matrix._BUDGET.reserve(
+                                numerical, numerical + passage_matrix.metadata_bytes(count, path_bytes)
+                            ))
+                    with call_spans.span("embeddings.matrix_load.allocate"):
+                        matrix = np.empty((count, width), dtype=np.float32)
+                        if reservation is not None:
+                            reservation.retain(matrix)
+                        metadata: list[tuple[str, int]] = []
+                    fields = {"expected_rows": count, "width_sum": width}
+                    # Never while this thread holds `_lock`: a reader waits on it. The read snapshot is not
+                    # a lock, so a bulk pass may pause on it.
+                    may_yield = not self._lock._is_owned()
+                    # The span counts the pauses for a request as work; `waited_ms` takes them apart.
+                    with call_spans.span("embeddings.matrix_load.rows", fields), foreground_priority.recording_waits(fields):
+                        try:
+                            cursor = conn.execute(
+                                "SELECT file_path, chunk_idx, vector FROM chunks ORDER BY file_path, chunk_idx"
+                            )
+                            for fp, idx, blob in cursor:
+                                if len(blob) != width * np.dtype(np.float32).itemsize:
+                                    raise ValueError("embedding row width differs from stored space")
+                                if len(metadata) >= count:
+                                    raise ValueError("embedding row count differs from snapshot")
+                                matrix[len(metadata)] = np.frombuffer(blob, dtype=np.float32)
+                                del blob  # Release this vector before the next cursor fetch.
+                                metadata.append((sys.intern(fp), idx))
+                                if may_yield and not len(metadata) % MATRIX_LOAD_YIELD_ROWS:
+                                    foreground_priority.yield_in_bulk()
+                            if len(metadata) != count:
                                 raise ValueError("embedding row count differs from snapshot")
-                            matrix[row] = np.frombuffer(blob, dtype=np.float32)
-                            metadata.append((sys.intern(fp), idx))
-                        if len(metadata) != count:
-                            raise ValueError("embedding row count differs from snapshot")
-                    finally:
-                        fields["rows"] = len(metadata)
-                        fields["vector_bytes"] = len(metadata) * width * np.dtype(np.float32).itemsize
+                        finally:
+                            fields["rows"] = len(metadata)
+                            fields["vector_bytes"] = len(metadata) * width * np.dtype(np.float32).itemsize
+                finally:
+                    with call_spans.span("embeddings.matrix_load.release"):
+                        conn.rollback()
             finally:
                 with call_spans.span("embeddings.matrix_load.release"):
-                    conn.rollback()
-        finally:
-            with call_spans.span("embeddings.matrix_load.release"):
-                conn.close()
-        with call_spans.span("embeddings.matrix_load.finalize"):
-            self._observe_identity(identity, snapshot_token)
-            try:
-                mtime = self.path.stat().st_mtime
-            except OSError:
-                mtime = 0.0
-            return _EmbCache(epoch, gen, instance, mtime, policy_identity, metadata, matrix, identity)
+                    conn.close()
+            with call_spans.span("embeddings.matrix_load.finalize"):
+                self._observe_identity(identity, snapshot_token)
+                try:
+                    mtime = self.path.stat().st_mtime
+                except OSError:
+                    mtime = 0.0
+                return _EmbCache(
+                    epoch, gen, instance, mtime, policy_identity, metadata, matrix, identity,
+                    passage_admitted=admit_passage,
+                )
 
     def search(
         self,
@@ -2484,6 +2880,12 @@ class EmbeddingIndex:
             defer_cold_load=defer_cold_load, incomplete_out=incomplete_out,
         ))
 
+    @property
+    def chunk_scoring_mode(self) -> str:
+        """Name the existing backend that selects chunks for this resource profile."""
+        # These are the two scoring backend names, not classifications of content.
+        return "disk" if cloud_cell.resource_policy() == "service-v1" else "resident"
+
     def select_chunks(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
         encoded_for: Any = _UNSPECIFIED_SPACE, defer_cold_load: bool = False,
@@ -2498,6 +2900,196 @@ class EmbeddingIndex:
             query_vec, k, allowed_paths=allowed_paths, encoded_for=encoded_for,
             defer_cold_load=defer_cold_load, defer_text=True, incomplete_out=incomplete_out,
         )
+
+    def page_scorer(self) -> PageScorer | None:
+        """A scorer bound to the matrix that serves now, or None when no resident matrix serves this profile.
+
+        Scoring through it costs O(scored pages' chunks), not O(vault): it scores only those pages' rows, where
+        `_search` scores the whole matrix and masks afterwards. A page `_search` would mask scores nothing: one a
+        lagging matrix holds stale rows for, or the store does not vouch for. It never loads the matrix on the
+        calling thread: a cold one starts the one background load and raises `recall_space.CorpusMatrixCold`.
+        The disk-scoring profile keeps no matrix, so it answers None before reading what the store withholds.
+        """
+        resident = self.require_resident_matrix()
+        if resident is None:
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
+            return None
+        return PageScorer(resident, frozenset(withheld.paths))
+
+
+    def select_passage_chunks(
+        self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
+        encoded_for: Any = _UNSPECIFIED_SPACE, lexical_query: str | None = None,
+    ) -> ChunkSelection:
+        """Prefer a current admitted matrix; otherwise use disk without waiting.
+
+        With `lexical_query`, the top `k` lexical hits of `allowed_paths` are read on the
+        connection and in the snapshot whose token the dense hits carry, and are returned
+        as `lexical`. When the terms do not cover that snapshot, `select_passage_terms`
+        decides whether this request can make them whole.
+        """
+        from . import recall_policy
+
+        fusing = lexical_query is not None and self.path.exists()
+        if fusing and allowed_paths is None:
+            raise ValueError("a lexical passage selection needs its allowed paths")
+        policy = (
+            recall_policy.recall_policy_identity(self.vault_root) if passage_matrix.ceiling() else None
+        )
+        withheld = self._withheld()
+        eligible = set(allowed_paths) - withheld.paths if fusing else set()
+        lexical: list[tuple[str, int, ChunkRef, float]] | None = None
+        resident = None
+        if fusing and policy is not None and not withheld.everything:
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. The one
+            # token it reads proves the matrix current and the lexical hits.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                resident = self._admitted_resident(policy, token)
+                if resident is not None:
+                    lexical = self._passage_terms_at(
+                        conn, token, resident.space, lexical_query, k, eligible
+                    )
+            finally:
+                conn.rollback()
+                conn.close()
+        else:
+            resident = self._admitted_resident(policy)
+        # These are the scoring backend's fixed protocol names, not content categories.
+        mode = "resident" if resident is not None else "disk"
+        if withheld.everything:
+            return ChunkSelection([], mode, [] if fusing else None)
+        if resident is not None:
+            hits = self._score_chunks(
+                query_vec, k, resident.metadata, resident.matrix, resident=resident,
+                allowed_paths=allowed_paths, withheld=withheld, encoded_for=encoded_for,
+                defer_text=True,
+            )
+        else:
+            def lexical_stage(conn: sqlite3.Connection, token: tuple[int, ...], space: Any) -> None:
+                nonlocal lexical
+                lexical = self._passage_terms_at(conn, token, space, lexical_query, k, eligible)
+
+            self.prepare_passage_matrix()
+            with foreground_priority.foreground():
+                hits = self._disk_score(
+                    [query_vec], k,
+                    admits=lambda path: path not in withheld and (
+                        allowed_paths is None or path in allowed_paths
+                    ),
+                    encoded_for=encoded_for, hydrate=True, defer_text=True,
+                    in_snapshot=lexical_stage if fusing else None,
+                )[0]
+        if fusing and lexical is None:
+            lexical = self.select_passage_terms(lexical_query, k, allowed_paths=allowed_paths)
+        return ChunkSelection(hits, mode, lexical)
+
+    def _admitted_resident(
+        self, policy: tuple[str, str] | None, token: tuple[int, ...] | None = None,
+    ) -> _EmbCache | None:
+        """The current matrix when passage search may score it, else None."""
+        if policy is None:
+            return None
+        resident = self._serve_resident(policy, nonblocking=True, token=token)
+        return resident if resident is not None and resident.passage_admitted else None
+
+    def _passage_terms_at(
+        self, conn: sqlite3.Connection, token: tuple[int, ...], space: Any,
+        query: str, k: int, eligible: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical hits under a proof of the caller's snapshot at `token`, or None when the
+        terms do not cover that snapshot."""
+        if token[1] <= 0 or not passage_terms.covered(conn, token[1]):
+            return None
+        proof = ChunkProof(self, token[:3], space)
+        counts = self._terms_counts
+        if counts is None or counts.token != proof.token:
+            counts = passage_terms.Counts(conn, proof.token)
+            self._terms_counts = counts
+        with foreground_priority.foreground():
+            rows = passage_terms.select(conn, query, k, eligible, counts)
+        return [(path, chunk, ChunkRef(proof, path, chunk), score) for path, chunk, score in rows]
+
+    def select_passage_terms(
+        self, query: str, k: int, *, allowed_paths: AbstractSet[str],
+    ) -> list[tuple[str, int, ChunkRef, float]] | None:
+        """Lexical passage hits under a chunk proof, or None while the terms table is not whole.
+
+        A sidecar of at most one backfill batch is made whole inline; a larger one starts
+        the background backfill, and the caller ranks without lexical matching meanwhile.
+        After a failed backfill, neither runs again until the retry delay has passed.
+        """
+        if not self.path.exists():
+            return None
+        withheld = self._withheld()
+        if withheld.everything:
+            return []
+        eligible = set(allowed_paths) - withheld.paths
+        for attempt in range(2):
+            # Read-only, as `chunk_inventory` reads: this ranks and serves no text. Each
+            # passage's text is read again, under the proof, by `matching_chunks`.
+            conn = _sqlite_connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
+            try:
+                conn.execute("BEGIN")
+                token = self._build_token(conn)
+                hits = self._passage_terms_at(
+                    conn, token, recall_space.read_identity(conn, tables=_VECTOR_TABLES),
+                    query, k, eligible,
+                )
+                if hits is not None:
+                    return hits
+                rows_held = int(conn.execute("SELECT count(*) FROM chunks").fetchone()[0])
+            finally:
+                conn.rollback()
+                conn.close()
+            if attempt or rows_held > passage_terms.BACKFILL_ROWS or self._terms_backing_off():
+                break
+            self._backfill_passage_terms()
+        self.prepare_passage_terms()
+        return None
+
+    def prepare_passage_terms(self) -> threading.Thread | None:
+        """Start the one background lexical backfill, or return the one running."""
+        if not self.path.exists():
+            return None
+        with self._terms_lock:
+            running = self._terms_backfill
+            if running is not None and running.is_alive():
+                return running
+            if self._terms_backing_off():
+                return None
+            running = threading.Thread(
+                target=self._backfill_passage_terms, name="exomem-passage-terms", daemon=True
+            )
+            running.start()
+            self._terms_backfill = running
+            return running
+
+    def passage_terms_failed(self) -> bool:
+        """Whether the last lexical backfill failed; the next waits out the retry delay."""
+        return self._terms_failed_at is not None
+
+    def _terms_backing_off(self) -> bool:
+        # A failing backfill rescans every row, so a request does not restart it at once.
+        failed_at = self._terms_failed_at
+        return failed_at is not None and time.monotonic() - failed_at < MATRIX_LOAD_RETRY_SECONDS
+
+    def _backfill_passage_terms(self) -> None:
+        try:
+            conn = self._connect()
+            try:
+                passage_terms.backfill(conn, CHUNK_PATH_LOG)
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError, OpError) as error:
+            self._terms_failed_at = time.monotonic()
+            log.warning("passage terms backfill failed: %s", error)
+            return
+        self._terms_failed_at = None
 
     def _search(
         self, query_vec: np.ndarray, k: int, *, allowed_paths: set[str] | None = None,
@@ -2527,7 +3119,7 @@ class EmbeddingIndex:
                 # The unit lane's witness: an empty answer here proves nothing, so it is no miss.
                 incomplete_out.append(".")
             return []
-        if cloud_cell.resource_policy() == "service-v1":
+        if self.chunk_scoring_mode == "disk":
             # SQLite row fetches release the GIL; cooperative bulk graph work
             # must yield during this read-only scan, which never waits on it.
             # Batched advisory scoring marks only its actual foreground caller.
@@ -2561,6 +3153,18 @@ class EmbeddingIndex:
             metadata, matrix = (
                 (resident.metadata, resident.matrix) if resident is not None else self.all_vectors()
             )
+        return self._score_chunks(
+            query_vec, k, metadata, matrix, resident=resident, allowed_paths=allowed_paths,
+            withheld=withheld, encoded_for=encoded_for, defer_text=defer_text,
+        )
+
+    def _score_chunks(
+        self, query_vec: np.ndarray, k: int, metadata: list[tuple[str, int]],
+        matrix: np.ndarray, *, resident: _EmbCache | None,
+        allowed_paths: set[str] | None, withheld: Withheld,
+        encoded_for: Any, defer_text: bool,
+    ) -> list[tuple[str, int, str | ChunkRef, float]]:
+        """Score one immutable matrix through the ordinary masks and chunk proofs."""
         if not metadata:
             return []
         if defer_text and encoded_for is not _UNSPECIFIED_SPACE:
@@ -2733,11 +3337,14 @@ class EmbeddingIndex:
         self, query_vecs, k: int, *, admits: Callable[[str], bool],
         encoded_for: Any = _UNSPECIFIED_SPACE, hydrate: bool = False,
         defer_text: bool = False,
+        in_snapshot: Callable[[sqlite3.Connection, tuple[int, ...], Any], None] | None = None,
     ) -> list[list[tuple[str, int, str | ChunkRef, float]]]:
-        """Exact eligible top-k with bounded vectors and one scoring snapshot."""
+        """Exact eligible top-k with bounded vectors and one scoring snapshot.
+
+        `in_snapshot` runs once in that snapshot, with its connection, token and space.
+        """
         if not self.path.exists():
             return [[] for _ in query_vecs]
-        self.unload_cache()
         # Fixed phase names form the disk-scoring instrumentation protocol.
         with call_spans.span("embeddings.disk_score.connect"):
             conn = self._connect()
@@ -2752,6 +3359,8 @@ class EmbeddingIndex:
                     recall_space.require_same_space(SimpleNamespace(identity=identity), encoded_for, queries[0])
                 self._observe_identity(identity, token)
                 proof = ChunkProof(self, token[:3], identity) if defer_text and token[1] > 0 else None
+            if in_snapshot is not None:
+                in_snapshot(conn, token, identity)
             answers: list[list[tuple[str, int, float]]] = [[] for _ in queries]
             if k <= 0:
                 return [[] for _ in queries]
@@ -3194,6 +3803,25 @@ class EmbeddingIndex:
             conn.close()
         return out
 
+    def matching_chunks(
+        self, selected: Iterable[tuple[str, int, str | ChunkRef, str | None]],
+    ) -> set[tuple[str, int]]:
+        """Verify selected passage cuts against their published text and generation."""
+        matches: set[tuple[str, int]] = set()
+        by_proof: dict[ChunkProof, list[tuple[str, int, str]]] = {}
+        for path, number, stored, expected in selected:
+            if expected is None:
+                continue
+            if isinstance(stored, str):
+                if stored == expected:
+                    matches.add((path, number))
+            else:
+                by_proof.setdefault(stored.proof, []).append((path, number, expected))
+        for proof, rows in by_proof.items():
+            texts = self._texts_for([(path, number) for path, number, _text in rows], proof=proof)
+            matches.update((path, number) for path, number, expected in rows if texts.get((path, number)) == expected)
+        return matches
+
     def stored_chunks_for(self, rel_path: str) -> tuple[list[str], float | None]:
         """One page's published chunk texts in index order, and the file mtime
         the embedding pass stamped on them.
@@ -3366,9 +3994,7 @@ class EmbeddingIndex:
         conn = self._connect()
         try:
             if paths is None:
-                rows = conn.execute(
-                    "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
-                ).fetchall()
+                rows = conn.execute(_FILE_MTIMES).fetchall()
             else:
                 wanted = sorted(paths)
                 rows = []
@@ -3383,6 +4009,46 @@ class EmbeddingIndex:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
 
+    def incremental_file_states(self) -> dict[str, tuple[float, bool]]:
+        """Join layout receipts into the existing scan of indexed file clocks."""
+        if not self.path.exists():
+            return {}
+        conn = self._connect()
+        try:
+            return {
+                path: (mtime, value == _TRANSCRIPT_LAYOUT_VERSION)
+                for path, mtime, value in conn.execute(
+                    f"SELECT files.file_path, files.file_mtime, meta.value FROM ({_FILE_MTIMES}) AS files "
+                    "LEFT JOIN meta ON meta.key = ? || files.file_path",
+                    (_TRANSCRIPT_LAYOUT_PREFIX,),
+                )
+                if isinstance(path, str) and mtime is not None
+            }
+        finally:
+            conn.close()
+
+    def verify_transcript_layout(self, expected: dict[str, list[str]], *, remember: bool) -> set[str]:
+        """Prove one bounded legacy batch and commit any receipts in the same snapshot."""
+        if not expected or not self.path.exists():
+            return set()
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("BEGIN IMMEDIATE" if remember else "BEGIN")
+                actual: dict[str, list[tuple[int, str]]] = {path: [] for path in expected}
+                for path, index, text in conn.execute(
+                    "SELECT file_path, chunk_idx, chunk_text FROM chunks "
+                    "WHERE file_path IN (SELECT value FROM json_each(?)) ORDER BY file_path, chunk_idx",
+                    (json.dumps(list(expected)),),
+                ):
+                    actual[path].append((index, text))
+                matching = {path for path, chunks in expected.items() if actual[path] == list(enumerate(chunks))}
+                if remember:
+                    _remember_transcript_layout(conn, matching)
+                return matching
+        finally:
+            conn.close()
+
     def semantic_unit_parent_states(
         self,
     ) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
@@ -3396,9 +4062,17 @@ class EmbeddingIndex:
             conn.close()
 
     def all_semantic_unit_vectors(
-        self, *, batch_size: int = SEMANTIC_UNIT_READ_BATCH
+        self,
+        *,
+        batch_size: int = SEMANTIC_UNIT_READ_BATCH,
+        paths: Iterable[str] | None = None,
     ) -> dict[str, list[SemanticUnitVectorRow]]:
         """Every stored occurrence vector, grouped by parent path, in ONE corpus read.
+
+        `paths` limits the read to those parent pages: the caller wants one project's
+        geometry and not the corpus's. The read stays paginated by the same key, in
+        batches of `_PATHS_PER_READ` pages, so a project of any size is read in bounded
+        pieces and never page by page.
 
         The audit's semantic scope-divergence sensor needs a page's unit geometry,
         and nothing here could supply it: `all_vectors()` is the CHUNK matrix
@@ -3428,35 +4102,50 @@ class EmbeddingIndex:
             return {}
         limit = max(1, int(batch_size))
         grouped: dict[str, list[SemanticUnitVectorRow]] = {}
+        if paths is None:
+            scopes: list[tuple[str, list[str]]] = [("", [])]
+        else:
+            wanted = sorted(set(paths))
+            scopes = [
+                (
+                    f"parent_path IN ({','.join('?' * len(batch))}) AND ",
+                    batch,
+                )
+                for batch in (
+                    wanted[start : start + _PATHS_PER_READ]
+                    for start in range(0, len(wanted), _PATHS_PER_READ)
+                )
+            ]
         conn = self._connect()
         try:
-            cursor = ("", "")
-            while True:
-                rows = conn.execute(
-                    "SELECT parent_path, unit_key, source_order, vector, parent_generation "
-                    "FROM semantic_unit_vectors WHERE (parent_path, unit_key) > (?, ?) "
-                    "ORDER BY parent_path, unit_key LIMIT ?",
-                    (*cursor, limit),
-                ).fetchall()
-                if not rows:
-                    break
-                for parent_path, unit_key, source_order, blob, generation in rows:
-                    try:
-                        vector = np.frombuffer(blob, dtype=np.float32)
-                    except (ValueError, TypeError):
-                        # Truncated or non-buffer blob: this row is unreadable, the
-                        # rest of the corpus is not.
-                        continue
-                    if vector.shape != (self.dim,):
-                        continue
-                    grouped.setdefault(str(parent_path), []).append(
-                        SemanticUnitVectorRow(
-                            str(unit_key), int(source_order), vector, str(generation)
+            for scope, scope_args in scopes:
+                cursor = ("", "")
+                while True:
+                    rows = conn.execute(
+                        "SELECT parent_path, unit_key, source_order, vector, parent_generation "
+                        f"FROM semantic_unit_vectors WHERE {scope}(parent_path, unit_key) > (?, ?) "
+                        "ORDER BY parent_path, unit_key LIMIT ?",
+                        (*scope_args, *cursor, limit),
+                    ).fetchall()
+                    if not rows:
+                        break
+                    for parent_path, unit_key, source_order, blob, generation in rows:
+                        try:
+                            vector = np.frombuffer(blob, dtype=np.float32)
+                        except (ValueError, TypeError):
+                            # Truncated or non-buffer blob: this row is unreadable, the
+                            # rest of the corpus is not.
+                            continue
+                        if vector.shape != (self.dim,):
+                            continue
+                        grouped.setdefault(str(parent_path), []).append(
+                            SemanticUnitVectorRow(
+                                str(unit_key), int(source_order), vector, str(generation)
+                            )
                         )
-                    )
-                cursor = (str(rows[-1][0]), str(rows[-1][1]))
-                if len(rows) < limit:
-                    break
+                    cursor = (str(rows[-1][0]), str(rows[-1][1]))
+                    if len(rows) < limit:
+                        break
         finally:
             conn.close()
         for unit_rows in grouped.values():
@@ -3646,6 +4335,7 @@ class EmbeddingIndex:
                         "rebuild_embeddings: serving or source snapshot changed; publication refused"
                     )
                     return 0
+                passage_terms.suspend(conn)
                 conn.execute("DELETE FROM chunks")
                 conn.execute("DELETE FROM semantic_unit_vectors")
                 recall_space.write_identity(conn, producer)

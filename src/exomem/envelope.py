@@ -115,11 +115,10 @@ CONFIRM_SHORTCUT: str = (
 #: current ceiling; it does not exist in v1, and only a deliberate founder
 #: ratification may ever create one. Pinned as its own refusal so it cannot be
 #: shadowed by the generic range refusal, and so the capability cannot drift in
-#: as a convenience.
-FOUNDER_GATE: str = (
-    "standing restructure delegation is absent in v1; founder ratification is required. "
-    "Automatic collections stay refused"
-)
+#: as a convenience. The ratified exceptions are not delegations: creating a
+#: minimal Records collection, and adding fields to a Records collection, inside the bounds of
+#: `automatic_collection` are `proactive_capture`, and the server enforces those bounds on every such write.
+FOUNDER_GATE: str = "standing restructure delegation is absent in v1; founder ratification is required"
 
 # The six actions are closed product operations, not vault vocabulary (O2/R3).
 # Registry saves here mean additive entries; edits to existing meanings stay restructure.
@@ -148,11 +147,11 @@ def _owner_actions(action_class: str) -> str:
 
 # Generate promotion clauses from the map so served prose cannot classify them differently.
 CONFIRM_REQUIRED: str = (
-    "confirm-required: restructure application, collection creation, supersession, entity merge, deletion, "
-    f"{_owner_actions('restructure_execution')}. Deletion has a server confirm parameter; "
+    "confirm-required: restructure application, out-of-bounds or Planning collection creation, supersession, "
+    f"entity merge, deletion, {_owner_actions('restructure_execution')}. Deletion has a server confirm parameter; "
     "adoption apply is preview-first; supersession has no server-side gate yet: future work. Additive owner "
-    f"promotions on v1: {_owner_actions('proactive_capture')} follow proactive_capture. "
-    "Meaning, alias, deprecation and deletion edits stay restructure."
+    f"promotions on v1: {_owner_actions('proactive_capture')}, bounded collection creation and added fields follow "
+    "proactive_capture. Meaning, alias, deprecation and deletion edits stay restructure."
 )
 
 #: The protocol the agent contract teaches for actions covered by the envelope.

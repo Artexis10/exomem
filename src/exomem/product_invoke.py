@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import cli_ops
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 
 
 def _expose_tier2(override: bool | None) -> bool:
@@ -54,7 +54,7 @@ def cli_surface_descriptor(*, expose_tier2: bool | None = None):
         surface="cli",
         profile="product",
         tier2_enabled=tier2,
-        product_commands=tuple(command.public_name for command in registered),
+        product_commands=tuple(command.public_name for command in registered if command.agent_listed),
         compatibility_commands=tuple(command.name for command in registered if command.preferred_name),
         exported_aliases=commands_module.simple_action_names(),
     )
@@ -87,7 +87,7 @@ def resolve_vault_for(op: str, kwargs: dict, vault_root: Path | str | None) -> P
             return root
         raise RuntimeError(
             f"{str(root)!r} does not look like a vault "
-            f"(no schema contract in .exomem/schema/ or {kb_prefix()}_Schema/)"
+            f"(no schema contract in .exomem/schema/ or {managed_join('_Schema/')})"
         )
     try:
         return vault_module.resolve_vault()
@@ -136,8 +136,7 @@ def invoke_prepared(
         state_migration.require_vault_state_ready(root)
     from .vault_store import availability
 
-    # The service's rollout fence: an in-process command must not answer a store-mode vault from
-    # the Markdown that the store replaced, where the service on this build refuses to start.
+    # Local product commands use the same store admission as the service.
     availability.require_servable(root)
     if cmd.needs_schema:
         injected = (root, schema_module.load_source_schema(root))

@@ -25,8 +25,12 @@ Successful product mutations return a compact decisive terminal by default. Its
 first key, `user_summary`, is one plain sentence for the user that names each page by its
 title: `Saved -> <title>`,
 `Updated -> <title>`, `Moved <from> -> <to>`, `Deleted -> <path>`,
-`Replaced -> <new title>, was <old title>`, `Discarded -> <path>` or `Restored -> <path>`.
+`Replaced -> <new title>, was <old title>`, `Discarded -> <path>`, `Restored -> <path>` or
+`Retracted -> <path>`. A Records retraction names the collection page, which stays.
 A tool whose subject is a file names the file by its path instead.
+A move that repointed links in append-only pages adds
+`. Repointed the links to it in <n> append-only pages`, and `pointer_repointed`
+names those pages by title; only their link spans changed.
 Several files read `Saved 3 files -> first.md and 2 more`. A batch with a file that
 failed or was already stored counts each state, and `Saved` covers only the files that
 this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not be saved`,
@@ -37,6 +41,8 @@ carry the codes and reasons. A result whose status is
 that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
+When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds
+` (kept for custody only)` and the Source's frontmatter records `custody_only: true`.
 A refusal carries no `user_summary`; see "Refusals" below. The reply carries only what
 your next call can take: the `title` and short `id` of each page written (`pages` when
 several), the hashes a guarded write takes, any
@@ -67,6 +73,15 @@ more than one independent question? The runtime counts size and claims nothing
 about the page. The field reports nothing about any other page, and it never
 affects `status`, `mutated`, or replay. Nothing is reorganised by the runtime;
 answering is the agent's decision with the user (see `writing.md`).
+Its `kind` is `ownership` while the written page is asked whether it belongs in its
+project and nobody has answered. It holds the review item's `ref`, `fingerprint` and
+`id`, and one `question` that carries the ownership test and the call that keeps the
+page where it is. A response carries one such advisory.
+Its `kind` is `rename` after a write that changed a page's title so that its file name no
+longer follows it. It holds the page's `ref`, its `current_name`, the `planned_name`,
+the spelled-out `call` that renames that page, and an `outcome` sentence. The user's edit
+is the approval. It is absent when the title did not change or the name still follows it,
+and the rename one leads.
 Use `detail="full"` when existing leaf diagnostics are needed under
 `diagnostics`. Detail is presentation-only: changing it
 does not change mutation identity, execute the leaf again, or alter a replayed
@@ -91,6 +106,9 @@ Do not reread solely to confirm a successful commit. Use one bounded final
 verification of the whole requested outcome, and extra reads only when content,
 warnings or missing concurrency guards actually require them.
 
+Only a committed result is a save. A call that could not run, failed in transport,
+or returned no committed result saved nothing; say so, never report it saved.
+
 `graph_sync=pending` and `derived_sync=pending` describe asynchronous work, not a
 failed canonical write. They appear under `diagnostics.operational` and in no
 other part of the reply. Continue independent work and ordinary recall; do not
@@ -114,10 +132,54 @@ identical call: the terminal is persisted before derived-state acknowledgement,
 so the same identity replays the same per-file paths, hashes, `request_id` and
 `receipt_id` without fetching or writing anything again. A retry under a new
 identity is a different mutation, and bytes the vault already holds come back as
-`already_stored` rather than being stored a second time. `scope` and
+`already_stored` rather than being stored a second time. A committed file is never
+reported as `failed` because its receipt reads badly. A row with no readable
+`file_id`, or one that states `failed` itself, is the exception. A field that did
+not read is left out of its row and named in `unverified_fields`, and the row keeps
+its `outcome`. It keeps its `state` when `state` itself read. Every warning is cut
+to 300 characters. A row with more than 8 warnings keeps the first 8, and
+`warnings_omitted` counts the rest. A row that lists `hash` in `unverified_fields`
+has no digest to check. Tell the person the file is kept and its digest is not
+confirmed; never say that it matched. `scope` and
 `category` are each one path segment: a separator, reserved character, control
 character or surrounding whitespace is refused with `INVALID_PRESERVE` naming the
 field, before any handle is fetched, and nothing is silently normalised.
+
+A saved PDF Source carries an `identity` block in its file row. The block says where
+DOIs appear. It never says that the document
+is the work its title names. `state` is one of:
+
+- `no_claim`: the `url` names no DOI.
+- `declared`: the metadata of the PDF holds the DOI of the `url`.
+- `printed`: the first page prints that DOI.
+- `conflict`: the metadata and first page show only other DOIs.
+- `not_shown`: the metadata and first page show no DOI.
+- `unavailable`: the PDF could not be read, and `reason` says why. A scanned PDF is checked again after OCR.
+
+`correctable` says whether this connection may record a Source correction. `false`
+means it cannot, so the reply asks you to tell the person which value is wrong instead
+of offering the correction call; `true` means only that the correction receipt may be
+written — the content-hash and page guards can still refuse. `opening` holds the first
+600 characters of the pages read. `claimed_dois`,
+`declared_dois` and `printed_dois` list the DOIs found. Compare the opening text with
+the work the person asked for. On `conflict` or `not_shown`, the sentence in the reply
+names the finding, and `next_action` is the correction call when this connection may record
+corrections; otherwise it asks you to tell the person which value is wrong. When the document shows
+one DOI, the call names it: correct the Source then, unless the opening text shows a work that cites
+that DOI, and tell the person. Call `save_source` with no files, the document's own `title`, the right
+`url` and
+`options.correction = {supersedes: <ref>, expected_hash: <the page's content hash>, reason}`. The
+correction keeps the stored original, writes one successor Source and leaves the first
+page unchanged. Take the content hash from `read_page` on the Source's ref just before
+the call, because processing may have rewritten the page. A search hit for a corrected Source carries
+`corrected_by` as `{title, path}`, the page that now stands for it. A successor that the
+caller may not read adds nothing.
+
+A note or Evidence write that a Records collection should also hold says so. When the
+reply's `records_routing` files a new item, appends an occurrence or asks, the sentence
+ends "not filed in <collection title>", and `next_action` is the call or the question.
+The note is saved; the Record is not. Do not report the item as filed until the Record
+call returns committed.
 
 A file of a multi-file batch can end `failed` with `MUTATION_BUSY` when the
 boundary stayed busy past the wait before that file began; files stored before
@@ -127,12 +189,31 @@ failed file. Retry the failed files in a new call that names only them, under a
 new identity. This differs from a call-level `MUTATION_BUSY` error, where nothing
 committed and the same identity and payload are retried.
 
+A save can instead return `state: "queued"` with `committed: false` and a
+`queued_write.ref`. The memory was busy, so the service holds the save durably
+and applies it in arrival order. It is not saved yet: tell the user it is
+queued, never that it is saved. Do not resend it; a resend with the same
+identity returns the same receipt. Read its outcome later with the `route`
+the reply gives (`review_memory` mode `queued-write` with that `ref`): it ends
+`applied`, or `failed` with its refusal and the original arguments to correct
+and send again.
+
 `MUTATION_WARMING`, `MUTATION_BUSY`, `MUTATION_ACKNOWLEDGEMENT_PENDING`, and
 `MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN` remain errors, not successful
 terminals. Preserve the same mutation identity and unchanged payload when
 following their `retry`: wait before retrying a warming or busy call; retry a pending
 call only with the same identity; do not submit a new identity after a
 committed-uncertain result—reconcile and retry only as instructed.
+
+A collection write that ends `MUTATION_ACKNOWLEDGEMENT_PENDING` was accepted by the store and
+may still commit. Recover in one of two ways, and never with a new identity or a changed
+payload:
+
+1. Replay the call with the same identity and the same payload. The product returns the
+   recorded result and never writes twice.
+2. Read the collection and the row by its natural key, then write only what is missing.
+
+A read refused `COLLECTION_STORE_BUSY` committed nothing; retry it later.
 
 ## Refusals
 

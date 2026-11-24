@@ -199,6 +199,40 @@ def test_incremental_flush_publishes_one_batch_without_splices(root, monkeypatch
     assert token(index)[1] == before[1] + 2
 
 
+def test_incremental_reconciles_legacy_transcript_only_when_its_rows_change(root, monkeypatch):
+    path = root / "Knowledge Base/Sources/survey.md"
+    path.parent.mkdir()
+    path.write_text("[0:03] The floor was dry.\n[0:19] We shut the gate.\n", encoding="utf-8")
+    rel = path.relative_to(root).as_posix()
+    mtime = path.stat().st_mtime
+    monkeypatch.setattr(embeddings, "embed_texts", lambda texts, **_kwargs: vectors(len(texts)))
+    index = embeddings.get_embedding_index(root)
+    legacy = ["Survey\n\n[0:03] The floor was dry.\n[0:19] We shut the gate."]
+    index.upsert_file(rel, legacy, vectors(1), mtime)
+
+    assert embeddings.index_incremental(root)["files_to_embed"] == 1
+
+    reads = []
+    connect = EmbeddingIndex._connect
+
+    def traced_connect(self, *args, **kwargs):
+        connection = connect(self, *args, **kwargs)
+        connection.set_trace_callback(
+            lambda sql: reads.append(sql) if sql.lstrip().startswith("SELECT") and "chunk_text" in sql else None
+        )
+        return connection
+
+    monkeypatch.setattr(EmbeddingIndex, "_connect", traced_connect)
+    embeddings.clear_embedding_indexes()
+    assert embeddings.index_incremental(root)["chunks_embedded"] == 0
+    assert reads == []
+
+    # An older application can replace the rows without knowing about layout receipts.
+    EmbeddingIndex(root).upsert_file(rel, legacy, vectors(1), mtime)
+    assert embeddings.index_incremental(root)["files_to_embed"] == 1
+    assert reads
+
+
 def test_deferred_replay_retains_all_captured_receipts_after_later_batch_failure(root, monkeypatch):
     from exomem import deferred_index, index_sync, readiness
 

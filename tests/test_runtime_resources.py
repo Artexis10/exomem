@@ -544,7 +544,7 @@ def test_model_busy_is_a_retryable_public_refusal() -> None:
 def test_media_child_defers_model_busy_without_publishing_a_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    job = types.SimpleNamespace(id=7, binary_path=tmp_path / "recording.mp3")
+    job = media_worker.media_jobs.MediaJob(tmp_path / "recording.mp3", tmp_path / "recording.md", "audio", id=7)
     events: list[tuple[str, object]] = []
 
     class Store:
@@ -566,8 +566,8 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
         def claim_next(self, admit=None, *, skip_media_types=()):
             return job
 
-        def defer(self, job_id: int) -> None:
-            events.append(("defer", job_id))
+        def defer(self, deferred: media_worker.media_jobs.MediaJob) -> None:
+            events.append(("defer", deferred))
 
         def clear_worker(self, _pid: int) -> None:
             events.append(("clear", None))
@@ -1101,3 +1101,41 @@ def test_peak_rss_reads_vmhwm_or_else_ru_maxrss_in_the_platforms_unit(
     assert runtime_resources.peak_rss_bytes() == 2048 * 1024, "kilobytes on Linux"
     monkeypatch.setattr(runtime_resources, "sys", types.SimpleNamespace(platform="darwin"))
     assert runtime_resources.peak_rss_bytes() == 2048, "bytes on macOS"
+
+
+@pytest.fixture
+def restore_switch_interval():
+    previous = sys.getswitchinterval()
+    yield
+    sys.setswitchinterval(previous)
+
+
+def test_worker_shortens_the_gil_switch_interval_by_default(
+    monkeypatch: pytest.MonkeyPatch, restore_switch_interval
+) -> None:
+    monkeypatch.delenv(runtime_resources.GIL_SWITCH_ENV, raising=False)
+    assert runtime_resources.configure_gil_switch_interval() == pytest.approx(0.001)
+    assert sys.getswitchinterval() == pytest.approx(0.001)
+
+
+def test_gil_switch_interval_follows_the_environment(
+    monkeypatch: pytest.MonkeyPatch, restore_switch_interval
+) -> None:
+    monkeypatch.setenv(runtime_resources.GIL_SWITCH_ENV, "5")
+    assert runtime_resources.configure_gil_switch_interval() == pytest.approx(0.005)
+
+
+@pytest.mark.parametrize("raw", ["0", "-2", "abc", "nan", "inf"])
+def test_unusable_gil_switch_interval_falls_back_to_the_default(
+    monkeypatch: pytest.MonkeyPatch, restore_switch_interval, raw: str
+) -> None:
+    # sys.setswitchinterval(0) raises; a value that cannot be a duration must not reach it.
+    monkeypatch.setenv(runtime_resources.GIL_SWITCH_ENV, raw)
+    assert runtime_resources.configure_gil_switch_interval() == pytest.approx(0.001)
+
+
+def test_gil_switch_interval_has_a_floor(
+    monkeypatch: pytest.MonkeyPatch, restore_switch_interval
+) -> None:
+    monkeypatch.setenv(runtime_resources.GIL_SWITCH_ENV, "0.0001")
+    assert runtime_resources.configure_gil_switch_interval() == pytest.approx(0.00005)

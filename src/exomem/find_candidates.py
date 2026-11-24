@@ -77,7 +77,8 @@ def _prepare_clip_query(vault_root: Path, query: str) -> PreparedQuery:
             return PreparedQuery(index, non_applicable_reason="no_image_vectors")
         if readiness.should_defer("clip"):
             return PreparedQuery(index, deferred=True)
-        return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
+        with embeddings.query_turn():
+            return PreparedQuery(index, vector=embeddings.embed_clip_text(query))
     except Exception as error:  # noqa: BLE001 - the image lane reports the retained failure.
         return PreparedQuery(error=error)
 
@@ -86,15 +87,16 @@ def prepare_query_inputs(
     vault_root: Path, query: str, *, unit: bool, page: bool, timings: Any = None,
 ) -> PreparedQueryInputs:
     """Run encoders before retaining catalogue rows; replay failures in their lanes."""
-    from . import embeddings, readiness, recall_migration, recall_space, runtime_resources
+    from . import embeddings, readiness, recall_migration, runtime_resources
 
     prepared = PreparedQueryInputs()
 
     def encode(index: Any) -> PreparedQuery:
         identity = getattr(index, "identity", None)
         try:
-            with _span(timings, "vector.embed"), recall_space.encoding_for(index):
-                vector = embeddings.embed_texts([query], is_query=True)[0]
+            # The query's own turn: it never queues behind a bulk batch or a model load on the shared slot.
+            with _span(timings, "vector.embed"):
+                vector = embeddings.encode_query(index, query)
             return PreparedQuery(index, identity, vector)
         except Exception as error:  # noqa: BLE001 - the existing lane classifies this failure.
             return PreparedQuery(index, identity, error=error)
@@ -182,6 +184,7 @@ class CandidateBundle:
     lexical_votes_withheld: dict[str, dict[str, int]] = field(default_factory=dict)
     frame_sources: dict[str, str] = field(default_factory=dict)
     ranking_pages: dict[str, RankingPage | None] = field(default_factory=dict)
+    neutral_prefix: tuple[str, ...] = ()
 
 
 def empty_bundle(
@@ -326,6 +329,7 @@ def collect_candidates(
     temporal: bool,
     intent: str | None,
     prefer_compiled: bool,
+    prefer_source_passages: bool = False,
     prefer_active: bool,
     prefer_used: bool,
     config: RankingConfig,
@@ -459,8 +463,7 @@ def collect_candidates(
                             encoded_for, query_vec = query_vector_provider()
                         else:
                             encoded_for = getattr(idx, "identity", None)
-                            with recall_space.encoding_for(idx):
-                                query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                            query_vec = embeddings.encode_query(idx, query)
                 recall_space.require_same_space(idx, encoded_for, query_vec)
                 sources = [idx]
                 if building is not None:
@@ -1199,6 +1202,14 @@ def collect_candidates(
             missing = {path for path, _score in fused if path not in ranking_pages}
             if missing:
                 ranking_pages.update(ranking_metadata(missing))
+        neutral_prefix = ()
+        if prefer_source_passages:
+            neutral = find_policy.apply_post_rrf_multipliers(
+                fused, query, config, prefer_compiled=False, prefer_active=prefer_active,
+                status_basis=status_basis, type_basis=type_basis, temporal=temporal,
+                page_of=ranking_of, usage_map=usage_map, top_n=3,
+            )
+            neutral_prefix = tuple(path for path, _score in neutral[:3])
         raw_fused_score_by_path = dict(fused) if capture_trace else {}
         multiplier_chain_by_path: (
             dict[str, list[dict[str, float | str]]] | None
@@ -1261,4 +1272,5 @@ def collect_candidates(
         lexical_votes_withheld=lexical_votes_withheld,
         frame_sources=frame_sources,
         ranking_pages=ranking_pages,
+        neutral_prefix=neutral_prefix,
     )

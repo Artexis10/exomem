@@ -104,7 +104,23 @@ def _cache_residency() -> dict[str, Any]:
 
 def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
     from . import index_sync
+    from .vault_store import mode as store_mode
 
+    in_store_mode, unreadable = (
+        (False, None) if vault_root is None else store_mode.store_mode_or_unreadable(vault_root)
+    )
+    if unreadable is not None:
+        return {
+            "state": "unknown",
+            "reason": f"The vault's mode could not be read ({unreadable}), so its index queue is not known.",
+        }
+    if in_store_mode:
+        # Migration leaves file mode's queues where they were and nothing in store mode drains them: the
+        # vectors follow the store's audit trail. Their counts would report work that never runs.
+        return {
+            "state": "not_applicable",
+            "reason": "This vault is in store mode, which keeps no file-mode index queue: its vectors follow the store.",
+        }
     return index_sync.deferred_work_status(vault_root)
 
 
@@ -212,6 +228,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         media_jobs,
         original_fixity,
         runtime_resources,
+        vault_backup,
     )
 
     policy = mode.resolved()
@@ -233,6 +250,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "cuda": cuda_accounting_if_initialized(),
         "dreamer": dreamer.status(),
         "originals": original_fixity.status(vault_root),
+        "vault_backup": vault_backup.status(vault_root),
     }
 
 

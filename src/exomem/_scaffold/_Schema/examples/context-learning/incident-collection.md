@@ -6,7 +6,7 @@ status: inactive-example
 
 This is an inactive schema example, not a collection installed in the vault.
 Reuse a compatible existing incident collection and its returned identity.
-The normal collection proposal and confirmation procedure still applies when no suitable collection exists.
+The Records procedure in `references/planning-records.md` still applies when no suitable collection exists: create a minimal one under the served capture disposition, or propose it.
 The example identifier and field names describe example data, not an existing vault reference or required product vocabulary.
 
 ```yaml

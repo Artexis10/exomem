@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import sys
 import threading
@@ -16,7 +17,7 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,37 @@ def bootstrap() -> ComputePolicy:
     return policy
 
 
+#: CPython hands the GIL to a waiting thread only after the holder has run this long. A request
+#: thread that releases the GIL around each short SQLite or file call waits that long once per
+#: call while any CPU-bound Python thread runs. The served worker runs several such threads (whole-vault
+#: passes), so a save with tens of thousands of calls waited tens of seconds. Measured on a
+#: request-like thread beside three CPU-bound threads: median 3.7 s at the default 5 ms against 32 ms at 1 ms,
+#: at the cost of about a third of the background throughput.
+GIL_SWITCH_ENV = "EXOMEM_GIL_SWITCH_INTERVAL_MS"
+_GIL_SWITCH_DEFAULT_MS = 1.0
+#: Below this the interpreter spends its time switching, not running.
+_GIL_SWITCH_FLOOR_MS = 0.05
+
+
+def configure_gil_switch_interval() -> float:
+    """Shorten the GIL switch interval for a served worker; return the seconds now in force.
+
+    `EXOMEM_GIL_SWITCH_INTERVAL_MS` sets it. Unset, malformed or not finite and positive means the
+    default. A value of 5 restores CPython's own interval.
+    """
+    milliseconds = _GIL_SWITCH_DEFAULT_MS
+    raw = os.environ.get(GIL_SWITCH_ENV, "").strip()
+    if raw:
+        try:
+            parsed = float(raw)
+        except ValueError:
+            parsed = 0.0
+        if math.isfinite(parsed) and parsed > 0:
+            milliseconds = max(parsed, _GIL_SWITCH_FLOOR_MS)
+    sys.setswitchinterval(milliseconds / 1000.0)
+    return sys.getswitchinterval()
+
+
 def configure_torch(torch: Any | None = None) -> None:
     """Apply explicit PyTorch limits when the optional runtime is installed."""
     if torch is None:
@@ -213,6 +245,13 @@ def onnx_share_weights_enabled(env: Mapping[str, str] | None = None) -> bool:
     return value == "1"
 
 
+class StopSignal(Protocol):
+    """What a model-turn wait polls to end early: a `threading.Event`, or any object that answers
+    `is_set()` the same way."""
+
+    def is_set(self) -> bool: ...
+
+
 class ModelBusyError(RuntimeError):
     """Retryable refusal when admitted model work would consume general capacity."""
 
@@ -277,7 +316,7 @@ class ModelAdmissionGate:
     @contextlib.contextmanager
     def execution(
         self, *, wait: bool = True, work_class: str | None = None,
-        cancel_event: threading.Event | None = None,
+        cancel_event: StopSignal | None = None,
     ):
         with self.admission():
             if self._fair:
@@ -303,7 +342,7 @@ class ModelAdmissionGate:
         return foreground
 
     @contextlib.contextmanager
-    def _fair_execution(self, *, wait: bool, work_class: str, cancel_event: threading.Event | None):
+    def _fair_execution(self, *, wait: bool, work_class: str, cancel_event: StopSignal | None):
         if work_class not in {"foreground", "bulk"}:
             raise ValueError("unknown model work class")
         owner = threading.get_ident()
@@ -372,9 +411,9 @@ def _process_gate() -> ModelAdmissionGate:
         return _gate
 
 
-def model_execution(*, wait: bool = True):
+def model_execution(*, wait: bool = True, cancel_event: StopSignal | None = None):
     """Return the process-wide model gate for an embedding, reranker, CLIP, or ASR call."""
-    return _process_gate().execution(wait=wait)
+    return _process_gate().execution(wait=wait, cancel_event=cancel_event)
 
 
 def model_admission():
@@ -545,6 +584,9 @@ class SemanticPreparation:
         # Title duplication is charged at UTF-8 width; strings can use four
         # bytes per codepoint. Eight vector copies cover retained encode parts,
         # concatenation/reuse assembly, both projections and publication blobs.
+        # Pass the width only before a chunker that encodes: otherwise
+        # check_projections charges the vectors of the actual cut before any
+        # encode, and this bound would refuse a page whose real vectors fit.
         lines = _source_line_bound(self.source)
         body = page.body or ""
         chunks = body.count("\n") + (len(body) + 249) // 250 + 1

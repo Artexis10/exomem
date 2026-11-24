@@ -12,7 +12,6 @@ import json
 import logging
 import shutil
 import sqlite3
-import sys
 import time
 from contextlib import closing
 
@@ -38,10 +37,6 @@ from exomem import (
 )
 from exomem.collection_store import admission, connection, replica, schema
 from exomem.vault_store import availability, marker, mode
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 
 @pytest.fixture
@@ -630,6 +625,10 @@ def test_a_holder_that_returns_after_a_release_reads_displaced_and_does_not_repu
     released = decision_in_store(vault)
     as_root(monkeypatch, tmp_path, "service", state="state")
 
+    error = refused(vault)
+    assert error.code == "VAULT_STORE_CLAIM_DISPLACED"
+    assert "exomem store-mode rollback --apply --export-held" in error.reason
+
     admit_after_the_lease_expires(vault)
 
     assert marker.read_replica(vault).state == marker.CLEAR
@@ -639,7 +638,7 @@ def test_a_holder_that_returns_after_a_release_reads_displaced_and_does_not_repu
     check = doctor._check_vault_store_records(vault)
     assert check.status == "warn"
     assert "no longer stands" in check.message
-    assert rollback_apply(vault, tmp_path / "export") == 0
+    assert rollback_apply(vault, tmp_path / "export", "--export-held") == 0
     assert marker.read_replica(vault).order.decision == released
     assert decision_in_store(vault) == released
     as_root(monkeypatch, tmp_path, "other", state="other-state")
@@ -676,6 +675,10 @@ def test_a_takeover_republishes_a_replica_decision_that_this_build_cannot_read(
     with closing(sqlite3.connect(replica.replica_path(vault))) as copy:
         copy.execute("UPDATE store_meta SET value = ? WHERE key = ?", (newer, marker.DECISION_KEY))
         copy.commit()
+    error = refused(vault)
+    assert error.code == "VAULT_STORE_CLAIM_UNKNOWN"
+    assert "exomem store-mode rollback --apply --export-held" in error.reason
+
     as_root(monkeypatch, tmp_path, "other", state="other-state")
     assert not marker.read_replica(vault).order.known
     assert refused(vault).code == availability.STORE_ELSEWHERE

@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 
 from .. import query_data
-from ..query_compat import DEFAULT_OP, OPS, VERSION, QueryDataError
+from ..query_compat import DEFAULT_DATE_COLUMN, DEFAULT_OP, OPS, VERSION, QueryDataError
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ def normalize(*, columns_available, filters=None, columns=None, sort_by=None,
             raise QueryDataError("BAD_OP", f"unknown op {predicate.get('op')!r}; allowed: {sorted(OPS)}")
         predicates.append(predicate)
     available = tuple(columns_available)
-    date_col = date_column or ("date" if "date" in available else None)
+    date_col = date_column or (DEFAULT_DATE_COLUMN if DEFAULT_DATE_COLUMN in available else None)
     notices = list(warnings or ())
     if (date_from or date_to) and not date_col:
         notices.append("date_from/date_to ignored: no date column found (pass date_column=)")

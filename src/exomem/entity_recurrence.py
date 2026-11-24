@@ -55,7 +55,7 @@ from .entity_candidates import _aliases as alias_values
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry
 from .find_corpus import NAVIGATION_BASENAMES
-from .kbdir import kb_prefix
+from .kbdir import managed_join
 from .vault import (
     AmbiguousWikilinkError,
     UnresolvedWikilinkError,
@@ -269,7 +269,7 @@ def entities_prefix() -> str:
     person, a profile naming its own affiliations — so counting those links
     would measure the registry's shape rather than the corpus's attention.
     """
-    return f"{kb_prefix()}Entities/"
+    return managed_join("Entities/")
 
 
 @dataclass(frozen=True, slots=True)

@@ -581,7 +581,9 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-tools
-          sparse-checkout: infra/scripts
+          sparse-checkout: |
+            infra/scripts
+            scripts/image-licences
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -593,6 +595,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A dry run pushes nothing, so it has no image for the licence check to read.
+      - name: Install the pinned trivy
+        if: ${{ env.DRY_RUN != 'true' }}
+        run: .release-tools/scripts/ci-install-trivy.sh
 
       - name: Resolve image version from the release tag
         id: meta
@@ -639,6 +646,7 @@ jobs:
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CLOUD }}-${{ matrix.arch }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}-{1}', env.IMAGE_CACHE_CLOUD, matrix.arch) || '' }}
@@ -656,17 +664,34 @@ jobs:
           outputs: type=image,name=ghcr.io/artexis10/exomem-cellctl,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CELLCTL }}-${{ matrix.arch }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}-{1}', env.IMAGE_CACHE_CELLCTL, matrix.arch) || '' }}
 
+      # An image that fails its licence check keeps no digest, so the publisher
+      # cannot join, attest or tag it.
+      - name: Check the Python distribution licences of the native cloud image
+        id: cloud-licences
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cloud-build.outcome == 'success' }}
+        env:
+          IMAGE: ghcr.io/artexis10/exomem@${{ steps.cloud-build.outputs.digest }}
+        run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
+
+      - name: Check the Python distribution licences of the native cellctl image
+        id: cellctl-licences
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cellctl-build.outcome == 'success' }}
+        env:
+          IMAGE: ghcr.io/artexis10/exomem-cellctl@${{ steps.cellctl-build.outputs.digest }}
+        run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
+
       - name: Retain successful native image digests
         id: digests
-        if: ${{ !cancelled() && env.DRY_RUN != 'true' && (steps.cloud-build.outcome == 'success' || steps.cellctl-build.outcome == 'success') }}
+        if: ${{ !cancelled() && env.DRY_RUN != 'true' && (steps.cloud-licences.outcome == 'success' || steps.cellctl-licences.outcome == 'success') }}
         env:
           ARCH: ${{ matrix.arch }}
-          CLOUD_DIGEST: ${{ steps.cloud-build.outcome == 'success' && steps.cloud-build.outputs.digest || '' }}
-          CELLCTL_DIGEST: ${{ steps.cellctl-build.outcome == 'success' && steps.cellctl-build.outputs.digest || '' }}
+          CLOUD_DIGEST: ${{ steps.cloud-licences.outcome == 'success' && steps.cloud-build.outputs.digest || '' }}
+          CELLCTL_DIGEST: ${{ steps.cellctl-licences.outcome == 'success' && steps.cellctl-build.outputs.digest || '' }}
         run: |
           mkdir -p native-image-digests
           if [[ -n "$CLOUD_DIGEST" ]]; then
@@ -721,6 +746,7 @@ jobs:
           sparse-checkout: |
             infra/scripts
             infra/helm/platform/files/image-admission-v1.json
+            scripts/image-licences
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -733,6 +759,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A dry run pushes nothing, so it has no image for the licence check to read.
+      - name: Install the pinned trivy
+        if: ${{ env.DRY_RUN != 'true' }}
+        run: .release-tools/scripts/ci-install-trivy.sh
 
       - name: Resolve image version from the release tag
         id: meta
@@ -783,12 +814,24 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_LEAN) || '' }}
 
+      - name: Check the Python distribution licences of the lean image
+        id: lean-licences
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).lean.publish && env.DRY_RUN != 'true' && steps.lean-build.outcome == 'success' }}
+        env:
+          IMAGE: ghcr.io/artexis10/exomem@${{ steps.lean-build.outputs.digest }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            .release-tools/scripts/check-image-licences.sh --platform "$platform" "$IMAGE"
+          done
+
       - name: Attest the exact lean image
         id: lean-attestation
-        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).lean.publish && env.DRY_RUN != 'true' && steps.lean-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).lean.publish && env.DRY_RUN != 'true' && steps.lean-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-name: ghcr.io/artexis10/exomem
@@ -824,12 +867,24 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
           cache-to: ${{ env.DRY_RUN != 'true' && format('type=gha,mode=max,scope={0}', env.IMAGE_CACHE_ML) || '' }}
 
+      - name: Check the Python distribution licences of the ml image
+        id: ml-licences
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).ml.publish && env.DRY_RUN != 'true' && steps.ml-build.outcome == 'success' }}
+        env:
+          IMAGE: ghcr.io/artexis10/exomem@${{ steps.ml-build.outputs.digest }}
+        run: |
+          for platform in linux/amd64 linux/arm64; do
+            .release-tools/scripts/check-image-licences.sh --platform "$platform" "$IMAGE"
+          done
+
       - name: Attest the exact ml image
         id: ml-attestation
-        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).ml.publish && env.DRY_RUN != 'true' && steps.ml-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).ml.publish && env.DRY_RUN != 'true' && steps.ml-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-name: ghcr.io/artexis10/exomem
@@ -865,12 +920,21 @@ jobs:
           provenance: mode=min,version=v0.2
           sbom: true
           outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
           # Cache export added 27 minutes after the build and push took five minutes.
 
+      - name: Check the Python distribution licences of the cuda image
+        id: cuda-licences
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cuda.publish && env.DRY_RUN != 'true' && steps.cuda-build.outcome == 'success' }}
+        env:
+          IMAGE: ghcr.io/artexis10/exomem@${{ steps.cuda-build.outputs.digest }}
+        run: .release-tools/scripts/check-image-licences.sh --platform linux/amd64 "$IMAGE"
+
       - name: Attest the exact cuda image
         id: cuda-attestation
-        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cuda.publish && env.DRY_RUN != 'true' && steps.cuda-build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cuda.publish && env.DRY_RUN != 'true' && steps.cuda-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
           subject-name: ghcr.io/artexis10/exomem

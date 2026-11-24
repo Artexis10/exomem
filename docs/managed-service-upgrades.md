@@ -369,15 +369,18 @@ while [ ! -e /tmp/xr/stop-probes ]; do
 done
 ```
 
-The check looks for success, not for each kind of failure. A read passes
-when its line holds `"isError":false` and no `"success":false`. A write passes
-when its line holds `"state":"committed"`. A refused call still returns a
-normal `"result"`, so the absence of an error is not proof that a call
-succeeded. A search refused while an index rebuilds is one example. The check
-command prints the failed reads, then the failed writes; expect both to be 0:
+The check parses each reply with `jq` and looks for success, not for each kind
+of failure. A read passes when its `result` has `isError` false and no object
+in it has `success` false. A write passes when its `structuredContent` names the
+saved episode (an `episode` starting `ep-`) and holds no `error`. A refused call
+still returns a normal `result`, so the absence of an error is not proof that a
+call succeeded. A search refused while an index rebuilds is one example. A line
+that is not JSON fails. The check command prints one count line for reads and
+one for writes; expect `0 failed of N`, where N is the number of probe pairs.
+No output means the check did not run, for example because `jq` is missing:
 
 ```sh
-awk '$2 == "read" && (!/"isError":false/ || /"success":false/)' /tmp/xr/calls.log | wc -l; awk '$2 == "write"' /tmp/xr/calls.log | grep -vc '"state":"committed"'
+awk '$2 == "read"' /tmp/xr/calls.log | jq -Rnr '[inputs | sub("^[^{]*"; "") | try (fromjson | .result | .isError == false and ([.. | objects | select(.success == false)] | length == 0)) catch false] | "reads: \(map(select(not)) | length) failed of \(length)"'; awk '$2 == "write"' /tmp/xr/calls.log | jq -Rnr '[inputs | sub("^[^{]*"; "") | try (fromjson | .result.structuredContent | (.episode // "" | startswith("ep-")) and .error == null) catch false] | "writes: \(map(select(not)) | length) failed of \(length)"'
 ```
 
 The worker also inherits the user manager's environment. Run `systemctl --user
@@ -568,11 +571,28 @@ A promoted worker runs its own warm-up, and subtracts from it whatever its
 standby already finished in the same process and promotion either re-verified or
 cannot invalidate. `carried_from_standby` on the `cutover` block and on the
 promotion record names what was subtracted, and the worker's `warm complete` log
-line repeats it. The graph handoff is carried only when the promotion verdict is
-`current`: the snapshot the standby proved is still on disk, or promotion
-re-proved the one the old worker published after that proof. An `advanced`,
-`unproven` or `rebuild-after-promotion` verdict leaves it out, and the adoption
-runs again in full while the writers' gate refuses writes. What remains after a
+line repeats it. A `current` graph promotion carries both `graph_handoff` and
+`startup_validation`. The worker arms its normal file watcher after taking ownership.
+Promotion then replays the source proof and binds it to that observer.
+The watcher seeds from disk and replays its buffered events without repeating the graph proof.
+If that observer stops or changes before startup finishes, the worker proves the sources again.
+
+If the proof finds a bounded set of changed pages, `residue_applied` records
+the number queued for repair. Graph reads wait for the drain to publish those rows.
+If observation or proof cannot complete, `startup_validation` is `pending`.
+Startup proves the graph origin through the normal recovery path.
+Any canonical writes that reach graph dispatch in the meantime queue their graph work.
+When the canonical floor and checkpoint agree, a full graph rebuild can replace a damaged metadata table.
+If startup encounters fatal SQLite corruption while reading the graph, graph reads stay fenced and rebuild debt remains.
+The startup log reports `graph_sidecar_requires_replacement`.
+Touching or rewriting the same file, or changing its companions, does not release this fence.
+Offline replacement requires closed readers and writers, a distinct main file, and compatible WAL or journal state.
+Restore or replace the damaged graph family offline before downgrading from a worker that recorded this fault.
+Older releases ignore the recorded data-family attestation.
+A quarantine can settle an exact checkpoint after the drain proves the held page's
+admission and topology. The graph retains that page's last-readable rows. The
+write reports pending graph repair, and the doctor reports the quarantine.
+What remains after a
 carried promotion is the retrieval catalog check and any model the standby's
 preload policy did not load. When promotion adopted a catalog the standby built
 detached, `carried_from_standby` names `catalogue_handoff` and not `lexical`: the
@@ -642,7 +662,8 @@ match and the manifest is complete, the step is recorded as skipped:
 {"handoff": {"standby": "ready",
              "migration": {"state": "skipped", "reason": "declared_none"},
              "promotion": {"snapshot": "current",
-                           "revalidated": true, "reproved": false}}}
+                           "startup_validation": "carried",
+                           "revalidated": true, "reproved": true}}}
 ```
 
 `handoff.unavailable_ms` is the window nobody was served in — pause to resume —
@@ -674,33 +695,25 @@ precisely the one worth reading closely, so neither value overwrites the other.
 manifest state that was not complete) when it runs. `promotion.snapshot` is
 `current` when the checkpoint this process adopted is the one on disk,
 `advanced` when it moved and promotion could not re-prove it, and
-`rebuild-after-promotion` when the migrated re-proof failed — in that last case
-promotion still proceeds and the coalesced rebuild path owns the repair. It is
-`unproven` when the standby's proof declined the snapshot outright, for example
-because the graph sidecar has an older schema than the build; promotion then
-records the decline reason in `promotion.proof_declined`, and the promoted
-worker runs the whole graph handoff.
+`rebuild-after-promotion` when promotion cannot seal the inherited proof.
+Promotion still proceeds and startup takes over graph recovery.
+It is `unproven` when the standby could not prove the snapshot, for example
+because the graph sidecar uses an older schema.
+`promotion.proof_declined` records the standby's reason.
 
-`promotion.revalidated` says promotion re-checked the snapshot at all;
-`promotion.reproved` says it re-ran the source proof. With a migration it re-runs
-the whole proof, because the migrator may have rewritten what the standby proved.
-Without one, promotion compares the checkpoint pair — a real re-validation
-against the one writer the sequence has not already excluded. A whole source
-proof would add seconds to the one window this sequence exists to shorten.
-
-When the pair moved, the old worker published after the standby's proof, which
-is the usual case under live writes. Promotion then re-proves the snapshot on
-disk from the page reads of the standby's proof. Each of its one or two rounds
-walks the vault once and checks the stat of every page. It reads again only the
-pages that moved since, where the stat generation binds a page's bytes. On
-Windows, and for a page written less than 2 s before its read, the check reads
-the page's bytes again. An adoption records `current` with `reproved: true`.
+`promotion.revalidated` says promotion checked the graph checkpoint.
+`promotion.reproved` says it ran the source proof after arming observation.
+A migration runs the whole proof because it may have rewritten state.
+Otherwise the proof starts with the standby's guarded reads, even when the
+checkpoint pair matches. Each round rechecks membership and every page guard.
+It re-reads pages whose guards moved or cannot bind the bytes.
+On Windows, a guard checks the page's bytes again.
 
 The supervisor sends the budget of its promotion request as `request_seconds`
 in the request body, at most 30 s. The re-proof may spend 40% of that budget,
 so at most 12 s, and it stops at the first page it reaches after that. A decline
-records `advanced` with the reason in `promotion.reproof_declined`, for example
-`proof_deadline_passed`, and the promoted worker runs the handoff in full. On a
+records its reason in `promotion.reproof_declined`, such as `proof_deadline_passed`.
+The promoted worker then proves its own graph origin during startup. On a
 synthetic 13,000-page vault, on a host at load 8, the re-proof of one moved
 page took 2.2 to 2.6 s.
 
@@ -747,6 +760,62 @@ before the upgrade, as "A release that changes the collection store's schema" in
 `docs/deployment.md` describes.
 
 ### A supervisor older than the vault's state
+
+Shared original storage and held-upload cancellation also require lifecycle
+support from the launcher and the upgrade operator. A new worker alone cannot
+activate either format. The worker accepts support only through its launch
+arguments; an inherited environment setting cannot supply it. Update an older
+launcher through the offline maintenance procedure before you convert
+originals or cancel held uploads. Until then, a conversion refuses with
+`ORIGINAL_POOL_LIFECYCLE_REQUIRED` and moves nothing.
+
+A new archive records that it starts in shared original storage. The first
+worker start with launcher support turns that storage on before the worker
+serves a request. A standby has no launcher support, so a promoted worker
+turns it on at promotion. Behind an older launcher, the worker keeps the new
+archive in ordinary storage and keeps the record. Its startup log and the
+`original_storage` block of `/health/ready` name the fix: update the launcher,
+then restart the service. Originals filed before then keep their ordinary
+files.
+
+An archive can keep its originals in shared storage while its state does not
+record that format, for example after a plain folder copy or a Cloud import.
+A worker with launcher support records the format at its start. Behind an
+older launcher, the worker refuses to start with
+`SHARED_ORIGINALS_LAUNCHER_UPDATE_REQUIRED`, because an older release would
+read the archive's originals as missing. Update the launcher, then restart the
+service.
+
+#### Rollback floor for shared original storage
+
+An archive or Cloud cell created on this release or a later one records
+shared original storage once that storage turns on. A release without shared
+storage then refuses it at startup. To recover, roll forward to this release
+or a later one. To move the archive to an earlier release instead, make a
+compatibility export, as "Downgrade to a release without shared storage" in
+`docs/deployment.md` describes.
+
+An upgrade never changes the format of an existing archive or cell. Only the
+owner's conversion moves an existing archive into shared storage. Until that
+conversion, shared storage never stops an archive created before this release
+from returning to an earlier release.
+
+An upgrade that removes cancellation support first stops the serving worker
+and its descendants. The current interpreter then finishes cancellation
+markers within the maintenance budget. The supervisor inspects the target
+again before admission. Interrupted cleanup retains the format requirement
+and the compatible interpreter for recovery.
+
+Cancellation cleanup retires only its temporary-upload requirement. It cannot
+remove any other recorded format requirement.
+
+A standalone server, including a Cloud cell, is its own launcher, so it can
+convert originals and cancel held uploads without this update. An older
+release refuses an archive in shared original storage, and no offline cleanup
+removes that format. An older release also refuses a vault that recorded the
+cancellation format. Before you start an older release on that
+vault, stop the server, then run
+`exomem maintain --vault VAULT --migrate-state --offline --cleanup-held-upload-cancellations`.
 
 A worker records each optional state format that it uses in the vault's state
 manifest, for example the schema of a migrated collection store. The supervisor

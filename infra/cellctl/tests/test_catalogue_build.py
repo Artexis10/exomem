@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace as NS
 
 import pytest
+import yaml
 
 from cellctl import main, reconcile
 from cellctl.catalogue_build import BuildConfig, BuildJob
@@ -18,6 +19,7 @@ from cellctl.k8s_client import ClusterClient
 from cellctl.manifests import (
     CATALOGUE_BACKUP_EXCLUDES,
     CATALOGUE_BUILD_NODE_ANNOTATION,
+    HOLD_ANNOTATION,
     JOB_KIND_CATALOGUE_BUILD,
     JOB_KIND_LABEL,
     CellManifestSpec,
@@ -32,7 +34,7 @@ from cellctl.manifests import (
 from cellctl.state import SNAPSHOT_BACKUP, CellRow, ClusterObservation, RolloutRow
 from cellctl.upgrade_window import Idle, WindowConfig, is_due
 
-from .test_platform_chart_headers import _find, _helm_template
+from .test_platform_chart_headers import PLATFORM_CHART, _find, _helm_template
 from .test_reconcile import IMAGE_A, IMAGE_B, FakeClusterGateway, _cluster_config
 
 NOW = datetime(2026, 1, 1, 16, 5, tzinfo=UTC)
@@ -138,7 +140,11 @@ def test_enabled_chart_delivers_profile_timeout_admission_and_quota_together(mon
     for entry in env:
         if entry["name"].startswith("CELLCTL_CATALOGUE_"):
             monkeypatch.setenv(entry["name"], entry["value"])
-    assert main.build_catalogue_prewarm() == BuildConfig(PROFILE, 1800)
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))["cellctl"]
+    chart = values["catalogueBuildResources"]
+    expected = ResourceSettings(chart["requests"]["cpu"], chart["limits"]["cpu"],
+                                chart["requests"]["memory"], chart["limits"]["memory"])
+    assert main.build_catalogue_prewarm() == BuildConfig(expected, values["catalogueBuildTimeoutSeconds"])
     scope = _find(docs, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     rules = "\n".join(rule["expression"] for rule in scope["spec"]["validations"])
     assert "^catalogue-build-[0-9a-f]{16}$" in rules
@@ -333,6 +339,124 @@ async def test_forced_attempt_waits_for_build_pods_before_stop_without_resetting
         assert fleet.config.upgrade_stall_bound == timedelta(minutes=30)
         malformed_warnings = [record for record in caplog.records if "malformed catalogue cancellation" in record.message]
         assert len(malformed_warnings) == int(cancellation_record is not None)
+    finally:
+        await fleet.close()
+
+
+async def test_an_attempt_started_beside_a_finished_build_leaves_no_hold_once_it_is_ready(cell_db):
+    """The start that cancels a build records its hold by patch, and server-side apply keeps keys that
+    a patch owns. Without their removal, the pass after the Ready exit resumes a half-cleared attempt
+    and stops the upgraded cell on its previous image."""
+    from .test_reconcile import _ATTEMPT_SNAPSHOT
+    from .test_rollout_automation import (
+        IDLE,
+        OWNER,
+        TENANT,
+        _annotations,
+        _image,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        cluster.readiness[TENANT] = IDLE
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+        # A build Job has no TTL, so a finished build is still there when the attempt starts.
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, succeeded=True)
+        cluster.builds[namespace_name(TENANT)] = (job,)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        patched = [event[2] for event in cluster.events if event[0] == "patch_annotations" and "exomem.io/hold" in event[2]]
+        assert len(patched) == 1 and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        cluster.builds.clear()  # The next census shows the cancelled Job gone.
+        for seconds, overrides in ((5, {}), (10, {}), (15, {"backup_job_succeeded": True,
+                                                            "backup_job_snapshot_id": _ATTEMPT_SNAPSHOT}),
+                                   (20, {}), (25, {})):
+            _observe(cluster, TENANT, pod_node="worker-one", **overrides)
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        # The Ready exit landed: the target serves, and the key only the apply owned is gone.
+        assert _image(cluster, TENANT) == IMAGE_B and "exomem.io/target-applied-at" not in _annotations(cluster, TENANT)
+        cluster.events.clear()
+        for seconds in (30, 35, 40):
+            _observe(cluster, TENANT, pod_node="worker-one")
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not set(patched[0]) & set(_annotations(cluster, TENANT))
+        assert ("apply_statefulset", namespace_name(TENANT), 0) not in cluster.events
+        assert _image(cluster, TENANT) == IMAGE_B and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+    finally:
+        await fleet.close()
+
+
+@pytest.mark.parametrize("method, fails", [
+    ("patch_statefulset_annotations", lambda namespace, annotations: HOLD_ANNOTATION in annotations
+     and annotations[HOLD_ANNOTATION] is None),
+    ("apply_all", lambda manifests: manifests[0]["kind"] == "StatefulSet"),
+], ids=["the-hold-removal", "the-apply-after-it"])
+async def test_one_failed_write_after_a_patched_start_still_converges(cell_db, method, fails):
+    """After a patched start, the next StatefulSet apply first removes the patched hold keys. One API
+    503 on that removal, or on the apply after it, once stopped the upgraded cell again or left it stopped
+    until the stall bound paused the rollout. Either failure must leave a serving cell that the next
+    passes upgrade once."""
+    from kubernetes.client.rest import ApiException
+
+    from cellctl.manifests import UPGRADE_START_ANNOTATION_KEYS
+
+    from .test_reconcile import _ATTEMPT_SNAPSHOT
+    from .test_rollout_automation import (
+        IDLE,
+        OWNER,
+        TENANT,
+        _annotations,
+        _image,
+        _observe,
+        _statefulset,
+        _windowed_fleet,
+    )
+
+    fleet = await _windowed_fleet(cell_db, TENANT)
+    cluster = BuildCluster()
+    cluster.__dict__.update(fleet.cluster.__dict__)
+    fleet.cluster = cluster
+    try:
+        cluster.readiness[TENANT] = IDLE
+        await fleet.admin.execute("UPDATE exomem_cloud_cells SET desired_image=$1 WHERE cell_id=$2", IMAGE_B, TENANT)
+        for _ in range(3):
+            await fleet.run(NOW.replace(hour=15), cluster_config=CONFIG)
+            _observe(cluster, OWNER, TENANT, pod_node="worker-one")
+        job = BuildJob(catalogue_build_name(IMAGE_B), IMAGE_B, "worker-one", NOW, succeeded=True)
+        cluster.builds[namespace_name(TENANT)] = (job,)
+        await fleet.run(NOW, cluster_config=CONFIG)
+        cluster.builds.clear()
+        call, failures = getattr(cluster, method), [ApiException(status=503)]
+
+        def fail_once(*args):
+            if failures and fails(*args):
+                raise failures.pop()
+            return call(*args)
+
+        setattr(cluster, method, fail_once)
+        for seconds, overrides in ((5, {}), (10, {}), (15, {}), (20, {"backup_job_succeeded": True,
+                                                                     "backup_job_snapshot_id": _ATTEMPT_SNAPSHOT}),
+                                   (25, {}), (30, {})):
+            _observe(cluster, TENANT, pod_node="worker-one", **overrides)
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not failures and _image(cluster, TENANT) == IMAGE_B
+        assert "exomem.io/target-applied-at" not in _annotations(cluster, TENANT)
+        cluster.events.clear()
+        for seconds in (35, 40, 45):
+            _observe(cluster, TENANT, pod_node="worker-one")
+            await fleet.run(NOW + timedelta(seconds=seconds), cluster_config=CONFIG)
+        assert not UPGRADE_START_ANNOTATION_KEYS & set(_annotations(cluster, TENANT))
+        assert ("apply_statefulset", namespace_name(TENANT), 0) not in cluster.events
+        assert _image(cluster, TENANT) == IMAGE_B and _statefulset(cluster, TENANT)["spec"]["replicas"] == 1
+        assert not (await fleet.rollout()).paused
     finally:
         await fleet.close()
 

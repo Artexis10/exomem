@@ -1,0 +1,11 @@
+{
+  "id": "m04-approve-replication",
+  "title": "A scoped trial of continuous backup is approved",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I keep coming back to continuous backups for the Pebble Ledger database. Right now I copy the file by hand on Sunday evenings and I've forgotten twice. Litestream streams the changes to another location as they happen.",
+    "Okay, let's try it. Only on my laptop copy of the database, replicating to the spare NAS, for about a week. If the file stays consistent we can talk about the real one."
+  ]
+}

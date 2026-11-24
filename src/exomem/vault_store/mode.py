@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import state_migration, state_paths
 from ..collection_store import capability, connection, schema
+from . import resident_catalogue
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
 FILE_MODE = "file"
@@ -139,15 +140,54 @@ def store_mode_for_reads(vault_root: Path) -> bool:
     return current == STORE_MODE
 
 
+def store_mode_or_unreadable(vault_root: Path) -> tuple[bool, str | None]:
+    """``store_mode_for_reads`` for a report: (in store mode, why the records could not be read).
+
+    A report on an unreadable store says ``unknown`` with the error's code, as ``status`` does: a crash is
+    no report, and a guess of file mode would describe a vault that the store may own. The first value is
+    False when the second is set.
+    """
+    try:
+        return store_mode_for_reads(vault_root), None
+    except Exception as error:  # noqa: BLE001 - an unreadable store is unknown, never a mode
+        return False, _reason(error)
+
+
 def forget_read_mode(vault_root: Path) -> None:
-    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records.
+
+    The vault has left store mode, so the commit's resident catalogue resolver goes with the answer.
+    """
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
+    resident_catalogue.forget(vault_root)
     if _held_mode(vault_root) is not None:
         _REQUEST_MODE.set(None)
 
 
 def _stored_mode(vault_root: Path) -> str | None:
     """The store's ``store_mode.mode``, or None when the store, its schema 15 or its mode row is absent."""
+    row = _stored_row(vault_root, "SELECT mode FROM store_mode WHERE id = 1")
+    return None if row is None else row[0]
+
+
+def projections_queued(vault_root: Path) -> bool:
+    """Whether the vault is in store mode, as ``state`` reads it, and its queue holds an intent.
+
+    A stop asks it before it starts a projector only to drain. A file-mode vault answers from its
+    manifest and never opens the store; a store-mode vault answers with one statement.
+    """
+    if not state_migration.vault_store_recorded(vault_root):
+        return False
+    row = _stored_row(
+        vault_root,
+        "SELECT mode FROM store_mode "
+        "WHERE id = 1 AND EXISTS (SELECT 1 FROM store_projection_queue)",
+    )
+    return row is not None and row[0] == STORE_MODE
+
+
+def _stored_row(vault_root: Path, statement: str) -> tuple | None:
+    """The statement's first row, or None when the store, its schema 15 or the row is absent."""
     path = connection.store_path(vault_root)
     if not path.is_file():
         return None
@@ -155,8 +195,7 @@ def _stored_mode(vault_root: Path) -> str | None:
     with closing(reader):
         if found < schema.VAULT_STORE_SCHEMA_VERSION:
             return None
-        row = reader.execute("SELECT mode FROM store_mode WHERE id = 1").fetchone()
-    return None if row is None else row[0]
+        return reader.execute(statement).fetchone()
 
 
 #: The projector acts on a queued intent only while no hold sits on its path or on a move's old
@@ -184,13 +223,20 @@ STORE_FIGURES = (
     "registry_waiting_on_paths",
     "owner_schema",
     "unowned_rows_as_of",
+    "derived",
+    "derived_pending",
+    "derived_failed",
+    "derived_failed_by_code",
+    "oldest_derivation_age_seconds",
 )
 
 
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
-    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash
+    A file-mode vault reports the mode, migration gate and vault-side marker. The gate says
+    whether this build and platform allow migration. ``migration_refusal`` names a platform refusal
+    when present. Migration preflight checks the vault. A crash
     window reports its own state. A store-mode vault adds the figures that an operator checks before
     a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
     queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
@@ -204,6 +250,10 @@ def status(vault_root: Path) -> dict:
     the registry pass creates and fills (``registry`` is then ``unknown``), else ``current``.
     ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
     the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
+    ``derived`` says whether the search, identity and graph rows follow every committed page
+    (``current``), wait for the store thread (``behind``), or hold an intent that failed its retries
+    (``failed``), with ``derived_pending``, ``derived_failed`` by reason code and the age of the
+    oldest intent; a store that has no queue yet reports ``unknown``.
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
     on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
     root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
@@ -215,7 +265,11 @@ def status(vault_root: Path) -> dict:
     """
     from . import marker
 
-    report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
+    platform_refusal = capability.vault_store_migration_platform_refusal()
+    can_migrate = capability.vault_store_enabled() and platform_refusal is None
+    report: dict = {"gate": "on" if can_migrate else "off"}
+    if platform_refusal:
+        report["migration_refusal"] = platform_refusal
     # A damaged manifest raises here, so the command refuses and names it.
     recorded = state_migration.vault_store_recorded(vault_root)
     try:
@@ -239,7 +293,7 @@ def _reason(error: Exception) -> str:
 
 
 def _store_figures(vault_root: Path) -> dict:
-    from . import read, rederive
+    from . import derivation, read, rederive
 
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
@@ -250,10 +304,21 @@ def _store_figures(vault_root: Path) -> dict:
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
         ).fetchone()
+        present = {
+            name for (name,) in reader.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # A store that an earlier release wrote lacks the tables of a later schema until the service
+        # opens it; their figures are unknown, never zero.
         counts = {
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
+            if table in present
         }
+        derived = (
+            derivation.figures(reader)
+            if "store_derivation_queue" in present
+            else {"derived": UNKNOWN}
+        )
         # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
         # The age counts what the projector can still act on: a held path waits for a person. An
         # intent that the projector deferred is counted, so that it never hides as a quiet queue.
@@ -278,6 +343,8 @@ def _store_figures(vault_root: Path) -> dict:
         "held": counts["store_held"],
         "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
+        # Whether the search, identity and graph rows follow every committed page (``derivation``).
+        **derived,
         "registry": registry.state,
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,

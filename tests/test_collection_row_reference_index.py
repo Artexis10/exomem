@@ -26,6 +26,7 @@ from test_collection_store_schema import _allow
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import _external, write_rule, write_scope
 from test_records_bulk_upsert import EVIDENCE, _evidence  # noqa: F401
+from test_typed_history_generations import before_source_dependencies
 
 from exomem import structured_collections as collections
 from exomem.collection_store import connection, reference_index, schema, snapshot
@@ -301,6 +302,7 @@ def test_a_schema_16_store_gains_warming_state_rows_and_backfills(tmp_path, monk
     path = tmp_path / "migrated.sqlite"
     with monkeypatch.context() as earlier:
         earlier.setattr(schema, "SCHEMA_VERSION", 16)
+        before_source_dependencies(earlier)
         with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
             assert schema.schema_version(handle.connection) == 16
             writer = CollectionWriter(root, handle)
@@ -311,7 +313,7 @@ def test_a_schema_16_store_gains_warming_state_rows_and_backfills(tmp_path, monk
             row(writer, DIARY, K1, {"title": "d", "skills": [{"skill_id": "welding"}]})
     with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
         conn = handle.connection
-        assert schema.schema_version(conn) == 17
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         state = conn.execute(
             "SELECT ready, built_through FROM item_reference_state "
             "WHERE collection_id=? AND field_path='skills.skill_id'", (DIARY,)).fetchone()
@@ -606,6 +608,7 @@ def test_migration_seeds_only_the_current_manifest_versions(tmp_path, monkeypatc
     path = tmp_path / "revised.sqlite"
     with monkeypatch.context() as earlier:
         earlier.setattr(schema, "SCHEMA_VERSION", 16)
+        before_source_dependencies(earlier)
         with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
             writer = CollectionWriter(root, handle)
             create(writer, SITES, sites_text(), "Sites")
@@ -617,6 +620,7 @@ def test_migration_seeds_only_the_current_manifest_versions(tmp_path, monkeypatc
     # Give the skills manifest a declaration, then a final version without it.
     with monkeypatch.context() as earlier:
         earlier.setattr(schema, "SCHEMA_VERSION", 16)
+        before_source_dependencies(earlier)
         with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
             writer = CollectionWriter(root, handle)
             text = skills_text().replace(
@@ -627,7 +631,7 @@ def test_migration_seeds_only_the_current_manifest_versions(tmp_path, monkeypatc
             revise(writer, SKILLS, skills_text())
     with connection.open_writer(path, lease_check=_allow) as handle, library_scope():
         conn = handle.connection
-        assert schema.schema_version(conn) == 17
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         diary_states = conn.execute(
             "SELECT count(*) FROM item_reference_state WHERE collection_id=? AND field_path='site'",
             (DIARY,)).fetchone()[0]

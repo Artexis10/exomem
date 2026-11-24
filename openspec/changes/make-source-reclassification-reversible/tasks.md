@@ -27,10 +27,43 @@ Evidence for 1.1 to 2.1 is in `tests/test_reclassify_source.py` and `tests/test_
 - [ ] 3.1 Preview the `Sources/Other` drain on the personal vault after installation; record how many Sources the preview holds back for path-form append-only referrers.
 - [ ] 3.2 Apply cleared moves in reviewed batches through governed reclassification and check references after each batch.
 
-## 4. Phase 2, only if 3.1 holds any Source back
+## 4. Phase 2, delivered by `add-curation-relocation-protocol`
 
-- [ ] 4.1 Update this design for history-aware read resolution under the Decision 5 constraints, choose the history store, and obtain review before implementation.
-- [ ] 4.2 Archive this change with shipped evidence, or withdraw Phase 2 with the 3.1 count as its reason.
+- [x] 4.1 After `add-curation-relocation-protocol` ships, prove that a reclassification writes `moved_from`, that a Source linked by path from an Evidence page moves with only that page's link span changed, and that a revert restores the Evidence page's exact bytes.
+
+  Evidence, delivered by `add-curation-relocation-protocol` (PR #2883, archived 2026-11-17):
+  - `tests/test_reclassify_source.py::test_the_correction_records_its_reason_and_previous_path` asserts that the reclassified Source carries a `moved_from` entry with the previous path, kind and domain, and no `reclassified_from`.
+  - `tests/test_relocation_repoint.py::test_a_reclassification_repoints_an_evidence_link_and_its_revert_restores_the_bytes` asserts that an Evidence page linking the Source by path differs after the move only in that link's target, and that the revert restores the Evidence page's exact bytes.
+  - `tests/test_relocation_repoint.py::test_a_reclassified_source_does_not_say_how_many_pages_it_repointed` asserts that the lineage entry is the same whether the correction repointed two Evidence pages or none, and that the revert restores both pages.
+  - The three tests pass on main.
+- [ ] 4.2 Archive this change with `openspec archive` after `add-curation-relocation-protocol` is archived, with shipped evidence.
+
+## 5. Source pointer custody
+
+A move of raw bytes beside an unpaired card left the card and its referrers naming a missing path. This group makes a move rewrite prose path mentions, makes pointer drift auditable, and makes it repairable through the same reversible history. Decisions 1 to 3 stand: no append-only byte changes, and the history entry gains one closed key, `pointer`.
+
+- [x] 5.1 Rename the exact vault path in the body of each page that cites a moved file, found through the lexical catalogue; leave Source and Evidence pages as captured and report them; prove the move and the reclassification preview in `tests/test_source_pointer_custody.py` and `tests/test_reclassify_source.py`.
+- [x] 5.2 Add the `source_pointer_drift` audit category over `evidence_file`, `data_file` and the nested `artifact_path` pointers, from file metadata only, with a one-candidate proposal and a fix that succeeds; prove it in `tests/test_source_pointer_custody.py` and the restricted-caller twin in `tests/test_derived_identifier_egress.py`.
+- [x] 5.3 Add `artifact_path` to reclassification as a pointer repair that records and reverts the previous values, and refuses a missing or mismatching target; prove repair and revert in `tests/test_source_pointer_custody.py`.
+- [x] 5.4 Write the unclassified kind, not `other`, in the sidecar of a binary artifact; prove it in `tests/test_preserve.py`.
+- [ ] 5.5 After release, run the audit category against the owner's vault and repair each card that names a missing path; record the finding count before and after.
+  - Done 2026-11-20 on 0.191.0: four dataset-export cards that cited a missing path were reclassified with `artifact_path`. Each was previewed, applied and checked on disk: kind, domain, classification history and an `evidence_file` that names the real file. The four artifacts' SHA-256 values are unchanged. Their captured prose still cites the old path, as a Source body is immutable.
+  - "path mentions were not checked" appeared on 2 of the 4 operations, because the search index was not current.
+  - Still open, so this task stays unchecked: on that vault the audit category stops at its 50 s budget with coverage `unknown`, and it takes no scope. The vault-wide finding count before and after is therefore unknown.
+
+## 6. Bounded managed preview and paged approval
+
+- [x] 6.1 Prove current inbound links and published prose candidates on the request deadline. Leave incomplete evidence to the existing recovery workers.
+  - Done 2026-11-22: an incomplete prose lookup returns warming without a digest. Watcher and resolver recovery run off the request path, and an overlapping Records read succeeds.
+- [x] 6.2 Send proven overflow to the maintenance job runner. Release the complete summary and bounded report pages under the same live owner authority.
+  - Done 2026-11-22: a frozen file-mode run on 10,001 Notes and 10,001 Sources, with 10,000 referrers, returned the handle in 96 ms. A concurrent Records read took 102 ms and the job 11.9 s. 10,001 entries arrived over 79 pages, median 48 ms, largest 10,393 JSON bytes. Neither flat folder was enumerated.
+- [x] 6.3 Bind the approval digest to the complete report. Refuse stale approval before the first write and verify a fresh approval through the normal apply operation.
+  - Done 2026-11-22: the large preview route test refuses a stale digest without a write, then applies a fresh one and moves the Source.
+- [ ] 6.4 Exercise a 20,000-page vault with 10,000 referrers to one Source. Verify all report pages and a concurrent Records read. Obtain exact independent review, required CI, and installed proof.
+- [x] 6.5 Prove governed paging with a long receipt history and concurrent disclosure appends. Withhold all report facts after historical receipt edits or a pending erasure.
+  - Done 2026-11-22: ten rotated receipt parts (524,670 bytes) held a governed erasure while another thread appended disclosure receipts. Every page answered within the request budget, median 47 to 71 ms. A same-size edit to a closed part, and an active-part edit after disclosure, both withheld every report fact.
+- [ ] 6.6 Prove bounded terminal release for an oversized governed referrer, including its custody and any bridge dependencies.
+  - Partly done 2026-11-22: a simple governed referrer (no container parent, no bridge) is released from the job's held proof with zero reads of the referrer. Ten 2 MiB referrers went from a 15.4 ms to a 1.1 ms median page. A referrer with a container or bridge dependency still takes the full terminal path, so this task stays unchecked.
 
 ## Phase 1 released delivery evidence
 

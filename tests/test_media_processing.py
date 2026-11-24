@@ -387,7 +387,7 @@ def test_partial_pending_sidecar_is_canonically_repaired_with_prose(vault: Path)
     frontmatter, body = _frontmatter_and_body(sidecar)
     assert uuid.UUID(str(frontmatter["exomem_id"]))
     assert frontmatter["title"] == "Evidence: partial.m4a"
-    assert frontmatter["source_type"] == "other"
+    assert frontmatter["source_type"] == "unclassified"
     assert frontmatter["captured"]
     assert isinstance(frontmatter["tags"], list)
     assert frontmatter["ingested_into"] == []
@@ -860,9 +860,9 @@ def test_background_batch_rechecks_access_policy_changed_during_staging(
     original_create = vault_module._BatchWorkspace.create_artifact
     changed = False
 
-    def create_then_protect(self, name, content):  # noqa: ANN001
+    def create_then_protect(self, name, content, **options):  # noqa: ANN001, ANN003
         nonlocal changed
-        artifact = original_create(self, name, content)
+        artifact = original_create(self, name, content, **options)
         if not changed and name.startswith("stage-"):
             changed = True
             (vault / "Knowledge Base" / "_access.yaml").write_text(
@@ -917,7 +917,7 @@ def test_binary_verification_uses_open_handle_identity_on_windows_like_stat_disa
 
     monkeypatch.setattr(Path, "stat", _windows_like_path_stat)
 
-    media_processing._verify_binary_identity(binary, resolved, provenance)
+    media_processing._verify_binary_identity(vault, binary, resolved, provenance)
 
 
 def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
@@ -1053,9 +1053,10 @@ def test_reconcile_all_media_is_bounded_pruned_and_soft_fails_per_artifact(
     calls: list[tuple[Path, bool]] = []
 
     def reconcile_media(
-        root: Path, path: Path, *, explicit: bool = True
+        root: Path, path: Path, *, explicit: bool = True, enqueue_preview: bool = True,
     ) -> None:
         assert root == vault
+        assert not enqueue_preview
         calls.append((path, explicit))
         if path == first:
             raise OSError("one unreadable artifact must not abort the pass")
@@ -1159,6 +1160,26 @@ def test_a_busy_refusal_does_not_move_the_cursor_past_the_only_media_file(
 
     assert calls == ["only.m4a", "only.m4a"]
     assert only.with_name(only.name + ".md").exists()
+
+
+def test_a_bulk_reconcile_that_meets_a_busy_vault_returns_the_transient_error(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bulk reconcile command, which asks for transient errors, met a store-mode vault
+    boundary held by another write and got a raw exception with no code or remediation."""
+    from exomem.vault_store.projector import BoundaryBusy
+
+    media_processing = _media_processing()
+    _drop_media(vault, "busy.m4a")
+
+    def busy(_binary: Path) -> None:
+        raise BoundaryBusy("vault_store_media_sidecar_commit: another holder has the boundary")
+
+    with pytest.raises(OpError) as refused:
+        media_processing.reconcile_all_media(
+            vault, limit=10, reconcile_one=busy, propagate_transient_errors=True
+        )
+    assert refused.value.code == "MUTATION_BUSY" and refused.value.remediation
 
 
 def test_the_rotation_reexamines_the_only_media_file_after_its_sidecar_is_lost(
@@ -2763,6 +2784,7 @@ def test_process_media_shows_memory_blocked_work_only_as_waiting(vault: Path) ->
         "gpu_preflight",
         "serving_worker_cuda_hidden",
         "child_crashes",
+        "result_publication",
         "jobs",
         "errors",
         "index_refresh",

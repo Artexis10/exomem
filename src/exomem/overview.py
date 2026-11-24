@@ -30,7 +30,7 @@ from pathlib import Path
 from . import access, reserved_paths
 from .collection_store.ownership import reader
 from .governance.policy import GOVERNANCE_DIRNAME, is_governance_path
-from .kbdir import kb_dirname
+from .kbdir import managed_root_rel
 from .vault_store import directory as store_directory
 from .vault_store import mode as store_mode
 from .vault_store import read as store_read
@@ -451,10 +451,10 @@ def overview(
         )
 
     kb: dict = {"present": False}
-    if store_directory.is_dir(root, kb_dirname()):
-        kb = {"present": True, "path": kb_dirname()}
+    if store_directory.is_dir(root, managed_root_rel()):
+        kb = {"present": True, "path": managed_root_rel()}
         if not rel:
-            kb_stat = dirstats.get(kb_dirname())
+            kb_stat = dirstats.get(managed_root_rel())
             kb["files"] = kb_stat.files_rec if kb_stat else 0
 
     root_stat = dirstats[""]

@@ -171,6 +171,11 @@ cellctl:
   # for it: the default then changes no existing cell's render and restarts no pod.
   # Empty keeps every engine off in a cell that mediaEngineCellIds does not name.
   mediaEngineFleetDefault: []
+  # Identity system -> the cells whose owner enabled captured-Source erasure for it
+  # (erase-captured-source), e.g. {"<identity system>": ["<cell id>"]}. Add a cell
+  # only when its owner enables erasure. A change restarts only the cells it names.
+  # There is no fleet default: every cell not named here keeps erasure off.
+  sourceErasureCellIds: {}
   # Qualified values are operator supplied only after shared-worker acceptance.
   sharedWorker:
     mode: "off"
@@ -201,13 +206,18 @@ cellctl:
   # cell, longer on a larger vault. A broken image keeps the canary cell down for the
   # whole deadline. The schema allows 5 to 120.
   upgradeReadyDeadlineMinutes: 30
-  # warm-cell-catalogue: rehearsal sets the measured profile and real timeout before enabling.
+  # warm-cell-catalogue D2: the rehearsal measured 12,000-note builds at 129 to 223 s, a CPU
+  # peak of 1.0 to 1.5 cores and 117 MB of anonymous memory (memory.peak 1.9 GB with page cache).
+  # Requests cover steady progress and non-reclaimable memory with headroom; the limits cover the
+  # peak and larger production vaults. The timeout covers a build several times that long.
   cataloguePrewarm: false
+  # Empty until verification is explicitly activated for these cells.
+  resticVerificationCellIds: []
   catalogueBuildTimeoutSeconds: 1800
   catalogueBuildResources:
     requests:
-      cpu: "2"
-      memory: 3Gi
+      cpu: "1"
+      memory: 1Gi
     limits:
       cpu: "2"
       memory: 3Gi
@@ -265,11 +275,16 @@ cellctl:
   # shared across cells, and 14-28 m CPU. The 0.108 matched pair qualified
   # 512Mi/125m: a large owner-sized cell saved and queried the same as at
   # 1Gi/250m on the same host (add-cloud-service-resource-policy task 3.9).
+  # passageMatrixBudget is the share of memoryLimit that passage search may hold as a resident
+  # matrix in each cell (EXOMEM_PASSAGE_MATRIX_BYTES), shared-worker cells included. 512Mi is the
+  # budget the 2026-11-14 qualification measured at 3Gi; raise or lower it with memoryLimit.
+  # 0Mi turns the matrix off.
   cellResources:
     cpuRequest: 125m
     cpuLimit: "2"
     memoryRequest: 512Mi
     memoryLimit: 3Gi
+    passageMatrixBudget: 512Mi
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: 500m, memory: 512Mi}

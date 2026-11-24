@@ -7,6 +7,7 @@ not the wording of a reply. Nothing here calls a leaf directly.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,7 @@ from exomem import server as server_module
 LISTED = {
     "recall_context", "search_memory", "read_page", "read_instructions", "create_note", "add_observation",
     "edit_note", "supersede_note", "save_source", "save_evidence", "save_episode", "upload_files",
-    "download_files", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
+    "download_files", "cancel_uploads", "query_records", "add_record", "edit_record", "query_plan_items", "add_plan_item",
     "edit_plan_item", "list_review_items", "decide_review_item", "inspect_memory", "manage_memory",
 }
 
@@ -189,9 +190,12 @@ async def _acorn_candidate(client):
 
 
 def test_an_agent_accepts_a_suggested_relation_by_review_item_id(build, vault) -> None:
+    from exomem import epistemic_graph
+
     acorn = _seed_relation_candidate(vault)
 
     async def scenario(client):
+        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
         item = await _acorn_candidate(client)
         decided = await _call(client, "decide_review_item", {
             "review_item": item["id"], "decision": "accept", "why": "The body already depends on it"})
@@ -217,6 +221,7 @@ def test_an_agent_holds_two_contradicting_pages_as_competing_alternatives(build,
     epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
 
     async def scenario(client):
+        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
         pair = (await _call(client, "list_review_items", {"queue": "contradiction"}))["items"][0]
         decided = await _call(client, "decide_review_item", {
             "review_item": pair["id"], "decision": "competing", "why": "Both hold in different deployments"})
@@ -229,9 +234,12 @@ def test_an_agent_holds_two_contradicting_pages_as_competing_alternatives(build,
 
 
 def test_a_review_item_id_read_before_the_page_changed_is_refused(build, vault) -> None:
+    from exomem import epistemic_graph
+
     acorn = _seed_relation_candidate(vault)
 
     async def scenario(client):
+        assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
         item = await _acorn_candidate(client)
         acorn.write_text(acorn.read_text(encoding="utf-8") + "\nAn edit made after the list was read.\n",
                          encoding="utf-8")
@@ -244,6 +252,42 @@ def test_a_review_item_id_read_before_the_page_changed_is_refused(build, vault) 
     assert item is not None
     assert decided.get("error", {}).get("code") == "REVIEW_ITEM_CHANGED", decided
     assert "## Relations" not in acorn.read_text(encoding="utf-8")
+
+
+def test_accept_by_id_retries_when_the_relation_graph_has_a_startup_fence(
+    build, vault, monkeypatch,
+) -> None:
+    from exomem import audit, epistemic_graph, review_state
+
+    acorn = _seed_relation_candidate(vault)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+
+    async def scenario(client):
+        assert graph.validate_startup_snapshot() is True
+        item = await _acorn_candidate(client)
+        assert item is not None
+        arguments = {"review_item": item["id"], "decision": "accept", "why": "The pages are linked."}
+        before = acorn.read_bytes()
+        state = review_state.ReviewStateStore(vault)
+        prior_reviews = state.load()
+        epistemic_graph.require_startup_source_proof(vault)
+
+        def unexpected_audit(*args, **kwargs):
+            raise AssertionError("relation acceptance must not audit the vault")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(audit, "audit", unexpected_audit)
+            refused = await _call(client, "decide_review_item", arguments)
+        assert refused.get("error", {}).get("code") == "REVIEW_REFRESH_REQUIRED", refused
+        assert acorn.read_bytes() == before
+        assert state.load() == prior_reviews
+
+        assert graph.validate_startup_snapshot() is True
+        accepted = await _call(client, "decide_review_item", arguments)
+        assert "error" not in accepted, accepted
+
+    _session(build(), scenario)
+    assert "birch]]" in acorn.read_text(encoding="utf-8").partition("## Relations")[2]
 
 
 def _item_files(vault: Path, folder: str) -> str:
@@ -338,6 +382,21 @@ def test_a_call_to_the_wrong_door_or_an_unknown_operation_is_refused_with_where_
     assert "records.create" in misspelt["error"]["candidates"]
 
 
+def test_an_argument_outside_arguments_is_refused_in_the_text_a_host_reads(build) -> None:
+    # A host that shows only text content saw an empty reply here, so the agent never learnt why.
+    async def scenario(client):
+        return await client.call_tool(
+            "manage_memory", {"operation": "media.retry", "path": "Sources/a.wav"}, raise_on_error=False
+        )
+
+    result = _session(build(), scenario)
+
+    text = " ".join(getattr(block, "text", "") for block in result.content)
+    refusal = json.loads(text)["error"]
+    assert refusal["code"] == "INVALID_ARGUMENT"
+    assert "path is not a field" in refusal["message"]
+
+
 def test_a_note_without_an_observation_is_refused_with_the_syntax_to_add(build, vault) -> None:
     async def scenario(client):
         return await _call(client, "create_note", {
@@ -366,6 +425,8 @@ def test_a_family_disposition_set_through_the_write_door_shows_in_the_read_door(
 
 
 def test_upload_files_returns_an_upload_step_and_writes_nothing(build, vault, monkeypatch) -> None:
+    # An agent that sent the file without hold stored a second, bare copy of a file the vault already kept: the file
+    # name as its title, no url and no duplicate check. The step tells a holder of the file how to send it held.
     monkeypatch.setenv("EXOMEM_UPLOAD_TOKEN", "synthetic-upload-secret")
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
     before = sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*"))
@@ -377,11 +438,60 @@ def test_upload_files_returns_an_upload_step_and_writes_nothing(build, vault, mo
 
     assert step["upload_url"] == "https://capture.example/upload" and step["lane"] == "source"
     assert step["committed"] is False
+    assert "expected_sha256" in step["next_action"] and "save_source" in step["next_action"]
     assert sorted(path.name for path in (vault / "Knowledge Base" / "Sources").rglob("*")) == before
 
 
 def _evidence_bytes(vault: Path) -> dict[Path, bytes]:
     return {path: path.read_bytes() for path in (vault / "Knowledge Base" / "Evidence").rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("proof", ["startup", "outside"])
+def test_a_queued_evidence_write_reports_pending_graph_repair(build, vault, monkeypatch, proof):
+    from exomem import deferred_index, epistemic_graph, freshness, graph_sync
+    from exomem.server_runtime import LocalRuntimeActivation
+
+    outside = vault / "Knowledge Base/Notes/Insights/outside.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(
+        "---\ntype: insight\nstatus: active\n---\n# Outside\n\n## Claim\n\nAn existing claim.\n",
+        encoding="utf-8",
+    )
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    # Hold optional startup work while the real lifespan keeps the source fence.
+    monkeypatch.setattr(LocalRuntimeActivation, "release", lambda self: None)
+    payload = '{"measurement":17}\n'
+
+    async def scenario(client):
+        assert epistemic_graph.startup_source_proof_pending(vault)
+        if proof == "outside":
+            assert graph.validate_startup_snapshot() is True
+            outside.write_text(outside.read_text() + "\nAn unrecorded edit.\n", encoding="utf-8")
+            freshness.mark_external_pending(vault, paths=[outside])
+        return await _call(client, "save_evidence", {
+            "scope": "Test", "category": "samples", "name": "reading.ndjson",
+            "text": payload, "description": "A synthetic measurement export.",
+            "options": {"raw_protection": True}, "detail": "full",
+        })
+
+    reply = _session(build(), scenario)
+    diagnostics = reply["diagnostics"]
+    assert diagnostics["operational"]["status"] == "committed"
+    assert diagnostics["operational"]["mutated"] is True
+    assert (vault / reply["path"]).read_bytes() == payload.encode()
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None
+    assert diagnostics["graph_sync"] == "pending"
+    assert diagnostics["graph_sync_code"] == "GRAPH_SYNC_REPAIR_QUEUED"
+    assert diagnostics["graph_sync_checkpoint"] == checkpoint.checkpoint_sha256
+    assert any(
+        receipt.rel_path == diagnostics["sidecar_path"]
+        and receipt.graph_generation == checkpoint.generation
+        for receipt in deferred_index.snapshot_graph(vault)
+    )
+    assert graph_sync.acknowledged_generation(vault) < checkpoint.generation
+    assert not graph.available()
 
 
 def test_download_files_hands_off_two_originals_by_title_without_changing_the_vault(build, vault, monkeypatch) -> None:
@@ -504,3 +614,16 @@ def test_an_uncoded_fault_names_the_tool_the_agent_called_not_the_command_behind
 
     assert reply["is_error"] is True
     assert "'read_page'" in reply["text"] and "read_memory" not in reply["text"], reply
+
+
+def test_a_correction_missing_every_field_is_refused_once_with_all_of_them(build) -> None:
+    # Agents spent three calls learning one missing field at a time.
+    async def scenario(client):
+        return await _call(client, "save_source", {
+            "title": "Harbour lanterns", "source_kind": "paper", "options": {"correction": {}},
+        })
+
+    refusal = _session(build(), scenario)["error"]
+
+    assert refusal["code"] == "INVALID_ARGUMENT"
+    assert all(field in refusal["message"] for field in ("supersedes", "expected_hash", "reason"))

@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import base64
 import json
+import os
+import subprocess
+import time
 import uuid
 from datetime import UTC, datetime
 
 import pytest
 
+from cellctl import manifests
 from cellctl.imports import PHASES, ImportRow
 from cellctl.manifests import (
     CELL_HEALTH_PORT,
     CELL_PORT,
     STORAGE_CLASS,
     CellManifestSpec,
+    ResourceSettings,
     namespace_name,
     render_cell_manifests,
     render_import_job,
@@ -59,6 +64,57 @@ def test_namespace_carries_restricted_pod_security_labels() -> None:
     labels = ns["metadata"]["labels"]
     for mode in ("enforce", "audit", "warn"):
         assert labels[f"pod-security.kubernetes.io/{mode}"] == "restricted"
+
+
+def test_restic_verification_uses_existing_repository_access_without_the_cell_volume() -> None:
+    spec = _spec(dedicated_node=True, media_collector_url="http://10.43.0.8:8769",
+                 media_collector_credential="fixture-collector")
+    job = manifests.render_restic_verify_job(
+        spec, bucket_name="backups", endpoint="https://s3.example", attempt_id="an-attempt",
+        part=3, total=24, download_kib_per_second=8192, deadline_seconds=300, start_before=1_800_000_000,
+        statefulset_uid="statefulset-id",
+    )
+
+    assert job["metadata"]["name"] == manifests.restic_verification_job_name("an-attempt")
+    assert job["metadata"]["ownerReferences"][0]["uid"] == "statefulset-id"
+    assert job["spec"]["activeDeadlineSeconds"] == 300 and job["spec"]["backoffLimit"] == 0
+    assert job["spec"]["ttlSecondsAfterFinished"] > 0
+    template = job["spec"]["template"]
+    pod = template["spec"]
+    assert pod["automountServiceAccountToken"] is False
+    assert pod["nodeSelector"] == {"exomem.io/dedicated-cell": spec.cell_id}
+    assert pod["terminationGracePeriodSeconds"] > 0
+    assert pod["activeDeadlineSeconds"] == job["spec"]["activeDeadlineSeconds"]
+    assert all("emptyDir" in volume for volume in pod["volumes"])
+    container, = pod["containers"]
+    assert container["image"] == spec.image
+    assert container["securityContext"]["readOnlyRootFilesystem"] is True
+    assert container["command"][-5:] == ["restic", "check", "--no-lock", "--read-data-subset=3/24", "--limit-download=8192"]
+    env = {entry["name"]: entry for entry in container["env"]}
+    assert env["RESTIC_REPOSITORY"]["value"] == f"s3:https://s3.example/backups/cells/{spec.cell_id}"
+    assert {entry["valueFrom"]["secretKeyRef"]["key"] for entry in env.values() if "valueFrom" in entry} == {
+        "backup-password", "b2-key-id", "b2-key-secret",
+    }
+
+    job_kind = template["metadata"]["labels"][manifests.JOB_KIND_LABEL]
+    policy = _find(render_network_policies(spec), "NetworkPolicy", manifests.JOB_EGRESS_POLICY)
+    assert all(job_kind not in rule.get("values", ()) for rule in policy["spec"]["podSelector"]["matchExpressions"])
+
+
+@pytest.mark.parametrize("elapsed", [False, True])
+def test_a_delayed_verifier_cannot_start_restic_after_its_launch_window(tmp_path, elapsed) -> None:
+    restic = tmp_path / "restic"
+    restic.write_text("#!/bin/sh\nprintf '%s\\n' \"$@\"\n")
+    restic.chmod(0o700)
+    command = manifests.restic_verification_command(3, 24, 8192, int(time.time()) + (-60 if elapsed else 60))
+
+    result = subprocess.run(command, capture_output=True, text=True, check=False,
+                            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"})
+
+    if elapsed:
+        assert result.returncode != 0 and result.stdout == ""
+    else:
+        assert result.returncode == 0 and result.stdout.splitlines() == command[-4:]
 
 
 # A local cell's hourly backup runs beside its runtime too, with its own clone claim.
@@ -405,6 +461,28 @@ def test_model_env_may_not_relocate_state_config_or_a_writable_directory() -> No
         with pytest.raises(ValueError, match=key):
             render_statefulset(_spec(model_env={key: "/elsewhere"}))
     render_statefulset(_spec(model_env={"EXOMEM_EMBED_BACKEND": "onnx", "EXOMEM_WHISPER_MODEL": "base"}))
+
+
+def test_a_cell_serves_passages_from_a_resident_matrix_by_default() -> None:
+    # Without the ceiling every passage search reads its vectors from disk, and
+    # four concurrent searches miss the cell's latency budget.
+    env = render_statefulset(_spec())["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == [str(512 * 1024 * 1024)]
+
+
+def test_a_cell_renders_the_passage_matrix_budget_its_resources_name() -> None:
+    # The chart sets the budget beside the memory limit; a cell sized differently needs a different one.
+    resources = ResourceSettings(memory_limit="6Gi", passage_matrix_budget="1Gi")
+    env = render_statefulset(_spec(resources=resources))["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == [str(1024 * 1024 * 1024)]
+
+
+def test_a_cells_model_env_replaces_the_passage_matrix_default_instead_of_duplicating_it() -> None:
+    # Two entries with one name leave the value the pod gets to the order of the list.
+    env = render_statefulset(_spec(model_env={"EXOMEM_PASSAGE_MATRIX_BYTES": "0"}))["spec"]["template"]["spec"][
+        "containers"
+    ][0]["env"]
+    assert [e["value"] for e in env if e["name"] == "EXOMEM_PASSAGE_MATRIX_BYTES"] == ["0"]
 
 
 def test_model_env_may_not_move_media_extraction_into_the_serving_process() -> None:

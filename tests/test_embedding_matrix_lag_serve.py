@@ -198,6 +198,16 @@ def test_a_lagging_matrix_never_serves_rows_or_text_of_a_path_changed_since_it(
     assert idx.require_resident_matrix().stale_paths == frozenset({"a.md"})
 
 
+def test_scoring_a_few_paths_leaves_out_a_path_the_lagging_matrix_holds_stale_rows_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    idx = _warm_index(tmp_path)
+    monkeypatch.setattr(idx, "start_corpus_matrix_load", lambda: None)  # hold the lag for the whole test
+    _lag_behind_another_writer(idx, "a.md", "new a", [0, 1])
+
+    assert set(idx.page_scorer().best_scores(_pad([1, 0]), {"a.md", "b.md", "c.md"})) == {"b.md", "c.md"}
+
+
 def test_a_policy_identity_change_still_refuses_a_lagging_matrix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

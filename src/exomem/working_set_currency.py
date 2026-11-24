@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 from . import lifecycle_statuses, relation_registry, semantic_units, vault
+from .kbdir import managed_split
 
 if TYPE_CHECKING:  # pragma: no cover
     from .working_set import LaneItem
@@ -82,8 +83,9 @@ def _page_names(path: str) -> frozenset[str]:
     folded = path.casefold()
     stem = folded.removesuffix(".md")
     names = {folded, stem, stem.rsplit("/", 1)[-1]}
-    if stem.startswith("knowledge base/"):
-        names.add(stem.removeprefix("knowledge base/"))
+    below = managed_split(stem, key=str.casefold)
+    if below is not None:
+        names.add(below)
     return frozenset(names)
 
 

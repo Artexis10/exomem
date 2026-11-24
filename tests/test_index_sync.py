@@ -1388,3 +1388,41 @@ def test_non_graph_input_paths_cannot_bless_a_graph_deferral(tmp_path: Path) -> 
     )
 
     assert index_sync.full_upsert_succeeded(tmp_path, [target], report) is False
+
+
+def test_a_deferred_component_takes_no_observation_made_over_other_paths() -> None:
+    """A folder trash whose source rows were never observed, beside an observation of its
+    destinations that derived. Matched by component name alone, the source read completed."""
+    source = index_sync.IndexSyncReport(
+        "delete", ("Notes/a.md",), ("Notes/a.md",),
+        (index_sync.IndexComponentOutcome("lexstore", "deferred", "store_derivation_queue"),),
+    ).as_dict()
+    destinations = index_sync.IndexSyncReport(
+        "upsert", ("Trash/a.md",), ("Trash/a.md",),
+        (index_sync.IndexComponentOutcome("lexstore", "completed", "store_derivation"),),
+    )
+
+    assert index_sync.with_observed_components(source, [destinations]) == source
+
+
+def test_a_deferred_component_takes_the_least_finished_observation_over_its_paths() -> None:
+    """A trash whose own path failed to derive while a wider observation that names it completed:
+    the failure is what the trash's report says."""
+    source = index_sync.IndexSyncReport(
+        "delete", ("Notes/a.md",), ("Notes/a.md",),
+        (index_sync.IndexComponentOutcome("lexstore", "deferred", "store_derivation_queue"),),
+    ).as_dict()
+    failed = index_sync.IndexSyncReport(
+        "delete", ("Notes/a.md",), ("Notes/a.md",),
+        (index_sync.IndexComponentOutcome("lexstore", "failed", "store_derivation_failed"),),
+    )
+    wider = index_sync.IndexSyncReport(
+        "upsert", ("Notes/a.md", "Trash/a.md"), ("Notes/a.md", "Trash/a.md"),
+        (index_sync.IndexComponentOutcome("lexstore", "completed", "store_derivation"),),
+    )
+
+    observed = index_sync.with_observed_components(source, [wider, failed])
+
+    assert observed["components"] == [
+        {"component": "lexstore", "outcome": "failed", "code": "store_derivation_failed"}
+    ]

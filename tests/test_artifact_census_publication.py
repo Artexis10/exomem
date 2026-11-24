@@ -220,6 +220,26 @@ def test_an_unpublished_census_takes_the_walk_and_is_never_empty(
     assert artifact_census.published_view(vault) is None
 
 
+def test_an_unpublished_census_redacts_a_withheld_path_that_ends_a_sentence(vault: Path) -> None:
+    _withhold_from_external(vault, "Notes/Patterns/**")
+    _write(vault, f"{WITHHELD_DIR}/orchid-memo.md")
+
+    released = _gate(vault, f"Record it in {WITHHELD_DIR}/orchid-memo.md.")
+
+    assert released == f"Record it in {egress.WITHHELD_REFERENCE}."
+    assert artifact_census.published_view(vault) is None
+
+
+def test_a_published_census_redacts_a_withheld_name_with_an_inner_full_stop_at_a_sentence_end(vault: Path) -> None:
+    _withhold_from_external(vault, "Notes/Patterns/**")
+    _write(vault, f"{WITHHELD_DIR}/Mr. Orchid.md")
+    _publish(vault)
+
+    released = _gate(vault, "The memo is Mr. Orchid.md.")
+
+    assert released == f"The memo is {egress.WITHHELD_REFERENCE}."
+
+
 def test_a_burst_of_new_files_withdraws_the_census_to_the_walk(
     vault: Path, walks: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -308,3 +328,71 @@ def test_a_generic_directory_move_adds_the_files_it_brings_to_the_census(
     arrived = f"{WITHHELD_DIR}/Lot/orchid-batch-chart.pdf"
     assert arrived in artifact_census.published_view(vault).paths(arrived.casefold())
     assert walks == []
+
+
+@pytest.mark.parametrize("pooled", [False, True], ids=["ordinary", "pooled"])
+@pytest.mark.parametrize("published", [False, True], ids=["walked", "published"])
+def test_a_pooled_original_is_named_to_a_restricted_caller_exactly_as_an_ordinary_file_is(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool, pooled: bool
+) -> None:
+    """Catches a gate that judges a shared original by its companion page. A shared original keeps no file at its
+    path, so its name resolved to nothing, or to the page `<name>.md`, and a scope on the original's path or suffix
+    withheld an ordinary file's name but showed the pooled one's. The ordinary arm is the reference: every arm must
+    redact alike. A visible original's name and a note whose name merely contains a dot stay readable."""
+    from exomem import artifact_lifecycle, original_pool
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    if pooled:
+        original_pool.enable(vault)
+    _withhold_from_external(vault, "**/*.pdf")
+    if published:
+        _publish(vault)
+
+    with library_scope():
+        filed = preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="orchid-quarterly-terms.pdf",
+            data=b"%PDF-1.4", text="terms",
+        )
+        preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="orchid-site-plan.png",
+            data=b"\x89PNG\r\n\x1a\nplan", text="plan",
+        )
+        create_file.create_file(vault, path=f"{KB}/Notes/Scratch/orchid-roadmap.v2.md", content="Internal note.\n")
+    assert (vault / filed.path).exists() is not pooled
+
+    # The scope matches the original's own path, not its companion page `orchid-quarterly-terms.pdf.md`.
+    assert _gate(vault, "See orchid-quarterly-terms.pdf for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "See orchid-site-plan.png for the plan.") == "See orchid-site-plan.png for the plan."
+
+    _withhold_from_external(vault, "Evidence/**", "Notes/Scratch/**")
+    below = filed.path.removeprefix(f"{KB}/")
+    assert _gate(vault, "See orchid-quarterly-terms.pdf for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "See [[orchid-quarterly-terms]] for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, f"See {below} for the terms.") == "See [withheld] for the terms."
+    assert _gate(vault, "Ships as orchid-roadmap.v2 soon.") == "Ships as orchid-roadmap.v2 soon."
+
+
+@pytest.mark.parametrize("published", [False, True], ids=["walked", "published"])
+def test_a_suffixless_original_never_pools_so_its_name_redacts_like_any_withheld_file(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, published: bool
+) -> None:
+    """Catches a pooled suffix-less original leaking its bare name. A pool-only filing exists on disk solely as its
+    companion `LICENSE.md`, which the census cannot tell from a note, so it proposed no original alias and a
+    restricted caller read `LICENSE` unredacted. Such an original keeps an ordinary file, which the census lists."""
+    from exomem import artifact_lifecycle, original_pool, originals
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    _withhold_from_external(vault, "Evidence/**")
+    if published:
+        _publish(vault)
+
+    with library_scope():
+        filed = preserve.preserve_bytes(
+            vault, scope="Rental", category="clips", filename="LICENSE",
+            data=b"the license terms", text="terms",
+        )
+    assert (vault / filed.path).is_file()
+    assert originals.pooled(vault, filed.path) is None
+
+    assert _gate(vault, "See LICENSE for the terms.") == "See [withheld] for the terms."

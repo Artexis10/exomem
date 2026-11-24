@@ -58,7 +58,13 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError
-from .kbdir import kb_page_target, kb_prefix, resolve_stored_page_target
+from .kbdir import (
+    kb_page_target,
+    managed_join,
+    managed_relative,
+    managed_split,
+    resolve_stored_page_target,
+)
 from .mutation_timings import MutationTimings, write_timings_enabled
 from .vault import _FM_PATTERN as _VAULT_FM_PATTERN
 from .vault import (
@@ -76,6 +82,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     render_frontmatter_document,
     render_title_links,
     rewritable_link_ranges,
@@ -154,6 +161,7 @@ def _resolve_date_iso(
         raise EditError(error.code, [], error.reason) from error
 
 
+@semantic_contract.share_writer_disk_census()
 def edit(
     vault_root: Path,
     *,
@@ -429,37 +437,31 @@ def edit(
 
 
 def _existing_page_outside_kb(vault_root: Path, given: str) -> str | None:
-    """The vault-relative page the caller addressed, iff it exists on disk under
-    the vault root but outside ``Knowledge Base/`` — else ``None``.
+    """The vault-relative path of a real file inside the vault but beyond the managed root.
 
-    Lets `_resolve` tell "you addressed a real page outside the governed root"
-    apart from "no such page". It leaks nothing the read side would not already
-    surface: it only confirms a vault-relative path `get_page` itself resolves,
-    and never a path that escapes the vault. Extension handling mirrors
-    `_resolve` so the two agree on what "the same page" means.
+    Returns `None` for anything else. `_missing_page_error` uses it to choose
+    between its two refusals. It confirms nothing that `get_page` does not
+    already show, and it never accepts a path that leaves the vault. Like
+    `_resolve`, it adds `.md` only when the text lacks it.
     """
-    # The caller's own text, separators normalised but *not* re-rooted: this
-    # question is precisely "did they name something outside the governed
-    # root?", so it must not go through `kbdir.kb_page_relative_form`, whose
-    # whole job is to supply the prefix `_resolve` wants and this does not.
-    given = given.strip().replace("\\", "/").lstrip("/")
-    if given.startswith(kb_prefix()):
-        return None  # caller explicitly addressed KB/ — a genuine miss stays one
-    rel = given if given.endswith(".md") else given + ".md"
-    candidate = vault_root / rel
+    # Read the text exactly as typed: `kb_page_target` and `kb_page_relative_form`
+    # prepend the managed root, which would hide what this function asks, namely
+    # whether the caller named something outside it.
+    page = given.strip().replace("\\", "/").lstrip("/")
+    if managed_split(page) is not None:
+        # The caller already addressed the managed root, so a miss there is a plain miss.
+        return None
+    if not page.endswith(".md"):
+        page += ".md"
     try:
-        resolved = candidate.resolve()
-        resolved.relative_to(vault_root.resolve())  # must stay inside the vault
+        vault = vault_root.resolve()
+        real = (vault / page).resolve()
+        inside_vault = real.is_relative_to(vault)
+        under_root = real.is_relative_to(kb_root(vault_root).resolve())
+        # `real` is the link target, so a symlink is judged by what it points at.
+        return page if inside_vault and not under_root and real.is_file() else None
     except (ValueError, OSError):
         return None
-    try:
-        resolved.relative_to(kb_root(vault_root).resolve())
-        return None  # already under the governed root — not this case
-    except ValueError:
-        pass
-    # `resolved` has followed symlinks and been confirmed under vault_root
-    # above, so stat the real target rather than the lexical candidate.
-    return rel if resolved.is_file() else None
 
 
 def _write_target_withheld(vault_root: Path, rel: str) -> bool:
@@ -473,11 +475,12 @@ def _missing_page_error(vault_root: Path, path: str, rel: str) -> EditError:
     outside = _existing_page_outside_kb(vault_root, path)
     if outside is not None:
         return EditError(
-            code="OUTSIDE_GOVERNED_ROOT", missing=["path"],
+            code="OUTSIDE_GOVERNED_ROOT",
+            missing=["path"],
             reason=(
-                f"page exists at {outside} but is outside {kb_prefix()}"
-                f" — exomem only edits governed content under {kb_prefix()};"
-                " move it under the governed root or address it there"
+                f"{outside} is a page in the vault, but it lies beyond the managed root "
+                f"{managed_join('')}, and governed edits apply only inside that root. "
+                f"Move the page into {managed_join('')} or refer to it by its location there."
             ),
         )
     return EditError(code="NOT_FOUND", missing=["path"], reason=f"file does not exist: {rel}")
@@ -525,27 +528,21 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         raise EditError(
             code="INVALID_PATH",
             missing=["path"],
-            reason=f"path escapes {kb_prefix()}: {e}",
+            reason=f"path escapes {managed_join('')}: {e}",
         ) from None
     # A page the caller may not see is answered exactly as a missing one, and
     # never loaded (see `egress.write_target_withheld`).
     if not candidate.exists() or _write_target_withheld(vault_root, rel):
-        # The read side (`get_page`) accepts a vault-relative path and will read
-        # a page living OUTSIDE the governed Knowledge Base/ root. Governed edits
-        # re-root every bare path under Knowledge Base/, so a caller re-using
-        # such a path here gets a re-rooted candidate that does not exist. A
-        # plain NOT_FOUND would then name a path the caller never gave and
-        # assert the page is missing when it demonstrably exists — a typo and an
-        # outside-the-root refusal become indistinguishable (issue #599). Detect
-        # that case and refuse honestly; the governance model is intentional, so
-        # we still don't write outside the root.
+        # Re-rooting the caller's path can miss a page that really exists elsewhere
+        # in the vault (#599). `_missing_page_error` picks the refusal; nothing is
+        # ever written outside the managed root.
         raise _missing_page_error(vault_root, path, rel)
     # Return the rel-form re-spelled to the real on-disk casing, reusing the
     # `resolved` already computed for the escape check above (no extra
     # syscalls). On a case-insensitive filesystem a caller addressing
     # `…/Acme/x.md` for an on-disk `…/ACME/` would otherwise carry its own
     # spelling into every identity comparison keyed on `rel_path`. Rebuilding
-    # from `kb_prefix()` also re-spells segment 1 to the configured KB name,
+    # from the managed root also re-spells segment 1 to the configured KB name,
     # matching `vault.canonical_vault_rel`; fail open to the literal form.
     #
     # Adopted ONLY when the rewrite is casing-only — `resolved` has followed any
@@ -555,7 +552,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     # adds no syscalls, so the property this mirror exists for is preserved.
     canonical = kb_relative.as_posix()
     if canonical and canonical != ".":
-        canonical = kb_prefix() + canonical
+        canonical = managed_join(canonical)
         if is_casing_only_rewrite(canonical, rel):
             rel = canonical
     return candidate, rel
@@ -601,14 +598,16 @@ def load_editable(
 
     append_only = in_append_only_tree(rel_path)
     if append_only is not None:
+        from . import source_corrections
+
+        # A captured Source has a governed correction; other append-only material keeps the general advice.
+        route = source_corrections.correction_route(vault_root, rel_path) or (
+            "Add a corrective source instead, or compile a downstream note that supersedes the framing."
+        )
         raise EditError(
             code="INVALID_EDIT",
             missing=["path"],
-            reason=(
-                f"{rel_path} is in {append_only}/, which is append-only "
-                "(SKILL.md rule 2). Add a corrective source instead, or compile "
-                "a downstream note that supersedes the framing."
-            ),
+            reason=f"{rel_path} is in {append_only}/, which is append-only (SKILL.md rule 2). {route}",
         )
 
     try:
@@ -1132,20 +1131,27 @@ def commit_edit(
     # Opportunistic sub-index refresh — surfacing any drift on every write
     # keeps the indexes self-healing.
     from .governance import connector_boundary
+    from .vault_store import read as store_read
 
     top_index = kb / "index.md"
-    if top_index.exists() and connector_boundary.effect_admission(vault_root)(top_index):
-        current_top, top_guard = read_guarded_text(vault_root, top_index)
-        sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_text=current_top
-        )
-        if new_top is not None and new_top != current_top:
-            writes.append(
-                PlannedWrite(path=top_index, content=new_top, guard=top_guard)
+    # Read the navigation pages and counts at one revision. The snapshot ends
+    # before preflight, and the commit still rechecks every write guard.
+    with store_read.request_snapshot(vault_root):
+        if (
+            store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
+            and connector_boundary.effect_admission(vault_root)(top_index)
+        ):
+            current_top, top_guard = read_guarded_text(vault_root, top_index)
+            sub_writes, new_top = indexes.compute_subindex_writes(
+                vault_root, top_index_text=current_top
             )
-            derived_auxiliary_writes.append(("index", writes[-1]))
-        writes.extend(sub_writes)
-        derived_auxiliary_writes.extend(("index", write) for write in sub_writes)
+            if new_top is not None and new_top != current_top:
+                writes.append(
+                    PlannedWrite(path=top_index, content=new_top, guard=top_guard)
+                )
+                derived_auxiliary_writes.append(("index", writes[-1]))
+            writes.extend(sub_writes)
+            derived_auxiliary_writes.extend(("index", write) for write in sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
     recorded = temporal.parse(date_iso)
@@ -1200,24 +1206,22 @@ def commit_edit(
             try:
                 from .relation_census import operation_provenance
 
-                log_plan = plan_log_writes(
-                    vault_root,
-                    date_iso=date_iso,
-                    op=op,
-                    rel_path_no_ext=rel_no_ext,
-                    body=log_body,
-                    provenance=operation_provenance(preflight),
-                    operation_token=(
-                        "edit:"
-                        + content_hash(
-                            # Keyed on the calendar day, not the stamp: this token is
-                            # what makes a replayed edit idempotent, and a
-                            # second-granularity value would mint a fresh key on every
-                            # attempt and defeat the dedup entirely.
-                            f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                with store_read.request_snapshot(vault_root):
+                    log_plan = plan_log_writes(
+                        vault_root,
+                        date_iso=date_iso,
+                        op=op,
+                        rel_path_no_ext=rel_no_ext,
+                        body=log_body,
+                        provenance=operation_provenance(preflight),
+                        operation_token=(
+                            "edit:"
+                            + content_hash(
+                                # The day keeps a replay idempotent across timestamps.
+                                f"{day}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                            )
                         )
-                    ),
-                )
+                    )
             except (OSError, UnicodeError, ValueError) as error:
                 raise EditError(
                     "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
@@ -1380,7 +1384,7 @@ def _clean_tags(tags: list[str]) -> list[str]:
 def _prepend_log_entry(
     text: str, *, date_iso: str, rel_no_ext: str, body: str, op: str = "edit"
 ) -> str:
-    title = rel_no_ext.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_no_ext)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

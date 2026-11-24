@@ -19,21 +19,29 @@ import datetime as dt
 import hashlib
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
 from . import (
     call_spans,
+    capabilities,
     graph_sync,
+    media_bindings,
+    original_pool,
     originals,
+    page_lineage,
+    path_mentions,
+    pointer_write,
     recap_folder,
     reserved_paths,
     semantic_index,
     semantic_writes,
+    source_custody,
     source_taxonomy,
     trash_metadata,
     working_set_heat,
@@ -41,17 +49,17 @@ from . import (
 )
 from .cli_ops import OpError
 from .governance import catalog_publication, graph_producer
-from .kbdir import kb_dirname
+from .kbdir import managed_split_parts
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
-    FrontmatterError,
     InboundLink,
     LogWritePlan,
     PathGuard,
     PathGuardError,
     PlannedWrite,
     VaultPathError,
+    WikilinkResolver,
     batch_atomic_write,
     content_hash,
     find_inbound_wikilinks,
@@ -82,17 +90,39 @@ class MoveFileResult:
     warnings: list[str]
     semantic: dict | None = None
     index: dict | None = None
+    #: Prose mentions of the old path in page bodies that the move renamed.
+    path_mentions_updated: int = 0
+    #: The pointer-write records of the append-only referrers the move changed.
+    pointer_writes: list[str] = field(default_factory=list)
+    #: Those referrers, title and path, in record order: the pages whose links the move repointed.
+    pointer_repointed: list[dict[str, str]] = field(default_factory=list)
+    #: A preview's one outcome per referrer the caller may see; None for a commit.
+    referrers: list[dict[str, str]] | None = None
+    #: A preview's outcome for the rows the collection store keeps (`store_rows_outcome`).
+    store_rows: str | None = None
+    #: The digest a commit that repoints append-only referrers passes; None when it cannot commit.
+    preview_digest: str | None = None
 
     def as_dict(self) -> dict:
-        return {
+        answer = {
             "old_path": self.old_path,
             "new_path": self.new_path,
             "wikilinks_updated": self.wikilinks_updated,
+            "path_mentions_updated": self.path_mentions_updated,
             "files_touched": self.files_touched,
             "warnings": self.warnings,
             "semantic": self.semantic,
             "index": self.index,
         }
+        if self.pointer_writes:
+            answer["pointer_writes"] = self.pointer_writes
+            answer["pointer_repointed"] = self.pointer_repointed
+        if self.referrers is not None:
+            answer["referrers"] = self.referrers
+            answer["preview_digest"] = self.preview_digest
+        if self.store_rows is not None:
+            answer["store_rows"] = self.store_rows
+        return answer
 
 
 @dataclass
@@ -113,6 +143,9 @@ class MoveFileValidation:
     after: tuple[dict[str, Any], ...]
     rename_after: tuple[dict[str, Any], ...]
     atomic_supported: bool
+    #: The moved page's bytes at its new path, for a Markdown page; curation seals them so a later
+    #: step of its plan can bind that page and its compensation can restore the pre-step bytes.
+    after_text: str | None = None
 
 
 def _in_episode_folder(vault_root: Path, rel: str) -> bool:
@@ -126,8 +159,9 @@ def _in_episode_folder(vault_root: Path, rel: str) -> bool:
     if recap_folder.in_inbox(vault_root, rel, casefold=True):
         return True
     parts = rel.replace("\\", "/").split("/")
-    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
-        parts = parts[1:]
+    below = managed_split_parts(parts, key=str.casefold)
+    if len(parts) > 1 and below is not None:
+        parts = below
     return (
         len(parts) > 2
         and parts[0].casefold() == source_taxonomy.SOURCES_ROOT.casefold()
@@ -138,8 +172,12 @@ def _in_episode_folder(vault_root: Path, rel: str) -> bool:
 def _admit_destination(vault_root: Path, rel: str) -> None:
     """Admit a move destination before any existence check.
 
-    A limited caller may create only in a capture namespace, so a hidden page
-    holding the name cannot change its answer.
+    A limited caller may create only in a capture namespace, and this policy answers first. A
+    hidden page can still change the later answer, and the two cases answer differently: a
+    hidden file at the name refuses with `DEST_EXISTS`, and a withheld page that claims the name
+    as a prior path refuses with `WRITE_REFUSED`. Neither names the page. The second tells the
+    caller that a page it cannot see once lived at that path (`prior_claims.require_unreserved`
+    says what that discloses and why the reservation holds).
     """
     from .governance import connector_boundary
 
@@ -233,7 +271,8 @@ def _paired_artifact(
     Returns None for an ordinary page, which is the common case: a source page
     whose stem happens to have no sibling file is not a pair. ``page_held`` says
     whether a page exists; a store-mode vault answers it from the store, where a
-    page may have no file yet.
+    page may have no file yet. An evicted original that the caller may not see is
+    no pair either: it stays in the store, and its page moves alone.
     """
     from .governance.raw_protection import marked
 
@@ -248,11 +287,24 @@ def _paired_artifact(
         binary_rel = rel[:-3]
         if not binary_rel or binary_rel.lower().endswith(".md"):
             return None
-        present = (vault_root / binary_rel).is_file() or originals.evicted(vault_root, binary_rel)
+        # A pooled filing has no file at its logical path: its bytes are a shared object.
+        present = (
+            (vault_root / binary_rel).is_file()
+            or originals.pooled(vault_root, binary_rel) is not None
+            or originals.evicted_visible_original(vault_root, binary_rel) is not None
+        )
         return (rel, binary_rel) if present else None
     page_rel = f"{rel}.md"
     held = (vault_root / page_rel).is_file() if page_held is None else page_held(page_rel)
     return (page_rel, rel) if held else None
+
+
+def paired_move(vault_root: Path, old_page: str, new_page: str) -> tuple[str, str] | None:
+    """The (old, new) binary path that moves with the page `old_page`, or None."""
+    pair = _paired_artifact(vault_root, old_page)
+    if pair is None or pair[0] != old_page:
+        return None
+    return pair[1], new_page.removesuffix(".md")
 
 
 def _repoint_artifact(old_binary: str, new_binary: str):
@@ -269,21 +321,21 @@ def _repoint_artifact(old_binary: str, new_binary: str):
         if block is None:
             return text
         changes: dict[str, Any] = {}
-        # These two pointer fields belong to the Source/Evidence companion schema.
-        for field in ("evidence_file", "data_file"):
-            if frontmatter.get(field) == old_binary:
-                changes[field] = new_binary
-        descriptor = frontmatter.get("governance_companion")
-        if isinstance(descriptor, dict) and descriptor.get("artifact_path") == old_binary:
-            moved_descriptor = {**descriptor, "artifact_path": new_binary}
+        for pointer in originals.SCALAR_POINTERS:
+            if frontmatter.get(pointer) == old_binary:
+                changes[pointer] = new_binary
+        path_key = originals.NESTED_PATH_KEY
+        descriptor = frontmatter.get(originals.GOVERNANCE_COMPANION)
+        if isinstance(descriptor, dict) and descriptor.get(path_key) == old_binary:
+            moved_descriptor = {**descriptor, path_key: new_binary}
             if "original_filename" in descriptor:
                 moved_descriptor["original_filename"] = Path(new_binary).name
-            changes["governance_companion"] = moved_descriptor
+            changes[originals.GOVERNANCE_COMPANION] = moved_descriptor
         if frontmatter.get("original_filename") == Path(old_binary).name:
             changes["original_filename"] = Path(new_binary).name
-        protection = frontmatter.get("raw_protection")
-        if isinstance(protection, dict) and protection.get("artifact_path") == old_binary:
-            changes["raw_protection"] = {**protection, "artifact_path": new_binary}
+        protection = frontmatter.get(originals.RAW_PROTECTION)
+        if isinstance(protection, dict) and protection.get(path_key) == old_binary:
+            changes[originals.RAW_PROTECTION] = {**protection, path_key: new_binary}
         if not changes:
             return text
         try:
@@ -292,6 +344,125 @@ def _repoint_artifact(old_binary: str, new_binary: str):
             raise MoveFileError(error.code, error.reason) from error
 
     return transform
+
+
+def _lineage_transform(
+    old_rel: str,
+    new_rel: str,
+    extra: Mapping[str, Any] | None,
+    undo: bool,
+    *,
+    keep_vacated: bool = False,
+) -> Callable[[str], str]:
+    """A content transform that records the move in the page's lineage, or undoes the entry.
+
+    With `keep_vacated`, an undo also records the path it vacates, as a move back does.
+    """
+    from . import page_lineage
+
+    change = (
+        page_lineage.undo_transform(new_rel, old_rel if keep_vacated else None)
+        if undo
+        else page_lineage.append_transform(old_rel, extra)
+    )
+
+    def transform(text: str) -> str:
+        try:
+            return change(text)
+        except page_lineage.LineageError as error:
+            raise MoveFileError(error.code, error.reason) from error
+
+    return transform
+
+
+@dataclass(frozen=True)
+class MoverView:
+    """What a mover may see, as every relocation reads it (`mover_view`)."""
+
+    #: The caller's view. It always filters what the caller is shown: a bound store gives the
+    #: owner one too.
+    visible: Callable[[str], bool]
+    #: Whether the caller is restricted at all.
+    restricted: bool
+    #: A connector-limited mover never reads, rewrites or counts a page it cannot see, so its
+    #: answer is the same with and without hidden linkers. A hidden linker keeps its old link,
+    #: which resolves through the moved page's lineage.
+    limited: bool
+
+    @property
+    def scope(self) -> Callable[[str], bool] | None:
+        """The filter for the pages a sealed link rewrite reads and lists, or None for every page.
+
+        It filters every restricted caller, not only a connector-limited one: a curation plan
+        lists each page it rewrites and its approval names them, so a page outside the caller's
+        view stays out of the plan and keeps its old link. A move filters its answer instead
+        (`shown`), so an unlimited restricted mover may still rewrite a hidden linker silently.
+        """
+        return self.visible if self.restricted else None
+
+
+def mover_view(vault_root: Path) -> MoverView:
+    """The caller's view for a relocation: one rule for a move and a curation link rewrite."""
+    from .governance import connector_boundary, egress
+    from .governance.principal import effective_principal
+
+    restricted = egress.caller_restricted(vault_root)
+    return MoverView(
+        visible=egress.restricted_release_filter(vault_root),
+        restricted=restricted,
+        limited=restricted
+        and not connector_boundary.unrestricted(vault_root, effective_principal()),
+    )
+
+
+def _own_lineage_write(
+    vault_root: Path, rel: str, before: str, after: str, reason: str
+) -> pointer_write.PointerWrite:
+    """The proven write by which a move's lineage entry changes an append-only page.
+
+    It admits one entry appended after every earlier byte of `moved_from` and nothing else, and
+    its record lets the move's change be read back. An undo removes an entry, which no
+    declaration admits; `page_lineage.remove_latest` checks that the entry is its own.
+    """
+    try:
+        return pointer_write.plan(
+            vault_root, rel, before, after, pointer_write.Declared(lineage=True), reason=reason
+        )
+    except pointer_write.PointerWriteError as error:
+        raise MoveFileError(code=error.code, reason=error.reason) from error
+
+
+def records_lineage(vault_root: Path, old_rel: str, new_rel: str, *, undo: bool) -> bool:
+    """Whether the move leaves the moved page a lineage entry that resolves its old path.
+
+    Only a Markdown page with a frontmatter block records lineage, and an undo removes the
+    entry instead of adding one.
+    """
+    from .vault import served_page_bytes
+
+    if undo or not (old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md")):
+        return False
+    raw = served_page_bytes(vault_root, old_rel)
+    if raw is None:
+        return False
+    _front, _body, block = parse_frontmatter(raw.decode("utf-8", errors="replace"))
+    return block is not None
+
+
+def _undo_records(vault_root: Path, old_rel: str) -> dict[str, str]:
+    """The pointer-write record id of each page that the move an undo reverses repointed.
+
+    The page's newest lineage entry names that move's operation; the owner-only map of the
+    operation gives the records, by page (`pointer_write.operation_records`).
+    """
+    from . import page_lineage, pointer_write
+    from .vault import served_page_bytes
+
+    raw = served_page_bytes(vault_root, old_rel)
+    if raw is None:
+        return {}
+    operation = page_lineage.latest_operation(raw.decode("utf-8", errors="replace"))
+    return pointer_write.operation_records(vault_root, operation)
 
 
 def _repoint_parts(new_page: str):
@@ -320,24 +491,126 @@ class InboundRewrite:
 
     path: str
     absolute: Path
-    #: The append-only tree that refuses the rewrite, or None when the move may write it.
+    #: The append-only tree that holds the page, or None when the move may write it freely.
     append_only: str | None
     #: Links whose bytes the move changes; zero leaves the page untouched.
     changes: int
     content: str
     guard: PathGuard
+    #: Prose mentions of the moved path that `content` renames; the page is written when any change.
+    mentions: int = 0
+    #: Mentions a page with an immutable body keeps, as captured.
+    left_mentions: int = 0
+    #: The proven pointer write that changes an append-only page; `content` is its result.
+    repoint: Any = None
+    #: True when `repoint` restores the page from the record of the move this one undoes.
+    restored: bool = False
+    #: The code and reason that refuse the change to an append-only page.
+    refusal: tuple[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class ReferrerProof:
+    """Select the approved reference scope before planning the guarded writes."""
+
+    visible: Callable[[str], bool]
+    verify: Callable[[
+        Sequence[InboundLink], Sequence[str], Sequence[InboundRewrite],
+        Callable[[str], bool] | None, Callable[[str], bool], bool,
+    ], Callable[[], None]]
+
+
+#: The outcome a move preview gives each referrer; the command-surface specification fixes the set.
+REWRITTEN = "rewritten"
+REPOINTED = "pointer-repointed (append-only page)"
+KEPT = "unchanged: resolves via prior path"
+REFUSED = "refused"
+#: A reference a move leaves while the moved file records no lineage, so nothing resolves it.
+KEPT_DANGLING = "unchanged: keeps the old path"
+
+
+def store_rows_outcome(vault_root: Path, unchanged: str) -> str | None:
+    """The preview outcome of the rows that the vault's collection store keeps without a page.
+
+    A move writes no such row, and no index maps a row's values to the pages they name, so a
+    preview cannot list the rows that name the moved path. They share `unchanged`, the outcome of
+    every reference the move leaves. None when the vault keeps every collection in files.
+    """
+    from .collection_store import ownership
+
+    return None if ownership.file_only(vault_root) else unchanged
+
+#: The `manage_memory_file` call whose preview digest approves a move's repoints of append-only
+#: referrers; a refusal spells it for the surface that serves the call.
+_MOVE_PREVIEW = MappingProxyType({"operation": "move", "validate_only": True})
+#: Stands for the store writer in a store-mode validation, which returns before any commit.
+_STORE_VALIDATION = object()
 
 
 def plan_inbound_rewrites(
-    vault_root: Path, old_rel: str, new_rel: str, inbound: list[InboundLink]
+    vault_root: Path,
+    old_rel: str,
+    new_rel: str,
+    inbound: list[InboundLink],
+    *,
+    named_in: Sequence[str] = (),
+    paired: tuple[str, str] | None = None,
+    undo: bool = False,
+    check: Callable[[], None] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
 ) -> list[InboundRewrite]:
-    """Rewrite each page `inbound` names, in path order, without writing it.
+    return list(iter_inbound_rewrites(
+        vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired,
+        undo=undo, check=check, resolver_factory=resolver_factory,
+    ))
+
+
+def iter_inbound_rewrites(
+    vault_root: Path,
+    old_rel: str,
+    new_rel: str,
+    inbound: list[InboundLink],
+    *,
+    named_in: Sequence[str] = (),
+    paired: tuple[str, str] | None = None,
+    undo: bool = False,
+    check: Callable[[], None] | None = None,
+    resolver_factory: Callable[[], WikilinkResolver] | None = None,
+    read_text: Callable[[Path, Path], tuple[str, PathGuard]] | None = None,
+) -> Iterator[InboundRewrite]:
+    """Rewrite each page `inbound` or `named_in` names, in path order, without writing it.
 
     The move and its preview both read their referrer outcomes from here. A
     page that cannot be read is skipped, and each guard binds the bytes read.
+    `named_in` are pages that may cite the moved paths in prose, and `paired` is the
+    moved file's binary when the page moves with one; the mention rewrite covers both.
+
+    A page in an append-only tree changes only through the governed pointer write: its links
+    follow the move when they name a page with an `exomem_id`, and its registry pointer fields
+    may change. An `undo` returns each append-only page to the before bytes of the record
+    that the move it undoes left on it, and refuses one that move did not change.
     """
-    plans: list[InboundRewrite] = []
-    for rel in sorted({hit.path for hit in inbound}):
+    from . import page_fields, pointer_write
+
+    reader = read_text or read_guarded_text
+    pages = sorted({hit.path for hit in inbound} | set(named_in))
+    moves = path_mentions.renames(
+        vault_root, [(old_rel, new_rel), *([paired] if paired is not None else [])]
+    ) if pages else ()
+    pointers = page_fields.pointer_fields(vault_root) if pages else frozenset()
+    # One matcher holds one resolver for every append-only referrer of the move.
+    matcher = pointer_write.page_matcher(vault_root, {old_rel: new_rel}, resolver_factory=resolver_factory)
+    # Read on the first append-only page the undo changes, so pages it does not plan never
+    # reach the records.
+    restore: dict[str, str] | None = None
+    identified = (
+        bool(pages)
+        and old_rel.lower().endswith(".md")
+        and pointer_write.identity_at(vault_root, old_rel) is not None
+    )
+    for rel in pages:
+        if check is not None:
+            check()
         if rel == old_rel:
             continue
         try:
@@ -346,7 +619,7 @@ def plan_inbound_rewrites(
         except (ValueError, OSError):
             continue
         try:
-            text, guard = read_guarded_text(vault_root, abs_file)
+            text, guard = reader(vault_root, abs_file)
         except (OSError, UnicodeDecodeError, PathGuardError):
             continue
         new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
@@ -356,55 +629,65 @@ def plan_inbound_rewrites(
         # Rule 2 protects the material, and refusing to repoint an index
         # at a file this op just moved would leave the index dangling —
         # the opposite of what the guard is for.
-        if rel.rsplit("/", 1)[-1] == "index.md":
+        generated_index = rel.rsplit("/", 1)[-1] == "index.md"
+        body_immutable = append_tree is not None and not generated_index
+        if generated_index:
             append_tree = None
-        # Only Evidence takes this exception; a Sources page keeps the refusal.
-        elif append_tree == "Evidence" and n_changed:
-            repointed = _repoint_back_references(text, old_rel, new_rel, n_changed)
-            if repointed is not None:
-                new_text, append_tree = repointed, None
-        plans.append(InboundRewrite(rel, abs_file, append_tree, n_changed, new_text, guard))
-    return plans
-
-
-def _repoint_back_references(text: str, old_rel: str, new_rel: str, changes: int) -> str | None:
-    """`text` with the move applied to its `ingested_into` field alone, or None.
-
-    `ingested_into` is the back-reference that note writes maintain on captured
-    material; it is not captured content. When every one of the `changes` links
-    sits in that field, the field is patched where the YAML parser places it,
-    so the body and every other field keep their bytes. Any other link, or a
-    page the parser cannot read, leaves the page refused as append-only.
-    Sources pages keep the refusal: only Evidence sidecars carry this
-    system-kept field that a folder merge must repoint.
-    """
-    from .record_formats import FrontmatterSpliceError, splice_markdown_frontmatter
-
-    try:
-        frontmatter, _body, block = parse_frontmatter(text, strict=True)
-    except FrontmatterError:
-        return None
-    entries = frontmatter.get("ingested_into") if block is not None else None
-    if not isinstance(entries, list):
-        return None
-    repointed: list[Any] = []
-    moved = 0
-    for entry in entries:
-        if isinstance(entry, str):
-            entry, count = _rewrite_wikilinks(entry, old_rel, new_rel)
-            moved += count
-        repointed.append(entry)
-    if moved != changes:
-        return None
-    try:
-        result = splice_markdown_frontmatter(text, {"ingested_into": repointed})
-    except FrontmatterSpliceError:
-        return None
-    # The counts can agree while a link elsewhere stays behind (an escaped entry, a merge key);
-    # the page then still points at the old path, so it stays refused.
-    if _rewrite_wikilinks(result, old_rel, new_rel)[1]:
-        return None
-    return result
+        repoint = refusal = None
+        restored = False
+        if append_tree is not None and n_changed:
+            record = None
+            try:
+                if undo:
+                    if restore is None:
+                        restore = _undo_records(vault_root, old_rel)
+                    if rel in restore:
+                        record = pointer_write.load_record(vault_root, restore[rel])
+                if undo and record is None:
+                    raise pointer_write.PointerWriteError(
+                        "POINTER_RECORD_UNKNOWN",
+                        f"undoing the move would change {rel} in append-only {append_tree}/, "
+                        "which the move it undoes did not change, so no pointer-write record "
+                        "restores it. Move the page explicitly instead.",
+                    )
+                if record is not None:
+                    new_text, restored = pointer_write.reverted_text(record, text), True
+                repoint = pointer_write.plan(
+                    vault_root,
+                    rel,
+                    text,
+                    new_text,
+                    # The move changes links to the moved page wherever they sit, and a registry
+                    # pointer field whose value holds one changes as a field.
+                    pointer_write.Declared(fields=pointers, moves={old_rel: new_rel}),
+                    reason=(
+                        f"undo of the move of {new_rel} to {old_rel}"
+                        if restored
+                        else f"move of {old_rel} to {new_rel}"
+                    ),
+                    same_page=matcher,
+                )
+            except pointer_write.PointerWriteError as error:
+                reason = error.reason
+                if error.code == "APPEND_ONLY" and not identified:
+                    reason = (
+                        f"updating inbound wikilinks would rewrite {rel} in append-only "
+                        f"{append_tree}/, and {old_rel} has no `exomem_id` to prove that a "
+                        "repointed link still names it. Retry with `update_wikilinks=false` to "
+                        "preserve exact bytes and run final-corpus semantic evaluation."
+                    )
+                new_text, refusal = text, (error.code, reason)
+        # A prose mention in an immutable body can never be rewritten, by this move or any
+        # other, so refusing would block every later move of the file; it is left and reported.
+        new_text, n_mentions = path_mentions.rewrite(
+            new_text, moves, apply=not body_immutable
+        )
+        left = n_mentions if body_immutable else 0
+        yield InboundRewrite(
+            rel, abs_file, append_tree, n_changed, new_text, guard,
+            mentions=0 if body_immutable else n_mentions, left_mentions=left,
+            repoint=repoint, restored=restored, refusal=refusal,
+        )
 
 
 def move_file(
@@ -420,47 +703,98 @@ def move_file(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _referrer_proof: ReferrerProof | None = None,
+    lineage_entry: Mapping[str, Any] | None = None,
+    undo_lineage: bool = False,
+    preview: bool = False,
+    preview_digest: str | None = None,
+    record_repoints: bool = False,
+    _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
+    _stage: Callable[[str], None] | None = None,
+    _exact_content: bool = False,
+    _caller_judges_contract: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
+    """Relocate a file; see `_move_file_local`.
+
+    `lineage_entry` adds keys to the lineage entry the move appends, such as a
+    reclassification's prior classification. `undo_lineage` marks the move as an undo:
+    it removes the newest lineage entry, which must name the destination, and appends none,
+    except for a restricted caller, whose undo appends an entry naming the path it vacates.
+    `record_repoints` marks the move undoable: its entry names its operation, which the
+    owner-only map of the move's pointer-write records keys, so the undo restores each
+    append-only referrer from its record.
+
+    `preview` validates without writing and returns the result with one outcome per referrer
+    and the `preview_digest` that a commit repointing append-only pages must pass.
+
+    `_stage` is curation's seam around a file-mode rename: it is called once with
+    `before-rename` immediately before the rename, `after-rename` after it and `after-batch`
+    after the batch commits. `_exact_content` makes `content_transform` alone decide the moved
+    bytes, with no lineage entry added or removed: curation's guarded inverse restores sealed bytes.
+    `_caller_judges_contract` leaves a validation's contract to its caller, which judges the move
+    from another state: curation's inverse move, from what the plan's earlier steps leave
+    (`semantic_writes.ProjectedMoves`). Its commit judges the vault as it is then.
+    """
     manager = writer_lease.active_manager()
+    validate_only = validate_only or preview
     boundary = manager.consistency_guard if validate_only else manager.mutation_guard
     # Protect semantic creation and rollback, then release before standalone index fan-out.
     with ExitStack() as mutation_context, ExitStack() as originals_context:
         mutation_context.enter_context(boundary(vault_root, operation="move_file"))
-        return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, originals_context=originals_context, mutation_context=mutation_context)
+        try:
+            return _move_file_local(vault_root, old_path=old_path, new_path=new_path, update_wikilinks=update_wikilinks, allow_curated=allow_curated, today=today, promotion_reason=promotion_reason, content_transform=content_transform, extra_writes=extra_writes, validate_only=validate_only, _validate_prepared_bindings=_validate_prepared_bindings, _referrer_proof=_referrer_proof, originals_context=originals_context, mutation_context=mutation_context, lineage_entry=lineage_entry, undo_lineage=undo_lineage, preview=preview, preview_digest=preview_digest, record_repoints=record_repoints, _preview_call=_preview_call, _stage=_stage, _exact_content=_exact_content, _caller_judges_contract=_caller_judges_contract)
+        except originals.RetirementUnconfirmed as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
 
 
-def _evicted_source(vault_root: Path, old_path: str) -> tuple[Path, str, originals.OriginalSnapshot] | None:
-    """An evicted original the caller may see; any other absent path stays NOT_FOUND."""
-    if originals.binding_for(vault_root) is None:
+def _evicted_source(
+    vault_root: Path, old_path: str, *, addressed_only: bool = False
+) -> tuple[Path, str, originals.OriginalSnapshot] | None:
+    """An original with no file at its path that the caller may see; any other absent path stays NOT_FOUND.
+
+    It is evicted (`originals.evicted_visible_original`), or, in a pooled archive, addressed by digest.
+    A store-mode caller asks only for the second: the store keeps a record of every evicted original it moves.
+    """
+    if not addressed_only and (evicted := originals.evicted_visible_original(vault_root, old_path)) is not None:
+        return evicted
+    if not original_pool.enabled(vault_root):
         return None
     try:
         abs_path, rel_path = resolve_under_vault(vault_root, old_path, must_be_file=True)
-        stored = originals.original_state(vault_root, abs_path)
-    except (VaultPathError, reserved_paths.ReservedPathLeafError):
+    except VaultPathError:
         return None
-    from .governance import egress
-
-    visible = egress.restricted_release_filter(vault_root)
-    if stored.state != "evicted" or (visible is not None and not visible(rel_path)):
+    stored = originals.digest_addressed(vault_root, abs_path)
+    if stored is None or not originals.caller_may_see(vault_root, rel_path):
         return None
     return abs_path, rel_path, stored
 
 
 def _materialize_originals(vault_root: Path, originals_context: ExitStack, rel: str) -> None:
     """Hydrate an evicted original only once the move is about to rename it."""
-    from .media_store import local_originals
+    from .media_store import moved_originals
 
-    originals_context.enter_context(local_originals(vault_root, (rel,)))
+    originals_context.enter_context(moved_originals(vault_root, rel))
+
+
+def _refuse_reserved_destination(
+    vault_root: Path, old_rel: str, new_rel: str, *, validate_only: bool
+) -> None:
+    """Refuse a destination that another live page's lineage claims; the page's own lineage is free."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, new_rel, own=old_rel, newest=not validate_only)
+    except prior_claims.ReservedPathError as error:
+        code = "DEST_EXISTS" if error.code == "FILE_EXISTS" else error.code
+        raise MoveFileError(code=code, reason=error.reason) from None
 
 
 def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:
-    """Refuse a file-mode destination that a file or folder holds, or that is reserved."""
+    """Refuse a file-mode destination that a file, a folder or an original holds, or that is reserved."""
     try:
         reserved_paths.inspect_generic_path(vault_root, new_rel)
     except reserved_paths.ReservedPathLeafError as error:
-        if error.code == "MISSING":
-            pass
-        elif error.code in {
+        if error.code in {
             "CAPABILITY_UNAVAILABLE",
             "IDENTITY_CHANGED",
             "RESERVED_PATH",
@@ -470,18 +804,20 @@ def _refuse_taken_destination(vault_root: Path, new_rel: str) -> None:
                 "RESERVED_PATH",
                 "destination is reserved for its owning subsystem",
             ) from None
-        else:
+        if error.code != "MISSING":
             raise MoveFileError(
                 "MOVE_FAILED", "held destination acquisition was refused"
             ) from None
-    else:
-        raise MoveFileError(
-            code="DEST_EXISTS",
-            reason=(
-                f"destination already exists: {new_rel}. "
-                f"This op refuses to overwrite — pick a different name."
-            ),
-        )
+        # A pooled or evicted original holds its logical path with no file there.
+        if originals.is_note_path(new_rel) or not originals.available(vault_root, new_rel):
+            return
+    raise MoveFileError(
+        code="DEST_EXISTS",
+        reason=(
+            f"destination already exists: {new_rel}. "
+            f"This op refuses to overwrite — pick a different name."
+        ),
+    )
 
 
 def _resolve_source_on_files(
@@ -591,8 +927,18 @@ def _move_file_local(
     extra_writes: tuple[PlannedWrite, ...] = (),
     validate_only: bool = False,
     _validate_prepared_bindings: Callable[[], None] | None = None,
+    _referrer_proof: ReferrerProof | None = None,
     originals_context: ExitStack,
     mutation_context: ExitStack,
+    lineage_entry: Mapping[str, Any] | None = None,
+    undo_lineage: bool = False,
+    preview: bool = False,
+    preview_digest: str | None = None,
+    record_repoints: bool = False,
+    _preview_call: Mapping[str, object] = _MOVE_PREVIEW,
+    _stage: Callable[[str], None] | None = None,
+    _exact_content: bool = False,
+    _caller_judges_contract: bool = False,
 ) -> MoveFileResult | MoveFileValidation:
     """Relocate a file, optionally rewriting wikilinks that point at it.
 
@@ -614,7 +960,10 @@ def _move_file_local(
         except VaultPathError as e:
             raise MoveFileError(code=e.code, reason=e.reason) from e
         store_targets.refuse_crossing("move_file", ends)
-        store_writer = store_availability.page_writer(vault_root)
+        # A validation writes nothing, so it reads the store off the writer thread a commit needs.
+        store_writer = (
+            _STORE_VALIDATION if validate_only else store_availability.page_writer(vault_root)
+        )
     # The read phase sees one revision; it ends before the commit, which rechecks what it read.
     reading = mutation_context.enter_context(ExitStack())
     if store_writer is not None:
@@ -626,8 +975,15 @@ def _move_file_local(
         try:
             old_abs, old_rel = store_targets.resolve_existing(vault_root, old_path)
         except VaultPathError as e:
-            raise MoveFileError(code=e.code, reason=e.reason) from e
-        stored_original = store_targets.evicted_original(vault_root, old_rel)
+            # The store records no binary for a digest-addressed original: its companion page is the filing.
+            addressed = (
+                _evicted_source(vault_root, old_path, addressed_only=True) if e.code == "NOT_FOUND" else None
+            )
+            if addressed is None:
+                raise MoveFileError(code=e.code, reason=e.reason) from e
+            old_abs, old_rel, stored_original = addressed
+        else:
+            stored_original = store_targets.evicted_original(vault_root, old_rel)
     from .collection_store import authority as collection_authority
 
     collection_authority.refuse_view_paths(vault_root, (old_rel,), MoveFileError)
@@ -671,6 +1027,8 @@ def _move_file_local(
     # the semantic write machinery below is written for — and the bytes are
     # renamed alongside it inside the same transaction.
     paired_binary: tuple[str, str] | None = None
+    # A digest-addressed original moves by repointing its companion; no bytes are renamed or fetched.
+    addressed_binary = False
     paired_parts: tuple[str, str] | None = None
     # A raw-marked page's part pages that the store holds, with their hashes.
     stored_parts: dict[str, str] = {}
@@ -711,7 +1069,7 @@ def _move_file_local(
         )
         if (
             (vault_root / paired_binary[1]).exists()
-            or originals.evicted(vault_root, paired_binary[1])
+            or originals.available(vault_root, paired_binary[1])
             or (store_writer is not None and store_targets.holds(vault_root, paired_binary[1]))
         ):
             raise MoveFileError(
@@ -724,6 +1082,22 @@ def _move_file_local(
         content_transform = _compose_transforms(
             content_transform, _repoint_artifact(*paired_binary)
         )
+        # A store record that an older eviction left still moves with its bytes, as before.
+        addressed_binary = originals.digest_addressed(vault_root, paired_binary[0]) is not None and not (
+            store_writer is not None and store_targets.holds(vault_root, paired_binary[0])
+        )
+        # A shared original keeps no file at its path: renamed to a suffix-less name its companion
+        # would read as a note and the census could no longer name it to a restricted caller.
+        if addressed_binary and not originals.may_share_bytes(paired_binary[1]):
+            suffix = PurePosixPath(paired_binary[0]).suffix
+            example = f", such as '{paired_binary[1]}{suffix}'" if suffix else ""
+            raise MoveFileError(
+                code="SHARED_ORIGINAL_NEEDS_EXTENSION",
+                reason=(
+                    f"A shared original keeps its filename extension, so it cannot be renamed "
+                    f"to '{paired_binary[1]}'. Add an extension to the destination name{example}."
+                ),
+            )
     if not recovering_from_trash and old_rel.lower().endswith(".md"):
         # The hidden pages that hold the rest of a long extraction move with their page, paired
         # with an original or not.
@@ -775,6 +1149,11 @@ def _move_file_local(
             )
     else:
         _refuse_taken_destination(vault_root, new_rel)
+    if not recovering_from_trash:
+        _refuse_reserved_destination(vault_root, old_rel, new_rel, validate_only=validate_only)
+
+    if (held := source_custody.erase_refusal_at(vault_root, old_rel)) is not None:
+        raise MoveFileError(*held)
 
     # Append-only guards. Rule 2 protects content *immutability*, not file
     # *location*: a move that stays WITHIN the same append-only tree
@@ -889,20 +1268,11 @@ def _move_file_local(
             index=recovered.index,
         )
 
-    from .governance import connector_boundary, egress
-    from .governance.principal import effective_principal
+    from .governance import connector_boundary
 
-    visible = egress.restricted_release_filter(vault_root)
-    # A connector-limited mover never reads, rewrites or counts a page it cannot
-    # see, so its answer is the same with and without hidden linkers. A hidden
-    # linker keeps its old link; the owner's audit reports it as a broken
-    # reference (named debt in the vault-consolidation change).
-    # Whether this mover is restricted. `visible` only applies a view: a bound store gives the
-    # owner one too.
-    restricted = egress.caller_restricted(vault_root)
-    limited_mover = restricted and not connector_boundary.unrestricted(
-        vault_root, effective_principal()
-    )
+    view = mover_view(vault_root)
+    visible, restricted, limited_mover = view.visible, view.restricted, view.limited
+    referrer_visible = _referrer_proof.visible if _referrer_proof is not None else visible if limited_mover else None
     # Scan inbound links BEFORE the move, while the old path still exists.
     stored_check: store_targets.InboundCheck | None = None
     if store_writer is not None and update_wikilinks:
@@ -911,14 +1281,31 @@ def _move_file_local(
         inbound = list(stored_check.links)
     else:
         inbound = (
-            find_inbound_wikilinks(vault_root, old_rel, visible=visible if limited_mover else None)
+            find_inbound_wikilinks(
+                vault_root, old_rel, visible=referrer_visible, lineage=False
+            )
             if update_wikilinks
             else []
         )
-    if limited_mover:
-        inbound = [hit for hit in inbound if visible(hit.path)]
+    if referrer_visible is not None:
+        inbound = [hit for hit in inbound if referrer_visible(hit.path)]
+    # Pages that cite the moved paths in prose come from the catalogue, never from a walk.
+    mention_lookup = (
+        path_mentions.find_pages(
+            vault_root, [old_rel, *([paired_binary[0]] if paired_binary is not None else [])]
+        )
+        if update_wikilinks
+        else None
+    )
+    named_in = [
+        rel
+        for rel in (mention_lookup.pages if mention_lookup is not None else ())
+        if referrer_visible is None or referrer_visible(rel)
+    ]
 
     warnings: list[str] = folder_split_warnings(vault_root, new_abs.parent)
+    if mention_lookup is not None and not mention_lookup.complete:
+        warnings.append(path_mentions.NOT_CHECKED)
     if (
         stored_check is not None
         and stored_check.unimported
@@ -943,6 +1330,10 @@ def _move_file_local(
     # `update_wikilinks=false`; the owner's audit reports it. Its change count
     # is kept here so the full figures drop it too.
     hidden_changes: dict[str, int] = {}
+    hidden_mentions: dict[str, int] = {}
+    mentions_updated = 0
+    reported_mentions = 0
+    kept_mentions = 0
 
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
@@ -951,46 +1342,135 @@ def _move_file_local(
     batch_fanout_paths: list[Path] = []
     left_unchanged: list[str] = []
     writable_page = connector_boundary.effect_admission(vault_root)
-    if update_wikilinks and inbound:
-        for item in plan_inbound_rewrites(vault_root, old_rel, new_rel, inbound):
-            if not item.changes:
-                continue
+    # A restricted caller may be denied a page that the move it undoes repointed, so its undo
+    # cannot restore every repoint. It records the path it vacates instead, as a move back does,
+    # whatever pages exist: its answer and the page's bytes never depend on a withheld page, and
+    # a withheld page that still links the vacated path resolves through the lineage.
+    keep_vacated = undo_lineage and restricted
+    keeps_lineage = records_lineage(
+        vault_root, old_rel, new_rel, undo=undo_lineage and not keep_vacated
+    )
+    store_rows = (
+        store_rows_outcome(vault_root, KEPT if keeps_lineage else KEPT_DANGLING) if preview else None
+    )
+    # One outcome per referrer the mover may see, and the pointer writes the move makes to
+    # append-only pages: those it restores from the records of the move it undoes, and the
+    # others, which the call does not name and the preview digest approves.
+    referrers: list[dict[str, str]] = []
+    repoints: list[Any] = []
+    restored: list[Any] = []
+    refused: list[MoveFileError] = []
+    recheck_referrers = None
+    if update_wikilinks:
+        plans = plan_inbound_rewrites(
+            vault_root, old_rel, new_rel, inbound, named_in=named_in, paired=paired_binary, undo=undo_lineage,
+        ) if inbound or named_in else []
+        if _referrer_proof is not None:
+            recheck_referrers = _referrer_proof.verify(
+                inbound, named_in, plans, _referrer_proof.visible, writable_page,
+                mention_lookup is not None and mention_lookup.complete,
+            )
+        for item in plans:
             rel = item.path
+            shown = visible is None or visible(rel)
+            unchanged = KEPT if keeps_lineage else KEPT_DANGLING
+            if item.left_mentions and shown:
+                kept_mentions += 1
+            if not (item.changes or item.mentions):
+                if shown and item.left_mentions:
+                    referrers.append({"path": rel, "outcome": unchanged})
+                continue
             if not writable_page(rel):
                 # A page the mover may not write keeps its link and the move commits. Only a page
                 # the mover may see is counted, so a withheld page leaves the answer as it is without it.
-                if visible is None or visible(rel):
+                if shown:
                     left_unchanged.append(rel)
+                    referrers.append({"path": rel, "outcome": unchanged})
                 continue
-            if visible is not None and not visible(rel):
+            if not shown:
                 if item.append_only:
                     continue
                 hidden_changes[rel] = item.changes
-            if item.append_only:
-                raise MoveFileError(
-                    code="APPEND_ONLY",
-                    reason=(
-                        f"updating inbound wikilinks would rewrite {rel} in "
-                        f"append-only {item.append_only}/. Retry with "
-                        f"`update_wikilinks=false` to preserve exact bytes "
-                        f"and run final-corpus semantic evaluation."
-                    ),
+                hidden_mentions[rel] = item.mentions
+            if item.refusal is not None:
+                code, reason = item.refusal
+                referrers.append({"path": rel, "outcome": REFUSED, "code": code, "cause": reason})
+                refused.append(MoveFileError(code=code, reason=reason))
+                continue
+            if item.repoint is not None:
+                (restored if item.restored else repoints).append(item.repoint)
+            if shown:
+                referrers.append(
+                    {"path": rel, "outcome": REPOINTED if item.repoint is not None else REWRITTEN}
                 )
             writes.append(
                 PlannedWrite(path=item.absolute, content=item.content, guard=item.guard)
             )
             files_touched.append(rel)
             wikilinks_updated += item.changes
-            if visible is None or visible(rel):
+            mentions_updated += item.mentions
+            if shown:
                 reported_touched.append(rel)
                 reported_updated += item.changes
+                reported_mentions += item.mentions
+    moves = {old_rel: new_rel}
+    digest = None if refused else pointer_write.preview_digest(moves, repoints)
+    if refused and not preview:
+        raise refused[0]
+    if preview and refused:
+        # A refused move cannot commit, so its preview stops at the outcomes it reports.
+        return MoveFileResult(
+            old_path=old_rel,
+            new_path=new_rel,
+            wikilinks_updated=reported_updated,
+            files_touched=list(reported_touched),
+            warnings=list(warnings),
+            path_mentions_updated=reported_mentions,
+            referrers=referrers,
+            store_rows=store_rows,
+        )
+    if not validate_only:
+        try:
+            pointer_write.require_preview(
+                moves, repoints, digest if _referrer_proof is not None else preview_digest,
+                preview_call=capabilities.active_call_text("manage_memory_file", _preview_call),
+            )
+        except pointer_write.PointerWriteError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from None
+    # An undoable move's lineage entry names its operation whether or not it repoints a page, so
+    # the page never says how many it repointed; owner-only state maps the operation to them.
+    operation = pointer_write.new_operation_id() if record_repoints else None
+    if operation is not None:
+        lineage_entry = {**dict(lineage_entry or {}), page_lineage.OPERATION_KEY: operation}
+    repoint_records = [(write, pointer_write.new_record_id()) for write in repoints]
+    restore_records = [(write, pointer_write.new_record_id()) for write in restored]
+    # The moved append-only page's own lineage write, proven once its final bytes are known.
+    own_records: list[tuple[pointer_write.PointerWrite, str]] = []
 
+    def record_pointer_writes() -> list[str]:
+        """Record each pointer write around the commit: its record outlives the move only when
+        its page holds the write (`pointer_write.recording`)."""
+        return [
+            *mutation_context.enter_context(
+                pointer_write.recording(
+                    vault_root, [*repoint_records, *own_records], operation=operation
+                )
+            ),
+            *mutation_context.enter_context(pointer_write.recording(vault_root, restore_records)),
+        ]
+
+    if kept_mentions:
+        # Captured pages cannot change; the page count carries no path, so a restricted caller keeps it.
+        warnings.append(
+            f"{kept_mentions} append-only page(s) cite the old path in prose and keep it; "
+            "a Source's own pointer is repaired with reclassify_source and artifact_path"
+        )
     if left_unchanged:
         # No path in the sentence: a restricted caller's response drops a warning that embeds one.
         warnings.append(f"{len(left_unchanged)} visible linking page(s) outside your write scope keep their link to the old path")
 
     def validation_result(
-        *, source_hash: str, destination_hash: str
+        *, source_hash: str, destination_hash: str, after_text: str | None = None
     ) -> MoveFileValidation:
         before = [{"path": old_rel, "content_hash": source_hash}]
         after = [
@@ -1013,6 +1493,10 @@ def _move_file_local(
                 wikilinks_updated=reported_updated,
                 files_touched=list(reported_touched),
                 warnings=list(warnings),
+                path_mentions_updated=reported_mentions,
+                referrers=referrers if preview else None,
+                preview_digest=digest if preview else None,
+                store_rows=store_rows,
             ),
             tuple(before),
             tuple(after),
@@ -1024,6 +1508,7 @@ def _move_file_local(
             paired_binary is None
             and old_rel.lower().endswith(".md")
             and new_rel.lower().endswith(".md"),
+            after_text,
         )
 
     today = today or dt.date.today()
@@ -1040,11 +1525,14 @@ def _move_file_local(
             if restricted
             else (wikilinks_updated, len(files_touched))
         )
+        logged_mentions = reported_mentions if restricted else mentions_updated
         body = (
             f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
             f"wikilinks_updated={logged_updated} across "
             f"{logged_files} file(s)."
         )
+        if logged_mentions:
+            body += f" path_mentions_updated={logged_mentions}."
         if src_curated or dst_curated:
             body += f" allow_curated=true (tree: {src_curated or dst_curated})."
         if promotion:
@@ -1068,6 +1556,17 @@ def _move_file_local(
     log_body: str
     log_plan: LogWritePlan
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
+        # The page's lineage changes last, so it records the move of the final bytes.
+        declared_transform = content_transform
+        lineage = (
+            None
+            if _exact_content
+            else _lineage_transform(
+                old_rel, new_rel, lineage_entry, undo_lineage, keep_vacated=keep_vacated
+            )
+        )
+        if lineage is not None:
+            content_transform = _compose_transforms(declared_transform, lineage)
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
             moved_source = source
@@ -1090,8 +1589,16 @@ def _move_file_local(
                     wikilinks_updated += source_changes
                     reported_touched.append(old_rel)
                     reported_updated += source_changes
-            if content_transform is not None:
-                moved_source = content_transform(moved_source)
+            if declared_transform is not None:
+                moved_source = declared_transform(moved_source)
+            if lineage is not None:
+                declared_source, moved_source = moved_source, lineage(moved_source)
+                if src_append and not undo_lineage:
+                    own_records[:] = [(
+                        _own_lineage_write(vault_root, new_rel, declared_source, moved_source,
+                                           f"lineage of the move of {old_rel} to {new_rel}"),
+                        pointer_write.new_record_id(),
+                    )]
             _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
             log_rel_no_ext, log_body, log_plan = plan_activity_log()
             destination_guard = (
@@ -1137,6 +1644,7 @@ def _move_file_local(
                 for rel in refused:
                     files_touched.remove(rel)
                     wikilinks_updated -= hidden_changes.pop(rel)
+                    mentions_updated -= hidden_mentions.pop(rel, 0)
                 log_rel_no_ext, log_body, log_plan = plan_activity_log()
                 preflight = run_preflight()
             semantic_states = {
@@ -1204,16 +1712,31 @@ def _move_file_local(
                     ) from error
 
             if validate_only:
+                if not (preview or _caller_judges_contract):
+                    # A curation plan seals this validation, so a step that validates is one
+                    # whose contract its commit accepts.
+                    semantic_writes.refuse_blocked_move(preflight)
                 if store_writer is not None:
                     # Prepared as the commit prepares it, so a move that validates is one whose
                     # catalog accepts it; file mode prepares it only at the commit.
                     prepared_catalog(())
-                return validation_result(
+                validation = validation_result(
                     source_hash=content_hash(source),
                     destination_hash=content_hash(moved_source),
+                    after_text=moved_source,
                 )
+                return validation.result if preview else validation
 
             def mutate(
+                lifecycle_writes: tuple[PlannedWrite, ...],
+                required_guards,
+                bound_destination: PathGuard,
+            ) -> None:
+                # The renames run before the batch, so one projection delta covers both.
+                with media_bindings.operation(vault_root, (old_rel, new_rel, *(paired_binary or ()))):
+                    _mutate_files(lifecycle_writes, required_guards, bound_destination)
+
+            def _mutate_files(
                 lifecycle_writes: tuple[PlannedWrite, ...],
                 required_guards,
                 bound_destination: PathGuard,
@@ -1243,7 +1766,8 @@ def _move_file_local(
                 # path; the link rewrites around it earn nothing (review F1).
                 if _validate_prepared_bindings is not None:
                     _validate_prepared_bindings()
-                _materialize_originals(vault_root, originals_context, old_rel)
+                if not addressed_binary:
+                    _materialize_originals(vault_root, originals_context, old_rel)
                 heat_move = working_set_heat.begin_commit(vault_root, [new_abs])
                 try:
                     move_epoch = graph_sync.prepare_rename_epoch(
@@ -1253,12 +1777,18 @@ def _move_file_local(
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     raise
+                rename_attempted = False
                 try:
+                    if _stage is not None:
+                        _stage("before-rename")
+                    if recheck_referrers is not None:
+                        recheck_referrers()
+                    rename_attempted = True
                     _held_rename(vault_root, old_rel, new_rel)
                     # The bytes follow the page inside the same transaction.
                     # A rollback below undoes both, so a failure can never
                     # leave an artifact split across two trees.
-                    if paired_binary is not None:
+                    if paired_binary is not None and not addressed_binary:
                         try:
                             _held_rename(vault_root, *paired_binary)
                         except MoveFileError:
@@ -1268,15 +1798,19 @@ def _move_file_local(
                         try:
                             _held_rename(vault_root, *paired_parts, kind="directory")
                         except MoveFileError:
-                            if paired_binary is not None:
+                            if paired_binary is not None and not addressed_binary:
                                 _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                             _held_rename(vault_root, new_rel, old_rel, rollback=True)
                             raise
+                    if _stage is not None:
+                        _stage("after-rename")
                 except BaseException:
                     working_set_heat.abandon_commit(heat_move)
                     if move_epoch is not None:
-                        # A held rename can fail after mutation; retain its floor and repair custody.
-                        graph_sync.provision_rename_recovery(move_epoch)
+                        if rename_attempted:
+                            graph_sync.provision_rename_recovery(move_epoch)
+                        else:
+                            graph_sync.restore_deletion_epoch(move_epoch)
                     raise
                 child_started = False
                 try:
@@ -1315,7 +1849,7 @@ def _move_file_local(
                     try:
                         if paired_parts is not None:
                             _held_rename(vault_root, paired_parts[1], paired_parts[0], rollback=True, kind="directory")
-                        if paired_binary is not None:
+                        if paired_binary is not None and not addressed_binary:
                             _held_rename(vault_root, paired_binary[1], paired_binary[0], rollback=True)
                         _held_rename(vault_root, new_rel, old_rel, rollback=True)
                     except MoveFileError as rollback_error:
@@ -1328,6 +1862,8 @@ def _move_file_local(
                     if move_epoch is not None:
                         graph_sync.restore_deletion_epoch(move_epoch)
                     raise
+                if _stage is not None:
+                    _stage("after-batch")
                 heat_moved.append(working_set_heat.observe_commit(heat_move))
 
             if visible is not None:
@@ -1369,7 +1905,8 @@ def _move_file_local(
                 bound_destination.recheck(vault_root)
                 catalog_target = prepared_catalog(lifecycle_writes)
                 entries: list[binaries.Entry] = []
-                if paired_binary is not None:
+                # A digest-addressed original has no store record: the page move carries its repointed binding.
+                if paired_binary is not None and not addressed_binary:
                     entries.append(binaries.Entry(*paired_binary))
                     _materialize_originals(vault_root, originals_context, paired_binary[0])
                 if paired_parts is not None and not stored_parts:
@@ -1417,6 +1954,9 @@ def _move_file_local(
 
             heat_moved: list[working_set_heat.ObservedCommit | None] = []
             reading.close()
+            if recheck_referrers is not None:
+                recheck_referrers()
+            pointer_writes = record_pointer_writes()
             committed = semantic_writes.commit_move(
                 vault_root,
                 preflight=preflight,
@@ -1476,10 +2016,12 @@ def _move_file_local(
                 raise MoveFileError(
                     "MOVE_FAILED", "move source changed during canonical validation"
                 ) from error
-            return validation_result(
+            validation = validation_result(
                 source_hash=source_hash,
                 destination_hash=source_hash,
             )
+            return validation.result if preview else validation
+        pointer_writes = record_pointer_writes()
         if store_writer is not None:
             # The store form has no epoch and no held rename; the log entry commits with the move.
             reading.close()
@@ -1577,9 +2119,12 @@ def _move_file_local(
             old_path=old_rel,
             new_path=new_rel,
             wikilinks_updated=reported_updated,
+            path_mentions_updated=reported_mentions,
             files_touched=reported_touched,
             warnings=warnings,
             semantic=semantic,
+            pointer_writes=pointer_writes,
+            pointer_repointed=[write.reported() for write in (*repoints, *restored)],
             # A bound store filters every caller, so the caller decides who reads the row report,
             # as file mode decides it: the paths it names may include pages withheld from others.
             index=(
@@ -1588,10 +2133,12 @@ def _move_file_local(
                     # A changed self-link puts the source in `files_touched`; it lives at new_rel.
                     "upsert_reports": [
                         store_batch.row_report(
-                            "upsert", [new_rel, *(rel for rel in files_touched if rel != old_rel)]
+                            "upsert",
+                            [new_rel, *(rel for rel in files_touched if rel != old_rel)],
+                            root=vault_root,
                         ).as_dict()
                     ],
-                    "delete_report": store_batch.row_report("delete", [old_rel]).as_dict(),
+                    "delete_report": store_batch.row_report("delete", [old_rel], root=vault_root).as_dict(),
                     "reconcile_required": False,
                     "reconcile_guidance": None,
                 }
@@ -1713,12 +2260,195 @@ def _move_file_local(
         old_path=old_rel,
         new_path=new_rel,
         wikilinks_updated=reported_updated,
+        path_mentions_updated=reported_mentions,
         files_touched=reported_touched,
         warnings=warnings,
         semantic=semantic,
+        pointer_writes=pointer_writes,
+        pointer_repointed=[write.reported() for write in (*repoints, *restored)],
         # The index outcome covers every rewritten page, so a mover other
         # than the owner receives none.
         index=None if restricted else index_feedback,
+    )
+
+
+def adopt_move(
+    vault_root: Path,
+    *,
+    old_path: str,
+    new_path: str,
+    source_hash: str,
+    content_transform: Callable[[str], str] | None = None,
+    extra_writes: tuple[PlannedWrite, ...] = (),
+    today: dt.date | None = None,
+    _validate_prepared_bindings: Callable[[], None] | None = None,
+    exact_content: bool = False,
+) -> MoveFileResult:
+    """Publish a move whose rename already ran, without renaming.
+
+    Curation adopts a move that a crash cut between its rename and its batch: the page sits at
+    `new_path` with the bytes it held at `old_path` (`source_hash`), and `old_path` is absent.
+    This commits what the move's batch would have committed: the destination bytes with their
+    lineage entry and `content_transform`, and the move's semantic, graph, catalog, index and
+    activity-log effects. The guards bind that rename-after state, so a page that changed or
+    returned to its old path refuses. Only an unpaired Markdown page in a file-mode vault
+    adopts, as only such a move records a curation intent. `exact_content` adopts an inverse
+    move, whose `content_transform` alone decides the bytes (`move_file`'s `_exact_content`).
+    """
+    from . import file_watcher, index_sync
+
+    manager = writer_lease.active_manager()
+    with ExitStack() as mutation_context:
+        mutation_context.enter_context(manager.mutation_guard(vault_root, operation="move_file"))
+        old_rel, new_rel = old_path, new_path
+        new_abs = vault_root / new_rel
+        try:
+            source, source_guard = read_guarded_text(vault_root, new_abs)
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            raise MoveFileError("SOURCE_CHANGED", "the renamed page is unreadable") from error
+        if content_hash(source) != source_hash:
+            raise MoveFileError(
+                "SOURCE_CHANGED", "the renamed page changed before its move was adopted"
+            )
+        transform = (
+            content_transform or (lambda text: text)
+            if exact_content
+            else _compose_transforms(
+                content_transform, _lineage_transform(old_rel, new_rel, None, False)
+            )
+        )
+        moved_source = transform(source)
+        _admit_publication(vault_root, new_rel, moved_source.encode("utf-8"))
+        absent_guard = PathGuard.capture(vault_root, old_rel, leaf_policy="absent")
+        try:
+            preflight = semantic_writes.preflight_move(
+                vault_root,
+                old_path=old_rel,
+                new_path=new_rel,
+                source=source,
+                moved_source=moved_source,
+                source_guard=source_guard,
+                destination_guard=absent_guard,
+                content_transform=transform,
+                adopt=True,
+            )
+        except semantic_writes.SemanticWriteError as error:
+            raise MoveFileError(error.code, error.reason) from error
+        semantic_states = {
+            item.after.path: semantic_index.from_semantic_page_state(item.after)
+            for item in preflight.evaluations
+        }
+        new_rel_no_ext = new_rel.removesuffix(".md")
+        log_plan = plan_log_entry(
+            vault_root,
+            date_iso=(today or dt.date.today()).isoformat(),
+            op="move_file",
+            rel_path_no_ext=new_rel_no_ext,
+            body=(
+                f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2, adopted after an "
+                "interrupted rename. wikilinks_updated=0 across 0 file(s)."
+            ),
+        )
+        catalog_target: catalog_publication.PreparedMarkdownCatalogPublication | None = None
+        index_reports: list[object] = []
+
+        def mutate(lifecycle_writes, required_guards, bound_absence: PathGuard) -> None:
+            nonlocal catalog_target
+            bound_absence.recheck(vault_root)
+            destination = PlannedWrite(
+                path=new_abs, content=moved_source, expected_hash=source_hash
+            )
+            catalog_writes = (
+                *lifecycle_writes,
+                PlannedWrite(path=new_abs, content=moved_source, create_only=True),
+                *extra_writes,
+                *log_plan.writes,
+            )
+            try:
+                catalog_target = catalog_publication.prepare_catalog_membership_batch(
+                    vault_root,
+                    writes=catalog_writes,
+                    removals=(catalog_publication.CatalogRemoval(old_rel, source_hash),),
+                    graph_replacement_provider=lambda: (
+                        graph_producer.replacements_for_semantic_transition(
+                            vault_root,
+                            before_corpus=preflight.before_corpus,
+                            after_corpus=preflight.after_corpus,
+                            writes=catalog_writes,
+                            semantic_states={
+                                item.after.path: item.after for item in preflight.evaluations
+                            },
+                        )
+                    ),
+                    now=int(time.time()),
+                    part_folders={},
+                )
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_BLOCKED", reason=str(error)
+                ) from error
+            combined = [*lifecycle_writes, destination, *extra_writes]
+            if catalog_target is not None:
+                combined.extend(log_plan.writes)
+            if _validate_prepared_bindings is not None:
+                _validate_prepared_bindings()
+            epoch = graph_sync.prepare_rename_epoch(vault_root, [(old_rel, new_rel)], adopted=True)
+            try:
+                if epoch is not None:
+                    graph_sync.publish_rename_epoch(epoch)
+                batch_atomic_write(
+                    combined,
+                    vault_root=vault_root,
+                    required_guards=required_guards,
+                    index_reports=index_reports,
+                    _validate_prepared_bindings=_validate_prepared_bindings,
+                    semantic_states={
+                        rel: semantic_states[rel]
+                        for write in combined
+                        if (rel := write.path.relative_to(vault_root).as_posix())
+                        in semantic_states
+                    },
+                )
+            except BaseException:
+                # No rename runs here, so nothing rolls back; the graph repairs from its floor.
+                if epoch is not None:
+                    graph_sync.provision_rename_recovery(epoch)
+                raise
+
+        try:
+            committed = semantic_writes.commit_move(vault_root, preflight=preflight, mutate=mutate)
+        except semantic_writes.SemanticWriteError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        except PathGuardError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        except ContentHashMismatchError as error:
+            raise MoveFileError(
+                "SOURCE_CHANGED", "the renamed page changed before its move was adopted"
+            ) from error
+        if catalog_target is not None:
+            try:
+                catalog_publication.publish_markdown_batch(catalog_target)
+            except catalog_publication.CatalogPublicationError as error:
+                raise MoveFileError(
+                    code="GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
+                    reason="the adopted move committed but its catalog publication did not "
+                    "reach a verified terminal",
+                ) from error
+    try:
+        file_watcher.register_self_delete(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — suppression is independently observed
+        log.debug("adopted move delete suppression registration failed", exc_info=True)
+    try:
+        index_sync.delete_after_remove(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — the move stands; reconcile repairs the index
+        log.exception("index delete failed for adopted move source %s", old_rel)
+    return MoveFileResult(
+        old_path=old_rel,
+        new_path=new_rel,
+        wikilinks_updated=0,
+        files_touched=[],
+        warnings=[],
+        semantic=committed.as_dict(),
     )
 
 

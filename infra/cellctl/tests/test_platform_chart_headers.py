@@ -905,6 +905,10 @@ def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
     # Without this route, clients that show the server's site icon fall back to the parent domain's.
     assert any("Path(`/favicon.ico`)" in rule["match"] and "Method(`HEAD`)" in rule["match"]
                for rule in route["spec"]["routes"])
+    # Without this route a product's identity read never reaches the gateway, so no service
+    # credential holder can verify its cell.
+    assert any(rule["match"] == "Host(`mcp.example.test`) && Path(`/.well-known/exomem-cell`) && Method(`GET`)"
+               for rule in route["spec"]["routes"])
 
     # The edge namespace holds no Secret but the certificate cert-manager
     # writes there at runtime: the chart itself renders none, and no issuer.
@@ -1439,6 +1443,19 @@ def test_media_engine_fleet_default_is_validated_and_delivered_to_cellctl() -> N
     for bad in (["Documents"], ["documnets"], ["documents", "documents"], {"documents": []}, "documents"):
         result = _helm_render("--set-json", "cellctl.mediaEngineFleetDefault=" + json.dumps(bad))
         assert result.returncode != 0 and "mediaEngineFleetDefault" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_source_erasure_selection_is_validated_and_delivered_to_cellctl() -> None:
+    selection = {"records": ["aaaaaaaaaaaaaaaa"]}
+    deployment = _find(_helm_template("--set-json", "cellctl.sourceErasureCellIds=" + json.dumps(selection)),
+                       "Deployment", "cellctl")
+    env = {entry["name"]: entry.get("value")
+           for entry in deployment["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert json.loads(env["CELLCTL_SOURCE_ERASURE_CELL_IDS"]) == selection
+    for bad in ({"records": ["not-a-cell"]}, ["aaaaaaaaaaaaaaaa"]):
+        result = _helm_render("--set-json", "cellctl.sourceErasureCellIds=" + json.dumps(bad))
+        assert result.returncode != 0 and "sourceErasureCellIds" in result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")

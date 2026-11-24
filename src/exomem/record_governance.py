@@ -15,6 +15,7 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    automatic_collection,
     call_spans,
     capabilities,
     collection_claims,
@@ -32,6 +33,7 @@ from . import structured_collections as collections
 from .collection_store import capability, ownership
 from .collection_store.preview import (
     QUERY_RECEIPT_BOUNDARY,
+    UNSERVED,
     bound_writer,
     canonical_read,
     production_bound,
@@ -40,6 +42,7 @@ from .collection_store.preview import (
 )
 from .governance import egress
 from .governance.principal import OWNER_AUDIENCE, effective_principal
+from .kbdir import managed_split
 
 _PUBLIC_LINK_INDEX_RAW_CANDIDATES = 512
 _INTERNAL_LINK_INDEX_RAW_CANDIDATES = 4_096
@@ -230,6 +233,17 @@ def _inspection_claims(value: Any) -> dict[str, list[str]] | None:
             return None
         claims[str(name)] = [entry for entry in entries if entry is not None]
     return claims
+
+
+def _inspection_declared_capture(value: Any) -> dict[str, str] | None:
+    """The `capture` block as the manifest declares it: one bounded reference, never resolved here."""
+    if not isinstance(value, Mapping) or set(value) != {"method"}:
+        return None
+    method = value["method"]
+    # The manifest parser bounds the reference in characters; inspection holds it to the same bound.
+    if type(method) is not str or not method or len(method) > collections.MAX_CAPTURE_METHOD_CHARS:
+        return None
+    return {"method": method}
 
 
 def effective_claims(
@@ -684,6 +698,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "storage",
             "plans",
             "claims",
+            "capture",
         } or not {
             "collection_id",
             "path",
@@ -738,6 +753,9 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         claims = _inspection_claims(contract.get("claims")) if "claims" in contract else None
         if "claims" in contract and claims is None:
             return None
+        capture = _inspection_declared_capture(contract.get("capture")) if "capture" in contract else None
+        if "capture" in contract and capture is None:
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -747,6 +765,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "storage": {"strategy": strategy, "source": source, "format_version": format_version},
             "plans": [plan for plan in normalized_plans if plan is not None],
             **({"claims": claims} if claims is not None else {}),
+            **({"capture": capture} if capture is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -1275,7 +1294,7 @@ class _LinkProjector:
                 frontmatter, body, _marker = vault.parse_frontmatter(text)
                 display_title = vault.resolve_display_title(frontmatter, body, path)
                 title = display_title.lower() if display_title else None
-                if relative.startswith(f"{vault.kb_dirname()}/"):
+                if managed_split(relative) is not None:
                     identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
             except (UnicodeDecodeError, vault.PathGuardError, vault.FrontmatterError):
                 complete = False
@@ -1365,21 +1384,24 @@ class _LinkProjector:
                     return False
                 # A bare title resolves over the borrowed generation filtered to the pages
                 # this reader may see. A path-shaped link never reads the borrowed index, so
-                # its verdict does not depend on which value came first.
+                # its verdict does not depend on which value came first; the pages that claim
+                # its path through their lineage count only when this reader may see them.
                 lend = self.borrowed is not None and bare
                 resolver = self.borrowed.resolver if lend else self.resolver
-                visible = self._visible if lend else None
+                visible = self._visible if lend or not bare else None
                 try:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(),
                         self.root,
                         resolver=resolver,
+                        targeted_namespace_contains=self._names_file,
                         strict=True,
                         visible=visible,
                     )
                 except vault.UnresolvedWikilinkError:
                     canonical, _warning = vault.normalize_wikilink(
                         inner.split("|", 1)[0].strip(), self.root, resolver=resolver,
+                        targeted_namespace_contains=self._names_file,
                         visible=visible, retired=self._retired_target,
                     )
                 except vault.WikilinkError:
@@ -1387,7 +1409,9 @@ class _LinkProjector:
                 target = canonical.split("#", 1)[0] + ".md"
             elif "/" in raw and not raw.startswith(("/", "\\")):
                 canonical, _warning = vault.normalize_wikilink(
-                    raw, self.root, resolver=self.resolver, retired=self._retired_target
+                    raw, self.root, resolver=self.resolver,
+                    targeted_namespace_contains=self._names_file, visible=self._visible,
+                    retired=self._retired_target,
                 )
                 if not canonical or "#" in canonical:
                     return False
@@ -1424,6 +1448,18 @@ class _LinkProjector:
             allowed = (self.authorize_path(relative) if self.authorize_path is not None
                        else _authorize(self.root, relative, receipt=True, policy=self.policy))
         return self._remember(relative, allowed)
+
+    def _names_file(self, key: str) -> bool:
+        """Whether the explicit link key `key` names a Markdown file, as the target check reads it.
+
+        A path-shaped link resolves without the index. This lets the resolver follow a path that a
+        moved page left to the live page whose lineage records it.
+        """
+        try:
+            vault.resolve_under_vault(self.root, f"{key}.md", must_exist=True, must_be_file=True)
+        except vault.VaultPathError:
+            return False
+        return True
 
     def _remember(self, target: str, allowed: bool) -> bool:
         if target in self.verdicts:
@@ -1789,6 +1825,9 @@ def inspect_collection(
                     guards = records.lifecycle_guards(manifest, snapshot)
             except collections.CollectionError:
                 pass
+        # After the guards: a method that does not resolve costs the collection nothing, so it never
+        # suppresses them the way a template finding does.
+        _inspection_capture(root, manifest, diagnostics)
         payload = _RecordEnvelope(
             {
                 "kind": "collection",
@@ -2002,6 +2041,43 @@ def _presentation_inspection(
     }
 
 
+@canonical_read
+def visible_collection_titles(
+    vault_root: Path, *, semantic_profile: str
+) -> tuple[tuple[tuple[str, str], ...], int]:
+    """The `(title, manifest_path)` of each collection of this profile whose manifest the caller may see,
+    and how many more such collections live in a store this thread does not serve, so their titles are unknown.
+
+    A title lives only in its manifest (a file's front matter, a store collection's manifest text), so
+    the lookup reads the manifests that discovery already reads, one sweep and no census. It asks
+    `_authorize` of each manifest path, as the manifest-path route does, so a collection that route
+    withholds is neither listed nor counted. It decides visibility only and emits no release receipt,
+    as a link projector's `visible_path` does; `released_manifest_paths` records what a reply lists.
+    """
+    root = Path(vault_root)
+    with authorization_pass(root):
+        # A duplicated identity is the refusal of the collection that carries it, not of every title.
+        manifests, unreadable = collections.discover_collections_with_errors(
+            root, authorize_path=lambda path: _authorize(root, path),
+            reject_duplicates=False, semantic_profile=semantic_profile,
+        )
+    titles = tuple((manifest.title, manifest.path) for manifest in manifests
+                   if manifest.semantic_profile == semantic_profile)
+    # Discovery lists an unserved store collection with the message it names this state by, and only
+    # where the caller may learn of it (`store_notice`); a file it could not parse is no store collection.
+    unserved = sum(1 for row in unreadable
+                   if row.message == UNSERVED and row.semantic_profile in (None, semantic_profile))
+    return titles, unserved
+
+
+@canonical_read(receipt_boundary="record_inspection")
+def released_manifest_paths(vault_root: Path, paths: Iterable[str]) -> tuple[str, ...]:
+    """Those of `paths` whose manifest the caller may see, each recorded as the inventory records the manifests it lists."""
+    root = Path(vault_root)
+    with authorization_pass(root):
+        return tuple(path for path in paths if _authorize(root, path, receipt=True))
+
+
 @canonical_read(receipt_boundary="record_inspection")
 def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
@@ -2065,6 +2141,28 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         )
     inventory, selections = [], []
     accounted: set[str] = set()
+    # One read of the activity log answers for every file collection, and one read of the store's create records
+    # answers for every store collection: the inventory grows with the collections, and these reads do not.
+    file_automatic = (
+        automatic_collection.file_created_ids(root)
+        if semantic_profile == "records" and any(store_writer is None for _, store_writer in released)
+        else (frozenset(), True)
+    )
+    store_automatic: dict[int, frozenset[str]] = {}
+    if semantic_profile == "records":
+        for _, store_writer in released:
+            if store_writer is not None and id(store_writer) not in store_automatic:
+                store_automatic[id(store_writer)] = store_writer.automatic_collection_ids()
+
+    def created_automatically(manifest: Any, store_writer: Any) -> bool | None:
+        """True or False when the create record answers; None when the log could not be read in full."""
+        if store_writer is not None:
+            return manifest.collection_id in store_automatic[id(store_writer)]
+        if file_automatic is None:
+            return None
+        ids, complete = file_automatic
+        return True if manifest.collection_id in ids else (False if complete else None)
+
     for manifest, store_writer in released:
         coverage, selection, items = _inventory_coverage(
             root, manifest, authorize, observations=observations[str(manifest.path)],
@@ -2078,6 +2176,8 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
             "lifecycle": manifest.lifecycle,
             "storage_strategy": manifest.storage.strategy,
             "natural_key": list(manifest.schema.natural_key),
+            # Planning has no automatic create. None is unknown, never False.
+            **({"created_automatically": created_automatically(manifest, store_writer)} if semantic_profile == "records" else {}),
             **coverage,
         })
         if selection is not None:
@@ -2188,6 +2288,8 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             if manifest.claims is not None
             else {}
         ),
+        # The reference as the author wrote it: manifest text the caller already reads, resolved only on delivery.
+        **({"capture": {"method": manifest.capture_method}} if manifest.capture_method is not None else {}),
     }
 
 
@@ -2248,6 +2350,26 @@ def _inspection_templates(
             diagnostics.append(
                 {"code": "TEMPLATE_UNAVAILABLE", "reason": "declared template is unavailable"}
             )
+
+
+def _inspection_capture(
+    root: Path, manifest: collections.CollectionManifest, diagnostics: list[dict[str, str]],
+    *, policy: Any | None = None, authorize_path: Callable[[str], bool] | None = None,
+) -> None:
+    """Report a declared capture method that this caller cannot be pointed to.
+
+    One reason covers an unresolved reference and a page the caller may not read, so the finding never
+    shows that a withheld page exists.
+    """
+    if manifest.capture_method is None or len(diagnostics) >= 64:
+        return
+    from . import capture_method
+
+    readable = authorize_path or (lambda path: _authorize(root, path, policy=policy))
+    if capture_method.resolve(root, manifest.capture_method, readable=readable) is None:
+        diagnostics.append(
+            {"code": "CAPTURE_METHOD_UNAVAILABLE", "reason": "declared capture method is unavailable"}
+        )
 
 
 def _inspection_audit(audit: Any) -> dict[str, Any]:
@@ -2735,7 +2857,7 @@ def _valid_agent_history(value: Mapping[str, Any] | None, *, semantic_profile="r
         return False
     # These are the implemented Records/Planning audit wire operations, not collection vocabulary.
     if semantic_profile == "records":
-        operations = ("create", "append", "update", "revise", "rebaseline", "bulk_upsert", "view_move")
+        operations = ("create", "append", "update", "retract", "revise", "rebaseline", "bulk_upsert", "view_move")
     elif semantic_profile == "planning":
         operations = ("plan_create", "plan_add", "plan_update", "plan_triage", "plan_revise", "plan_rebaseline")
     else:

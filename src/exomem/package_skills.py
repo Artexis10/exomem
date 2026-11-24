@@ -24,9 +24,14 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from . import workflow_skills
+from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
+from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 _HOOKS_SRC = Path(__file__).parent / "_hooks"
+#: The one copy of the Apache-2.0 text. Every package of client artifacts (the plugin,
+#: the cloud packages) is written with this file, so none holds a second copy by hand.
+APACHE_LICENSE = Path(__file__).parent / "_licenses" / "Apache-2.0.txt"
 
 #: Wherever a shipped doc shows an install line it writes this placeholder instead
 #: of a version: every deployment fills the release it ships, so no copy advises a
@@ -162,7 +167,7 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
     for name in _CORE_FILES:
         # Overlay the real registry when a vault is given, so a personal upload
         # advertises real project scopes; otherwise ship the generic starter.
-        override = (vault / "Knowledge Base" / "_Schema" / name) if vault else None
+        override = (managed_root(vault) / "_Schema" / name) if vault else None
         source = override if (override and override.is_file()) else (_SKILL_SRC / name)
         if source.is_file():
             payload[name] = source.read_text(encoding="utf-8")
@@ -234,6 +239,11 @@ _PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
     "SessionEnd": "exomem-continuation-checkpoint.sh",
     "SessionStart": "exomem-continuation-checkpoint.sh",
 }
+# The checkpoint core requires --client; the nudge cores infer it, so only this wrapper
+# needs it. The value comes from the installer's own continuation command.
+_PLUGIN_HOOK_ARGS: dict[str, str] = {
+    "exomem-continuation-checkpoint.sh": CLAUDE_CONTINUATION_CLIENT_ARG,
+}
 
 
 def _write_generated(path: Path, payload: dict) -> None:
@@ -266,7 +276,7 @@ def _plugin_manifest() -> dict:
         "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
         "homepage": "https://substratesystems.io/exomem",
         "repository": "https://github.com/Artexis10/exomem",
-        "license": "AGPL-3.0-or-later",
+        "license": "Apache-2.0",
         "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
         # and declaring it as well fails the install with "Duplicate hooks file
@@ -311,14 +321,11 @@ def _plugin_hooks() -> dict:
         entry: dict = {}
         if matcher is not None:
             entry["matcher"] = matcher
-        entry["hooks"] = [
-            {
-                "type": "command",
-                "command": (
-                    f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{_PLUGIN_HOOK_SCRIPTS[event]}"'
-                ),
-            }
-        ]
+        script = _PLUGIN_HOOK_SCRIPTS[event]
+        command = f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}"'
+        if script in _PLUGIN_HOOK_ARGS:
+            command += f" {_PLUGIN_HOOK_ARGS[script]}"
+        entry["hooks"] = [{"type": "command", "command": command}]
         events.setdefault(event, []).append(entry)
     return {
         "description": "Exomem capture, retrieval, and continuation hooks.",
@@ -387,6 +394,8 @@ def sync_plugin(plugin_root: Path) -> dict:
 
     manifest_dir.mkdir(parents=True, exist_ok=True)
     _write_generated(manifest_dir / "plugin.json", _plugin_manifest())
+    # The marketplace copies only this directory, so the licence it declares travels with it.
+    shutil.copyfile(APACHE_LICENSE, plugin_root / "LICENSE")
 
     return {"plugin_root": str(plugin_root), "skills": names, "version": _package_version()}
 
@@ -416,7 +425,7 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     vault = Path(vault).expanduser() if vault is not None else None
     if out_dir is None:
         out_dir = (
-            vault / "Knowledge Base" / "_Schema" / "private-skills"
+            managed_root(vault) / "_Schema" / "private-skills"
             if vault is not None
             else Path.cwd() / "dist" / "skills"
         )

@@ -14,12 +14,14 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from exomem import call_spans, embeddings, sidecar_store
+from exomem import call_spans, embedding_index, embeddings, foreground_priority, sidecar_store
+from exomem.vault_store.vectors import Withheld
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +90,33 @@ def test_matrix_loads_once_and_is_reused(tmp_path, monkeypatch):
     assert count["n"] == 1  # loaded once, not per call
     assert matrix.shape[0] == 2
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
+
+
+def test_the_background_load_waits_for_a_request_and_a_reader_joining_it_does_not_wait_out_the_floor(
+    tmp_path, monkeypatch
+):
+    """The row copy shares the interpreter with requests, so it pauses for one in flight, and
+    the reader that joins the load for its matrix is not the request it pauses for."""
+    vault = _fresh_vault(tmp_path)
+    seed = embeddings.EmbeddingIndex(vault)
+    for name in ("a", "b", "c"):
+        seed.upsert_file(f"{name}.md", [f"{name} one", f"{name} two"], _mat([1, 0], [0, 1]), 1.0)
+    monkeypatch.setattr(embedding_index, "MATRIX_LOAD_YIELD_ROWS", 2)
+    idx = embeddings.get_embedding_index(vault)
+
+    with foreground_priority.foreground():
+        loading = idx.start_corpus_matrix_load()
+        time.sleep(0.3)
+        parked = loading.is_alive()
+        started = time.monotonic()
+        metadata, matrix = idx.all_vectors()
+        waited = time.monotonic() - started
+    loading.join(timeout=10)
+
+    assert parked
+    assert waited < foreground_priority.MAX_YIELD_SECONDS / 2, waited
+    assert matrix.shape[0] == 6
+    assert [m[0] for m in metadata] == ["a.md", "a.md", "b.md", "b.md", "c.md", "c.md"]
 
 
 def test_failed_matrix_load_retains_partial_counts_in_the_call_ledger(tmp_path, monkeypatch):
@@ -233,6 +262,34 @@ def test_search_ranks_only_the_allowed_parent_set(tmp_path):
     hits = idx.search(_pad([1, 0]), k=1, allowed_paths={"allowed.md"})
 
     assert [hit[0] for hit in hits] == ["allowed.md"]
+
+
+def test_scoring_a_few_paths_matches_the_masked_whole_matrix_search_and_skips_a_withheld_path(tmp_path, monkeypatch):
+    idx = embeddings.get_embedding_index(_fresh_vault(tmp_path))
+    idx.upsert_file("a.md", ["a1", "a2"], _mat([1, 0], [0.6, 0.8]), 1.0)
+    idx.upsert_file("b.md", ["b1"], _mat([0.9, 0.1]), 1.0)
+    idx.upsert_file("c.md", ["c1", "c2", "c3"], _mat([0, 1], [0.3, 0.3], [-1, 0]), 1.0)
+    idx.upsert_file("d.md", ["d1"], _mat([1, 0]), 1.0)
+    idx.all_vectors()
+    query = _pad([0.8, 0.6])
+    asked = {"a.md", "b.md", "c.md", "no-rows.md"}
+
+    def masked_search() -> dict[str, float]:
+        best: dict[str, float] = {}
+        for path, _chunk, _text, score in idx.select_chunks(query, 100, allowed_paths=asked, defer_cold_load=True):
+            best[path] = max(score, best.get(path, score))
+        return best
+
+    scored = idx.page_scorer().best_scores(query, asked)
+
+    assert scored == pytest.approx(masked_search())
+    assert set(scored) == {"a.md", "b.md", "c.md"}
+
+    monkeypatch.setattr(idx, "_withheld", lambda: Withheld(paths=frozenset({"b.md"})))
+
+    withheld = idx.page_scorer().best_scores(query, asked)
+    assert "b.md" not in withheld
+    assert withheld == pytest.approx(masked_search())
 
 
 def test_delete_to_empty_keeps_zero_row_shape(tmp_path):

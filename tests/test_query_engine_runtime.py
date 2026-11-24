@@ -19,7 +19,7 @@ from exomem.collection_store.preview import preview_store
 from exomem.governance import authorization_session_authority
 from exomem.governance import store as authority_store
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.query_engine import runtime
+from exomem.query_engine import runtime, sqlite
 
 
 def test_query_reader_allows_private_temp_membership(store):
@@ -71,16 +71,12 @@ def test_admission_identity_scan_uses_index_without_external_sort(store):
     for sql in scans:
         plan = [row[3] for row in store.connection.execute("EXPLAIN QUERY PLAN " + sql)]
         assert not any("TEMP B-TREE" in step for step in plan), plan
-        assert any("USING INDEX sqlite_autoindex_items_1" in step for step in plan), plan
+        assert any("USING INDEX sqlite_autoindex_item_rows_1" in step for step in plan), plan
 
 
 def values(admitted):
-    admitted.check()
-    sql = (f"SELECT {admitted.values_sql} FROM items AS i WHERE i.collection_id=? "
-           f"AND {admitted.membership_sql} ORDER BY {admitted.input_order}")
-    return [json.loads(row[0]) for batch in admitted.session.fetch(
-        admitted.session.connection.execute(sql, (admitted.collection_id,))
-    ) for row in batch]
+    """Every admitted row's values in input order, as the legacy scan reads and projects them."""
+    return [found for _, _, found in sorted(sqlite.scan(admitted, admitted.fields), key=lambda row: row[1])]
 
 
 def test_withheld_row_is_absent_before_decode_and_projection(store):
@@ -102,16 +98,14 @@ def test_withheld_row_is_absent_before_decode_and_projection(store):
         return value
 
     # Invalid JSON is an actual decode trap, not a mock of authorization.
-    store.connection.execute("UPDATE items SET values_json='not json' WHERE item_key=?", (OTHER,))
+    store.connection.execute("UPDATE item_rows SET values_json='not json' WHERE item_key=?", (OTHER,))
     with request_scope(_external()):
         with runtime.read_session(store.root, store.handle.path) as session:
             session.project_with(project, fields={"title", "count"})
             admitted = session.admit(CID)
             assert admitted.visible_count == absent_count == 1
             assert values(admitted) == absent_values == [{"title": "Visible", "count": 2}]
-            cursor = session.connection.execute(f"SELECT {admitted.values_sql} FROM items AS i")
-            assert sum(row[0] is None for batch in session.fetch(cursor) for row in batch) == 1
-    assert seen == [{"title": "Visible", "count": 2}] * 2
+    assert seen == [{"title": "Visible", "count": 2}]
 
 
 def test_admission_cannot_cross_principal_or_session_and_policy_is_fresh(store):
@@ -170,7 +164,7 @@ def test_failure_closes_connection_and_releases_reader_slot(store, monkeypatch, 
                 cancelled[0] = True
                 session.check()
             elif failure == "timeout":
-                monkeypatch.setattr(runtime.time, "monotonic", lambda: session._deadline + 1)
+                session._deadline.cpu_ms = 0  # the CPU budget is spent
                 conn.execute("WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<10000) SELECT sum(x) FROM n")
             elif failure == "sql":
                 conn.execute("SELECT * FROM missing_table")
@@ -207,7 +201,7 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
     assert before["rows"] == [{"title": "Private fixture title"}]
     assert not log.exists()
 
-    real_clock = runtime.time.monotonic
+    real_clock = runtime.time.thread_time
     real_load = governance.policy.load
     real_reader = connection.open_query_reader
     real_check = runtime.ReadSession.check
@@ -218,7 +212,7 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
         result = real_load(*args, **kwargs)
         if runtime._CURRENT_SESSION.get() is not None:
             gc.collect()
-            offset[0] += 0.201  # Expire the unchanged interactive deadline without sleeping.
+            offset[0] += 0.201  # Spend the unchanged interactive CPU budget without burning it.
         return result
 
     def reader(*args, **kwargs):
@@ -234,7 +228,7 @@ def test_timeout_observer_retains_setup_dependency_and_preserves_reader_cleanup(
             raise
 
     with monkeypatch.context() as patch:
-        patch.setattr(runtime.time, "monotonic", lambda: real_clock() + offset[0])
+        patch.setattr(runtime.time, "thread_time", lambda: real_clock() + offset[0])
         patch.setattr(governance.policy, "load", load)
         patch.setattr(connection, "open_query_reader", reader)
         patch.setattr(runtime.ReadSession, "check", check)
@@ -401,7 +395,7 @@ def test_oversized_value_refuses_before_json_materialization(store):
     """One large stored row cannot consume the whole reader memory budget."""
     create(store)
     store.append_record(CID, item={"title": "One"}, item_key=KEY, why="capture")
-    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?",
+    store.connection.execute("UPDATE item_rows SET values_json=? WHERE item_key=?",
                              ('{"title":"' + "x" * (256 * 1024) + '"}', KEY))
     with pytest.raises(runtime.QueryError, match="QUERY_COST_LIMIT"):
         with runtime.read_session(store.root, store.handle.path) as session:

@@ -1,7 +1,7 @@
 """Server-side media extraction — deterministic modality→text (transduction, not a brain).
 
 ASR (audio/video via faster-whisper), OCR (images via Tesseract), and embedded-text
-(PDF via PyMuPDF, with a rasterize+OCR fallback for scanned pages). This is "measure,"
+(PDF via PDFium, with a rasterize+OCR fallback for scanned pages). This is "measure,"
 not "reason" — the same category as the bge-base embedder already running on the GPU;
 Claude still does all the thinking. The extracted text feeds the Evidence sidecar so an
 otherwise-opaque binary becomes findable by its content.
@@ -47,11 +47,12 @@ import sys
 import tempfile
 import threading
 from collections.abc import Iterable
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from . import accel, asr_runtime, diarizer_sidecar, runtime_resources
+from . import accel, asr_runtime, capture_metadata, diarizer_sidecar, runtime_resources
 from .asr_facts import (
     DECODING_BATCHED,
     DECODING_SEQUENTIAL,
@@ -62,8 +63,15 @@ from .asr_facts import (
     LANGUAGE_REQUESTED,
     AsrFacts,
 )
+from .capture_metadata import CaptureFacts
 from .media_types import (
     DOC_READERS as _DOC_READERS,
+)
+from .media_types import (
+    PDF_READERS,
+    damaged_pdf_page_texts,
+    has_text_layer,
+    pdf_page_text,
 )
 from .media_types import (
     media_type_for as _registry_media_type_for,
@@ -94,15 +102,12 @@ def _semantic_segments_module():
     return semantic_segments
 
 # Documents → MarkItDown (Microsoft, MIT) renders office/html/EPUB to markdown, fully
-# local. PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest).
+# local. PDF deliberately stays on PDFium (markitdown's PDF path is its weakest).
 # MarkItDown reads no OpenDocument or RTF, so those use odfdo and striprtf; the
 # registry (`media_types.DOC_READERS`) names the library for each kind. The rest are
 # tiny native parsers — no dependency. Only formats the vault actually holds.
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
-# A PDF page yielding fewer than this many characters of embedded text is treated as
-# scanned → rasterize + OCR fallback.
-_PDF_OCR_MIN_CHARS = 16
 
 
 #: What `## Extracted text` holds when an extraction found no text at all.
@@ -113,7 +118,7 @@ NO_TEXT_DETECTED = "(no text detected)"
 class ExtractResult:
     text: str
     media_type: str           # audio|video|image|pdf|docx|xlsx|pptx|html|text|email|calendar
-    engine: str               # provenance, e.g. "faster-whisper:large-v3", "tesseract", "pymupdf"
+    engine: str               # provenance, e.g. "faster-whisper:large-v3", "tesseract", "pdfium"
     warnings: list[str] = field(default_factory=list)
     # Optional speaker-diarized turns from ASR (EXOMEM_DIARIZE). Each entry is
     # `{"speaker": "Speaker A", "start": float, "end": float, "text": str}`. Default
@@ -129,6 +134,9 @@ class ExtractResult:
     # What image OCR measured and kept out of `text`: the mean word confidence and the words
     # under the floor. None for every other media type, and for PDF pages, which keep whole text.
     ocr: OcrFacts | None = None
+    # What an image or video states about its own capture. None for every other media type and
+    # for a file that states nothing; the sidecar then records no capture fields.
+    capture: CaptureFacts | None = None
 
     @property
     def sidecar_text(self) -> str:
@@ -214,7 +222,7 @@ class _ResolvedSpeakerLabels:
 def media_type_for(path: str | Path) -> str | None:
     """Coarse extraction kind for a path's extension, else None (not extractable).
 
-    audio/video → ASR, image → OCR (+CLIP), pdf → PyMuPDF, docx/xlsx/pptx/html →
+    audio/video → ASR, image → OCR (+CLIP), pdf → PDFium, docx/xlsx/pptx/html →
     MarkItDown, text → plain read, email → stdlib parse, calendar → VEVENT parse.
     """
     return _registry_media_type_for(path)
@@ -237,6 +245,7 @@ def extract_text(
     timestamps: bool = False,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -247,6 +256,9 @@ def extract_text(
     `language` is a code the caller asks the speech engine to use, and `multilingual` asks it to
     detect the language per decoding window instead; only audio and video read either, and a
     caller gives at most one.
+
+    `diarize` requests or skips speaker labeling for this audio or video item. An omitted
+    choice uses the deployment default.
     """
     p = Path(path)
     mt = media_type or media_type_for(p)
@@ -256,9 +268,16 @@ def extract_text(
             options["language"] = language
         if multilingual:
             options["multilingual"] = True
-        return _transcribe(p, mt, vault_root=vault_root, **options)
+        if diarize is not None:
+            options["diarize"] = diarize
+        result = _transcribe(p, mt, vault_root=vault_root, **options)
+        if mt == "video":
+            result.capture = capture_metadata.read(p, mt)
+        return result
     if mt == "image":
-        return _ocr_image(p)
+        result = _ocr_image(p)
+        result.capture = capture_metadata.read(p, mt)
+        return result
     if mt == "pdf":
         return _extract_pdf(p)
     # The registry names each document kind's library; each one has its own code here.
@@ -296,7 +315,7 @@ def dependencies_present(media_type: str | None) -> bool:
     if media_type == "image":
         return find_spec("PIL") is not None and resolve_tesseract_cmd() is not None
     if media_type == "pdf":
-        return find_spec("fitz") is not None
+        return all(find_spec(module) is not None for module in PDF_READERS)
     if media_type in _DOC_READERS:
         return find_spec(_DOC_READERS[media_type]) is not None
     return True
@@ -754,7 +773,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
     raises (same contract as `prewarm`).
     """
     try:
-        from . import voice_profiles
+        from . import voice_embed, voice_profiles
 
         enabled = _diarize_enabled()
         sidecar_venv = _diarizer_sidecar_python() is not None
@@ -767,13 +786,23 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
                     vault_root=vault_root,
                 )
             )
+        # The voice embedder is the `diarization` extra's `speechbrain`; without it every
+        # cluster stays anonymous even with voiceprints enrolled, and `voice_embed` only
+        # logs that once per call, so name the gap here at boot.
+        voice_embedder = voice_embed.installed()
         line = (
             f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
-            f"hf_token={hf_token} profiles={len(names)}"
+            f"hf_token={hf_token} voice_embedder={voice_embedder} profiles={len(names)}"
         )
         if names:
             line += f" ({', '.join(names)})"
-        level = logging.WARNING if enabled and not (sidecar_venv and hf_token) else logging.INFO
+        if enabled and names and not voice_embedder:
+            line += "; named attribution disabled: install the 'diarization' extra"
+        level = (
+            logging.WARNING
+            if enabled and (not (sidecar_venv and hf_token) or (names and not voice_embedder))
+            else logging.INFO
+        )
         log.log(level, "%s", line)
     except Exception:  # noqa: BLE001 — a diagnostics line must never break startup
         log.debug("diarization readiness check failed", exc_info=True)
@@ -811,6 +840,7 @@ def _transcribe(
     timestamps: bool = False,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
@@ -824,13 +854,11 @@ def _transcribe(
     )
     seg_list = list(segments)  # materialize once: diarization needs per-segment timing
     asr = _asr_facts(report, forced, source, multilingual)
+    diarize = _diarize_enabled() if diarize is None else diarize
 
-    # OPTIONAL speaker diarization (EXOMEM_DIARIZE, default OFF). A pretrained
-    # clustering model (deterministic transduction, not an LLM) labels who-spoke-when
-    # and prefixes turns with `[Speaker A]: …`. Soft-fail: if the dep/model is absent
-    # or diarization errors, fall back to the plain transcript below — extraction with
-    # the flag off (or unavailable) is byte-for-byte unchanged.
-    if _diarize_enabled():
+    # The deterministic clustering model adds labels such as `[Speaker A]: …`.
+    # If it is unavailable or fails, publish the transcript without speaker labels.
+    if diarize:
         # Boundary guard for the WHOLE optional layer: the spec's Soft-Fail Degradation
         # requirement says a diarization failure MUST NOT break extraction, and inner
         # guards can't cover everything (a mid-run source change once escaped via an
@@ -886,7 +914,7 @@ def _transcribe(
                 text="[0:00] (no speech detected)",
                 media_type=media_type,
                 engine=f"{engine}+timed",
-                speaker_verification="unavailable" if _diarize_enabled() else None,
+                speaker_verification="unavailable" if diarize else None,
                 asr=asr,
             )
         try:
@@ -907,7 +935,7 @@ def _transcribe(
                     text=timed_text,
                     media_type=media_type,
                     engine=f"{engine}+timed",
-                    speaker_verification="unavailable" if _diarize_enabled() else None,
+                    speaker_verification="unavailable" if diarize else None,
                     asr=asr,
                 )
             if timestamps:
@@ -928,7 +956,7 @@ def _transcribe(
         text=text,
         media_type=media_type,
         engine=engine,
-        speaker_verification="unavailable" if _diarize_enabled() else None,
+        speaker_verification="unavailable" if diarize else None,
         asr=asr,
     )
 
@@ -1296,9 +1324,10 @@ def resolve_tesseract_cmd() -> str | None:
     return next((cand for cand in TESSERACT_INSTALL_CANDIDATES if Path(cand).is_file()), None)
 
 
-def _save_png_for_ocr(image, target: Path) -> None:
+def _save_png_for_ocr(image, target: Path, dpi: int | None = None) -> None:
     """Write a decoded Pillow image as PNG, as pytesseract did, so every Pillow-readable
-    format reaches Tesseract in a form Leptonica reads.
+    format reaches Tesseract in a form Leptonica reads. `dpi` records the resolution of a
+    rasterized document page, which Tesseract reads from the file.
 
     Transparency is flattened onto white first, as pytesseract did: dropping the alpha
     channel alone turns dark text on a transparent background into a solid dark page.
@@ -1313,7 +1342,7 @@ def _save_png_for_ocr(image, target: Path) -> None:
         image = background
     elif image.mode not in ("1", "L", "RGB"):
         image = image.convert("RGB")
-    image.save(target, format="PNG")
+    image.save(target, format="PNG", **({"dpi": (dpi, dpi)} if dpi else {}))
 
 
 def _ocr_png(source: Path) -> OcrReading:
@@ -1338,13 +1367,17 @@ def _ocr_image(path: Path) -> ExtractResult:
             image = image_codecs.open_image(path)
         except ImportError as error:
             raise ExtractionUnavailable(str(error)) from error
-        with image as img:
+        # Pillow's `with image` closes the file, not the decoded pixels, so `closing` does.
+        with closing(image) as img:
             _save_png_for_ocr(img, source)
         # The decoded image is closed before Tesseract starts: each process has its own
         # VmData limit, so holding both would let one job take two budgets of the cell.
         reading = _ocr_png(source)
     # Words under the confidence floor stay in the sidecar, outside the text every search reads.
     text, low_confidence_text = reading.split(ocr_models.word_floor())
+    ocr = OcrFacts(
+        confidence=reading.confidence, low_confidence_text=low_confidence_text, text_available=bool(text.strip())
+    )
     # OPTIONAL frozen-model caption (EXOMEM_VISION_CAPTION, default OFF) prepended so
     # a photo with no on-image text is still findable. Soft-fails to OCR-only.
     text, engine = _maybe_caption(text, path)
@@ -1355,7 +1388,7 @@ def _ocr_image(path: Path) -> ExtractResult:
         text=text,
         media_type="image",
         engine=engine,
-        ocr=OcrFacts(confidence=reading.confidence, low_confidence_text=low_confidence_text),
+        ocr=ocr,
     )
 
 
@@ -1492,51 +1525,134 @@ def _maybe_image_tags(ocr_text: str, path: Path, engine: str) -> tuple[str, str]
     return text, f"{engine}+tags"
 
 
+def page_marker(number: int) -> str:
+    """The line that opens page `number` in a PDF extraction, so a reader can cite the page a passage sits on."""
+    return f"[page {number}]"
+
+
+# nosemgrep: ep-word-search -- reads back the marker line `page_marker` writes, a format this module owns.
+_PAGE_MARKER_LINE = re.compile(r"^\[page (\d+)\]\n", re.MULTILINE)
+
+
+def leading_pages(text: str, count: int) -> tuple[str, ...]:
+    """The text of pages 1 to `count` of a PDF extraction, read back from its `page_marker` lines.
+
+    A page that held no text has no marker and reads as "". Text with no marker at all reads as page 1.
+    """
+    pages = [""] * count
+    marks: list[re.Match[str]] = []
+    for mark in _PAGE_MARKER_LINE.finditer(text):
+        marks.append(mark)
+        if int(mark.group(1)) > count:
+            break
+    if not marks:
+        pages[0] = text.strip()
+    for mark, following in zip(marks, [*marks[1:], None], strict=True):
+        if 1 <= (number := int(mark.group(1))) <= count:
+            pages[number - 1] = text[mark.end():following.start() if following else None].strip()
+    return tuple(pages)
+
+
 def _extract_pdf(path: Path) -> ExtractResult:
     try:
-        import fitz  # PyMuPDF
+        import pypdfium2 as pdfium
     except ImportError as e:
-        raise ExtractionUnavailable(f"pymupdf not installed: {e}") from e
-    from . import media_engines
+        raise ExtractionUnavailable(f"pypdfium2 not installed: {e}") from e
+    from . import media_engines, ocr_models
 
     warnings: list[str] = []
     parts: list[str] = []
     ocr_pages = 0
     scanned_pages = 0
+    refused_pages: list[int] = []
+    unread_pages: list[int] = []
+    no_engine: ExtractionUnavailable | None = None
+    # PDFium answers a failed allocation of its own by aborting the process, which the media worker
+    # reads from the child's exit (`MediaWorker._record_allocation_abort`). The allocation that fails
+    # in Python's buffers, a page raster too large for the child's limit, raises `MemoryError`, which
+    # propagates to the worker as a memory stop.
     try:
-        with fitz.open(path) as doc:
-            for number, page in enumerate(doc, start=1):
-                page_text = page.get_text().strip()
-                if len(page_text) < _PDF_OCR_MIN_CHARS:
+        doc = pdfium.PdfDocument(path)
+    except pdfium.PdfiumError as refusal:
+        # A password or an unsupported security handler is encryption, which pypdf cannot lift; every other
+        # refusal to open the file is damage, which pypdf may still repair.
+        if refusal.err_code in (pdfium.raw.FPDF_ERR_PASSWORD, pdfium.raw.FPDF_ERR_SECURITY):
+            raise
+        return _extract_damaged_pdf(path, refusal)
+    with doc:
+        for number in range(1, len(doc) + 1):
+            page = doc[number - 1]
+            try:
+                page_text = pdf_page_text(page)
+                if not has_text_layer(page_text):
                     # Scanned/image-only page → rasterize and OCR it.
                     scanned_pages += 1
-                    ocr_text = _ocr_pdf_page(page)
+                    try:
+                        ocr_text = _ocr_pdf_page(page)
+                    except ocr_models.OcrFailed:
+                        # Tesseract refused this page's image for a reason other than memory: the page
+                        # is damaged, so it stays unread and the rest of the document completes.
+                        refused_pages.append(number)
+                        ocr_text = ""
+                    except ExtractionUnavailable as missing:
+                        # No OCR engine can read the page (no Tesseract binary, say): it stays unread, as it
+                        # does when OCR is switched off, and the pages with a text layer are still stored.
+                        unread_pages.append(number)
+                        no_engine = no_engine or missing
+                        ocr_text = ""
                     if ocr_text:
                         page_text = ocr_text
                         ocr_pages += 1
-                if page_text:
-                    # A line of its own, so a reader can cite the page a passage sits on.
-                    parts.append(f"[page {number}]\n{page_text}")
-    except MemoryError:
-        raise
-    except Exception as e:
-        if _is_pymupdf_allocation_failure(e):
-            raise MediaMemoryExhausted(f"pymupdf: {e}") from e
-        raise
+            finally:
+                page.close()
+            if page_text:
+                parts.append(f"{page_marker(number)}\n{page_text}")
     if not parts and scanned_pages and not media_engines.stage_enabled("image"):
         # Completing now would store "no text" for good; waiting lets enabling OCR read it.
         raise EngineDisabled(media_engines.OCR, "the PDF has no text layer and OCR is switched off")
+    if not parts and no_engine is not None:
+        # The same wait as for a switched-off engine: no page was read, and installing OCR reads them.
+        raise no_engine
     if ocr_pages:
         warnings.append(f"{ocr_pages} scanned page(s) recovered via OCR")
-    engine = "pymupdf+tesseract" if ocr_pages else "pymupdf"
+    if unread_pages:
+        warnings.append(f"OCR is unavailable for scanned page(s) {', '.join(map(str, unread_pages))}; they are not in the text")
+    if refused_pages:
+        warnings.append(f"OCR refused scanned page(s) {', '.join(map(str, refused_pages))}; they are not in the text")
+    engine = "pdfium+tesseract" if ocr_pages else "pdfium"
     return ExtractResult(text="\n\n".join(parts).strip(), media_type="pdf", engine=engine, warnings=warnings)
+
+
+def _extract_damaged_pdf(path: Path, refusal: Exception) -> ExtractResult:
+    """The text layer of a PDF that PDFium refused to open, as far as pypdf can repair the file.
+
+    Pages lost to the damage and scanned pages are missing, and the warnings say so. A file pypdf cannot
+    read either, or one that yields no text, fails with PDFium's refusal, as it did before this repair.
+    """
+    try:
+        texts = list(damaged_pdf_page_texts(path))
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - pypdf fails on a file it cannot repair in many ways; PDFium's refusal is the one reported
+        raise refusal from None
+    parts = [f"{page_marker(number)}\n{text}" for number, text in enumerate(texts, 1) if text]
+    if not parts:
+        # Completing now would store "no text" for good, for a file whose pages were never read.
+        raise refusal
+    warnings = [
+        f"damaged PDF repaired by pypdf: text read from {len(parts)} page(s); pages lost to the damage are "
+        "missing, and page numbers count only the pages that could be read"
+    ]
+    if len(parts) < len(texts):
+        warnings.append(f"{len(texts) - len(parts)} page(s) have no text layer and are not OCR'd in a damaged PDF")
+    return ExtractResult(text="\n\n".join(parts).strip(), media_type="pdf", engine="pypdf", warnings=warnings)
 
 
 def _extract_document(path: Path, media_type: str) -> ExtractResult:
     """docx/xlsx/pptx/html → markdown via MarkItDown (Microsoft, MIT; office libs bundled).
 
     Runs fully local — plugins disabled, no cloud/LLM. PDF deliberately does NOT route
-    here: markitdown's PDF path is weaker than PyMuPDF + our scanned-page OCR fallback.
+    here: markitdown's PDF path is weaker than PDFium + our scanned-page OCR fallback.
     """
     try:
         from markitdown import FileConversionException, MarkItDown, MissingDependencyException
@@ -1592,24 +1708,6 @@ def _markitdown_attempts(error: BaseException) -> list[tuple[type[BaseException]
         if exc_info[1] is not None and getattr(exc_info[1], "attempts", None):
             found.extend(_markitdown_attempts(exc_info[1]))
     return found
-
-
-def _is_pymupdf_allocation_failure(error: BaseException) -> bool:
-    """Whether PyMuPDF reports that MuPDF's allocator failed.
-
-    MuPDF raises a failed allocation as FZ_ERROR_SYSTEM (PyMuPDF's `FzErrorSystem`)
-    with its own message, `malloc (N bytes) failed` or the calloc and realloc forms.
-    Matching that whole message, never a substring, keeps a file path out of it:
-    other system errors name the file.
-    """
-    import fitz
-
-    system_error = getattr(getattr(fitz, "mupdf", None), "FzErrorSystem", None)
-    if system_error is None or not isinstance(error, system_error):
-        return False
-    message = str(getattr(error, "m_text", "") or "")
-    # nosemgrep: ep-word-search -- MuPDF's own allocator message format (source/fitz/memory.c).
-    return re.fullmatch(r"(?:malloc|calloc|realloc)(?: of array)? \(\d+(?: x \d+)? bytes\) failed", message) is not None
 
 
 def _extract_opendocument(path: Path, media_type: str) -> ExtractResult:
@@ -1796,32 +1894,56 @@ def _extract_ics(path: Path) -> ExtractResult:
     return ExtractResult(text="\n".join(lines).strip(), media_type="calendar", engine="ics")
 
 
-def _ocr_pdf_page(page) -> str:
-    """Rasterize a PDF page to an image and OCR it. Empty string if OCR is unavailable.
+#: The resolution at which a scanned PDF page is rasterized for OCR.
+_PDF_OCR_DPI = 200
+_PDF_POINTS_PER_INCH = 72
 
-    A deployment whose OCR engine is switched off reads only the text layer.
+
+@contextmanager
+def _render_pdf_page(page):
+    """The page as a grayscale Pillow image at `_PDF_OCR_DPI`, valid inside the block only.
+
+    PDFium draws on an opaque white page, so no alpha flattening is needed. A gray bitmap is one byte a
+    pixel and Pillow shares its buffer. An RGB bitmap is three bytes a pixel, and Pillow stores RGB at
+    four, so its copy raised the peak to seven. Choosing the format, not PDFium's grayscale flag, also
+    spares the converted copy of an embedded scan that the flag makes PDFium hold.
+
+    The block releases the raster. pypdfium2 allocates the buffer in Python, so it lives until the
+    image and the bitmap wrapper are both gone, and `bitmap.close()` frees only PDFium's handle. Pillow's
+    `with image` does not release a raster, so `closing` does. The image closes before the bitmap, which
+    is also the safe order for a bitmap whose buffer PDFium owns.
+    """
+    import pypdfium2 as pdfium
+
+    bitmap = page.render(
+        scale=_PDF_OCR_DPI / _PDF_POINTS_PER_INCH, force_bitmap_format=pdfium.raw.FPDFBitmap_Gray
+    )
+    try:
+        with closing(bitmap.to_pil()) as image:
+            yield image
+    finally:
+        bitmap.close()
+
+
+def _ocr_pdf_page(page) -> str:
+    """Rasterize a PDF page to an image and OCR it.
+
+    A deployment whose OCR engine is switched off reads only the text layer, so it gets "". A render or
+    OCR failure propagates, so that a page lost to a resource failure ends the extraction as a memory
+    stop or a failure and never as a stored extraction that lacks the page. `_extract_pdf` alone
+    skips a page that Tesseract refuses as damaged (`OcrFailed`).
     """
     from . import media_engines
 
     if not media_engines.stage_enabled("image"):
         return ""
-    try:
-        import fitz
-
-        with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
-            source = Path(tmp) / "page.png"
-            pix = page.get_pixmap(dpi=200)  # no alpha channel, so no flattening is needed
-            pix.save(source)
-            del pix
-            # MuPDF's store keeps the page's decoded scan after rendering; empty it too.
-            fitz.TOOLS.store_shrink(100)
-            # The raster is released before Tesseract starts: each process has its own
-            # VmData limit, so holding both would let one job take two budgets of the cell.
-            return _ocr_png(source).text
-    except MemoryError:
-        raise  # a hard-limit failure is a memory stop, never a missing page
-    except Exception as e:  # noqa: BLE001 — OCR fallback is best-effort
-        if _is_pymupdf_allocation_failure(e):
-            raise MediaMemoryExhausted(f"pymupdf: {e}") from e
-        log.warning("PDF page OCR fallback failed: %s", e)
-        return ""
+    with tempfile.TemporaryDirectory(prefix="exomem-ocr-") as tmp:
+        source = Path(tmp) / "page.png"
+        with _render_pdf_page(page) as image:
+            _save_png_for_ocr(image, source, dpi=_PDF_OCR_DPI)
+        # Closing the page frees the decoded scan that PDFium caches on it; the caller's own
+        # close is then a no-op. The raster and the scan are released before Tesseract starts:
+        # each process has its own VmData limit, so holding them would let one job take two
+        # budgets of the cell.
+        page.close()
+        return _ocr_png(source).text

@@ -21,10 +21,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import find, find_corpus, memory_refs, page_ids, reserved_paths, semantic_contract, vault
+from . import (
+    capabilities,
+    find,
+    find_corpus,
+    memory_refs,
+    page_ids,
+    reserved_paths,
+    semantic_contract,
+    vault,
+    writer_lease,
+)
 from .cli_ops import OpError
 from .governance import egress
-from .kbdir import kb_dirname, kb_page_target, kb_prefix
+from .kbdir import kb_page_target, managed_join, managed_root
 
 #: A refusal names at most this many pages to choose from.
 MAX_CANDIDATES = 5
@@ -78,7 +88,7 @@ def read_identity(root: Path, rel_path: str) -> PageIdentity | None:
 
 
 class AmbiguousTitle(OpError):
-    """Several pages the caller may see share a title; the refusal lists up to `MAX_CANDIDATES`."""
+    """Several pages the caller may see answer one name; the refusal lists up to `MAX_CANDIDATES`."""
 
 
 def resolve_reference(root: Path, value: str, *, serve_stale: bool = False) -> str:
@@ -108,7 +118,7 @@ def _names_a_file(root: Path, raw: str, visible: Callable[[str], bool] | None) -
 
     stem = raw.removesuffix(".md")
     with egress.decide_without_receipt():
-        for base in ("", kb_prefix()):
+        for base in ("", managed_join("")):
             for candidate in (f"{base}{raw}", f"{base}{stem}.md"):
                 try:
                     if read.holds_file(root, candidate) and (visible is None or visible(candidate)):
@@ -125,18 +135,25 @@ def _identity_owners(root: Path, serve_stale: bool) -> Iterable[str]:
     )
     if snapshot is not None:
         return tuple(snapshot.reference_owners)
-    owners = memory_refs.scan_reference_owners(root, root / kb_dirname())
+    owners = memory_refs.scan_reference_owners(root, managed_root(root))
     return tuple(owner for _path, owner in owners)
 
 
-def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
-    """The pages this caller may see whose id head is `head`."""
+def _paths_for_head(
+    root: Path, head: str, *, serve_stale: bool, resolver_for: Callable[[], Any | None] | None = None
+) -> list[str]:
+    """The pages this caller may see whose id head is `head`.
+
+    A page that holds no id is found through the broad resolver, which `resolver_for` supplies as for a
+    title (see `resolve_page`); when it gives none, such a page stays unresolved.
+    """
     # The head holds the first 35 bits of an id, and its first 8 hex digits are all inside them, so
     # they narrow the owners before each survivor is checked in full.
     leading = base64.b32decode((head + "a").upper()).hex()[:8]
     paths: set[str] = set()
+    stored = memory_refs.store_owners_by_prefix(root, leading)
     with egress.decide_without_receipt():
-        for owner in _identity_owners(root, serve_stale):
+        for owner in _identity_owners(root, serve_stale) if stored is None else stored:
             if not owner.startswith(leading) or page_ids.id_head(owner, "") != head:
                 continue
             try:
@@ -153,7 +170,9 @@ def _paths_for_head(root: Path, head: str, *, serve_stale: bool) -> list[str]:
         if paths:
             return sorted(paths)
         # A page with no id of its own is named by a hash of its path.
-        resolver = find.shared_resolver(root)
+        resolver = resolver_for() if resolver_for is not None else find.shared_resolver(root)
+        if resolver is None:
+            return []
         visible = egress.visible_page_filter(root)
         return sorted(
             candidate.path
@@ -171,10 +190,9 @@ def _carries_head(root: Path, rel_path: str, head: str) -> bool:
     return found is not None and found.id.split(".", 1)[0] == head
 
 
-def _ambiguous(
-    root: Path, shown: str, paths: list[str], field: str, *, by_id: bool
-) -> AmbiguousTitle:
-    """The refusal for several visible pages that one title or id head names."""
+def _ambiguous(root: Path, paths: list[str], field: str, *, named: str) -> AmbiguousTitle:
+    """The refusal for several visible pages that one value names; `named` says what they share,
+    by the step that matched them (`resolve_page`)."""
     identities = [
         found
         for found in (read_identity(root, path) for path in paths[:_MAX_CANDIDATES_READ])
@@ -187,7 +205,6 @@ def _ambiguous(
     candidates = [
         {**found.row(), "path": found.path} if twins else found.row() for found in shown_pages
     ]
-    named = f"match the id {shown}" if by_id else f"are titled \u201c{shown}\u201d"
     return AmbiguousTitle(
         "AMBIGUOUS_REFERENCE",
         f"{len(paths)} pages {named}.",
@@ -214,14 +231,20 @@ def resolve_page(
     prefer: Callable[[str], bool] | None = None,
     field: str = "path",
     serve_stale: bool = False,
+    resolver_for: Callable[[], Any | None] | None = None,
 ) -> str:
     """The path of the page `value` names, as a title or a short id when it is neither a ref nor a path.
 
-    Order: a memory ref; an existing file path; a short id; a title. A value that names nothing is
-    returned as the path it always was, so today's NOT_FOUND and create-missing paths still apply.
+    Order: a memory ref; an existing file path; a short id; in a read, a path or a bare stem that a
+    moved page left, as a link to it resolves; a title. A write keeps its value literal, so it never
+    lands on the page that left it. A value that names nothing is returned as the path it always
+    was, so today's NOT_FOUND and create-missing paths still apply.
     `prefer` narrows several title matches to the pages it accepts (an edit prefers a page it can
     edit) before the call refuses. `field` is the command argument that held `value`, which the
     refusal's retry replaces with the id of the page the caller picks.
+    `resolver_for` gives the broad resolver that the title and the no-id short-id steps read. Left out it is the shared one,
+    which a cold process builds in full, as a write may. A read on a request path passes a lookup that
+    never builds; when it returns None the title stays unresolved, as one that names nothing.
     """
     root = Path(root)
     raw = str(value or "").strip()
@@ -229,7 +252,9 @@ def resolve_page(
     if not raw or raw.lower().startswith("exomem://") or _names_a_file(root, raw, visible):
         return resolve_reference(root, value, serve_stale=serve_stale)
     if page_ids.is_page_id(raw):
-        paths = _paths_for_head(root, raw.split(".", 1)[0], serve_stale=serve_stale)
+        paths = _paths_for_head(
+            root, raw.split(".", 1)[0], serve_stale=serve_stale, resolver_for=resolver_for
+        )
         if len(paths) > 1:
             # Two pages share a 35-bit head; the version the caller read tells them apart.
             paths = [
@@ -238,12 +263,31 @@ def resolve_page(
                 if (found := read_identity(root, path)) is not None and found.id == raw
             ] or paths
         if len(paths) > 1:
-            raise _ambiguous(root, raw, paths, field, by_id=True)
+            raise _ambiguous(root, paths, field, named=f"match the id {raw}")
         if paths:
             return resolve_reference(root, paths[0])
         # No page holds that id: the value may still be a title of the same shape.
+    resolver = resolver_for() if resolver_for is not None else find.shared_resolver(root)
+    if resolver is None:
+        return resolve_reference(root, raw)
+    moved: list[str] = []
+    # The resolver's own lineage steps. A short id has already won; a live stem or title wins
+    # over a prior stem inside `prior_stem_pages`.
+    lineage, left = (
+        (vault.prior_path_pages, f"once lived at \u201c{raw}\u201d")
+        if "/" in raw
+        else (vault.prior_stem_pages, f"once had the file name \u201c{raw}\u201d")
+    )
+    if writer_lease.invocation_reads():
+        with egress.decide_without_receipt():
+            moved = lineage(root, raw, resolver, visible=visible)
+    if len(moved) > 1 and prefer is not None:
+        moved = [path for path in moved if prefer(path)] or moved
+    if len(moved) > 1:
+        raise _ambiguous(root, moved, field, named=left)
+    if moved:
+        return resolve_reference(root, moved[0], serve_stale=serve_stale)
     key = vault.title_key(raw)
-    resolver = find.shared_resolver(root)
     with egress.decide_without_receipt():
         matches = vault.wikilink_candidates(
             resolver.candidates_by_key,
@@ -258,7 +302,7 @@ def resolve_page(
     if len(paths) > 1 and prefer is not None:
         paths = [path for path in paths if prefer(path)] or paths
     if len(paths) > 1:
-        raise _ambiguous(root, raw, paths, field, by_id=False)
+        raise _ambiguous(root, paths, field, named=f"are titled \u201c{raw}\u201d")
     return resolve_reference(root, paths[0] if paths else raw)
 
 
@@ -348,13 +392,90 @@ def _renamed(item: Mapping[str, Any], swaps: Mapping[str, Mapping[str, str]]) ->
     return out
 
 
-def _name_hit(root: Path, hit: Any, *, keep_paths: bool) -> Any:
+def _title_link_renderer(root: Path) -> Callable[[str], str] | None:
+    """Shows the links of a text by title, as `read_page` shows a body; None with no resident resolver.
+
+    A search reply only borrows the resident resolver: it never builds one, so a cold server keeps
+    the stored links rather than pay a vault-sized build.
+    """
+    visible = egress.visible_page_filter(root)
+    resolver = find.borrow_query_resolver(root, visible, schedule_rebuild=False)
+    if resolver is None:
+        return None
+    return lambda text: vault.render_title_links(text, root, resolver=resolver, visible=visible).text
+
+
+def _without_cut_link(text: str) -> str:
+    """`text` without a link that the excerpt ended inside: it would show half a stored path."""
+    start = text.rfind("[[")
+    if start == -1 or "]]" in text[start:]:
+        return text
+    return text[:start].rstrip() + "…"
+
+
+def _name_hit(
+    root: Path, hit: Any, *, keep_paths: bool, render: Callable[[str], str] | None = None
+) -> Any:
     if not isinstance(hit, Mapping) or not isinstance(hit.get("path"), str):
         return hit
     found = read_identity(root, hit["path"])
     if found is None:
         return hit
-    return {**hit, "id": found.id} if keep_paths else _renamed(hit, {"path": {"id": found.id}})
+    if keep_paths:
+        return {**hit, "id": found.id}
+    named = _renamed(hit, {"path": {"id": found.id}})
+    excerpt = named.get("excerpt")
+    if render is not None and isinstance(excerpt, str) and "[[" in excerpt:
+        named["excerpt"] = render(_without_cut_link(excerpt))
+    return named
+
+
+def name_candidate(root: Path, candidate: Any) -> Any:
+    """A candidate page with its title first, then its short id, beside its `ref` and its path.
+
+    The title is the candidate's own or, for an alias or title match that has none, the page's.
+    Clients read `path` from a candidate, so it stays. A candidate whose bytes cannot be read has no
+    id to offer and comes back as it was.
+    """
+    if not isinstance(candidate, Mapping) or not isinstance(candidate.get("path"), str):
+        return candidate
+    found = read_identity(root, candidate["path"])
+    if found is None:
+        return candidate
+    rest = {key: value for key, value in candidate.items() if key not in ("title", "id")}
+    return {"title": candidate.get("title") or found.title, "id": found.id, **rest}
+
+
+def candidates_by_handle(root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Candidates for a refusal message: each by its title and id (and `ref`), with no path.
+
+    An agent reads a message as text, and the id is the handle that every tool takes, so the path
+    stays out. A candidate whose page cannot be read has no handle to offer and keeps its path.
+    """
+    out: list[Any] = []
+    for item in candidates:
+        named = name_candidate(root, item)
+        out.append(named if named is item else {key: value for key, value in named.items() if key != "path"})
+    return out
+
+
+def _is_page_read(reply: Mapping[str, Any]) -> bool:
+    """Whether `reply` reads a Markdown page: it carries the page's content hash and frontmatter."""
+    return isinstance(reply.get("content_hash"), str) and isinstance(reply.get("frontmatter"), Mapping)
+
+
+def _name_read(reply: dict[str, Any]) -> dict[str, Any]:
+    """A page read with its `title` first, then its `id` and `ref`; `path` stays where clients read it.
+
+    A reply with no `id` is not a Markdown page read: it has no handle to offer and comes back as it was.
+    """
+    path, frontmatter = reply.get("path"), reply.get("frontmatter")
+    if not (isinstance(path, str) and isinstance(reply.get("id"), str) and isinstance(frontmatter, Mapping)):
+        return reply
+    body = reply.get("body")
+    title = vault.resolve_display_title(dict(frontmatter), body if isinstance(body, str) else "", path)
+    lead = {"title": title, **{key: reply[key] for key in ("id", "ref") if key in reply}}
+    return {**lead, **{key: value for key, value in reply.items() if key not in lead}}
 
 
 def _id_as_written(identity: PageIdentity, after_hash: Any) -> str:
@@ -437,13 +558,29 @@ def name_released_reply(
 
     A write reply swaps `path` for `title` and `id`; `response_detail="full"` still carries the
     path under `diagnostics.operational`. A search reply swaps each page hit's `path` for its `id`
-    (the hit keeps its `title` and `ref`). `keep_paths`, set for `detail="full"`, adds the `id` and
-    keeps the path, for a harness that reads vault files. A page that cannot be read keeps its
-    path. This runs after the egress release, so it names only what that filter let through. A
-    reply that is none of these comes back unchanged.
+    (the hit keeps its `title` and `ref`) and, on the public tool shape, shows the links in its
+    excerpt by title where a resolver is resident. A resolve-entity reply puts each candidate's
+    `title` and `id` first and a page read puts its `title` first; both keep the `path`, which clients
+    read. `keep_paths`, set for `detail="full"`, adds the `id` to a hit and keeps the path and the
+    stored links, for a harness that reads vault files. A page that cannot be read keeps its path.
+    This runs after the egress release, so it names only what that filter let through. A reply that
+    is none of these comes back unchanged.
     """
     root = Path(root)
     hits = reply.get("hits")
     if isinstance(hits, list):
-        return {**reply, "hits": [_name_hit(root, hit, keep_paths=keep_paths) for hit in hits]}
+        render = None
+        if (
+            not keep_paths
+            and capabilities.shows_links_by_title()
+            and any(isinstance(hit, Mapping) and "[[" in str(hit.get("excerpt", "")) for hit in hits)
+        ):
+            render = _title_link_renderer(root)
+        named = [_name_hit(root, hit, keep_paths=keep_paths, render=render) for hit in hits]
+        return {**reply, "hits": named}
+    candidates = reply.get("candidates")
+    if isinstance(candidates, list):
+        return {**reply, "candidates": [name_candidate(root, item) for item in candidates]}
+    if _is_page_read(reply):
+        return reply if keep_paths else _name_read(reply)
     return _name_write(root, reply)

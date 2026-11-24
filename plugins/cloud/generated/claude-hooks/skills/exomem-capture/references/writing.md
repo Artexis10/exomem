@@ -87,7 +87,9 @@ Use this loop whenever a durable conclusion should enter Exomem:
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
    `links.body_wikilinks`, and `relations.relation_debt` — lives under
-   `diagnostics` and needs `detail="full"`. Ask for it when provenance
+   `diagnostics` and needs `detail="full"`. When the reply also lists
+   `diagnostics.derived_components`, it lives under `diagnostics.leaf_result`
+   instead. Ask for it when provenance
    or connectivity is in doubt; if all three counts are zero and that is not
    honest, fix it before reporting. Corpus-aware `suggestions` are **off by
    default** because they cost a whole retrieval pass on the write path; pass
@@ -148,6 +150,44 @@ Answer once and carry on with the task. Do not recite the field names to the use
 and do not split a coherent note to make the question go away. A page that drops
 below the first step is not asked either.
 
+**When a write asks whether the page belongs in its project.** A write may return
+`structure_suggestion` of kind `ownership`. It means the written page is being asked
+whether it belongs in its current project and home folder: the page was created in a
+project, its project key or title just changed, or the daily rotation reached it. It does
+not say the page is misfiled: the runtime decides when to ask and you judge meaning.
+The question carries the ownership test, and the served `routes` in the bootstrap carry
+the same wording. Apply it to the page in hand, answer before you reply to the user, and
+do not change the page when you answer.
+
+- **It serves the project's goal.** Dismiss the item with
+  `decide_review_item(review_item=<id>, decision='dismiss', why='intentional: <the project goal this page serves>')`. The item stays quiet while the
+  page keeps its project key, folder and title, however much the page grows.
+- **It has its own goal, schedule or course of events.** Tell the user. On their yes,
+  propose the move or split through the curation lane. Register a new project through
+  the project-key route first, link the related projects' notes with a typed relation,
+  and get the user's exact confirmation of the previewed plan.
+- **You cannot tell.** If the user already decided this page's home and nothing since
+  bears on ownership, the earlier decision stands: dismiss with a reason that starts
+  `deferred:`, or make no call.
+
+Answer once and carry on with the task. Do not recite the field names to the user.
+A page that is asked and also at a size step carries the ownership question first.
+
+**When a write returns a rename.** A write that changed a page's title may return
+`structure_suggestion` of kind `rename`. The new title no longer matches the file name,
+and the suggestion holds the name that the title now gives, plus the spelled-out
+`curation_action='relocate'` call for that one page. The user's own retitle is the
+approval: do not ask again. Run the call as a preview, tell the user the new name in one
+line, and apply it. A rename keeps links working. When the suggestion is absent, the
+name still follows the title or the title did not change.
+
+**When many pages carry stale names.** Pages made before titles named files, or retitled
+since, keep a name that no longer follows their title. The review queue holds one item for
+the whole vault (`name_drift`), and `inspect_name_drift` lists the pages with the name each
+would get. Never rename a page that has no usable title; the list marks those. Propose the
+next batch to the user as one preview with the call the item carries, and apply it only
+on their yes. Repeat per batch until the item closes.
+
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
 *expression* — distillation, signal-density, no redundancy — never of *coverage*.
@@ -184,9 +224,11 @@ restatement of what specs/commits already capture.
 
 These rules are non-negotiable.
 
-1. **Read-only paths.** Never write to anything outside `Knowledge Base/`. Any
+1. **Read-only paths.** Never write vault content outside `Knowledge Base/`. Any
    sibling folders in the vault are inputs only. Compiled notes may **link to**
-   them but never modify them.
+   them but never modify them. Ordinary workspace files (the user's code,
+   documents and project files) are not the vault: write them with your own file
+   tools when asked.
 
 2. **Sources and Evidence are append-only.** Once a file lands in `Sources/` or
    `Evidence/`, never edit its *content*. Corrections happen by adding a new
@@ -240,7 +282,7 @@ For the full read-only / writeable path map see `write-scope.md`.
 
 ## Page types
 
-Nine page types under `Knowledge Base/`, each with a required frontmatter shape,
+The page types under `Knowledge Base/`, each with a required frontmatter shape,
 naming rule, and location. **Full per-type spec: `page-types.md`;
 frontmatter: `frontmatter.md`.** The behaviorally-load-bearing
 distinctions:

@@ -50,11 +50,12 @@ import os
 import re
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
 from . import semantic_authoring
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root_rel
 
 
 def _module_available(name: str) -> bool:
@@ -93,49 +94,6 @@ def _configure_local_search_capabilities(action: str | None) -> tuple[str, ...]:
     return tuple(introduced)
 
 
-# Subcommands `_dispatch_main` routes explicitly, before falling through to
-# `_serve_main`. Kept alongside `_is_cli_only_invocation` so a one-shot CLI
-# command gets its own log file; `serve` configures server-role logging
-# itself from `server.run()`, so it is deliberately excluded here.
-# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
-_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(
-    {
-        "setup",
-        "init",
-        "reclaim-schema",
-        "install-skill",
-        "package-skills",
-        "personalize",
-        "install-hook",
-        "demo",
-        "studio",
-        "tui",
-        "doctor",
-        "install-info",
-        "auth",
-        "attach",
-        "status",
-        "warm",
-        "mode",
-        "dreamer",
-        "prominence",
-        "backfill-media",
-        "index",
-        "enroll-speaker",
-        "list-speakers",
-        "remove-speaker",
-        "trace",
-        "logs",
-        "lease",
-        "governance-schema",
-        "relations",
-        "collections",
-        "store-mode",
-        "import",
-    }
-)
-
-
 def _is_cli_only_invocation(raw: list[str]) -> bool:
     """Whether `raw` routes to a one-shot CLI command rather than `serve`."""
     if not raw or raw[0].startswith("-"):
@@ -147,23 +105,18 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
     return raw[0] in _simple_cli_action_names()
 
 
+# The backup Job's commands, which `main` runs before it loads the CLI, the server framework or the native
+# runtime: each bounds itself in seconds on one CPU.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_LEAN_COMMANDS: frozenset[str] = frozenset(
+    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
-    if raw[:1] == ["cell-media-census"]:
-        # The backup Job bounds this command in seconds on one CPU, and it reads one file, so it loads no CLI,
-        # server framework or native runtime.
-        from .cell_media_census import main as census_main
-
-        return census_main(raw[1:])
-    if raw[:1] == ["cell-media-manifest"]:
-        # The backup Job runs this on a read-only clone: it reads the vault and the media ledger, nothing more.
-        from .media_manifest import main as manifest_main
-
-        return manifest_main(raw[1:])
-    if raw[:1] == ["cell-media-collect"]:
-        from .media_collect import main as collect_main
-
-        return collect_main(raw[1:])
+    if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
     preload_local_dotenv_policy()
@@ -248,99 +201,8 @@ def _unsupported_platform_refusal(raw: list[str]) -> str | None:
 
 
 def _dispatch_main(raw: list[str]) -> int:
-    if raw and raw[0] == "setup":
-        from .setup_wizard import setup_main
-
-        return setup_main(raw[1:])
-    if raw and raw[0] == "init":
-        return _init_main(raw[1:])
-    if raw and raw[0] == "reclaim-schema":
-        return _reclaim_schema_main(raw[1:])
-    if raw and raw[0] == "install-skill":
-        return _install_skill_main(raw[1:])
-    if raw and raw[0] == "package-skills":
-        return _package_skills_main(raw[1:])
-    if raw and raw[0] == "personalize":
-        from .personalize import personalize_main
-
-        return personalize_main(raw[1:])
-    if raw and raw[0] == "install-hook":
-        return _install_hook_main(raw[1:])
-    if raw and raw[0] == "demo":
-        from .demo import main as demo_main
-
-        return demo_main(raw[1:])
-    if raw and raw[0] == "studio":
-        return _studio_main(raw[1:])
-    if raw and raw[0] == "tui":
-        return _tui_main(raw[1:])
-    if raw and raw[0] == "doctor":
-        return _doctor_main(raw[1:])
-    if raw and raw[0] == "install-info":
-        return _install_info_main(raw[1:])
-    if raw and raw[0] == "auth":
-        return _auth_main(raw[1:])
-    if raw and raw[0] == "attach":
-        return _attach_main(raw[1:])
-    if raw and raw[0] == "status":
-        return _status_main(raw[1:])
-    if raw and raw[0] == "warm":
-        return _warm_main(raw[1:])
-    if raw and raw[0] == "mode":
-        return _mode_main(raw[1:])
-    if raw and raw[0] == "dreamer":
-        return _dreamer_main(raw[1:])
-    if raw and raw[0] == "prominence":
-        return _prominence_main(raw[1:])
-    if raw and raw[0] == "backfill-media":
-        return _backfill_media_main(raw[1:])
-    if raw and raw[0] == "index":
-        return _index_main(raw[1:])
-    if raw and raw[0] == "enroll-speaker":
-        return _enroll_speaker_main(raw[1:])
-    if raw and raw[0] == "list-speakers":
-        return _list_speakers_main(raw[1:])
-    if raw and raw[0] == "remove-speaker":
-        return _remove_speaker_main(raw[1:])
-    if raw and raw[0] == "trace":
-        return _trace_main(raw[1:])
-    if raw and raw[0] == "logs":
-        return _logs_main(raw[1:])
-    if raw and raw[0] == "lease":
-        return _lease_main(raw[1:])
-    if raw and raw[0] == "governance-schema":
-        return _governance_schema_main(raw[1:])
-    if raw and raw[0] == "relations":
-        return _relations_main(raw[1:])
-    if raw and raw[0] == "collections":
-        return _collections_main(raw[1:])
-    if raw and raw[0] == "store-mode":
-        return _store_mode_main(raw[1:])
-    if raw and raw[0] == "import":
-        from .local_import import main as local_import_main
-        return local_import_main(raw[1:])
-    if raw and raw[0] == "cloud":
-        if raw[1:2] == ["export"]:
-            from .cloud_export_client import main as cloud_export_main
-            return cloud_export_main(raw[2:])
-        if raw[1:2] == ["download"]:
-            from .cloud_download_client import main as cloud_download_main
-            return cloud_download_main(raw[2:])
-        from .cloud_import_client import main as cloud_main
-        return cloud_main(raw[1:])
-    if raw and raw[0] == "cell-import":
-        from .cloud_import_job import main as import_main
-        return import_main(raw[1:])
-    if raw and raw[0] == "cell-export":
-        from .cloud_export import main as export_main
-        return export_main(raw[1:])
-    if raw and raw[0] == "cell-init":
-        return _cell_init_main(raw[1:])
-    # `exomem activate "<turn>"` — the spelled-out contract for the context
-    # compiler. A thin alias over the registry command so there is exactly one
-    # leaf; the long form `exomem activate_context` keeps working.
-    if raw and raw[0] == "activate":
-        return _activate_main(raw[1:])
+    if raw and raw[0] in _COMMANDS:
+        return _run_command(raw[0], raw[1:])
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
@@ -364,7 +226,24 @@ def _dispatch_main(raw: list[str]) -> int:
     return _serve_main(raw)
 
 
-def _load_cwd_dotenv() -> None:
+class _DotenvConflict(Exception):
+    """The working-directory `.env` would replace exported values; a credential write must not guess."""
+
+    def __init__(self, keys: list[str]) -> None:
+        super().__init__(", ".join(keys))
+        self.keys = keys
+
+
+def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
+    return (
+        f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        "to a different value than this process's environment, so it is unclear which "
+        "deployment to act on. Unset those variables, remove them from the .env, or run "
+        "from a directory without that .env."
+    )
+
+
+def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     """Load the operator's cwd `.env`, as the local CLI always has.
 
     Never in a cloud cell: its environment is the pod spec, and "no `.env`
@@ -373,6 +252,11 @@ def _load_cwd_dotenv() -> None:
     example to set `EXOMEM_OAUTH_STORAGE_URL`) must not become CLI
     configuration just because an operator ran a command from inside it --
     the same guard `server_runtime` applies to the service's own load.
+
+    The `.env` still wins over exported values. A command that writes
+    credentials or sessions passes `refuse_conflicts`: when the `.env` would
+    replace an exported value with a different one, it stops instead of
+    acting on a store the operator did not name. Other commands warn.
     """
     from . import cloud_cell
 
@@ -383,8 +267,21 @@ def _load_cwd_dotenv() -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 
+    # Names only: the values may be secrets.
+    replaced = sorted(
+        key
+        for key, value in dotenv_values(dotenv_path).items()
+        if value is not None and key in os.environ and os.environ[key] != value
+    )
+    if replaced and refuse_conflicts:
+        raise _DotenvConflict(replaced)
+    if replaced:
+        print(
+            f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
+            file=sys.stderr,
+        )
     load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
@@ -395,7 +292,7 @@ def _build_auth_session_authority():
     issuer, audience, storage namespace, and local-vs-HA selection without
     importing server auth during unrelated CLI startup.
     """
-    _load_cwd_dotenv()
+    _load_cwd_dotenv(refuse_conflicts=True)
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -485,7 +382,11 @@ def _issue_local_main(args: argparse.Namespace) -> int:
     if output.exists() or output.is_symlink():
         print(f"issue-local: {output} already exists; choose a new path", file=sys.stderr)
         return 2
-    _load_cwd_dotenv()
+    try:
+        _load_cwd_dotenv(refuse_conflicts=True)
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message("auth issue-local", conflict), file=sys.stderr)
+        return 2
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -589,6 +490,9 @@ def _auth_main(argv: list[str]) -> int:
 
     try:
         authority = _build_auth_session_authority()
+    except _DotenvConflict as conflict:
+        print(_dotenv_conflict_message(f"auth {args.command}", conflict), file=sys.stderr)
+        return 2
     except (SessionStoreUnavailable, OSError):
         print(
             "session authority unavailable; check storage configuration and connectivity",
@@ -698,6 +602,11 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         help="with --scope/--category: keep the original owner-only until a whole-artifact release",
     )
     parser.add_argument(
+        "--diarize",
+        action=argparse.BooleanOptionalAction,
+        help="with --scope/--category: request or skip speaker labels for this recording",
+    )
+    parser.add_argument(
         "--archive",
         choices=("members",),
         default="",
@@ -729,27 +638,22 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
     )
     args = parser.parse_args(argv)
     if args.handoff_file:
-        if (args.scope or args.category or args.description or args.raw_protection
+        if (args.scope or args.category or args.description or args.raw_protection or args.diarize is not None
                 or args.archive or args.resumable or args.token_file or args.port):
-            parser.error("--handoff-file accepts only a held file, --root, --filename and its bound --lane")
+            parser.error("--handoff-file accepts a file, --root, --filename and its bound --lane")
         return _attach_handoff(args, transport=transport)
     if args.root:
         parser.error("--root requires --handoff-file")
     args.lane = args.lane or "evidence"
 
-    token_file = args.token_file or os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
-    raw_port = str(args.port or os.environ.get("EXOMEM_LOCAL_PORT", "")).strip()
-    if not token_file:
-        parser.error("a local client token file is required (--token-file or EXOMEM_LOCAL_TOKEN_FILE)")
-    if not raw_port.isascii() or not raw_port.isdigit() or not 0 < int(raw_port) < 65536:
-        parser.error("a valid local port is required (--port or EXOMEM_LOCAL_PORT)")
+    from .local_transfer_client import LocalListenerUnset, local_listener
+
     try:
-        token = Path(token_file).expanduser().read_text(encoding="ascii").strip()
-    except (OSError, UnicodeDecodeError):
-        print("attach: the local client token file could not be read", file=sys.stderr)
-        return 2
-    if not token:
-        print("attach: the local client token file is empty", file=sys.stderr)
+        token, port = local_listener(args.token_file, args.port)
+    except LocalListenerUnset as error:
+        parser.error(str(error))
+    except ValueError as error:
+        print(f"attach: {error}", file=sys.stderr)
         return 2
     source = Path(args.file).expanduser()
     if not source.is_file():
@@ -761,6 +665,8 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         parser.error("--lane applies only without --scope/--category; a direct preserve is Evidence")
     if hold and args.raw_protection:
         parser.error("--raw-protection needs --scope/--category; a held file takes it when redeemed")
+    if hold and args.diarize is not None:
+        parser.error("--diarize and --no-diarize need --scope/--category; a held file takes the choice when redeemed")
     if hold and (args.archive or args.resumable):
         parser.error("--archive and --resumable need --scope/--category")
     fields = {
@@ -777,12 +683,14 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         }.items()
         if value
     }
+    if args.diarize is not None:
+        fields["diarize"] = "true" if args.diarize else "false"
 
     import httpx
 
     from .upload_sessions import MAX_PATCH_BYTES
 
-    base = f"http://127.0.0.1:{int(raw_port)}"
+    base = f"http://127.0.0.1:{port}"
     timeout = httpx.Timeout(30.0, read=300.0, write=300.0)
     if hold or not (args.resumable or source.stat().st_size > MAX_PATCH_BYTES):
         try:
@@ -802,7 +710,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
                     data=fields,
                 )
         except (httpx.ConnectError, httpx.ConnectTimeout):
-            print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+            print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
             return 1
         except httpx.HTTPError:
             # The bytes may have been committed: a direct preserve retried answers ARTIFACT_EXISTS,
@@ -827,7 +735,7 @@ def _attach_main(argv: list[str], *, transport=None) -> int:
         ) as client:
             return _attach_resumable(client, base, token, source, name, fields)
     except (httpx.ConnectError, httpx.ConnectTimeout):
-        print(f"attach: the local listener on 127.0.0.1:{int(raw_port)} is unreachable", file=sys.stderr)
+        print(f"attach: the local listener on 127.0.0.1:{port} is unreachable", file=sys.stderr)
         return 1
     except httpx.HTTPError:
         print("attach: the upload was interrupted; run the same command again to resume",
@@ -842,7 +750,7 @@ def _attach_handoff(args, *, transport=None) -> int:
 
     import httpx
 
-    from . import held_fs, held_uploads, upload_handoff, upload_tokens
+    from . import held_fs, held_uploads, upload_handoff, upload_sessions, upload_tokens
     from .source_capture import validate_sha256
 
     try:
@@ -859,16 +767,33 @@ def _attach_handoff(args, *, transport=None) -> int:
         if not isinstance(descriptor, dict) or not fields <= set(descriptor):
             raise ValueError("expected an upload handoff descriptor")
         token = descriptor["token"]
+        resumable = upload_handoff.parse_ticket(token, resumable=True) is not None
+        expected_hold = not resumable
         if (upload_handoff.parse_handoff_token(token) is None
-                or descriptor["hold"] is not True or descriptor["committed"] is not False
+                or descriptor["hold"] is not expected_hold or descriptor["committed"] is not False
                 or descriptor["handoff_status"] != "handoff_prepared"
                 or descriptor["lane"] not in upload_tokens.UPLOAD_LANES
                 or type(descriptor["ttl_seconds"]) is not int
                 or not 0 < descriptor["ttl_seconds"] <= upload_tokens.DEFAULT_TTL
                 or type(descriptor["max_bytes"]) is not int
-                or not 0 < descriptor["max_bytes"] <= upload_handoff.MAX_BYTES):
+                or descriptor["max_bytes"] <= 0
+                or (not resumable and descriptor["max_bytes"] > upload_handoff.MAX_BYTES)):
             raise ValueError("invalid upload handoff descriptor")
         endpoint = upload_handoff.upload_endpoint(descriptor["upload_url"])
+        base = endpoint.removesuffix("/upload")
+        if resumable:
+            transfer = descriptor["resumable"]
+            size = descriptor["size_bytes"]
+            if (descriptor["lane"] != "source" or type(size) is not int or size != descriptor["max_bytes"]
+                    or transfer["create_url"] != base + upload_sessions.SESSIONS_PATH
+                    or transfer["protocol"] != f"tus {upload_sessions.TUS_VERSION}"
+                    or transfer["resend_header"] != upload_sessions.SECRET_HEADER
+                    or not isinstance(transfer["metadata"], list)
+                    or sorted(transfer["metadata"]) != sorted(upload_sessions.required_metadata("source"))
+                    or type(transfer["max_part_bytes"]) is not int
+                    or not 0 < transfer["max_part_bytes"] <= upload_sessions.MAX_PATCH_BYTES
+                    or type(transfer["max_bytes"]) is not int or size > transfer["max_bytes"]):
+                raise ValueError("invalid resumable Source descriptor")
         expected = validate_sha256(descriptor["expected_sha256"])
         if args.lane is not None and args.lane != descriptor["lane"]:
             raise ValueError("--lane must match the handoff")
@@ -879,10 +804,32 @@ def _attach_handoff(args, *, transport=None) -> int:
         root = root.absolute()
         source = source if source.is_absolute() else root / source
         relative = source.relative_to(root)
+        name = args.filename or relative.name
         with held_fs.acquire(root).require() as filesystem:
             with filesystem.parent(relative.parent.as_posix()).require() as parent:
                 with filesystem.file(parent, relative.name).require() as handle:
                     version = handle.version()
+                    if resumable:
+                        if version.size != size or not isinstance(handle.descriptor, int):
+                            raise ValueError("file does not match the declared size")
+                        with os.fdopen(os.dup(handle.descriptor), "rb") as stream:
+                            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                            if digest != expected or handle.version() != version:
+                                raise ValueError("file does not match the declared SHA-256")
+                            try:
+                                with httpx.Client(
+                                    transport=transport, trust_env=False, follow_redirects=False,
+                                    timeout=httpx.Timeout(30.0, read=300.0, write=300.0),
+                                ) as client:
+                                    return _send_upload_session(
+                                        client, base, token, stream, name, {}, digest, size,
+                                        max_part_bytes=transfer["max_part_bytes"], delegated=True,
+                                        current=lambda: handle.version() == version,
+                                    )
+                            except httpx.HTTPError:
+                                print("attach: upload acknowledgement unavailable; use the same handoff to resume",
+                                      file=sys.stderr)
+                                return 1
                     data = filesystem.read(handle, max_bytes=descriptor["max_bytes"]).require()
                     if version != handle.version():
                         raise ValueError("file changed while reading")
@@ -893,7 +840,6 @@ def _attach_handoff(args, *, transport=None) -> int:
         print("attach: invalid handoff or file; use a regular file within --root with the expected SHA-256", file=sys.stderr)
         return 2
 
-    name = args.filename or relative.name
     try:
         with httpx.Client(
             transport=transport, trust_env=False, follow_redirects=False,
@@ -924,59 +870,110 @@ def _attach_handoff(args, *, transport=None) -> int:
     return 0
 
 
-def _attach_refused(response, payload: object) -> int:
+def _attach_refused(response, payload: object, *, retained_source: bool = False) -> int:
+    if retained_source and response.status_code in (404, 410):
+        print("attach: the session is unavailable and the Source outcome is unknown. "
+              "Check Source custody before starting another upload", file=sys.stderr)
+        return 1
     code = payload.get("code") or payload.get("error") if isinstance(payload, dict) else None
+    next_step = ". Request a new handoff before trying again" if (
+        isinstance(payload, dict) and payload.get("handoff_spent") is True
+    ) else ""
     print(
-        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''})",
+        f"attach: upload refused (HTTP {response.status_code}{f', {code}' if code else ''}){next_step}",
         file=sys.stderr,
     )
     return 1
 
 
-def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
-    """Send `source` through an upload session, continuing one an earlier run left open.
+def _matches_source_receipt(receipt: object, sha256: str, size: int) -> bool:
+    from pathlib import PurePosixPath
 
-    The session's URL and secret are kept in a 0600 file under the user's state
-    directory, keyed by the file's SHA-256 and its destination, until the
-    service reports the session settled.
-    """
+    from .memory_refs import canonical_memory_ref
+
+    if (not isinstance(receipt, dict) or receipt.get("hash_algorithm") != "sha256"
+            or receipt.get("hash") != sha256 or type(receipt.get("size")) is not int or receipt["size"] != size):
+        return False
+    try:
+        canonical_memory_ref(receipt.get("ref"))
+        page, artifact = receipt.get("path"), receipt.get("artifact_path")
+        if not isinstance(page, str) or not isinstance(artifact, str) or page == artifact:
+            return False
+        paths = (PurePosixPath(page), PurePosixPath(artifact))
+        if any(path.is_absolute() or len(path.parts) < 2 or ".." in path.parts or "\\" in path.as_posix()
+               for path in paths):
+            return False
+        return paths[0].parent == paths[1].parent and paths[0].suffix == ".md"
+    except ValueError:
+        return False
+
+
+def _attach_resumable(client, base: str, token: str, source: Path, name: str, fields: dict) -> int:
+    """Send an ordinary local upload through the same session client."""
+    import hashlib
+
+    with source.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        sha256 = hashlib.file_digest(handle, "sha256").hexdigest()
+        return _send_upload_session(client, base, token, handle, name, fields, sha256, size)
+
+
+def _send_upload_session(
+    client, base: str, token: str, handle, name: str, fields: dict, sha256: str, size: int,
+    *, max_part_bytes: int | None = None, delegated: bool = False, current=None,
+) -> int:
+    """Send a file in bounded parts. The saved session can reconcile the last acknowledged offset."""
     import base64
     import hashlib
 
     import httpx
 
-    from . import upload_sessions
+    from . import private_state, upload_sessions
     from .state_paths import state_store_root
 
-    # Half the bytes one part may carry, so a part never meets the service's cap.
-    part_bytes = upload_sessions.MAX_PATCH_BYTES // 2
+    part_bytes = max(1, (max_part_bytes or upload_sessions.MAX_PATCH_BYTES) // 2)
 
-    digest = hashlib.sha256()
-    with source.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    sha256 = digest.hexdigest()
-    size = source.stat().st_size
     # nosemgrep: ep-word-set -- the session metadata keys that `/upload/sessions` defines.
     destination = {key: fields[key] for key in ("scope", "category", "description",
-                                                "raw_protection", "archive") if key in fields}
+                                                "raw_protection", "archive", "diarize") if key in fields}
     key = hashlib.sha256(json.dumps(
-        {"sha256": sha256, "target": base, "filename": name, **destination}, sort_keys=True
+        {"sha256": sha256, "target": base, "filename": name, **destination,
+         **({"handoff": hashlib.sha256(token.encode()).hexdigest()} if delegated else {})}, sort_keys=True
     ).encode()).hexdigest()
     records = state_store_root() / "attach-sessions"
     record_path = records / f"{key}.json"
-    tus = {"Authorization": f"Bearer {token}", "Tus-Resumable": "1.0.0"}
+    tus = {"Tus-Resumable": upload_sessions.TUS_VERSION}
+    authorize = {"Authorization": f"Bearer {token}"}
+    if not delegated:
+        tus.update(authorize)
+    prefix = upload_sessions.SESSIONS_PATH + "/"
+
+    def checked_location(path: str, secret: str) -> str:
+        session_id = path.removeprefix(prefix)
+        if (not path.startswith(prefix) or not upload_sessions.valid_session_id(session_id)
+                or upload_sessions.delegated_source(session_id) != delegated
+                or not upload_sessions.valid_session_secret(secret)):
+            raise ValueError("the service returned an invalid upload session")
+        return base + path
 
     session = None
     offset = 0
     try:
         session = json.loads(record_path.read_text(encoding="utf-8"))
-        url, secret = str(session["url"]), str(session["secret"])
+        saved_url, secret = str(session["url"]), str(session["secret"])
+        if not saved_url.startswith(base + prefix):
+            raise ValueError("the saved upload belongs to another endpoint")
+        url = checked_location(saved_url.removeprefix(base), secret)
     except (OSError, ValueError, KeyError, TypeError):
         session = None
     if session is not None:
         held = client.head(url, headers={**tus, "Exomem-Upload-Secret": secret})
-        if held.status_code in (404, 410):
+        if delegated and held.status_code == 410:
+            # HEAD also returns 410 for a retained failed record. GET can still give its exact failure.
+            offset = size
+        elif held.status_code in (404, 410):
+            if delegated:
+                return _attach_refused(held, None, retained_source=True)
             record_path.unlink(missing_ok=True)
             session = None
         elif held.status_code != 200:
@@ -988,93 +985,125 @@ def _attach_resumable(client, base: str, token: str, source: Path, name: str, fi
                 return 1
     if session is None:
         metadata = {"filename": name, "sha256": sha256, **destination}
-        created = client.post(
-            f"{base}/upload/sessions",
-            headers={
-                **tus,
-                "Upload-Length": str(size),
-                "Upload-Metadata": ",".join(
-                    f"{field} {base64.b64encode(str(value).encode()).decode()}"
-                    for field, value in metadata.items()
-                ),
-            },
-        )
+        try:
+            created = client.post(
+                base + upload_sessions.SESSIONS_PATH,
+                headers={
+                    **tus, **authorize,
+                    "Upload-Length": str(size),
+                    "Upload-Metadata": ",".join(
+                        f"{field} {base64.b64encode(str(value).encode()).decode()}"
+                        for field, value in metadata.items()
+                    ),
+                },
+            )
+        except httpx.HTTPError:
+            if not delegated:
+                raise
+            print("attach: no session creation acknowledgement; request a new handoff", file=sys.stderr)
+            return 1
         if created.status_code != 201:
             try:
                 payload = created.json()
             except ValueError:
                 payload = None
             return _attach_refused(created, payload)
-        url, secret = base + created.headers["location"], created.headers["exomem-upload-secret"]
+        secret = created.headers.get(upload_sessions.SECRET_HEADER, "")
+        try:
+            url = checked_location(created.headers.get("location", ""), secret)
+        except ValueError:
+            print("attach: the service returned an invalid upload session"
+                  + (". Request a new handoff before trying again" if delegated else ""), file=sys.stderr)
+            return 1
         records.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(record_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
-            json.dump({"url": url, "secret": secret}, sink)
-    headers = {**tus, "Exomem-Upload-Secret": secret}
+        private_state.write_record(records, key, {"url": url, "secret": secret}, temp_suffix=".tmp", durable=True)
+        private_state.sync_directory(records)
+    headers = {**tus, upload_sessions.SECRET_HEADER: secret}
     stalls = 0
-    with source.open("rb") as handle:
-        while offset < size:
-            handle.seek(offset)
-            chunk = handle.read(part_bytes)
-            try:
-                sent = client.patch(
-                    url,
-                    headers={
-                        **headers,
-                        "Upload-Offset": str(offset),
-                        "Content-Type": "application/offset+octet-stream",
-                    },
-                    content=chunk,
-                )
-            except httpx.HTTPError:
-                sent = None
-            if sent is not None and sent.status_code == 204:
-                advanced = upload_sessions.header_count(sent.headers.get("upload-offset", ""))
-                if advanced is None or not offset < advanced <= offset + len(chunk):
-                    print("attach: the service returned an invalid upload offset; run the same command again to reconcile",
-                          file=sys.stderr)
-                    return 1
-                offset, stalls = advanced, 0
-                continue
-            # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
-            if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
-                return _attach_refused(sent, None)
-            held = client.head(url, headers=headers)
-            if held.status_code != 200:
-                return _attach_refused(held, None)
-            advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
-            if advanced is None or not offset <= advanced <= offset + len(chunk):
-                print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+    while offset < size:
+        handle.seek(offset)
+        chunk = handle.read(min(part_bytes, size - offset))
+        if not chunk or current is not None and not current():
+            print("attach: the file changed during upload", file=sys.stderr)
+            return 1
+        try:
+            sent = client.patch(
+                url,
+                headers={
+                    **headers,
+                    "Upload-Offset": str(offset),
+                    "Content-Type": "application/offset+octet-stream",
+                },
+                content=chunk,
+            )
+        except httpx.HTTPError:
+            sent = None
+        if sent is not None and sent.status_code == 204:
+            advanced = upload_sessions.header_count(sent.headers.get("upload-offset", ""))
+            if advanced is None or not offset < advanced <= offset + len(chunk):
+                print("attach: the service returned an invalid upload offset; run the same command again to reconcile",
+                      file=sys.stderr)
                 return 1
-            stalls = stalls + 1 if advanced == offset else 0
-            if stalls >= 3:
-                print("attach: the upload made no progress; run the same command again to resume", file=sys.stderr)
-                return 1
-            offset = advanced
-            # Smaller requests reduce repeated timeout exposure without discarding accepted bytes.
-            part_bytes = max(1, part_bytes // 2)
-    while True:
+            offset, stalls = advanced, 0
+            continue
+        # HTTP timeout/conflict/size refusals and server errors can follow accepted bytes.
+        if sent is not None and not (sent.status_code in (408, 409, 413) or 500 <= sent.status_code < 600):
+            return _attach_refused(sent, None, retained_source=delegated)
+        held = client.head(url, headers=headers)
+        if delegated and held.status_code == 410:
+            offset = size
+            break
+        if held.status_code != 200:
+            return _attach_refused(held, None, retained_source=delegated)
+        advanced = upload_sessions.header_count(held.headers.get("upload-offset", ""))
+        if advanced is None or not offset <= advanced <= offset + len(chunk):
+            print("attach: the service returned an invalid upload offset; retained session is unchanged", file=sys.stderr)
+            return 1
+        stalls = stalls + 1 if advanced == offset else 0
+        if stalls >= 3:
+            print("attach: the upload made no progress; run the same command again to resume", file=sys.stderr)
+            return 1
+        offset = advanced
+        # Smaller requests reduce repeated timeout exposure without discarding accepted bytes.
+        part_bytes = max(1, part_bytes // 2)
+    deadline = time.monotonic() + 120
+    while not delegated or time.monotonic() < deadline:
         state = client.get(url, headers=headers)
         try:
             payload = state.json()
         except ValueError:
             payload = None
         if state.status_code != 200 or not isinstance(payload, dict):
-            return _attach_refused(state, payload)
+            return _attach_refused(state, payload, retained_source=delegated)
         if payload.get("state") == upload_sessions.COMMITTED:
-            record_path.unlink(missing_ok=True)
-            print(json.dumps(payload.get("receipt"), ensure_ascii=False))
+            receipt = payload.get("receipt")
+            if delegated and not _matches_source_receipt(receipt, sha256, size):
+                print("attach: the Source receipt does not match the file bytes", file=sys.stderr)
+                return 1
+            if not delegated:
+                record_path.unlink(missing_ok=True)
+            # The same command can recover a delegated receipt if stdout closes after commit.
+            print(json.dumps(receipt, ensure_ascii=False))
             return 0
         if payload.get("state") == upload_sessions.FAILED:
             record_path.unlink(missing_ok=True)
             print(f"attach: the upload failed ({payload.get('code')})", file=sys.stderr)
             return 1
         if payload.get("state") == upload_sessions.RETRYABLE:
+            if delegated and payload.get("code") == upload_sessions.SOURCE_RECEIPT_PENDING:
+                time.sleep(0.25)
+                continue
+            if payload.get("code") == "SOURCE_OUTCOME_UNKNOWN":
+                print("attach: the Source outcome is unknown. Run the same command again to check its receipt",
+                      file=sys.stderr)
+                return 1
             # The service holds every byte; the session record stays so the next run retries the commit.
             print(f"attach: the upload is held but not preserved yet ({payload.get('code')}); "
                   "run the same command again to retry", file=sys.stderr)
             return 1
         time.sleep(0.25)
+    print("attach: Source publication is pending; run the same command again to check its receipt", file=sys.stderr)
+    return 1
 
 
 def _serve_main(argv: list[str]) -> int:
@@ -1231,7 +1260,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--dry-run",
@@ -1247,9 +1276,8 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument(
         "--rediarize",
         action="store_true",
-        help="re-extract audio/video transcribed before diarization (extracted_by without "
-        "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
-        "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
+        help="add speaker labels to existing unlabeled recordings. An explicit recording choice "
+        "takes precedence over EXOMEM_DIARIZE in this shell.",
     )
     parser.add_argument(
         "--retime",
@@ -1258,8 +1286,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
         "does not read .env). One re-extraction serves --retime and --rediarize together. "
-        "Already-diarized recordings are SKIPPED unless EXOMEM_DIARIZE is also set, so "
-        "re-timing never drops their speaker labels.",
+        "Re-timing a labeled recording requires an enabled speaker-label choice so it keeps its labels.",
     )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -1268,10 +1295,12 @@ def _backfill_media_main(argv: list[str]) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from . import backfill, state_migration
+    from .vault_store import cli_fence
 
     # Ordinary CLI entry is a read-only placement gate. Legacy state must be
     # moved by the explicit offline maintenance command before stores open.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("backfill-media", Path(args.vault).expanduser())
 
     backfill.backfill_media(
         Path(args.vault).expanduser(),
@@ -1293,21 +1322,21 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        f"it never wipes the sidecar first. Covers {kb_prefix()} by default, or "
-        f"the whole vault with --scope vault (so notes outside {kb_prefix()} "
+        f"it never wipes the sidecar first. Covers {managed_join('')} by default, or "
+        f"the whole vault with --scope vault (so notes outside {managed_join('')} "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope",
         choices=("kb", "vault"),
         default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        f"'vault' indexes the whole vault, not just {kb_prefix()}.",
+        f"'vault' indexes the whole vault, not just {managed_join('')}.",
     )
     parser.add_argument(
         "--batch-size",
@@ -1340,10 +1369,12 @@ def _index_main(argv: list[str]) -> int:
     # Contending is never the right move, so make it unrepresentable.
     from . import graph_sync as _graph_sync
     from . import state_migration
+    from .vault_store import cli_fence
 
     # Placement must resolve before even the graph-owner probe reads its
     # coordination state.
     state_migration.require_vault_state_ready(Path(args.vault).expanduser())
+    cli_fence.require("index", Path(args.vault).expanduser())
 
     owner = _graph_sync.live_graph_owner(Path(args.vault).expanduser())
     if owner is not None:
@@ -1651,12 +1682,12 @@ def _status_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
-    from . import resource_status, state_migration
+    from . import layout_report, resource_status, state_migration
 
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
@@ -1667,6 +1698,8 @@ def _status_main(argv: list[str]) -> int:
 
         # The records' own answer: it opens the store only when the manifest says store mode.
         status["vault_store"] = store_mode.status(vault_root)
+        # A layout that cannot be read is a state in the report, so status never refuses on it.
+        status["layout"] = layout_report.report(vault_root)
     if args.json:
         print(json.dumps(status))
     else:
@@ -1675,11 +1708,25 @@ def _status_main(argv: list[str]) -> int:
         print(f"  models: {status['models']}")
         print(f"  media: {status['media']}")
         print(f"  originals: {status['originals']}")
+        if "vault_backup" in status:
+            from . import vault_backup_cli
+
+            print(f"  vault_backup: {vault_backup_cli.summary_line(status['vault_backup'])}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
         if "vault_store" in status:
             print(f"  vault_store: {status['vault_store']}")
+        if "layout" in status:
+            print(f"  layout: {status['layout']['outcome']}")
+            if status["layout"]["remedy"]:
+                print(f"    fix: {status['layout']['remedy']}")
     return 0
+
+
+def _backup_main(argv: list[str]) -> int:
+    from . import vault_backup_cli
+
+    return vault_backup_cli.main(argv)
 
 
 def _install_info_main(argv: list[str]) -> int:
@@ -1731,7 +1778,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -1808,7 +1855,7 @@ def _relations_main(argv: list[str]) -> int:
         "--vault",
         default=None,
         help=(
-            f"vault root containing '{kb_prefix()}'; reads its snapshot locally "
+            f"vault root containing '{managed_join('')}'; reads its snapshot locally "
             "instead of asking the service (default: the service, else $EXOMEM_VAULT_PATH)"
         ),
     )
@@ -1881,6 +1928,9 @@ def _relations_main(argv: list[str]) -> int:
                 )
             vault_root = Path(vault).expanduser()
             served_by = "local-snapshot"
+            from .vault_store import cli_fence
+
+            cli_fence.require("relations", vault_root)
             # A terminal on the owner's machine reading its own sidecar is the
             # owner-local caller, the one audience a governed vault serves.
             from .collection_store import ownership
@@ -1977,8 +2027,10 @@ def _warm_main(argv: list[str]) -> int:
     vault_root = Path(args.vault).expanduser() if args.vault else None
     if vault_root is not None:
         from . import state_migration
+        from .vault_store import cli_fence
 
         state_migration.require_vault_state_ready(vault_root)
+        cli_fence.require("warm", vault_root)
 
     # Which models this install can actually load. The reranker and the torch
     # CLIP are sentence-transformers models, so the `embeddings-onnx` lane
@@ -2102,7 +2154,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2135,7 +2187,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2164,7 +2216,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -2496,7 +2548,7 @@ def _collections_main(argv: list[str]) -> int:
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2508,7 +2560,9 @@ def _collections_main(argv: list[str]) -> int:
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
     from .structured_collections import CollectionError
+    from .vault_store import cli_fence
 
+    cli_fence.require(f"collections {args.command}", Path(args.vault))
     try:
         if args.command == "backup":
             result = owner.backup(
@@ -2586,16 +2640,17 @@ def _store_mode_main(argv: list[str]) -> int:
         prog="exomem store-mode",
         description=(
             "Owner operations that move this vault's pages, lexical rows and graph rows into the "
-            "collection store and back. Behind the vault-store-v1 release gate; vault files are "
-            "never rewritten by a migration."
+            "collection store and back. File mode is the default. The explicit migrate command "
+            "enables store mode without rewriting vault files. "
+            "`relayout --plan` reads the vault and writes nothing."
         ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
     status = subcommands.add_parser("status", help="report the mode and, in store mode, the store's counts")
     migrate = subcommands.add_parser(
         "migrate",
-        help="stage the store from the files, prove it equals what the files derive, then install it; "
-        "run apply with the service stopped and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
+        help="stage, verify and install the store. Run --apply with the service stopped "
+        "and EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN set",
     )
     migrate_step = migrate.add_mutually_exclusive_group(required=True)
     migrate_step.add_argument("--dry-run", action="store_true", help="run the read-only preflight; writes nothing")
@@ -2632,11 +2687,25 @@ def _store_mode_main(argv: list[str]) -> int:
         "--claim", help="the claim id that the refusal or --dry-run names (required with --apply)"
     )
     release.add_argument("--why", help="reason for the release (required with --apply)")
-    for command in (status, migrate, rollback, release):
+    relayout = subcommands.add_parser(
+        "relayout",
+        help="plan the move of the managed folder's content to the vault root; the plan reads "
+        "the vault and writes nothing",
+    )
+    relayout.add_argument(
+        "--plan",
+        action="store_true",
+        required=True,
+        help="print the plan: outcome, counts, alternatives and samples of each listing",
+    )
+    relayout.add_argument(
+        "--full", action="store_true", help="list every entry instead of the first 20 of each listing"
+    )
+    for command in (status, migrate, rollback, release, relayout):
         command.add_argument(
             "--vault",
             default=os.environ.get("EXOMEM_VAULT_PATH"),
-            help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+            help=f"vault root containing '{managed_join('')}' (default: $EXOMEM_VAULT_PATH)",
         )
     args = parser.parse_args(argv)
     if not args.vault:
@@ -2656,7 +2725,7 @@ def _store_mode_main(argv: list[str]) -> int:
         )
         return 2
 
-    from . import state_migration
+    from . import relayout, state_migration
     from .cli_ops import OpError
     from .collection_store.connection import CollectionStoreError
     from .governance.principal import library_scope
@@ -2678,14 +2747,16 @@ def _store_mode_main(argv: list[str]) -> int:
                     if applying
                     else store_release.dry_run(root)
                 )
+            elif args.command == "relayout":
+                result = relayout.render(relayout.plan(root), full=args.full)
             elif applying:
                 result = store_rollback.apply_route(
                     root, export_to=args.export_to, why=args.why, export_held=args.export_held
                 )
             else:
                 result = store_rollback.dry_run(root)
-        # A release leads with its outcome sentence, so its keys keep their order; the rest sort.
-        print(json.dumps(result, sort_keys=args.command != "release"))
+        # A release and a relayout plan lead with their outcome sentence, so their keys keep their order; the rest sort.
+        print(json.dumps(result, sort_keys=args.command not in ("release", "relayout")))
     except (
         CollectionStoreError,
         OpError,
@@ -2703,6 +2774,44 @@ def _store_mode_main(argv: list[str]) -> int:
         if details:
             print(json.dumps(details, sort_keys=True, default=str), file=sys.stderr)
         return 1
+    return 0
+
+
+def _intake_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem intake",
+        description=(
+            "Owner inspection of saves the service queued because the vault was busy, and "
+            "dismissal of a failed one. The service applies queued saves by itself."
+        ),
+    )
+    parser.add_argument("--vault", help="vault root; defaults to the configured vault")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    list_parser = subcommands.add_parser("list", help="list queued, applying and failed saves")
+    list_parser.add_argument("--limit", type=int, default=50, help="most saves to list, at most 50")
+    show_parser = subcommands.add_parser("show", help="show one save, with its arguments")
+    show_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")
+    dismiss_parser = subcommands.add_parser("dismiss", help="remove one failed save")
+    dismiss_parser.add_argument("ref", help="the save's exomem://queued-write/<id> ref or its id")
+    args = parser.parse_args(argv)
+
+    from . import write_intake
+    from .cli_ops import OpError
+    from .vault import resolve_vault
+
+    root = Path(args.vault).expanduser().resolve() if args.vault else resolve_vault()
+    try:
+        if args.command == "list":
+            result = write_intake.read(root, limit=args.limit)
+        elif args.command == "show":
+            ref = args.ref if args.ref.startswith(write_intake.REF_PREFIX) else write_intake.ref_for(args.ref)
+            result = write_intake.read(root, ref=ref)
+        else:
+            result = write_intake.dismiss(root, args.ref)
+    except OpError as error:
+        print(json.dumps(error.as_public_dict(), indent=2, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -2911,6 +3020,14 @@ def _governance_schema_main(argv: list[str]) -> int:
             "--vault must name an existing absolute vault root",
             as_json=as_json,
         )
+        return 1
+
+    from .vault_store import cli_fence
+
+    try:
+        cli_fence.require(f"governance-schema {args.command}", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        _governance_schema_print_error(refused.code, refused.reason, as_json=as_json)
         return 1
 
     from .governance import authorization_custody, schema_downmigration, schema_migration
@@ -3242,7 +3359,7 @@ def _reclaim_schema_main(argv: list[str]) -> int:
         prog="exomem reclaim-schema",
         description=(
             f"Remove the superseded copy of the shipped schema from "
-            f"{kb_prefix()}_Schema/ once it has been redeployed to .exomem/schema/."
+            f"{managed_join('_Schema/')} once it has been redeployed to .exomem/schema/."
         ),
     )
     parser.add_argument(
@@ -3258,8 +3375,10 @@ def _reclaim_schema_main(argv: list[str]) -> int:
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = Path(args.vault or os.environ.get("EXOMEM_VAULT_PATH") or ".")
+    cli_fence.require("reclaim-schema", vault)
     try:
         report = init_module.reclaim_legacy_shipped_schema(vault, apply=args.apply)
     except OpError as error:
@@ -3273,11 +3392,11 @@ def _reclaim_schema_main(argv: list[str]) -> int:
     verb = "Removed" if report["applied"] else "Would remove"
     print(f"{verb} {len(report['removed'])} file(s), {report['reclaimed_kb']} KB:")
     for relative in report["removed"]:
-        print(f"  {kb_prefix()}_Schema/{relative}")
+        print(f"  {managed_join(f'_Schema/{relative}')}")
     if report["declined"]:
         print(f"Kept {len(report['declined'])} file(s):")
         for entry in report["declined"]:
-            print(f"  {kb_prefix()}_Schema/{entry['path']} — {entry['reason']}")
+            print(f"  {managed_join('_Schema/')}{entry['path']} — {entry['reason']}")
     if not report["applied"]:
         print("Re-run with --apply to delete.")
     return 0
@@ -3313,11 +3432,19 @@ def _cell_init_main(argv: list[str]) -> int:
         return 1
 
     from . import cell_init, cloud_cell, privacy_log
+    from .vault_store import cli_fence
 
     # The same content redaction the server installs (design D3 "Output"): a
     # failure below must never let a query- or path-shaped detail escape
     # through a log line this process emits before it exits.
     privacy_log.install_hosted_log_redaction()
+
+    try:
+        cli_fence.require("cell-init", vault)
+    except cli_fence.StoreFenceRefusal as refused:
+        # The refusal's code is a fixed code, and the step names where it stopped.
+        _cell_init_failure_line(refused.code, "vault_store")
+        return 1
 
     try:
         # `/data/host` (design D3.1) is enforced only inside a real cloud
@@ -3352,7 +3479,7 @@ def _cell_init_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description=f"Bootstrap a fresh {kb_dirname()} scaffold into a vault.",
+        description=f"Bootstrap a fresh {managed_root_rel()} scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -3361,14 +3488,16 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help=f"Overlay the scaffold even if {kb_prefix()} exists (existing files kept).",
+        help=f"Overlay the scaffold even if {managed_join('')} exists (existing files kept).",
     )
     args = parser.parse_args(argv)
 
     from . import init as init_module
     from .cli_ops import OpError
+    from .vault_store import cli_fence
 
     vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH") or "."
+    cli_fence.require("init", Path(vault))
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
@@ -3377,15 +3506,20 @@ def _init_main(argv: list[str]) -> int:
     except OpError as error:
         print(f"exomem init: {error.message}\n{error.remediation}", file=sys.stderr)
         return 1
-    print(f"Initialized {kb_dirname()} at {report['kb']}")
+    print(f"Initialized {managed_root_rel()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
+    if (storage := report.get("original_storage")) is not None:
+        if storage["layout"] == "shared":
+            print("  Originals are stored once, however many filings share their bytes.")
+        else:
+            print(f"  {storage['action']}")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: "
+        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
-    print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
+    print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
     print(
         "  4. For low-resource mode: exomem mode quiet; inspect with "
         "exomem status --resources --json."
@@ -3500,6 +3634,10 @@ def _package_skills_main(argv: list[str]) -> int:
     # Personalized packaging is explicit.  A configured runtime vault must never
     # silently turn the default public package command into a private build.
     vault = Path(args.vault) if args.vault else None
+    if vault is not None:
+        from .vault_store import cli_fence
+
+        cli_fence.require("package-skills", vault)
     try:
         report = package_module.package_skills(
             Path(args.out) if args.out else None,
@@ -3773,7 +3911,7 @@ def _activate_main(argv: list[str]) -> int:
         "--max-chars",
         type=int,
         default=None,
-        help="character ceiling for the packet (default 4000, clamped to 500..8000)",
+        help="character ceiling for the packet (default 6000, clamped to 500..8000)",
     )
     parser.add_argument("--purpose", default=None, help="declared purpose for this request")
     parser.add_argument(
@@ -4446,6 +4584,10 @@ def _simple_maintain_main(argv: list[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--cleanup-held-upload-cancellations", action="store_true",
+        help="with --migrate-state --offline: finish temporary cancellation markers before downgrading",
+    )
+    parser.add_argument(
         "--deadline-monotonic",
         type=float,
         help=(
@@ -4470,18 +4612,48 @@ def _simple_maintain_main(argv: list[str]) -> int:
         parser.error("--arm-connector-boundary requires --migrate-state --offline without --adopt-state")
     if args.migrate_collections and (
         not args.migrate_state or args.adopt_state or args.arm_connector_boundary
+        or args.cleanup_held_upload_cancellations
     ):
         parser.error("--migrate-collections requires --migrate-state --offline without other state steps")
-    if (args.deadline_monotonic is not None) != args.migrate_collections or (
-        args.deadline_monotonic is not None
-        and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0)
+    if args.cleanup_held_upload_cancellations and (
+        not args.migrate_state or args.adopt_state or args.arm_connector_boundary or args.migrate_collections
     ):
-        parser.error("--migrate-collections requires a positive --deadline-monotonic, and only it takes one")
+        parser.error("--cleanup-held-upload-cancellations requires --migrate-state --offline without other state steps")
+    if (
+        (args.deadline_monotonic is not None and not (args.migrate_collections or args.cleanup_held_upload_cancellations))
+        or (args.migrate_collections and args.deadline_monotonic is None)
+        or (args.deadline_monotonic is not None
+            and not (math.isfinite(args.deadline_monotonic) and args.deadline_monotonic > 0))
+    ):
+        parser.error("collections migration requires a positive --deadline-monotonic; only it and held-upload cleanup take one")
     if args.migrate_state:
         if not args.offline:
             parser.error("--migrate-state requires --offline")
         if args.fix or args.reconcile:
             parser.error("--migrate-state cannot be combined with --fix or --reconcile")
+        if args.cleanup_held_upload_cancellations:
+            from . import artifact_lifecycle, state_migration
+
+            try:
+                authority = state_migration.assert_offline_migration_authority(
+                    source="exomem maintain --cleanup-held-upload-cancellations --offline",
+                )
+                # The launcher passes its own deadline; an operator's run gets a bounded default budget.
+                deadline = args.deadline_monotonic if args.deadline_monotonic is not None else time.monotonic() + 600
+                completed = artifact_lifecycle.cleanup_cancellations(
+                    _offline_vault_root(args.vault), authority=authority, deadline=deadline,
+                )
+            except (OSError, RuntimeError, ValueError, TimeoutError) as error:
+                if args.json:
+                    print(json.dumps({"success": False, "error": {"message": str(error)}}))
+                else:
+                    print(f"Error: {error}", file=sys.stderr)
+                return 1
+            if args.json:
+                print(json.dumps({"success": True, "data": {"completed": completed}}))
+            else:
+                print(f"Completed {completed} held-upload cancellations")
+            return 0
         try:
             resolution = _run_offline_state_migration(
                 vault=args.vault,
@@ -4748,7 +4920,7 @@ def _print_adopt_human(result: dict) -> None:
         f"{totals.get('dirs', 0)} folders"
     )
     if governance.get("kb_present"):
-        print(f"  Governed layer: {governance.get('governed_path') or kb_prefix()}")
+        print(f"  Governed layer: {governance.get('governed_path') or managed_join('')}")
     else:
         print("  Governed layer: not initialized yet")
     print("  Originals: untouched; non-KB files stay read-only input.")
@@ -4805,7 +4977,9 @@ def _print_human(result, *, op: str | None = None) -> None:
             and operational.get("status") == "committed"
             and operational.get("mutated") is True
         ):
-            result = diagnostics
+            from .mutation_terminal import reply_leaf
+
+            result = dict(reply_leaf(diagnostics))
         elif "user_summary" in result:
             print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
             return
@@ -4918,7 +5092,7 @@ def _print_triage_human(result: dict) -> None:
         print(f"  {result['ref']}")
 
 
-def _core_op_main(argv: list[str]) -> int:
+def _core_op_main(argv: list[str], *, local_transfer_transport=None) -> int:
     from . import cli_ops, product_invoke
     from . import commands as commands_module
 
@@ -4988,9 +5162,16 @@ def _core_op_main(argv: list[str]) -> int:
         if resolved is not None:
             argv = [resolved.public_name, *argv[1:]]
 
+    local_cancellation = False
+    if argv and argv[0] in cmds and cmds[argv[0]].name == "transfer_artifact":
+        # The closed transfer selector chooses transport before any fresh CLI owner is constructed.
+        selector = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+        selector.add_argument("--operation", default="upload")
+        selected, _ = selector.parse_known_args(argv[1:])
+        local_cancellation = selected.operation == "cancel"
     preverified_root = None
     preverified_admission = None
-    if not authorization_carrier.is_absent and argv and argv[0] in cmds:
+    if not authorization_carrier.is_absent and argv and argv[0] in cmds and not local_cancellation:
         try:
             preverified_root, preverified_admission = (
                 product_invoke.verify_local_authorization_transport(
@@ -5008,7 +5189,7 @@ def _core_op_main(argv: list[str]) -> int:
                 print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
             return 1
 
-    parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
+    parser = _CLIParser(prog="kb", description=f"Query and write the local {managed_root_rel()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]
@@ -5035,13 +5216,35 @@ def _core_op_main(argv: list[str]) -> int:
             ),
         )
         _add_command_args(sp, cmd)
+        if cmd.name == "transfer_artifact":
+            sp.add_argument("--token-file", default="", help="holding local client's token file (default EXOMEM_LOCAL_TOKEN_FILE)")
+            sp.add_argument("--port", default="", help="local listener port (default EXOMEM_LOCAL_PORT)")
 
     args = parser.parse_args(argv)
     cmd = cmds[args.op]
     as_json = getattr(args, "json", False)
+    if cmd.name == "transfer_artifact" and not local_cancellation:
+        if getattr(args, "operation", None) == "cancel":
+            # The transport selector reads only the full spelling; an abbreviation must not run in-process.
+            parser.error("spell --operation cancel in full")
+        if args.token_file or args.port:
+            parser.error("--token-file and --port apply only to --operation cancel")
 
     try:
         raw = _collect_raw_args(cmd, args, parser)
+        if local_cancellation:
+            from .local_transfer_client import cancel_uploads
+
+            kwargs = cli_ops.coerce(cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True)
+            result = cancel_uploads(
+                kwargs, authorization_carrier=authorization_carrier,
+                token_file=args.token_file, port=args.port, transport=local_transfer_transport,
+            )
+            if as_json:
+                print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
+            else:
+                _print_human(result, op=cmd.name)
+            return 1 if result.get("failed") else 0
         if preverified_admission is None:
             root, principal = product_invoke.prepare_local_authorization(
                 cmd,
@@ -5088,12 +5291,240 @@ def _core_op_main(argv: list[str]) -> int:
             if err.get("remediation"):
                 print(err["remediation"], file=sys.stderr)
         return 1
+    finally:
+        from . import writer_lease
+
+        writer_lease.hand_back_after_command()
 
     if as_json:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
     else:
         _print_human(result, op=cmd.name)
     return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
+
+
+def _setup_main(argv: list[str]) -> int:
+    from .setup_wizard import setup_main
+
+    return setup_main(argv)
+
+
+def _personalize_main(argv: list[str]) -> int:
+    from .personalize import personalize_main
+
+    return personalize_main(argv)
+
+
+def _demo_main(argv: list[str]) -> int:
+    from .demo import main as demo_main
+
+    return demo_main(argv)
+
+
+def _import_main(argv: list[str]) -> int:
+    from .local_import import main as local_import_main
+
+    return local_import_main(argv)
+
+
+def _cloud_main(argv: list[str]) -> int:
+    if argv[:1] == ["export"]:
+        from .cloud_export_client import main as cloud_export_main
+
+        return cloud_export_main(argv[1:])
+    if argv[:1] == ["download"]:
+        from .cloud_download_client import main as cloud_download_main
+
+        return cloud_download_main(argv[1:])
+    from .cloud_import_client import main as cloud_main
+
+    return cloud_main(argv)
+
+
+def _cell_import_main(argv: list[str]) -> int:
+    from .cloud_import_job import main as import_main
+
+    return import_main(argv)
+
+
+def _cell_export_main(argv: list[str]) -> int:
+    from .cloud_export import main as export_main
+
+    return export_main(argv)
+
+
+def _media_replicas_main(argv: list[str]) -> int:
+    """The owner's commands for replica stores and personal eviction."""
+    parser = argparse.ArgumentParser(
+        prog="exomem media-replicas",
+        description="Declare a replica store, confirm that you exported its key, list the replicas by original, or list "
+                    "the replicas that a check found damaged.",
+    )
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+                        help="vault root (default: $EXOMEM_VAULT_PATH)")
+    actions = parser.add_subparsers(dest="action", required=True)
+    declare = actions.add_parser("declare-store", parents=[common],
+                                 help="write the identity marker into a filesystem store's root")
+    declare.add_argument("store", help="the store's name in the vault's media store configuration")
+    confirm = actions.add_parser("confirm-key-export", parents=[common],
+                                 help="record that you exported the key outside this machine")
+    confirm.add_argument("--key-version", help="the key version; default is the vault's current one")
+    enable = actions.add_parser("enable-eviction", parents=[common], help="evict idle originals to a declared store")
+    enable.add_argument("store", help="the name of a declared filesystem store")
+    enable.add_argument("--free-bytes", required=True, type=int, help="vault bytes to keep free before eviction starts")
+    enable.add_argument("--margin-bytes", type=int, help="extra vault bytes to free in each pass")
+    enable.add_argument("--upload-floor-bytes", type=int, help="minimum free bytes to keep after an upload")
+    enable.add_argument("--minimum-idle-seconds", type=int, default=600)
+    enable.add_argument("--eviction-settle-seconds", type=int, default=600)
+    enable.add_argument("--max-temporary-bytes", type=int)
+    enable.add_argument("--max-hydrations", type=int)
+    actions.add_parser("disable-eviction", parents=[common], help="stop evicting and restore originals as space allows")
+    listing = actions.add_parser("list", parents=[common], help="list originals with replicas, by path")
+    listing.add_argument("--after", help="the path that the previous page ended on")
+    listing.add_argument("--limit", type=int, default=100)
+    found = actions.add_parser("findings", parents=[common], help="list the replicas that a check found damaged")
+    found.add_argument("--after-path", help="the path that the previous page ended on")
+    found.add_argument("--after-store", default="", help="the store that the previous page ended on")
+    found.add_argument("--limit", type=int, default=100)
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("media-replicas: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
+        return 2
+    from . import held_fs, media_replicas, media_store, personal_eviction, state_migration
+    from .vault_store import cli_fence
+
+    vault = Path(args.vault).expanduser()
+    state_migration.require_vault_state_ready(vault)
+    cli_fence.require("media-replicas", vault)
+    try:
+        if args.action == "declare-store":
+            print(f"declared store {args.store} at {media_store.declare_store(vault, args.store)}")
+        elif args.action == "confirm-key-export":
+            print(f"recorded the export of key version {media_replicas.confirm_key_export(vault, args.key_version)}")
+        elif args.action == "enable-eviction":
+            personal_eviction.enable(
+                vault, args.store, free_bytes=args.free_bytes, margin_bytes=args.margin_bytes,
+                upload_floor_bytes=args.upload_floor_bytes, minimum_idle_seconds=args.minimum_idle_seconds,
+                eviction_settle_seconds=args.eviction_settle_seconds, max_temporary_bytes=args.max_temporary_bytes,
+                max_hydrations=args.max_hydrations,
+            )
+            print(f"Eviction is enabled for {args.store}.")
+            print("Eviction removes plaintext from the vault and its current mirrors. "
+                  "Recover an evicted original from the store with its exported decryption key.")
+        elif args.action == "disable-eviction":
+            print(f"Eviction is disabled for {personal_eviction.disable(vault)}. Originals return as space allows.")
+        elif args.action == "findings":
+            cursor = None if args.after_path is None else (args.after_path, args.after_store)
+            print(json.dumps(media_replicas.findings(vault, after=cursor, limit=args.limit), indent=2))
+        else:
+            print(json.dumps(media_replicas.page(vault, after=args.after, limit=args.limit), indent=2))
+    except (held_fs.HeldFsError, media_store.MediaStoreError, ValueError) as error:
+        print(f"Error [{getattr(error, 'code', 'INVALID')}]: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cell_media_census_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_census import main as census_main
+
+    return census_main(argv)
+
+
+def _cell_media_manifest_main(argv: list[str]) -> int:
+    # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
+    from .media_manifest import main as manifest_main
+
+    return manifest_main(argv)
+
+
+def _cell_media_collect_main(argv: list[str]) -> int:
+    from .media_collect import main as collect_main
+
+    return collect_main(argv)
+
+
+#: One entry per subcommand that `_dispatch_main` routes before the registry path. `vault_store/cli_fence.py`
+#: declares what each one touches, and its handler refuses a store-mode vault where it resolves the vault.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_COMMANDS: dict[str, Callable[[list[str]], int]] = {
+    "setup": _setup_main,
+    "init": _init_main,
+    "reclaim-schema": _reclaim_schema_main,
+    "install-skill": _install_skill_main,
+    "package-skills": _package_skills_main,
+    "personalize": _personalize_main,
+    "install-hook": _install_hook_main,
+    "demo": _demo_main,
+    "studio": _studio_main,
+    "tui": _tui_main,
+    "doctor": _doctor_main,
+    "install-info": _install_info_main,
+    "auth": _auth_main,
+    "attach": _attach_main,
+    "status": _status_main,
+    "warm": _warm_main,
+    "mode": _mode_main,
+    "dreamer": _dreamer_main,
+    "prominence": _prominence_main,
+    "backfill-media": _backfill_media_main,
+    "index": _index_main,
+    "enroll-speaker": _enroll_speaker_main,
+    "list-speakers": _list_speakers_main,
+    "remove-speaker": _remove_speaker_main,
+    "trace": _trace_main,
+    "logs": _logs_main,
+    "lease": _lease_main,
+    "intake": _intake_main,
+    "governance-schema": _governance_schema_main,
+    "relations": _relations_main,
+    "collections": _collections_main,
+    "store-mode": _store_mode_main,
+    "import": _import_main,
+    "backup": _backup_main,
+    "cloud": _cloud_main,
+    "cell-import": _cell_import_main,
+    "cell-export": _cell_export_main,
+    "cell-init": _cell_init_main,
+    "media-replicas": _media_replicas_main,
+    "cell-media-census": _cell_media_census_main,
+    "cell-media-manifest": _cell_media_manifest_main,
+    "cell-media-collect": _cell_media_collect_main,
+    # A thin alias over the registry command, so there is exactly one leaf; the long form
+    # `exomem activate_context` keeps working.
+    "activate": _activate_main,
+}
+
+# The table entries that never configured the one-shot CLI log file: the cloud client, the cell jobs and the
+# `activate` alias. Every other entry gets `process="cli"` logging, and `serve` configures its own from `server.run()`.
+# nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
+_WITHOUT_CLI_LOG: frozenset[str] = frozenset(
+    {
+        "cloud",
+        "cell-import",
+        "cell-export",
+        "cell-init",
+        "cell-media-census",
+        "cell-media-manifest",
+        "cell-media-collect",
+        "activate",
+    }
+)
+# Subcommands `_dispatch_main` routes explicitly, before falling through to `_serve_main`: all of `_COMMANDS`
+# but those. `_is_cli_only_invocation` reads it at call time.
+_CLI_ONLY_SUBCOMMANDS: frozenset[str] = frozenset(_COMMANDS) - _WITHOUT_CLI_LOG
+
+
+def _run_command(name: str, argv: list[str]) -> int:
+    """Run one table entry, and report a store-mode refusal as one line instead of a traceback."""
+    from .vault_store import cli_fence
+
+    try:
+        return _COMMANDS[name](argv)
+    except cli_fence.StoreFenceRefusal as refused:
+        print(f"Error [{refused.code}]: {refused.reason}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

@@ -17,19 +17,21 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import hashlib
+import io
 import logging
 import os
 import stat
-import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import IO
+from typing import IO, TYPE_CHECKING, Any
 
 from . import (
     call_spans,
     cli_ops,
     corpus_aware,
+    document_forms,
+    document_identity,
     duplicates,
     indexes,
     lexstore,
@@ -38,20 +40,26 @@ from . import (
     schema,
     source_capture,
     source_corrections,
+    source_imports,
+    source_result_attribution,
     source_taxonomy,
     tag_variants,
     temporal,
     vocabulary_auxiliaries,
     vocabulary_resolution,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .source_coverage import CAPTURE_HEADING
+
+if TYPE_CHECKING:
+    from .deferred_index import DeferredReceipt
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     CreateOnlyConflict,
     DefiniteNoEffect,
     InvalidSlugError,
+    PathGuard,
     PathGuardError,
     PlannedWrite,
     PreparedBinaryContent,
@@ -59,6 +67,7 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     kb_root,
     parse_frontmatter,
     read_guarded_text,
@@ -69,6 +78,7 @@ from .vault import (
     yaml_flow_list,
     yaml_scalar,
 )
+from .vocabulary import registry as vocabulary_registry
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +151,8 @@ class AddResult:
     same_url: dict[str, object] | None = None
     # True when the duplicate index could not answer, so the capture was stored without a duplicate check.
     duplicate_check_unavailable: bool = False
+    # An erasable Source's path names its content, so no call or write log keeps it. Never sent to callers.
+    path_withheld: bool = False
 
     def as_dict(self) -> dict:
         out = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
@@ -170,7 +182,11 @@ class AddResult:
             out["same_url"] = self.same_url
         if self.duplicate_check_unavailable:
             out["duplicate_check_unavailable"] = True
-        return out
+        # These are this producer's result fields; historical outcome facts stay independently readable.
+        paths = tuple((key,) for key in out if key not in (
+            "capture_outcome", "duplicate_check_unavailable", "same_url",
+        ))
+        return source_result_attribution.bind(out, (self.ref,), paths=paths)
 
 
 @dataclass
@@ -181,6 +197,13 @@ class AddError(Exception):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
+
+
+class PooledOriginalRaceLost(AddError):
+    """An identical upload published the shared original first, so this filing's stage is no longer the winner.
+
+    A fresh stage confirms that winner before the boundary; the upload doors run it once more.
+    """
 
 
 @dataclass(frozen=True)
@@ -196,6 +219,10 @@ class SourceArtifact:
     staged_path: Path | IO[bytes]
     filename: str
     content_type: str | None = None
+    #: The same bytes in a private upload stage (`upload_stage.StagedUpload`), already hashed before the
+    #: boundary: `add` takes their identity from it, reads no byte to learn it, and installs the stage by rename.
+    staged: Any | None = None
+    diarize: bool | None = None
 
 
 def source_artifact_name(filename: str) -> str:
@@ -284,7 +311,7 @@ def artifact_identity(path: Path | IO[bytes], *, ceiling: int | None = None) -> 
 
 
 def artifact_binary_write(
-    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int
+    staged_path: Path | IO[bytes], artifact_path: Path, digest: str, size: int, *, staged: Any | None = None
 ) -> tuple[PlannedWrite, IO[bytes]]:
     """The create-only write that publishes staged bytes at `artifact_path`.
 
@@ -293,18 +320,77 @@ def artifact_binary_write(
     batch checks the bytes against `digest` and `size`, so a file that changed
     after the identity read fails the whole batch instead of publishing.
     A supplied stream remains caller-owned; a Path opens a stream for the caller.
+    An upload `staged` before the boundary is opened through its own identity check and carried
+    on the write, so the batch renames it in rather than copying `staged_path`.
     """
-    stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
+    if staged is not None:
+        stream = staged.open()
+    else:
+        stream = staged_path.open("rb") if isinstance(staged_path, Path) else staged_path
     stream.seek(0)
     return (
         PlannedWrite(
             path=artifact_path,
-            content=PreparedBinaryContent(stream, size, digest),
+            content=PreparedBinaryContent(stream, size, digest, staged=staged),
             create_only=True,
             expected_hash=MISSING_CONTENT_HASH,
+            media_allocation=True,
         ),
         stream,
     )
+
+
+def pools_named_original(vault_root: Path, name: str) -> bool:
+    """Whether a new filing named `name` has its bytes in the shared original pool rather than at its logical path.
+
+    The rule reads only the name's suffix and the pool's marker, so an upload door asks it before the
+    boundary, for the name the filing will take, and the filing asks it again under the boundary.
+    Notes stay ordinary pages. Every other original of an activated archive is pooled; its
+    companion alone binds the logical path. A name with no suffix stays an ordinary file
+    (`originals.may_share_bytes`), like a dataset.
+    """
+    from . import original_pool
+    from .originals import is_note_path, may_share_bytes
+
+    return not is_note_path(name) and may_share_bytes(name) and original_pool.enabled(vault_root)
+
+
+def pools_original(vault_root: Path, artifact_path: Path) -> bool:
+    """`pools_named_original` for the file at `artifact_path`."""
+    return pools_named_original(vault_root, artifact_path.name)
+
+
+def staged_pool_publication(stack: contextlib.ExitStack, vault_root: Path, stream: IO[bytes],
+                            digest: str, size: int, *, prepared: Any | None = None) -> Callable[[], None]:
+    """Stage and verify every byte now; return the publication the batch runs before its first install.
+
+    The stack keeps the stage and its physical pin until the filing commits. A concurrent
+    identical upload that publishes first makes this filing retry instead of hashing the
+    winner under the canonical boundary. A `prepared` stage that the caller made before the
+    boundary (`upload_stage.stage(pooled=True)`, which also owns its pin) is published as it is.
+    """
+    from . import held_fs, media_capacity, original_pool, reserved_paths
+
+    def chunks():
+        stream.seek(0)
+        while chunk := stream.read(1024 * 1024):
+            yield chunk
+
+    if prepared is None:
+        prepared = stack.enter_context(original_pool.prepare(
+            vault_root, digest, size, held_fs.Chunks(chunks),
+            meter_allocation=media_capacity.managed_allocations(vault_root),
+        ))
+
+    def publish() -> None:
+        try:
+            with reserved_paths._subsystem_authority_scope(original_pool.OWNER):
+                prepared.publish()
+        except original_pool.PublicationRace:
+            raise PooledOriginalRaceLost(code="MUTATION_BUSY", missing=[],
+                                         reason="an identical upload was stored at the same moment; retry") from None
+
+    return publish
 
 
 @dataclass(frozen=True)
@@ -417,7 +503,7 @@ def prepare_source_metadata(
         raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
     try:
         filename_slug, slug_warnings = resolve_filename_slug(
-            title, slug, vault_root=vault_root
+            title, slug, vault_root=vault_root, dated=True
         )
     except InvalidSlugError as e:
         raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
@@ -445,15 +531,24 @@ def add(
     extra_frontmatter: Mapping[str, object] | None = None,
     supersede: Sequence[tuple[str, str]] = (),
     defer_fanout_to_terminal: bool = False,
+    custody_before_commit: bool = False,
+    corpus_advisories: bool = True,
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse_payload: bool = False,
+    document_form: str | None = None,
+    identity_check: Mapping[str, object] | None = None,
+    ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
+    import_capture: source_imports.ImportCapture | None = None,
+    _import_resume: tuple[source_imports.Receipt, PathGuard] | None = None,
 ) -> AddResult:
     """Capture a raw source into the KB and update indexes/log atomically.
 
@@ -477,20 +572,39 @@ def add(
 
     `defer_fanout_to_terminal` is the episode recorder's opt-in: its caller
     keeps planning and canonical writes under the wide guard, while derived
-    refresh waits for the committed mutation's terminal.
+    refresh waits for the committed mutation's terminal. The upload doors add
+    `custody_before_commit`: the pages' full-refresh custody is recorded before
+    the install and retired when the deferred refresh completes. They also pass
+    `corpus_advisories=False`, because the upload receipt carries no advisories,
+    so the near-duplicate and contradiction pass would be paid for nothing.
 
     `reuse_payload` is the capture door's opt-in, and its caller holds the mutation guard across this
     call: a text capture without identity, correction, adoption or episode fields that repeats the text
     of a Source the caller can read returns that Source (`capture_outcome` "reused") and writes nothing.
     A new capture with a URL also names earlier Sources that share the canonical URL.
 
+    `document_form` names what the document is as a record of a work, in the `document-forms` registry; a new
+    key registers in this capture's batch. `identity_check` is the record of what the document showed against its
+    claimed URL (`document_identity`), kept on the page as read. `ingested_into` seeds the page's backlinks, which a
+    metadata-only correction carries over from its predecessor.
+
+    `correction` is the call's correction, or the `CorrectionPlan` a caller already prepared for it. Preparing scans
+    every canonical Source, so a caller that read the predecessor first passes its plan; the plan's guards still fail
+    the commit when the predecessor page or its receipt changed since.
+
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
     from .governance import raw_protection as raw_guard
 
+    if passages is not None:
+        passages = source_capture.validate_passages(passages)
+        content = "\n\n".join(passage["text"] for passage in passages)
     if correction is not None and (source_identity is not None or adoption_seed is not None or supersede):
         raise ValueError("INVALID_SOURCE_CORRECTION: correction cannot coexist with source_identity, adoption, or episode revision")
-    correction_plan = source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    correction_plan = (
+        correction if isinstance(correction, source_corrections.CorrectionPlan)
+        else source_corrections.prepare_correction(vault_root, correction) if correction is not None else None
+    )
     if expected_sha256 is not None:
         source_capture.validate_sha256(expected_sha256)
         if artifact is None:
@@ -503,22 +617,33 @@ def add(
             capture_input_digest = source_capture.capture_digest(
                 vault_root, content=content, title=title, source_type=source_type or "", url=url,
                 tags=tags, why_captured=why_captured, domain=domain, projects=projects,
-                slug=slug, raw_protection=raw_protection,
+                slug=slug, raw_protection=raw_protection, passages=passages,
             )
     if raw_protection and artifact is None:
-        with tempfile.TemporaryDirectory(prefix="exomem-raw-source-") as staging:
-            original = Path(staging) / "source.txt"
-            original.write_bytes(content.encode("utf-8"))
+        def prepare_raw(value: dict) -> None:
+            assert _prepare is not None
+            normalized = {**value["normalized_native_args"], "content": content}
+            _prepare({**value, "normalized_native_args": normalized})
+
+        # The artifact API already accepts a seekable stream; no unowned pre-allocation disk copy is needed.
+        with io.BytesIO(content.encode("utf-8")) as original:
             return add(
                 vault_root, source_schema, content="", title=title, source_type=source_type,
                 slug=slug, url=url, tags=tags, why_captured=why_captured, domain=domain,
                 projects=projects, today=today, artifact=SourceArtifact(original, "source.txt", "text/plain"),
                 adoption_seed=adoption_seed, extra_frontmatter=extra_frontmatter,
                 supersede=supersede, defer_fanout_to_terminal=defer_fanout_to_terminal,
+                custody_before_commit=custody_before_commit, corpus_advisories=corpus_advisories,
                 raw_protection=True,
                 source_identity=source_identity, capture_input_digest=capture_input_digest,
+                passages=passages,
                 expected_sha256=expected_sha256,
-                correction=correction,
+                correction=correction_plan,
+                document_form=document_form, identity_check=identity_check, ingested_into=ingested_into,
+                custody_only=custody_only,
+                _allocation=_allocation,
+                _prepare=prepare_raw if _prepare is not None else None,
+                _validate_inputs=_validate_inputs,
             )
     # An artifact's identity is read before validation, because the page body
     # is synthesized from it when the caller supplied no text — and
@@ -529,7 +654,19 @@ def add(
     if artifact is not None:
         safe_name = source_artifact_name(artifact.filename)
         artifact_suffix = source_artifact_suffix(artifact.filename)
-        artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
+        if artifact.diarize is not None:
+            from . import media_engines, media_types
+
+            if media_engines.engine_for(media_types.media_type_for(safe_name)) != media_engines.SPEECH:
+                raise AddError(
+                    code="DIARIZE_NOT_APPLICABLE", missing=["diarize"],
+                    reason="speaker labels apply to audio and video only",
+                )
+        if artifact.staged is not None:
+            # Hashed as it was staged, before the boundary: reading the file again here is what the stage removes.
+            artifact_digest, artifact_size = artifact.staged.sha256, artifact.staged.size
+        else:
+            artifact_digest, artifact_size = artifact_identity(artifact.staged_path)
         source_capture.verify_sha256(expected_sha256, artifact_digest)
         if not content or not content.strip():
             content = _describe_artifact(safe_name, artifact_digest, artifact_size)
@@ -550,14 +687,18 @@ def add(
     contradiction_candidates: list[corpus_aware.DupCandidate] = []
     # A recap revision near-duplicates the revision it supersedes by
     # construction, so the embedding pass could only ever report that.
-    if _prepare is None and _allocation is None and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None:
+    if (corpus_advisories and _prepare is None and _allocation is None
+            and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS") and episode_lines is None):
         try:
             # One embedding pass: dups (vs other sources) + contradictions (vs
             # active compiled conclusions). Restricting contradiction candidates
             # to conclusions is what makes an `add`-time flag meaningful ("this
             # capture challenges conclusion [[Y]]") rather than source-vs-source.
+            from .passage_evidence import chunk_texts
+
             cosines = corpus_aware._best_cosine_per_file(
-                vault_root, title=title, body=content
+                vault_root, title=title, body=content,
+                chunks=chunk_texts(passage["text"] for passage in passages) if passages is not None else None,
             )
             duplicate_candidates = corpus_aware.detect_duplicates(
                 vault_root, title=title, body=content,
@@ -573,6 +714,13 @@ def add(
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
     stamp_iso = temporal.stamp(now)
+    if _import_resume is not None:
+        prior_receipt, retained_original = _import_resume
+        _allocation = {"captured": prior_receipt.captured, "destination": prior_receipt.page,
+                       "artifact": prior_receipt.artifact}
+    else:
+        retained_original = None
+
     if _allocation is not None:
         captured = temporal.parse(_allocation["captured"])
         if captured is None:
@@ -594,11 +742,16 @@ def add(
             source_capture.require_authority(vault_root)
             if original_digest != capture_input_digest:
                 raise source_capture.SourceCaptureError("SOURCE_IDENTITY_CONFLICT: identity already binds different capture inputs")
+            from . import capture_attempts, source_custody
+
+            source_custody.require_publishable(vault_root, reference)
+            if source_custody.available():
+                capture_attempts.record_observed(vault_root, reference)
             return AddResult(path=path, ref=reference, warnings=identity_warnings, capture_outcome="reused")
     # Identity decides an identity-bearing capture alone; an artifact, a correction, an adoption, an
     # episode revision and a protected capture each have a lane of their own.
     checks_duplicates = (
-        reuse_payload and artifact is None and source_identity is None and correction is None
+        reuse_payload and passages is None and artifact is None and source_identity is None and correction is None
         and adoption_seed is None and not supersede and extra_frontmatter is None
         and not raw_protection and _prepare is None and _allocation is None
     )
@@ -647,15 +800,19 @@ def add(
         )
     project_keys_clean = list(dict.fromkeys(projects or ()))
     project_plan = project_keys.plan_project_keys(vault_root, project_keys_clean)
+    try:
+        form_plan = document_forms.plan(vault_root, document_form)
+    except vocabulary_registry.RegistryError as error:
+        raise AddError(code="INVALID_SOURCE", missing=["document_form"], reason=str(error)) from error
     if raw_protection:
         # Private capture metadata does not enroll shared vocabulary.
         taxonomy_plan = replace(taxonomy_plan, writes=(), introductions=())
         project_plan = replace(project_plan, writes=(), introductions=())
+        form_plan = replace(form_plan, writes=(), introduced=False)
 
     supersede_targets = _supersede_targets(vault_root, folder_path, supersede)
-    stem = f"{date_iso}-{filename_slug}"
-    if raw_protection:
-        stem = raw_guard.PREFIX + stem
+    name_prefix = (raw_guard.PREFIX if raw_protection else "") + f"{date_iso}-"
+    stem = name_prefix + filename_slug
     # No directory is created here: the batch creates the folder with the page
     # and removes it again if the commit is refused.
     if artifact is None:
@@ -685,7 +842,9 @@ def add(
         artifact_path = vault_root / str(_allocation["artifact"]) if _allocation.get("artifact") else None
         if source_path.parent != folder_path or (artifact_path is not None and artifact_path.parent != folder_path):
             raise ValueError("native capture destination changed")
-        if os.path.lexists(source_path) or artifact_path is not None and os.path.lexists(artifact_path):
+        if os.path.lexists(source_path) or (
+            artifact_path is not None and retained_original is None and os.path.lexists(artifact_path)
+        ):
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
     allocation = {
         "captured": stamp_iso, "destination": source_path.relative_to(vault_root).as_posix(),
@@ -712,7 +871,9 @@ def add(
 
     tags_clean = _clean_tags(tags)
     tag_warnings = tag_variants.advise_authored(vault_root, tags_clean)
-    exomem_id = memory_refs.new_id()
+    exomem_id = (
+        memory_refs.parse_memory_ref(_import_resume[0].ref) if _import_resume is not None else memory_refs.new_id()
+    )
 
     source_md = _render_source(
         title=title,
@@ -739,91 +900,51 @@ def add(
         adoption_receipt=adoption_receipt,
         source_identity=source_identity,
         capture_input_digest=capture_input_digest,
+        passages=passages,
         extra_lines=(*(episode_lines or ()), *(
             (f"supersedes: {yaml_scalar(correction_plan.old_ref)}",) if correction_plan is not None else ()
         )),
+        document_form=form_plan.key,
+        identity_check=identity_check,
+        ingested_into=ingested_into,
+        custody_only=custody_only,
     )
     supersede_writes = _supersede_writes(
         vault_root, supersede_targets, new_path=source_path, stamp_iso=stamp_iso
     )
+    if artifact is not None and artifact.diarize is not None:
+        from .preserve import set_diarize_pin
+
+        source_md = set_diarize_pin(source_md, artifact.diarize)
     if raw_protection:
         source_md = raw_guard.protect(
             source_md, artifact_path=artifact_path.relative_to(vault_root).as_posix(),
             digest=artifact_digest,
         )
 
-    # Plan with post-creation counts: the folder may not exist until the batch
-    # creates it, so include the new file in the in-memory counts.
-    rel_source_no_ext = (
-        source_path.relative_to(vault_root).with_suffix("").as_posix()
-    )
+    if artifact_path is not None:
+        from . import media_previews
 
-    # Pre-compute counts and bump the relevant folder by 1 for the new file.
+        source_md = media_previews.stamp_intent(
+            source_md, artifact_path.relative_to(vault_root).as_posix(), artifact_digest,
+        )
+
+    rel_source_no_ext = source_path.relative_to(vault_root).with_suffix("").as_posix()
     count_errors: list[OSError] = []
     with call_spans.span("source.counts"):
-        pre_counts = indexes._count_sources(
-            kb_root(vault_root) / "Sources", on_error=count_errors.append
-        )
+        pre_counts = indexes._count_sources(kb_root(vault_root) / "Sources", on_error=count_errors.append)
     post_counts = dict(pre_counts)
     if in_sources:
         post_counts[folder_name] = post_counts.get(folder_name, 0) + 1
-
-    activity_summary = _activity_summary(
-        rel_source_no_ext=rel_source_no_ext,
-        title=title,
-        source_type=kind.key,
-        tags=tags_clean,
-    )
-    log_entry_body = _log_entry_body(
-        title=title,
-        source_type=kind.key,
-        url=url,
-        tags=tags_clean,
-        why_captured=why_captured,
-    )
-
-    with call_spans.span("source.index_planning"):
-        update = indexes.compute_updates(
-            vault_root,
-            source_type=folder_name.lower(),
-            folder_title=folder_name,
-            folder_description=taxonomy.category_description(folder_name),
-            rel_source_path=(
-                f"{kb_prefix()}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
-                if in_sources else rel_source_no_ext
-            ),
-            date_iso=date_iso,
-            stamp_iso=stamp_iso,
-            activity_summary=activity_summary,
-            log_entry_body=log_entry_body,
-            source_counts=post_counts,
-        )
-
-        # Refresh the Notes/Entities counts in the top index alongside the
-        # Sources counts that compute_updates() already handled. `add` doesn't
-        # change Notes/Entities counts, so no override needed.
-        sub_writes, top_with_counts = indexes.compute_subindex_writes(
-            vault_root,
-            top_index_text=update.top_index_content,
-            pending_paths=[rel_source_no_ext],
-            include_sources_index=False,
-        )
-        top_index_final = (
-            top_with_counts if top_with_counts is not None
-            else update.top_index_content
-        )
-    derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
-    derived.extend(("index", write) for write in sub_writes)
-    writes = [
-        PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH),
-        *(write for _role, write in derived),
-    ]
+    derived: list[tuple[str, PlannedWrite]] = []
+    writes = [PlannedWrite(path=source_path, content=source_md, create_only=True, expected_hash=MISSING_CONTENT_HASH)]
     writes.extend(taxonomy_plan.writes)
     writes.extend(project_plan.writes)
+    writes.extend(form_plan.writes)
     writes.extend(supersede_writes)
     if raw_protection:
         # Global index/log prose cannot carry the protected title or byte identity.
-        writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes]
+        writes = [writes[0], *taxonomy_plan.writes, *project_plan.writes, *form_plan.writes]
         derived = []
     if correction_plan is not None:
         writes[0].create_only = True
@@ -833,13 +954,26 @@ def add(
             new_path=source_path.relative_to(vault_root).as_posix(), timestamp=stamp_iso,
         ))
 
-    warnings: list[str] = list(slug_warnings) + tag_warnings + identity_warnings
+    adjusted = filename_adjusted_warning(
+        title,
+        slug,
+        planned=stem,
+        final=source_path.stem,
+        vault_root=vault_root,
+        dated=True,
+        date_prefix=name_prefix,
+    )
+    warnings: list[str] = list(slug_warnings) + ([adjusted] if adjusted else []) + tag_warnings + identity_warnings
     # Vocabulary notices are plain per-write warnings, not dismissible advisories:
     # "registered 'field-notebook'" reports what the write did, so routing it
     # through the suppression channel would let a dismissal hide a fact.
     warnings.extend(
         _vocabulary_warnings(kind, domain_resolution, taxonomy_plan, project_plan)
     )
+    if form_plan.introduced:
+        warnings.append(
+            f"NEW_DOCUMENT_FORM: registered {form_plan.key!r}. Edit _Schema/document-forms.yaml to relabel it."
+        )
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
     # to also surface it as a per-write warning.
 
@@ -848,13 +982,16 @@ def add(
     # can publish in the same rollback set.
     artifact_stream = None
     originals: list[PlannedWrite] = []
+    pooled_artifact = False
     if artifact is not None and artifact_path is not None:
         assert artifact_digest is not None and artifact_size is not None
         binary_write, artifact_stream = artifact_binary_write(
-            artifact.staged_path, artifact_path, artifact_digest, artifact_size
+            artifact.staged_path, artifact_path, artifact_digest, artifact_size, staged=artifact.staged
         )
-        writes.append(binary_write)
-        originals.append(binary_write)
+        pooled_artifact = pools_original(vault_root, artifact_path)
+        if not pooled_artifact:
+            writes.append(binary_write)
+            originals.append(binary_write)
 
     # The registry the domain resolved against must still be the one on disk.
     # A registration rewrites it in this batch under its own content guard.
@@ -865,13 +1002,26 @@ def add(
     )
     if correction_plan is not None:
         required_guards = (*required_guards, correction_plan.guards[0])
+    if pooled_artifact:
+        assert artifact_path is not None
+        # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
+        required_guards = (*required_guards, PathGuard.capture(
+            vault_root, artifact_path.relative_to(vault_root).as_posix(), leaf_policy="absent"))
     from . import document_containers
 
     container_stack = contextlib.ExitStack()
     container_metadata = None
     core_paths = {source_path, artifact_path} - {None}
+    publish_original = None
     try:
+        if pooled_artifact:
+            assert artifact_stream is not None and artifact_digest is not None and artifact_size is not None
+            publish_original = staged_pool_publication(
+                container_stack, vault_root, artifact_stream, artifact_digest, artifact_size,
+                prepared=artifact.staged.pool if artifact.staged is not None else None)
         if artifact_stream is not None and document_containers.is_container(artifact_path):
+            # Known residual: reading a document container's members still grows with the payload, under the
+            # boundary. Only the upload copy, hash and install moved out of it.
             container_plan = container_stack.enter_context(document_containers.plan(
                 vault_root, parent=artifact_path.relative_to(vault_root).as_posix(),
                 parent_page=source_path.relative_to(vault_root).as_posix(), digest=artifact_digest,
@@ -882,19 +1032,109 @@ def add(
             writes.extend(container_plan.writes)
             originals.extend(write for write in container_plan.writes if isinstance(write.content, PreparedBinaryContent))
             core_paths.update(write.path for write in container_plan.writes)
+        from . import source_custody, source_payload_custody
+
+        source_reference = memory_refs.memory_ref(exomem_id)
+        custody_started = source_custody.begin_capture(
+            vault_root, reference=source_reference, path=source_path.relative_to(vault_root).as_posix(),
+            source_hash=content_hash(writes[0].content), identity=source_identity,
+        )
+        if custody_started:
+            from . import call_ledger
+
+            # An erasable Source's paths name its content, so no call ledger row keeps them.
+            call_ledger.withhold_targets(path.relative_to(vault_root).as_posix() for path in core_paths)
+        # An enrolled Source stays off the shared index and log pages; the captured-Source inventory lists it.
+        if not raw_protection and not custody_started:
+            activity_summary = _activity_summary(
+                rel_source_no_ext=rel_source_no_ext,
+                title=title,
+                source_type=kind.key,
+                tags=tags_clean,
+            )
+            log_entry_body = _log_entry_body(
+                title=title,
+                source_type=kind.key,
+                url=url,
+                tags=tags_clean,
+                why_captured=why_captured,
+            )
+
+            with call_spans.span("source.index_planning"):
+                update = indexes.compute_updates(
+                    vault_root,
+                    source_type=folder_name.lower(),
+                    folder_title=folder_name,
+                    folder_description=taxonomy.category_description(folder_name),
+                    rel_source_path=(
+                        f"{managed_join('')}{'/'.join(segments)}/{rel_source_no_ext.rsplit('/', 1)[-1]}"
+                        if in_sources else rel_source_no_ext
+                    ),
+                    date_iso=date_iso,
+                    stamp_iso=stamp_iso,
+                    activity_summary=activity_summary,
+                    log_entry_body=log_entry_body,
+                    source_counts=post_counts,
+                )
+
+                # Refresh the Notes/Entities counts in the top index alongside the
+                # Sources counts that compute_updates() already handled. `add` doesn't
+                # change Notes/Entities counts, so no override needed.
+                sub_writes, top_with_counts = indexes.compute_subindex_writes(
+                    vault_root,
+                    top_index_text=update.top_index_content,
+                    pending_paths=[rel_source_no_ext],
+                    include_sources_index=False,
+                )
+                top_index_final = (
+                    top_with_counts if top_with_counts is not None
+                    else update.top_index_content
+                )
+            derived = _derived_index_writes(vault_root, update, top_index_content=top_index_final)
+            derived.extend(("index", write) for write in sub_writes)
+            writes[1:1] = [write for _role, write in derived]
         # Activated vocabulary classifies only the page; its originals and derived outputs bind to it.
+        bound_receipts = []
+        file_commit_witness = None
+        if import_capture is not None:
+            assert artifact_path is not None and artifact_digest == import_capture.original_sha256
+            receipt = import_capture.receipt(
+                source_path.relative_to(vault_root).as_posix(), source_reference,
+                artifact_path.relative_to(vault_root).as_posix(), content_hash(writes[0].content),
+                captured=stamp_iso,
+            )
+            receipt_write = import_capture.planned_write(vault_root, receipt)
+            if _import_resume is None:
+                import_capture.prepare(vault_root, receipt)
+            if isinstance(import_capture, source_imports.ResumableCapture):
+                file_commit_witness = import_capture.file_commit_witness(receipt)
+            writes.append(receipt_write)
+            bound_receipts.append((vocabulary_auxiliaries.SOURCE_IMPORT_RECEIPT, receipt_write))
+            from . import reserved_paths
+
+            container_stack.enter_context(reserved_paths._subsystem_authority_scope(source_imports.OWNER))
         bound_outputs = vocabulary_auxiliaries.seal(
             vault_root, primary=writes[0],
-            derived=[*derived, *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
+            derived=[*derived, *bound_receipts,
+                     *((vocabulary_auxiliaries.SOURCE_ORIGINAL, write) for write in originals)],
         )
+        payload_custody = container_stack.enter_context(source_payload_custody.capture(
+            vault_root, reference=source_reference, primary=writes[0], writes=writes,
+            auxiliaries=bound_outputs, enabled=custody_started,
+        ))
+        if import_capture is not None and _prepare is None:
+            registrations = [*taxonomy_plan.writes, *project_plan.writes, *form_plan.writes]
+            writes = registrations + [write for write in writes if write not in registrations]
         def validate_bindings() -> None:
             if _validate_inputs is not None:
                 _validate_inputs()
             taxonomy_plan.recheck_bindings(vault_root)
+            form_plan.recheck_bindings(vault_root)
             if source_identity is not None:
                 source_capture.require_authority(vault_root)
             if correction_plan is not None:
                 correction_plan.require_authority(vault_root)
+            source_custody.require_publishable(vault_root, source_reference)
 
         def prepare_final(planned: list[PlannedWrite]) -> None:
             _prepare({"allocation": allocation, "ref": memory_refs.memory_ref(exomem_id),
@@ -910,21 +1150,32 @@ def add(
         if defer_fanout_to_terminal:
             publication_intents: list[object] = []
             created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
+            custody = (
+                full_refresh_custody(vault_root, writes) if custody_before_commit and _prepare is None else None
+            )
             committed = batch_atomic_write(
                 writes,
                 vault_root=vault_root,
                 required_guards=required_guards,
                 post_commit_fanout=False,
+                _retained_original=retained_original,
                 _vocabulary_auxiliaries=bound_outputs,
                 publication_intents_out=publication_intents,
                 _validate_prepared_bindings=validate_bindings,
                 _prepare=prepare_final if _prepare is not None else None,
+                _publish_originals=publish_original,
+                _file_commit_witness=file_commit_witness,
+                **({"_payload_custody": payload_custody} if payload_custody is not None else {}),
             )
         else:
             batch_atomic_write(writes, vault_root=vault_root, required_guards=required_guards,
                                _vocabulary_auxiliaries=bound_outputs,
                                _validate_prepared_bindings=validate_bindings,
-                               _prepare=prepare_final if _prepare is not None else None)
+                               _prepare=prepare_final if _prepare is not None else None,
+                               _publish_originals=publish_original,
+                               _retained_original=retained_original,
+                               _file_commit_witness=file_commit_witness,
+                               **({"_payload_custody": payload_custody} if payload_custody is not None else {}))
     except _NativePrepared:
         raise
     except source_capture.SourceCaptureError:
@@ -956,8 +1207,12 @@ def add(
     if defer_fanout_to_terminal:
         assert isinstance(committed, list)
         deferred_fanout(
-            vault_root, committed, created_paths=created_paths, publication_intents=publication_intents
+            vault_root, committed, created_paths=created_paths, publication_intents=publication_intents,
+            receipts=custody,
         )
+
+    if custody_started:
+        source_custody.finish_capture(vault_root, source_reference, path=source_path.relative_to(vault_root).as_posix())
 
     if checks_duplicates or artifact is not None:
         # The next acquisition of the mutation boundary finds this payload, whatever other indexes have caught up.
@@ -1011,19 +1266,40 @@ def add(
         ) if not count_errors else None,
         adoption=adoption_receipt,
         vocabulary_resolution=domain_binding.as_dict() if domain_binding is not None else None,
-        vocabulary_receipt=taxonomy_plan.receipt(),
+        vocabulary_receipt=[*taxonomy_plan.receipt(), *form_plan.receipt()],
         capture_outcome="created" if source_identity is not None else None,
         same_url=same_url,
         duplicate_check_unavailable=duplicate_unavailable,
+        path_withheld=custody_started,
     )
 
 
-def _stored_why(page_text: str) -> str | None:
+
+def stored_why(page_text: str) -> str | None:
     """The reason a Source page records in its leading blockquote, in the shape `_render_source` writes it."""
     _, body, _ = parse_frontmatter(page_text)
     lines = body.split(f"\n{CAPTURE_HEADING}\n", 1)[0].splitlines()[1:]
     quoted = [line[2:] for line in lines if line.startswith("> ")]
     return "\n".join(quoted) or None
+
+
+def correction_carry(old_source: str) -> dict[str, object]:
+    """The capture fields a correction keeps from the Source it replaces wherever the call omits them.
+
+    Read back from the frontmatter keys `_render_source` writes, with their types, so a correction that names
+    only what was wrong keeps the rest, whether it supplies a new file, new text or neither.
+    """
+    metadata, _body, _front = parse_frontmatter(old_source)
+    carried: dict[str, object] = {
+        **{name: metadata[name] for name in ("source_type", "url", "domain", "document_form")
+           if isinstance(metadata.get(name), str) and metadata[name]},
+        **({"custody_only": True} if metadata.get("custody_only") is True else {}),
+        **{name: [str(item) for item in metadata[name]] for name in ("tags", "projects")
+           if isinstance(metadata.get(name), list) and metadata[name]},
+    }
+    if why := stored_why(old_source):
+        carried["why_captured"] = why
+    return carried
 
 
 def _reused_capture(
@@ -1045,7 +1321,7 @@ def _reused_capture(
             ("source_kind", kind, kept.get("source_type")),
             ("url", provided_url, kept.get("url")),
             ("tags", tags or None, kept.get("tags") or None),
-            ("why_captured", why, _stored_why(hit.payload.text)),
+            ("why_captured", why, stored_why(hit.payload.text)),
             ("domain", domain, kept.get("domain")),
             ("projects", projects or None, kept.get("projects")),
         )
@@ -1068,16 +1344,21 @@ def _same_url_advisory(found: duplicates.SameUrl | None) -> dict[str, object] | 
     """The `same_url` advisory for earlier Sources that share a capture's URL: up to five of them and the total."""
     if found is None:
         return None
-    return {
+    if found.count > len(found.sources):
+        source_result_attribution.mark_unknown()
+    out = {
         "count": found.count,
         "sources": [
-            {
+            source_result_attribution.bind({
                 "ref": source.ref, "path": source.path, "title": source.payload.frontmatter.get("title"),
                 "captured": str(source.payload.frontmatter.get("captured")),
-            }
+            }, (source.ref,))
             for source in found.sources
         ],
     }
+    return source_result_attribution.bind(
+        out, tuple(source.ref for source in found.sources), paths=(("count",),), action="count",
+    )
 
 
 _SUGGESTION_KIND = "source_classification_debt"
@@ -1292,17 +1573,23 @@ def deferred_fanout(
     *,
     created_paths: list[Path],
     publication_intents: list[object],
+    receipts: list[DeferredReceipt] | None = None,
 ) -> None:
     """Run the derived fanout of a batch committed with `post_commit_fanout=False`.
 
     The Source already committed, so nothing here fails the caller except an
     uncertain outcome the terminal must report. Shared by the Source writer and
     the episode recorder's in-place revision.
+
+    `receipts` is the full-refresh custody a caller recorded before its commit
+    (`full_refresh_custody`). The fanout then retires that exact custody when it
+    completes and reports its outcome to the enclosing `fanout_after_release`.
     """
     from . import deferred_index, file_watcher, writer_lease
     from . import vault as vault_module
 
     replaced = list(dict.fromkeys(committed))
+    pretaken = receipts
 
     def abort_intents() -> None:
         try:
@@ -1343,40 +1630,72 @@ def deferred_fanout(
                     if fanout_succeeded[0]
                     else index_sync.failed_upsert_report(vault_root, replaced)
                 )
+            if pretaken is not None:
+                if fanout_succeeded[0] and pretaken:
+                    try:
+                        # Exact revisions keep a newer receipt on the same page queued. A receipt that the
+                        # drain retired and a later failure re-created restarts at revision 1, so it can match.
+                        deferred_index.clear_full_receipts(vault_root, pretaken)
+                    except Exception as error:  # noqa: BLE001 - the drain retires custody left behind
+                        log.warning("full-refresh custody retirement failed: %s", type(error).__name__)
+                # A fan-out that reported nothing, as in store mode, is noted as unverified, never as complete.
+                writer_lease.note_released_fanout(reports, completed=fanout_succeeded[0])
             return reports
 
-        try:
-            # Keep this receipt after a successful inline drain too: a
-            # same-path ABA write may have replaced its queued revision.
-            # The background drain owns exact-revision retirement.
-            receipts = deferred_index.add_full_receipts(
-                vault_root,
-                [path.relative_to(vault_root).as_posix() for path in replaced],
-            )
-        except Exception as error:  # noqa: BLE001 - a committed Source cannot be retried safely
-            log.warning("episode durable derived demand failed after commit: %s", type(error).__name__)
-            run_fanout()
-            if not fanout_succeeded[0]:
-                raise writer_lease._PostCommitOutcomeUncertain() from None
-        else:
-            def run_terminal_fanout() -> list[object]:
-                from . import epistemic_graph
-
-                # This callback has a durable parent and a terminal that
-                # can report pending. A direct caller below must still
-                # converge, even though it also retained full receipts.
-                coordinator = writer_lease.active_manager()._mutation_coordinator_for(
-                    vault_root
-                )
-                with epistemic_graph.parent_receipted_graph_handoff(
+        if pretaken is None:
+            try:
+                # Keep this receipt after a successful inline drain too: a
+                # same-path ABA write may have replaced its queued revision.
+                # The background drain owns exact-revision retirement.
+                receipts = deferred_index.add_full_receipts(
                     vault_root,
-                    state_root=coordinator.state_root,
-                    receipts=tuple(receipts),
-                ):
-                    return run_fanout()
-
-            if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
+                    [path.relative_to(vault_root).as_posix() for path in replaced],
+                )
+            except Exception as error:  # noqa: BLE001 - a committed Source cannot be retried safely
+                log.warning("episode durable derived demand failed after commit: %s", type(error).__name__)
                 run_fanout()
+                if not fanout_succeeded[0]:
+                    raise writer_lease._PostCommitOutcomeUncertain() from None
+                return
+
+        def run_terminal_fanout() -> list[object]:
+            from . import epistemic_graph
+
+            if not receipts:
+                # A store-mode commit derived its own rows and recorded no file-mode custody to hand off.
+                return run_fanout()
+            # This callback has a durable parent and a terminal that
+            # can report pending. A direct caller below must still
+            # converge, even though it also retained full receipts.
+            coordinator = writer_lease.active_manager()._mutation_coordinator_for(
+                vault_root
+            )
+            with epistemic_graph.parent_receipted_graph_handoff(
+                vault_root,
+                state_root=coordinator.state_root,
+                receipts=tuple(receipts),
+            ):
+                return run_fanout()
+
+        if not writer_lease.defer_until_terminal_persisted(run_terminal_fanout):
+            run_fanout()
+
+
+def full_refresh_custody(vault_root: Path, writes: Sequence[PlannedWrite]) -> list[DeferredReceipt]:
+    """Record durable full-refresh custody for a batch's Markdown pages before the batch installs them.
+
+    A stop between the install and the derived fanout leaves these receipts, so the next drain makes the
+    pages searchable. A store-mode commit derives its own rows, and a fast-ack session already carries the
+    batch's derived work, so neither records custody here.
+    """
+    from . import deferred_index, writer_lease
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(vault_root) or writer_lease.active_derived_batch_custody(vault_root):
+        return []
+    return deferred_index.add_full_receipts(
+        vault_root, [write.path.relative_to(vault_root).as_posix() for write in writes]
+    )
 
 
 def _episode_frontmatter_lines(
@@ -1545,7 +1864,12 @@ def _render_source(
     adoption_receipt: Mapping[str, object] | None = None,
     source_identity: source_capture.SourceIdentity | None = None,
     capture_input_digest: str | None = None,
+    passages: list[source_capture.DeclaredPassage] | None = None,
     extra_lines: Sequence[str] = (),
+    document_form: str | None = None,
+    identity_check: Mapping[str, object] | None = None,
+    ingested_into: Sequence[str] = (),
+    custody_only: bool | None = None,
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape.
 
@@ -1573,7 +1897,13 @@ def _render_source(
 
         lines.append("source_identity: " + json.dumps(source_identity))
         lines.append(f"capture_input_digest: {yaml_scalar(capture_input_digest)}")
+    if passages is not None:
+        lines.append(f"declared_passages: {len(passages)}")
     lines.extend(extra_lines)
+    if document_form:
+        lines.append(f"document_form: {document_form}")
+    if custody_only:
+        lines.append("custody_only: true")
     if artifact_rel:
         # The stored file is what extraction reads, so its name decides the kind; the original's name
         # can differ (a Markdown original is stored under `.md.txt`; captures before it used `.md.bin`).
@@ -1594,6 +1924,8 @@ def _render_source(
             lines.append(f"binary_sha256: {artifact_digest}")
         if artifact_size is not None:
             lines.append(f"binary_size: {artifact_size}")
+    if identity_check is not None:
+        lines.append(f"identity_check: {document_identity.render(identity_check)}")
     if adoption_receipt is not None:
         from .preserve import _render_adoption_receipt_lines
 
@@ -1604,7 +1936,7 @@ def _render_source(
         lines.append("tags: " + yaml_flow_list(tags))
     else:
         lines.append("tags: []")
-    lines.append("ingested_into: []")
+    lines.append("ingested_into: " + yaml_flow_list(list(ingested_into)))
     lines.append("---")
     lines.append("")
     lines.append(f"# {title.strip()}")
@@ -1613,6 +1945,11 @@ def _render_source(
         # Single-line blockquote at top, per page-types.md shape.
         for paragraph in why_captured.strip().splitlines():
             lines.append(f"> {paragraph}")
+        lines.append("")
+    if passages is not None:
+        from .passage_evidence import render_key_block
+
+        lines.append(render_key_block([passage["key"] for passage in passages]).rstrip("\n"))
         lines.append("")
     lines.append(CAPTURE_HEADING)
     lines.append("")
@@ -1633,7 +1970,7 @@ def _activity_summary(
     The index is a derived output bound to the Source page, so the gate never classifies its
     links: the caller's title and tags stay inert text here, as they do in the log body.
     """
-    base = f"`{rel_source_no_ext.replace(kb_prefix(), '')}` (source, {source_type}, mobile capture via exomem)"
+    base = f"`{managed_relative(rel_source_no_ext)}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
     return f"{base} — {escape_wikilinks_for_log(excerpt + tags_part)}"

@@ -11,7 +11,6 @@ import base64
 import copy
 import datetime as dt
 import json
-import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -23,6 +22,7 @@ from test_deferred_write_advisory import _prepare_custody as prepare_advisory_cu
 from test_episode_memory_command import KEY as EPISODE
 from test_episode_memory_command import _record as record_episode
 from test_managed_collections_migration import coordinator_url  # noqa: F401
+from test_name_drift import without_scan_time
 from test_vault_store_graph_readers import (
     CLAIM,
     LAMP,
@@ -58,10 +58,7 @@ from exomem.governance.principal import request_scope
 from exomem.vault_store import mode, ownership, read
 from exomem.writer_lease import invoke_command
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(180),
-]
+pytestmark = pytest.mark.timeout(180)
 
 SOURCE = "Knowledge Base/Sources/Beacon Survey.md"
 DATA = "Knowledge Base/Records/dataset/readings.csv"
@@ -76,6 +73,9 @@ SAMPLES = {
     "served_context": {},
     "configure_memory:inspect": {"action": "inspect"},
     "coordination_status": {},
+    "inspect_captured_sources": {"system": "archive"},
+    "inspect_capture_erasure_policy": {"system": "archive"},
+    "inspect_name_drift": {},
     "bootstrap": {},
     "search": {"query": "lighthouse"},
     "fetch": {"id": CLAIM},
@@ -188,6 +188,7 @@ SAMPLES = {
     "review_memory:write-advisory-result": {
         "mode": "write-advisory-result", "ref": "$advisory",
     },
+    "review_memory:queued-write": {"mode": "queued-write"},
     "review_memory:procedure_approvals": {"mode": "procedure_approvals"},
     "review_memory:held": {"mode": "held"},
     "review_memory:vocabulary": {"mode": "vocabulary"},
@@ -207,6 +208,8 @@ SAMPLES = {
     "maintain_memory:fix": {"mode": "fix"},
     "maintain_memory:reconcile": {"mode": "reconcile", "dry_run": True},
     "maintain_memory:backfill-ids": {"mode": "backfill-ids"},
+    "maintain_memory:capture-metadata": {"mode": "capture-metadata"},
+    "maintain_memory:convert-originals": {"mode": "convert-originals"},
     "maintain_memory:maintenance-job": {"mode": "maintenance-job"},
     "maintain_memory:structured-files": {"mode": "structured-files", "collection": DATASET},
     "maintain_memory:tag-variants": {"mode": "tag-variants"},
@@ -231,6 +234,10 @@ SAMPLES = {
     "manage_memory_file:append": {
         "operation": "append", "validate_only": True, "path": CLAIM,
         "content": "\nThe keeper adds oil at dusk.\n",
+    },
+    "manage_memory_file:move": {
+        "operation": "move", "validate_only": True, "old_path": CLAIM,
+        "new_path": "Knowledge Base/Notes/Archive/Lantern Claim.md",
     },
     "manage_memory_file:trash-list": {"operation": "trash-list"},
     "manage_memory_file:propose-reclassification": {
@@ -458,8 +465,10 @@ def comparable(value, *, inbound_links=False):
     served_context_id, generation.freshness_key and generation.index_generation identify
     backend snapshots; budget.serialized_chars includes their variable-length encoding.
     Only minted_ns, thread, thread_ns and mac vary per call in the decoded continuity.
+    A reason's meta.scanned_at dates the scan behind it, and a store read after migration scans
+    again (`without_scan_time`).
     """
-    result = copy.deepcopy(value)
+    result = without_scan_time(copy.deepcopy(value))
     if not isinstance(result, dict):
         return result
     result.pop("observed_at", None)
@@ -500,6 +509,20 @@ def test_comparison_ignores_only_inbound_order_and_keeps_duplicate_links():
     assert comparable(answer, inbound_links=True) != comparable(reordered, inbound_links=True)
 
 
+def test_comparison_ignores_only_when_a_reason_was_scanned():
+    """A later scan must not fail parity, and an answer that drops the time or the count must."""
+    def reason(scanned, detail):
+        return {"items": [{"reasons": [{"detail": detail, "meta": {"scanned_at": scanned}}]}]}
+
+    file_answer = reason("2026-01-01 10:00 UTC", "As of 2026-01-01 10:00 UTC, 2 pages drift.")
+    later = reason("2026-01-01 10:01 UTC", "As of 2026-01-01 10:01 UTC, 2 pages drift.")
+    undated = reason("2026-01-01 10:01 UTC", "2 pages drift.")
+    recounted = reason("2026-01-01 10:01 UTC", "As of 2026-01-01 10:01 UTC, 3 pages drift.")
+    assert comparable(file_answer) == comparable(later)
+    assert comparable(file_answer) != comparable(undated)
+    assert comparable(file_answer) != comparable(recounted)
+
+
 def prepare_sample(root, monkeypatch, request, sample):
     """Write the shared pages and the sample's own state; answer (command, arguments, schema)."""
     name = sample.split(":", 1)[0]
@@ -515,6 +538,10 @@ def prepare_sample(root, monkeypatch, request, sample):
     if sample == "maintain_memory:reconcile":
         # Reconcile verifies the receipt journal, which each call extends: keep it as prepared.
         monkeypatch.setattr(egress, "emit_boundary_receipt", lambda _collector: None)
+    if sample == "maintain_memory:convert-originals":
+        # Its preview refuses where the launcher cannot start a conversion; this sample proves its inventory read.
+        from exomem import artifact_lifecycle
+        monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
     if sample == "schema_memory:census":
         from exomem import relation_census
         monkeypatch.setattr(relation_census, "_cohort_now", lambda: datetime(2026, 1, 1, tzinfo=UTC))
@@ -571,21 +598,16 @@ def prepare_sample(root, monkeypatch, request, sample):
     return command, arguments, source_schema
 
 
-#: The held listing of a store-mode folder takes each disk entry's identity before it drops the files
-#: at stored pages' paths, so it stats and opens every projected page in the folder. Answers are equal.
-HELD_LISTING_PROBES = (
-    "the store-mode folder listing (reserved_paths.list_generic_tree) stats and opens each projected "
-    "page file for its identity before it leaves the file out; the answer is the store's",
-    frozenset({"page filesystem read"}),
-)
 #: Each registered read that still breaks the store-mode read contract, why, and the only violations
 #: it may show. Its marker is strict, so a fix that makes the read pass fails here until its entry
 #: goes, and any other violation fails it as a regression.
-STORE_READ_GAPS = {
-    **dict.fromkeys((
-        "audit", "browse_memory", "list_directory", "maintain_memory:audit", "maintain_memory:fix",
-        "manage_memory_file:list", "review_memory:audit",
-    ), HELD_LISTING_PROBES),
+STORE_READ_GAPS: dict[str, tuple[str, frozenset[str]]] = {
+    "manage_memory_file:move": (
+        "the store-mode move preview runs the move's own checks, which stat the moved page and walk "
+        "its linkers on disk (store_targets.resolve_existing, store_targets.inbound_links, "
+        "move_file.plan_inbound_rewrites); the answer is the store's",
+        frozenset({"page filesystem read"}),
+    ),
 }
 
 
@@ -647,7 +669,7 @@ def test_each_registered_read_uses_the_store(vault, monkeypatch, record_property
         with read.snapshot(vault) as snapshot:
             revision = snapshot.revision
         for value in expected.values():
-            value["graph_sync"] = {"state": "not_applicable", "generation": None}
+            value["graph_sync"] = {"state": "current", "generation": None}
             value["vault_store"] = {"state": "available", "revision": revision}
     if sample == "schema_memory:census":
         # Canonical-vault-store graph reads identify the store revision, not the sidecar counter.

@@ -28,6 +28,7 @@ _STORE_FILENAME = "rows.sqlite"
 _STORE_STATUS = "measurement-rows-ready"
 _ROW_DOMAIN = b"exomem.authorization-projection-measurement-row.v1"
 _STORE_DOMAIN = b"exomem.authorization-projection-measurements.v1"
+_TEXT_PASSAGES_PREFIX = b"exomem.projection-text-passages.v1\x00"
 _CLIP_PAYLOAD_PREFIX = b"exomem.projection-clip-samples.v1\x00"
 _LANES = frozenset({"vector", "clip", "graph"})
 _HEX = frozenset("0123456789abcdef")
@@ -265,6 +266,24 @@ def _vector_payload(vector: tuple[float, ...]) -> bytes:
     return struct.pack(f">{len(canonical)}d", *canonical)
 
 
+def _text_payload(measurement: projected_retrieval.ProjectionVectorMeasurement) -> bytes:
+    vector = _vector_payload(measurement.vector)
+    return (
+        _TEXT_PASSAGES_PREFIX + vector + bytes.fromhex(measurement.transcript_bank)
+        if measurement.transcript_bank is not None else vector
+    )
+
+
+def _decode_text(payload: bytes, dimension: int) -> tuple[tuple[float, ...], str | None]:
+    size = dimension * 8
+    if len(payload) == size:
+        return _decode_vector(payload, dimension=dimension), None
+    prefix = len(_TEXT_PASSAGES_PREFIX)
+    if not payload.startswith(_TEXT_PASSAGES_PREFIX) or len(payload) != prefix + size + 32:
+        raise MeasurementStoreMismatch("transcript bank reference does not verify")
+    return _decode_vector(payload[prefix:prefix + size], dimension=dimension), payload[-32:].hex()
+
+
 def _clip_payload(
     measurement: projected_retrieval.ProjectionClipMeasurement,
 ) -> bytes:
@@ -302,7 +321,7 @@ def _graph_payload(measurement: projected_graph.ProjectionGraphMeasurement) -> b
 
 def _measurement_payload(measurement: ProjectionMeasurement) -> bytes:
     if isinstance(measurement, projected_retrieval.ProjectionVectorMeasurement):
-        return _vector_payload(measurement.vector)
+        return _text_payload(measurement)
     if isinstance(measurement, projected_retrieval.ProjectionClipMeasurement):
         return _clip_payload(measurement)
     if isinstance(measurement, projected_graph.ProjectionGraphMeasurement):
@@ -652,9 +671,9 @@ def _decode_measurement(
     try:
         if family.lane == "vector":
             assert manifest.vector_dimension is not None
+            vector, transcript_bank = _decode_text(payload, manifest.vector_dimension)
             return projected_retrieval.ProjectionVectorMeasurement(
-                measurement_key=key,
-                vector=_decode_vector(payload, dimension=manifest.vector_dimension),
+                measurement_key=key, vector=vector, transcript_bank=transcript_bank,
             )
         if family.lane == "clip":
             assert manifest.vector_dimension is not None

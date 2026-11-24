@@ -374,9 +374,17 @@ def test_cloud_governed_write_commits_then_owner_only_op_refuses(
 # ---------------------------------------------------------------------------
 
 
-def test_cloud_server_exposes_only_mcp_health_and_ready_routes(
+def test_cloud_server_exposes_mcp_health_ready_and_content_free_identity(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from exomem import recall_space
+    from exomem.cell_identity import DISCOVERY_PATH
+    from exomem.embedding_index import EmbeddingIndex
+
+    index = EmbeddingIndex(vault)
+    space = recall_space.SpaceIdentity("/private/model/location", "first-weights", 2)
+    with index._connect() as connection:
+        recall_space.write_identity(connection, space)
     mcp, dotenv_calls = _build_cloud_server(monkeypatch)
     try:
         app = mcp.http_app(stateless_http=True, json_response=True)
@@ -391,15 +399,36 @@ def test_cloud_server_exposes_only_mcp_health_and_ready_routes(
                     rest = await client.get("/api/ask_memory")
                     upload = await client.post("/upload")
                     download = await client.post("/download")
-                    return health, ready, rest, upload, download
+                    identity = await client.get(DISCOVERY_PATH)
+                    wrong_credential = await _initialize(client, token="another-cell-credential")
+                    with index._connect() as connection:
+                        recall_space.write_identity(connection, recall_space.SpaceIdentity(
+                            space.model, "next-weights", space.dim))
+                    changed_identity = await client.get(DISCOVERY_PATH)
+                    with index._connect() as connection:
+                        recall_space.clear_identity(connection)
+                    empty_identity = await client.get(DISCOVERY_PATH)
+                    return health, ready, rest, upload, download, identity, wrong_credential, changed_identity, empty_identity
 
-        health, ready, rest, upload, download = asyncio.run(scenario())
+        health, ready, rest, upload, download, identity, wrong_credential, changed_identity, empty_identity = asyncio.run(scenario())
         assert health.status_code == 200, health.text
         assert ready.status_code in {200, 503}, ready.text
         assert rest.status_code == 404
         assert upload.status_code == 404
         assert download.status_code == 404
         assert dotenv_calls == []
+        assert identity.status_code == 200
+        body = identity.json()
+        assert body["cell_id"] == CELL_ID
+        assert {"declared_passages", "passage_results"} <= set(body["operations"])
+        assert body["recall_space"] == {"state": "observed", "id": space.identity_digest}
+        assert body["software"]["state"] == "observed"
+        assert TOKEN not in identity.text
+        assert str(vault) not in identity.text
+        assert space.model not in identity.text
+        assert body["recall_space"]["id"] != changed_identity.json()["recall_space"]["id"]
+        assert empty_identity.json()["recall_space"] == {"state": "unavailable", "id": None}
+        assert wrong_credential.status_code == 401
     finally:
         _teardown_activation(mcp)
 
@@ -716,7 +745,7 @@ def test_cloud_tool_list_allows_staged_adoption(
         assert {"imports.start", "imports.apply"} <= writes
         # Media status remains available; Cloud still omits the video-frame command.
         assert "media.status" in reads
-        assert not {"media.video", "media.image"} & reads
+        assert not {"media.video", "media.image", "media.preview"} & reads
         assert "media.process" in writes
         assert {"settings.set"} <= writes
         assert "recall_context" in names
@@ -1286,3 +1315,15 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
     assert result["source"]["id"] == promoted_page.id
     assert {p: p.read_bytes() for lane in ("Sources", "Evidence")
             for p in (vault / "Knowledge Base" / lane).rglob("*.md")} == before
+
+
+def test_cloud_cell_handshake_names_its_release_and_source_repository(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGPL section 13: the operator's service names the release it runs and where its source is."""
+    from exomem import __version__
+
+    cloud, _ = _build_cloud_server(monkeypatch)
+    assert cloud.version == __version__
+    assert cloud.website_url == "https://github.com/Artexis10/exomem"
+    assert cloud.instructions == server.SERVER_INSTRUCTIONS

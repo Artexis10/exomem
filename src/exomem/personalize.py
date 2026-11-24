@@ -25,7 +25,8 @@ import yaml
 
 from . import access as access_module
 from . import overview as overview_module
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import is_managed_root_name, managed_join, managed_root
+from .vault_store import cli_fence
 
 # Classification of a top-level sibling folder.
 CLASS_READONLY = "readonly"
@@ -115,7 +116,7 @@ def _sibling_signals(scan: dict) -> dict[str, dict]:
         if entry.get("depth") != 1:
             continue
         name = entry.get("path", "")
-        if not name or name == kb_dirname():
+        if not name or is_managed_root_name(name):
             continue
         junk_count = sum(1 for jp in junk_paths if jp == name or jp.startswith(name + "/"))
         signals[name] = {
@@ -198,8 +199,8 @@ def scan_and_classify(vault: str | Path, *, overview_fn=overview_module.overview
     """Scan and classify — never writes. Requires an initialized ``Knowledge Base/``
     (that's where ``_access.yaml`` lives), else raises ``PersonalizeError('NO_KB')``."""
     vault_path = Path(vault).expanduser()
-    if not (vault_path / kb_dirname()).is_dir():
-        raise PersonalizeError("NO_KB", f"no {kb_prefix()} under {vault_path} - run `exomem init` first")
+    if not managed_root(vault_path).is_dir():
+        raise PersonalizeError("NO_KB", f"no {managed_join('')} under {vault_path} - run `exomem init` first")
     scan = overview_fn(vault_path)
     existing = access_module._load_config(vault_path)
     proposals = classify_siblings(scan, existing)
@@ -301,7 +302,7 @@ def personalize_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem personalize",
         description=(
-            f"Scan a vault and generate a starter {kb_prefix()}_access.yaml - classify "
+            f"Scan a vault and generate a starter {managed_join('_access.yaml')} - classify "
             "top-level sibling folders as readonly/excluded so exomem knows what is "
             "read-only input. Non-destructive; only adds entries it proposes."
         ),
@@ -316,6 +317,7 @@ def personalize_main(argv: list[str]) -> int:
     vault = args.vault or _vault_default()
     if not vault:
         parser.error("set --vault or $EXOMEM_VAULT_PATH")
+    cli_fence.require("personalize", Path(vault).expanduser())
 
     if args.json:
         import json

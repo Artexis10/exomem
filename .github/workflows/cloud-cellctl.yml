@@ -46,8 +46,10 @@ concurrency:
 jobs:
   checks:
     name: cellctl tests, pinned ruff and platform chart
-    # Base-controlled release validation permits only version changes; full CI proves the base.
-    if: &not-release-pr ${{ github.head_ref != 'release-please--branches--main' }}
+    # Skips exactly the PRs scripts/release_evidence.py ci_scope treats as release metadata,
+    # whose content ci.yml's release evidence checks from the base (release-PR file check or
+    # reconciliation projection). Keep this predicate identical to ci_scope.
+    if: &not-release-pr ${{ !(github.event_name == 'pull_request' && ((github.base_ref == 'main' && startsWith(github.head_ref, 'release-reconcile/')) || github.head_ref == 'release-please--branches--main' || (startsWith(github.base_ref, 'release-cuts/') && github.head_ref == format('release-please--branches--{0}', github.base_ref)))) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -344,5 +346,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: live-k3s-${{ matrix.suite }}-${{ matrix.shard }}-junit
+          # Per-run diagnostics: nothing reads them after the run, so a week is enough.
+          retention-days: 7
           path: ${{ runner.temp }}/live-k3s.xml
           if-no-files-found: warn

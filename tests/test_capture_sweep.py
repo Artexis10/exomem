@@ -599,8 +599,8 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,483 and 1,494 — 17 and 6 bytes of
-    headroom — so no wording of this clause fits, and the only way to make one
+    into. The prominent blocks sit at 1,481 and 1,466 — 19 and 34 bytes of
+    headroom — so no wording of this clause (about 190 bytes) fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the
     Planning/Records transition rule past seven reviews, so it was not made.
@@ -621,12 +621,19 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
         fence = doc.index("```", doc.index(heading))
         block = doc[fence + 3 : doc.index("```", fence + 3)]
         sizes[name] = len(block.rstrip().encode("utf-8"))
-        assert "Never save transcripts." in block, name
+        assert "Never save chat transcripts." in block, name
 
-    assert sizes == {"maximal": 1483, "balanced": 1485}, sizes
+    # 2026-11-18, keep-handed-files-as-sources: "chat transcripts" and
+    # "get no note" cost 6 bytes per block. 2026-11-20: the balanced block
+    # dropped "or open questions" (-17 bytes), giving 1489/1474. 2026-11-21: the
+    # tail no longer lists tentative events as quiet (-18 bytes), giving 1471/1456.
+    # 2026-11-22: the Records route replaced "Records only for a compatible measurement"
+    # (+17 bytes), giving 1488/1473. Later that day the route became its own sentence,
+    # "Items compared or tracked: Records rows, not a note." (-7 bytes), giving 1481/1466.
+    assert sizes == {"maximal": 1481, "balanced": 1466}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
-    assert 1500 - sizes["maximal"] >= 16, sizes
+    assert 1500 - sizes["maximal"] >= 11, sizes
     assert all(1500 - size < 100 for size in sizes.values()), sizes
 
 

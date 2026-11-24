@@ -59,7 +59,7 @@ from . import adopt as adopt_module
 from . import overview as overview_module
 from .adopt import _TEXT_IMPORT_SUFFIXES
 from .governance import raw_protection
-from .kbdir import kb_dirname
+from .kbdir import is_in_managed_root, managed_join, managed_root
 from .vault import PlannedWrite, batch_atomic_write, kb_root, parse_frontmatter
 from .writer_lease import _FAST_ACK_DEADLINE_SECONDS
 
@@ -148,7 +148,7 @@ _RECALL_SAMPLE = 10
 _REASONS = {
     "NOT_IN_INVENTORY": "path is not among the scanned adoption candidates",
     "UNSUPPORTED_IMPORT_TYPE": "the scan did not mark this file importable",
-    "ALREADY_GOVERNED": f"path is already inside {kb_dirname()}/",
+    "ALREADY_GOVERNED": f"path is already inside {managed_join('')}",
     adoption_plan.OVER_CEILING: "file is larger than the adoption ceiling",
     "NOT_REGULAR_FILE": "only regular files import; links and special files do not",
     "HIDDEN_FOLDER": "hidden folders are not scanned unless include_hidden=true",
@@ -497,7 +497,6 @@ def walk_inventory(
     from . import client_artifacts
 
     root = Path(root)
-    kb_name = kb_dirname()
     limit = client_artifacts.adoption_ceiling() if ceiling is None else ceiling
     scan_root = root if not _clean(path) else (root / _clean(path))
     rows: list[dict] = []
@@ -511,7 +510,7 @@ def walk_inventory(
             for d in dirnames:
                 dpath = Path(dirpath) / d
                 rel_dir = _rel(root, dpath)
-                if rel_dir == kb_name or rel_dir.startswith(kb_name + "/"):
+                if is_in_managed_root(rel_dir):
                     continue
                 if dpath.is_symlink():
                     rows.append(_row(rel_dir, 0, 0.0, eligible=False, reason="NOT_REGULAR_FILE"))
@@ -539,7 +538,7 @@ def walk_inventory(
                     continue
                 fpath = Path(dirpath) / fn
                 rel = _rel(root, fpath)
-                if rel == kb_name or rel.startswith(kb_name + "/"):
+                if is_in_managed_root(rel):
                     continue
                 try:
                     st = fpath.lstat()
@@ -635,8 +634,7 @@ def _classify_path(run: dict, path: str) -> str:
         if row.get("eligible"):
             return ""
         return row.get("reason") or "UNSUPPORTED_IMPORT_TYPE"
-    kb_name = kb_dirname()
-    if path == kb_name or path.startswith(kb_name + "/"):
+    if is_in_managed_root(path):
         return "ALREADY_GOVERNED"
     return "NOT_IN_INVENTORY"
 
@@ -1313,12 +1311,12 @@ def start(
     _refuse_outside_vault(root, path)
     _refuse_pending_renames(root, "start", under=_clean(path))
     run_date = _today(today)
-    kb = root / kb_dirname()
+    kb = managed_root(root)
     if not kb.is_dir():
         if not initialize_kb:
             raise AdoptionRunError(
                 "KB_NOT_INITIALIZED",
-                f"{kb_dirname()}/ is required; pass initialize_kb=true to bootstrap the scaffold first",
+                f"{managed_join('')} is required; pass initialize_kb=true to bootstrap the scaffold first",
             )
         from . import init as init_module
 
@@ -4124,7 +4122,7 @@ def file(
                 )
                 raise AdoptionRunError(
                     exc.code,
-                    f"{kb_dirname()}/ is required; run {begin}, then repeat the file call: it carries on that run",
+                    f"{managed_join('')} is required; run {begin}, then repeat the file call: it carries on that run",
                 ) from exc
             raise
         return _filing_reply(root, store, run, stop={"code": exc.code, "reason": exc.reason})

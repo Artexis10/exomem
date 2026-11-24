@@ -35,6 +35,25 @@ def test_an_ordinary_model_env_loads(monkeypatch) -> None:
     assert main.build_cluster_config().model_env == {"EXOMEM_EMBED_BACKEND": "onnx"}
 
 
+def test_a_shared_worker_cell_takes_the_chart_passage_matrix_budget(monkeypatch) -> None:
+    # The shared-worker resources in the chart carry no budget key, so a cell placed there would
+    # otherwise keep the 512Mi default even when the operator turned the matrix off.
+    _settings_env(monkeypatch, {})
+    monkeypatch.setenv("CELLCTL_CELL_PASSAGE_MATRIX_BUDGET", "0Mi")
+    monkeypatch.setenv(
+        "CELLCTL_SHARED_WORKER",
+        json.dumps({
+            "mode": "selected", "cell_ids": ["aaaaaaaaaaaaaaaa"], "profile": "qualified-test",
+            "topology_key": "topology.kubernetes.io/zone", "topology_value": "test-zone",
+            "occupancy": 2, "reserve_cpu": "0", "reserve_memory": "0",
+            "resources": {"cpu_request": "1", "cpu_limit": "2", "memory_request": "2Gi",
+                          "memory_limit": "3Gi"},
+        }),
+    )
+    resources, _placement = main.build_cluster_config().workload_for_cell("aaaaaaaaaaaaaaaa")
+    assert resources.passage_matrix_budget == "0Mi"
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -51,6 +70,8 @@ def test_an_ordinary_model_env_loads(monkeypatch) -> None:
         "EXOMEM_JWT_SIGNING_KEY",
         "EXOMEM_WRITER_LEASE_URL",
         "EXOMEM_OAUTH_STORAGE_TOKEN",
+        # Chart-wide, it would enable erasure in every owner's cell.
+        "EXOMEM_SOURCE_ERASURE_POLICY",
         "exomem_embed_backend",
         "BAD NAME",
     ],

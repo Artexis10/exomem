@@ -3,7 +3,7 @@
 Drives the actual ASGI app (build_server + TestClient) against a throwaway vault:
   1. /upload an image with text in it  → server OCRs it (Tesseract) → find by that text
   2. /upload a textless red image       → server CLIP-embeds it    → find "a red square"
-  3. /upload a text PDF                  → server reads it (PyMuPDF) → find by that text
+  3. /upload a text PDF                  → server reads it (PDFium) → find by that text
   4. /download one of them back          → bytes match (scoped token)
 Proves the bytes path (no base64), server-side transduction, first-class media find,
 CLIP visual search, and the /download reverse channel — all wired together.
@@ -48,7 +48,9 @@ def _wait(predicate, *, timeout=120.0, what="condition", explain=None):
 
 
 def _missing_dependencies() -> list[str]:
-    modules = ("PIL", "fitz", "faster_whisper", "sentence_transformers", "av")
+    from exomem.media_types import PDF_READERS
+
+    modules = ("PIL", *PDF_READERS, "faster_whisper", "sentence_transformers", "av")
     missing = [name for name in modules if importlib.util.find_spec(name) is None]
     missing.extend(name for name in ("tesseract", "espeak", "ffmpeg") if not shutil.which(name))
     return missing
@@ -168,12 +170,12 @@ def _lanes(vault: Path, client) -> int:
     print("  [2] textless image -> found by CLIP visual match  PASS")
 
     # ---- 3. PDF text ----
-    import fitz
-    doc = fitz.open()
-    page = doc.new_page()
-    page.insert_text((72, 72), "MEDICAL REPORT cardiology consult Dr Avery 2026")
-    pdf_bytes = doc.tobytes()
-    doc.close()
+    sys.path.insert(0, str(REPO / "tests"))
+    from _identity_pdf import make_pdf  # the one PDF writer the repository's tests use
+
+    pdf_bytes = make_pdf(
+        vault.parent / "report.pdf", ["MEDICAL REPORT cardiology consult Dr Avery 2026"]
+    ).read_bytes()
     post("report.pdf", pdf_bytes, "application/pdf", "Smoke", "03")
     pdf_sidecar = vault / "Knowledge Base/Evidence/Smoke/03/report.pdf.md"
     _wait(
@@ -185,7 +187,7 @@ def _lanes(vault: Path, client) -> int:
     assert "cardiology" in pdf_sidecar.read_text("utf-8").lower(), "PDF text not extracted"
     _wait(lambda: found("cardiology consult", "keyword", "report.pdf.md"),
           what="find to surface the PDF")
-    print("  [3] PDF text -> extracted (PyMuPDF) & searchable   PASS")
+    print("  [3] PDF text -> extracted (PDFium) & searchable   PASS")
 
     # ---- 4. /download reverse channel (scoped token) ----
     from exomem.governance.principal import OWNER_AUDIENCE

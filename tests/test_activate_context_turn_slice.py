@@ -71,9 +71,11 @@ def test_the_slice_lists_what_the_turn_reached(vault: Path) -> None:
     assert packet["budget"]["used_chars"] <= packet["budget"]["limit_chars"]
 
 
-def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path) -> None:
+def test_an_irrelevant_turn_gets_an_empty_slice_and_the_same_map(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The turn changes the slice alone: not the map, its generation or the continuity token."""
     _structured(vault)
+    # The fixture's collection would list a catalogue and point this turn at it; this test is about the slice's moves.
+    monkeypatch.setenv("EXOMEM_ACTIVATION_SKILLS", "off")
     resolving = _activate(vault, turn=SLED_TURN)
     irrelevant = _activate(vault, turn=IRRELEVANT_TURN)
     blank = _activate(vault, turn="")
@@ -283,7 +285,7 @@ def test_a_slice_with_no_record_is_replaced_and_leaves_the_map(vault: Path) -> N
     assert guarded["turn_slice"] == {"state": "unavailable", "items": []}
     assert guarded["map"] == compiled_map and not guarded.get("abstained")
     assert guarded["budget"]["used_chars"] == context_views.packet_chars(
-        compiled_map, guarded.get("turn_slice"), guarded.get("task_context"), guarded.get("stance"), guarded.get("next_action"),
+        compiled_map, guarded.get("turn_slice"), guarded.get("task_context"), guarded.get("next_action"),
     )
 
 
@@ -329,7 +331,7 @@ def test_a_slice_that_cannot_be_built_keeps_the_map(vault: Path, monkeypatch: py
     assert failed["turn_slice"]["state"] == "unavailable" and failed["turn_slice"]["items"] == []
     assert failed["map"] == expected["map"]
     assert failed["continuity"] == expected["continuity"]
-    assert failed["budget"]["used_chars"] == _capture_chars(failed) + context_views.packet_chars(failed["map"], failed.get("turn_slice"), failed.get("task_context"), failed.get("stance"), failed.get("next_action"))
+    assert failed["budget"]["used_chars"] == _capture_chars(failed) + context_views.packet_chars(failed["map"], failed.get("turn_slice"), failed.get("task_context"), failed.get("next_action"))
 
 
 def test_a_compile_that_abstains_inside_serve_is_an_unavailable_slice(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -649,9 +651,11 @@ def test_a_budget_too_small_for_one_slice_line_holds_none_of_it_back(vault: Path
     monkeypatch.setenv("EXOMEM_ACTIVATION_TURN_SLICE", "off")
     _cold()
     alone = _activate(vault, turn=SLED_TURN, max_chars=500)
-    assert alone["map"].get("overflow")  # the control: the map has more than it can list, so a smaller budget lists less
+    # The task share is half the budget, so at the smallest size what it leaves cannot
+    # list a map line either; the slice still compiles into exactly what the map gets.
     assert sliced["turn_slice"]["state"] == "skipped" and sliced["turn_slice"]["items"] == []
     assert sliced["map"] == alone["map"]
+    assert sliced["budget"]["used_chars"] <= sliced["budget"]["limit_chars"]
 
 
 @pytest.mark.parametrize("max_chars", [500, 1000, 2000, 4000])
@@ -662,7 +666,7 @@ def test_the_packet_stays_within_its_limit_at_every_budget(vault: Path, max_char
         packet = _activate(vault, caller, turn=NAMING_TURN, max_chars=max_chars)
         used, limit = packet["budget"]["used_chars"], packet["budget"]["limit_chars"]
         assert limit == max_chars and used <= limit
-        assert used == _capture_chars(packet) + context_views.packet_chars(packet["map"], packet["turn_slice"], packet.get("task_context"), packet.get("stance"), packet.get("next_action"))
+        assert used == _capture_chars(packet) + context_views.packet_chars(packet["map"], packet["turn_slice"], packet.get("task_context"), packet.get("next_action"))
 
 
 def test_the_setting_off_preserves_independent_task_context(vault: Path, monkeypatch: pytest.MonkeyPatch, caplog) -> None:
@@ -674,7 +678,7 @@ def test_the_setting_off_preserves_independent_task_context(vault: Path, monkeyp
     off = _activate(vault, turn=SLED_TURN, include_timings=True)
     assert "turn_slice" not in off
     assert not any(stage.startswith("working_set.lexical") for stage in off["timings"]["stages"])
-    assert off["budget"]["used_chars"] == _capture_chars(off) + context_views.packet_chars(off["map"], None, off.get("task_context"), off.get("stance"), off.get("next_action"))
+    assert off["budget"]["used_chars"] == _capture_chars(off) + context_views.packet_chars(off["map"], None, off.get("task_context"), off.get("next_action"))
     assert off["map"] == with_slice["map"]
     # An invalid value is not the rollback: it serves the slice and says so once.
     monkeypatch.setattr(working_set_runtime, "_SLICE_WARNING_EMITTED", False)

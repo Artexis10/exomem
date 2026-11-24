@@ -17,7 +17,7 @@ from urllib.parse import unquote
 
 from . import call_spans, foreground_priority, reserved_paths, state_paths
 from . import vault as vault_module
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_split
 
 if TYPE_CHECKING:
     from .pending_recall import ReferenceProjection
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 # Cached negative rows must rebuild when frontmatter recognition changes.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
 _REFERENCE_REBUILD_LOCK = threading.Lock()
@@ -43,7 +43,8 @@ def _sqlite_connect_owned(
     return sqlite3.connect(database, *args, **kwargs)
 
 
-@dataclass(frozen=True)
+# Not frozen: contextlib assigns __traceback__ when an exception leaves a generator context manager.
+@dataclass(eq=False)
 class ReferenceError(Exception):
     code: str
     reason: str
@@ -114,6 +115,14 @@ def parse_memory_ref(value: str) -> str | None:
     if not raw.lower().startswith(REF_PREFIX):
         return None
     return normalize_id(raw[len(REF_PREFIX) :])
+
+
+def canonical_memory_ref(value: str) -> str:
+    """`value` unchanged when it is already a canonical memory ref; a ValueError otherwise."""
+    identity = parse_memory_ref(value)
+    if identity is None or memory_ref(identity) != value:
+        raise ValueError("memory_ref_not_canonical")
+    return value
 
 
 def ref_from_markdown(markdown: str) -> str | None:
@@ -278,10 +287,10 @@ def _managed_runtime() -> bool:
 def _sidecar_prefix() -> str:
     """The one prefix `rebuild_all` can reach, resolved at call time.
 
-    `kb_dirname()` is configurable per vault, so this cannot be a module
+    The managed root's name is configurable per vault, so this cannot be a module
     constant without freezing the first vault a process sees.
     """
-    return f"{kb_dirname()}/"
+    return managed_join("")
 
 
 def _decline_if_managed(vault_root: Path) -> None:
@@ -497,11 +506,16 @@ class ReferenceIndex:
         # A full corpus scan. Exact receipts exist so an ordinary governed
         # write never moves this counter.
         freshness.note_custody_rebuild(_CUSTODY_SEAM)
-        entries = _scan_pages(self.vault_root)
+        entries, priors = _scan_rows(self.vault_root)
         conn = self._connect()
         try:
             with conn:
                 conn.execute("DELETE FROM identities")
+                conn.execute("DELETE FROM prior_paths")
+                conn.executemany(
+                    "INSERT INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)",
+                    priors,
+                )
                 conn.execute(
                     "INSERT OR REPLACE INTO ref_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
@@ -530,6 +544,9 @@ class ReferenceIndex:
         if not self.available():
             self.rebuild_all()
             return
+        from . import relayout_record
+
+        relayout = relayout_record.load(self.vault_root)
         conn = self._connect()
         try:
             with conn:
@@ -538,7 +555,8 @@ class ReferenceIndex:
                     if rel is None:
                         continue
                     conn.execute("DELETE FROM identities WHERE path = ?", (rel,))
-                    row = _read_identity(self.vault_root, path)
+                    # An unreadable or missing page keeps no row, as `_read_identity` decides.
+                    row, raw = _identity_and_bytes(self.vault_root, path)
                     if row is not None:
                         conn.execute(
                             "INSERT INTO identities("
@@ -546,6 +564,11 @@ class ReferenceIndex:
                             ") VALUES (?, ?, ?, ?, ?)",
                             row,
                         )
+                    replace_prior_rows(
+                        conn,
+                        rel,
+                        prior_path_rows(rel, raw, relayout) if raw is not None else (),
+                    )
         finally:
             conn.close()
 
@@ -573,6 +596,9 @@ class ReferenceIndex:
             with conn:
                 conn.executemany(
                     "DELETE FROM identities WHERE path = ?", [(p,) for p in targets]
+                )
+                conn.executemany(
+                    "DELETE FROM prior_paths WHERE path = ?", [(p,) for p in targets]
                 )
         finally:
             conn.close()
@@ -681,12 +707,40 @@ class ReferenceIndex:
         own. No sidecar is read or rebuilt and no file is read to fill a miss, and the duplicate
         check spans every row the store holds.
         """
-        found = _from_store_identities(
-            self.vault_root, lambda conn: self._refs_from_connection(conn, wanted)[0]
-        )
+        found = _from_store_identities(self.vault_root, lambda conn: self._store_refs(conn, wanted))
         if found is not None:
             return found
         return self._refs_for_paths_from_sidecar(wanted, recall_reader=recall_reader)
+
+    def _store_refs(self, conn: sqlite3.Connection, wanted: list[str]) -> dict[str, str | None]:
+        """The refs of ``wanted`` from the store's identity rows at ``conn``'s snapshot.
+
+        A page whose derivation trails its stored bytes takes its ref from those bytes, by the rule
+        of ``_store_identity_owners``, so a read of a page saved a moment ago carries the page's own
+        ref and id, not one that names nothing once its rows arrive.
+        """
+        from .vault_store import derivation
+
+        underived = derivation.underived(conn)
+        lagging = [path for path in wanted if path in underived]
+        derived = [path for path in wanted if path not in underived]
+        refs = self._refs_from_connection(conn, derived)[0] if derived else {}
+        if not lagging:
+            return refs
+        ids: dict[str, str] = {}
+        for path in lagging:
+            raw = underived[path]
+            row = None if raw is None else identity_row(self.vault_root, path, raw)
+            identifier = None if row is None or row[4] != "valid" else row[1]
+            if identifier is not None:
+                ids[path] = identifier
+        owners = (
+            _owners_at(conn, self.vault_root, sorted(set(ids.values())), underived) if ids else {}
+        )
+        for path in lagging:
+            held = ids.get(path)
+            refs[path] = memory_ref(held) if held is not None and len(owners[held]) == 1 else None
+        return refs
 
     def _refs_for_paths_from_sidecar(
         self, wanted: list[str], *, recall_reader: bool = False
@@ -1272,6 +1326,31 @@ def resolve_identifier_read_only(vault_root: Path, value: str) -> str:
     return raw
 
 
+def identifier_resolver_read_only(
+    vault_root: Path, values: Iterable[Any]
+) -> Callable[[str], str]:
+    """`resolve_identifier_read_only` for each of `values`, over one identity census.
+
+    The memory refs among `values` resolve together (`paths_for_ids_read_only`), so naming many
+    pages by ref costs one census instead of one per ref. Any other value resolves as before.
+    """
+    root = Path(vault_root)
+    ids = {
+        memory_id
+        for value in values
+        if (memory_id := parse_memory_ref(str(value or "").strip())) is not None
+    }
+    owners = paths_for_ids_read_only(root, sorted(ids)) if ids else {}
+
+    def resolve(value: str) -> str:
+        memory_id = parse_memory_ref(str(value or "").strip())
+        if memory_id is not None and memory_id in owners:
+            return _one_owner(memory_id, list(owners[memory_id]))
+        return resolve_identifier_read_only(root, value)
+
+    return resolve
+
+
 def add_id_to_markdown(markdown: str, exomem_id: str | None = None) -> tuple[str, str]:
     """Add an identity without reserializing or reordering existing frontmatter."""
     fm, _body, fm_text = vault_module.parse_frontmatter(markdown)
@@ -1353,13 +1432,13 @@ def _backfill_candidates(vault_root: Path) -> Iterator[tuple[str, Path]]:
     from .vault_store import ownership as page_ownership
 
     root = Path(vault_root)
-    kb = root / kb_dirname()
+    kb = managed_root(root)
     if mode.store_mode_for_reads(root):
         try:
             with read.snapshot(root) as view:
                 # `rglob("*.md")` below matches the suffix case-sensitively; stored pages do too.
                 stored = {
-                    root / meta.path: meta.path for meta in view.pages(f"{kb_dirname()}/")
+                    root / meta.path: meta.path for meta in view.pages(managed_join(""))
                     if meta.path.endswith(".md") and is_scanned_page(meta.path)
                 }
         except connection.CollectionStoreError as error:
@@ -1575,10 +1654,10 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         for row in _scan_pages(vault_root)
     }
     if not index.path.exists():
-        return ([{"path": f"{kb_dirname()}/", "reason": "reference sidecar missing"}]
+        return ([{"path": managed_join(""), "reason": "reference sidecar missing"}]
                 if current else [])
     if not index.available():
-        return [{"path": f"{kb_dirname()}/", "reason": "reference sidecar incompatible"}]
+        return [{"path": managed_join(""), "reason": "reference sidecar incompatible"}]
     try:
         conn = index._connect_readonly()
         try:
@@ -1588,7 +1667,7 @@ def drift(vault_root: Path) -> list[dict[str, str]]:
         finally:
             conn.close()
     except (OSError, RuntimeError, sqlite3.Error) as exc:
-        return [{"path": f"{kb_dirname()}/", "reason": f"reference sidecar unreadable: {exc}"}]
+        return [{"path": managed_join(""), "reason": f"reference sidecar unreadable: {exc}"}]
     indexed = {
         str(path): (
             str(exomem_id) if exomem_id is not None else None,
@@ -1657,21 +1736,72 @@ def _from_store_identities(
 def _store_identity_owners(
     vault_root: Path, ids: Iterable[str]
 ) -> dict[str, tuple[str, ...]] | None:
-    """Every page that holds each normalized id, from the store; None outside store mode."""
-    wanted = list(dict.fromkeys(ids))
+    """Every page that holds each normalized id, from the store; None outside store mode.
 
-    def owners(conn: sqlite3.Connection) -> dict[str, tuple[str, ...]]:
-        found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
-        for start in range(0, len(wanted), REFS_QUERY_CHUNK):
-            chunk = wanted[start : start + REFS_QUERY_CHUNK]
-            for exomem_id, path in conn.execute(
-                "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
-                f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)}) "
-                "ORDER BY exomem_id, path",
-                chunk,
-            ):
+    A page whose derivation trails its stored bytes (``derivation.underived``) answers from those
+    bytes, by the rule that its drain applies (``identity_row``): a page that a failed delete left
+    with its row is not an owner, and one that a failed write gave an id is.
+    """
+    from .vault_store import derivation
+
+    wanted = list(dict.fromkeys(ids))
+    root = Path(vault_root)
+    return _from_store_identities(
+        vault_root, lambda conn: _owners_at(conn, root, wanted, derivation.underived(conn))
+    )
+
+
+def _owners_at(
+    conn: sqlite3.Connection, root: Path, wanted: list[str], underived: dict[str, bytes | None]
+) -> dict[str, tuple[str, ...]]:
+    """Every page at ``conn``'s snapshot that holds each id in ``wanted``, with the rows of the
+    ``underived`` pages taken from their stored bytes (``_store_identity_owners``)."""
+    found: dict[str, list[str]] = {identifier: [] for identifier in wanted}
+    for start in range(0, len(wanted), REFS_QUERY_CHUNK):
+        chunk = wanted[start : start + REFS_QUERY_CHUNK]
+        for exomem_id, path in conn.execute(
+            "SELECT exomem_id, path FROM identities "  # noqa: S608 - placeholders only
+            f"WHERE status = 'valid' AND exomem_id IN ({','.join('?' for _ in chunk)})",
+            chunk,
+        ):
+            if path not in underived:
                 found[str(exomem_id)].append(str(path))
-        return {identifier: tuple(paths) for identifier, paths in found.items()}
+    for path, raw in underived.items():
+        row = None if raw is None else identity_row(root, path, raw)
+        if row is not None and row[4] == "valid" and row[1] in found:
+            found[row[1]].append(path)
+    return {identifier: tuple(sorted(paths)) for identifier, paths in found.items()}
+
+
+def store_owners_by_prefix(vault_root: Path, prefix: str) -> tuple[str, ...] | None:
+    """Every well-formed id in the store that starts with ``prefix``; None outside store mode.
+
+    One read through the id index, with the rule of ``_store_identity_owners`` for a page whose
+    derivation trails its stored bytes, so a page saved a moment ago is found by its id at once.
+    """
+    from .vault_store import derivation
+
+    root = Path(vault_root)
+    # The first string after every one that starts with ``prefix``, for an index range.
+    end = prefix[:-1] + chr(ord(prefix[-1]) + 1)
+
+    def owners(conn: sqlite3.Connection) -> tuple[str, ...]:
+        underived = derivation.underived(conn)
+        found = {
+            str(exomem_id)
+            for exomem_id, path in conn.execute(
+                "SELECT exomem_id, path FROM identities "
+                "WHERE status = 'valid' AND exomem_id >= ? AND exomem_id < ?",
+                (prefix, end),
+            )
+            if path not in underived
+        }
+        for path, raw in underived.items():
+            row = None if raw is None else identity_row(root, path, raw)
+            identifier = None if row is None or row[4] != "valid" else row[1]
+            if identifier is not None and identifier.startswith(prefix):
+                found.add(identifier)
+        return tuple(sorted(found))
 
     return _from_store_identities(vault_root, owners)
 
@@ -1744,8 +1874,7 @@ def _relative_markdown(vault_root: Path, path: Path) -> str | None:
 
 def is_scanned_page(rel: str) -> bool:
     """Whether the reference scan reads this path: a Markdown page in the Knowledge Base."""
-    prefix = f"{kb_dirname()}/"
-    if not rel.startswith(prefix) or not rel.lower().endswith(".md"):
+    if managed_split(rel) is None or not rel.lower().endswith(".md"):
         return False
     return not vault_module.in_excluded_scan_dir(rel)
 
@@ -1760,14 +1889,64 @@ def create_identity_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_identities_exomem_id ON identities(exomem_id)"
     )
+    # Each prior path a live page claims, from its lineage and the relayout record. The stem
+    # column serves the resolver's prior-stem step; both lookups are indexed point reads.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS prior_paths ("
+        "prior_path TEXT NOT NULL, path TEXT NOT NULL, prior_stem TEXT NOT NULL, "
+        "PRIMARY KEY (prior_path, path))"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prior_paths_path ON prior_paths(path)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prior_paths_stem ON prior_paths(prior_stem)")
+
+
+#: A derived prior-path row: the prior path, the page that claims it, and the prior path's stem.
+PriorRow = tuple[str, str, str]
 
 
 def derive_identities(vault_root: Path, conn: sqlite3.Connection) -> None:
-    """Fill the empty ``identities`` table from the files, as a full sidecar rebuild does."""
+    """Fill the empty ``identities`` and ``prior_paths`` tables from the files, as rebuilds do."""
+    identities, priors = _scan_rows(vault_root)
     conn.executemany(
         "INSERT INTO identities(path, exomem_id, raw_id, source_hash, status) "
         "VALUES (?, ?, ?, ?, ?)",
-        _scan_pages(vault_root),
+        identities,
+    )
+    conn.executemany(
+        "INSERT INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)", priors
+    )
+
+
+def prior_stem(prior_path: str) -> str:
+    """The stem a bare link names a prior path by: its file name without `.md`."""
+    return vault_module.wikilink_page_key(prior_path.rsplit("/", 1)[-1])
+
+
+def prior_path_rows(rel: str, raw: bytes, relayout: Any | None) -> list[PriorRow]:
+    """The prior-path rows one page's bytes claim, with the relayout rows that claim for it.
+
+    A page the reference scan does not read, or whose bytes are not text, claims nothing.
+    """
+    from . import page_lineage
+
+    if not is_scanned_page(rel):
+        return []
+    # Without a relayout row, only the page's own lineage claims, so most pages skip the parse.
+    if not relayout and not page_lineage.may_hold_lineage(raw):
+        return []
+    fm, has_block = page_lineage.read_front_of_bytes(raw)
+    if not has_block and not relayout:
+        return []
+    claimed = page_lineage.iter_claims(rel, fm, normalize_id(fm.get(ID_FIELD)), relayout)
+    return [(prior, rel, prior_stem(prior)) for prior in claimed]
+
+
+def replace_prior_rows(conn: sqlite3.Connection, rel: str, rows: Iterable[PriorRow]) -> None:
+    """Replace the prior-path rows that ``rel`` claims; the caller owns the transaction."""
+    conn.execute("DELETE FROM prior_paths WHERE path = ?", (rel,))
+    conn.executemany(
+        "INSERT OR IGNORE INTO prior_paths(prior_path, path, prior_stem) VALUES (?, ?, ?)",
+        list(rows),
     )
 
 
@@ -1776,8 +1955,7 @@ _UNREADABLE = "unreadable"
 
 
 def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, str, str] | None:
-    row = _identity_or_unreadable(vault_root, path)
-    return None if row is not None and row[4] == _UNREADABLE else row
+    return _identity_and_bytes(vault_root, path)[0]
 
 
 def _identity_or_unreadable(
@@ -1787,19 +1965,26 @@ def _identity_or_unreadable(
     `_UNREADABLE` instead of None. None still means the scan reads no identity
     here: the page is not a member, or it is gone.
     """
+    return _observed_page(vault_root, path)[0]
+
+
+def _observed_page(
+    vault_root: Path, path: Path
+) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
+    """The identity row of one page (`_identity_or_unreadable`) and the bytes it was read from."""
     rel = _relative_markdown(vault_root, path)
     if rel is None:
-        return None
+        return None, None
     # Read first instead of checking `exists()`: from Python 3.14 `exists()`
     # returns False on PermissionError, which would turn an unreadable page
     # into a gone one.
     try:
         raw = path.read_bytes()
     except (FileNotFoundError, NotADirectoryError):
-        return None
+        return None, None
     except OSError:
-        return rel, None, "", "", _UNREADABLE
-    return _identity_from_bytes(rel, raw)
+        return (rel, None, "", "", _UNREADABLE), None
+    return _identity_from_bytes(rel, raw), raw
 
 
 def _identity_from_bytes(rel: str, raw: bytes) -> tuple[str, str | None, str, str, str]:
@@ -1852,7 +2037,39 @@ def replace_identity_row(
 
 
 def _scan_pages(vault_root: Path) -> list[tuple[str, str | None, str, str, str]]:
-    return _scan_directory(vault_root, Path(vault_root) / kb_dirname())
+    return _scan_directory(vault_root, managed_root(Path(vault_root)))
+
+
+def _scan_rows(
+    vault_root: Path,
+) -> tuple[list[tuple[str, str | None, str, str, str]], list[PriorRow]]:
+    """The identity and prior-path rows of every scanned page.
+
+    The identity rows come from `_scan_pages`, the one corpus census. The prior rows read each
+    page again; `prior_path_rows` parses only a page that may hold a lineage key
+    (`page_lineage.may_hold_lineage`), unless the vault holds a relayout record.
+    """
+    from . import relayout_record
+
+    root = Path(vault_root)
+    identities = _scan_pages(root)
+    relayout = relayout_record.load(root)
+    priors: list[PriorRow] = []
+    for row in identities:
+        try:
+            raw = (root / row[0]).read_bytes()
+        except OSError:
+            continue
+        priors.extend(prior_path_rows(row[0], raw, relayout))
+    return identities, priors
+
+
+def _identity_and_bytes(
+    vault_root: Path, path: Path
+) -> tuple[tuple[str, str | None, str, str, str] | None, bytes | None]:
+    """`_read_identity` and the bytes it read, so the prior-path rows need no second read."""
+    row, raw = _observed_page(vault_root, path)
+    return (None, None) if row is None or row[4] == _UNREADABLE else (row, raw)
 
 
 def _scan_directory(

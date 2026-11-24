@@ -323,6 +323,50 @@ item_schema:
     assert [record.identity.key for record in parsed.records] == ["json-1"]
 
 
+def test_a_stored_null_natural_key_part_keeps_a_file_collection_readable(tmp_path: Path) -> None:
+    # Treating null as an incomplete key on read would refuse every query of a collection that holds one such row.
+    from exomem.record_memory import record_memory
+
+    collection = tmp_path / "Knowledge Base/Records/Meters"
+    collection.mkdir(parents=True)
+    (collection / "readings.json").write_text(
+        '[{"reading_id": "m-1", "meter": "north", "value": 1}, {"reading_id": "m-2", "meter": null, "value": 2}]',
+        encoding="utf-8",
+    )
+    (collection / "_collection.md").write_text(
+        """---
+type: collection
+exomem_id: 6a1f0c3e-52b4-4f0e-8d7a-2c9e1b5d4a70
+title: Meter readings by meter
+semantic_profile: records
+collection_version: 1
+schema_version: 1
+lifecycle: active
+storage:
+  strategy: dataset
+  source: readings.json
+  format_version: 1
+item_schema:
+  natural_key: [reading_id, meter]
+  fields:
+    reading_id:
+      type: string
+      required: true
+    meter:
+      type: string
+    value:
+      type: number
+      required: true
+---
+""",
+        encoding="utf-8",
+    )
+
+    result = record_memory(tmp_path, "query", collection="Knowledge Base/Records/Meters/_collection.md")
+
+    assert sorted(row["reading_id"] for row in result["rows"]) == ["m-1", "m-2"]
+
+
 def test_query_collection_has_bounded_snapshot_continuations_and_derived_renderers(
     tmp_path: Path,
 ) -> None:

@@ -6,6 +6,7 @@ import json
 import os
 from typing import Any
 
+import httpx
 import pytest
 from sse_starlette.sse import AppStatus
 
@@ -369,3 +370,6 @@ def test_managed_worker_socket_preserves_public_auth_intent(fake_mcp, monkeypatc
     assert call["stateless_http"] is True
     assert call["host"] == "0.0.0.0"
     assert call["uvicorn_config"]["uds"] == str(socket_path)
+    # The supervisor pools this socket's connections for httpx's default expiry; a worker
+    # that closes them no later races each reuse and the caller gets a spurious 503.
+    assert call["uvicorn_config"]["timeout_keep_alive"] > httpx.Limits().keepalive_expiry

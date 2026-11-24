@@ -21,13 +21,13 @@ import pytest
 from test_collection_store_schema import _populated
 from test_collection_store_writer import CID, manifest_path, manifest_text
 from test_collection_store_writer import store as store
+from test_query_engine_legacy_sql import engine_result
 from test_records_bulk_upsert import EVIDENCE, _evidence
 
 from exomem import query_data
-from exomem.collection_store import connection, schema, tokens, views
+from exomem.collection_store import chain, connection, schema, tokens, views
 from exomem.collection_store.reader import StoreAdapter
-from exomem.query_engine import legacy, runtime
-from exomem.query_engine import sqlite as legacy_sql
+from exomem.query_engine import runtime
 from exomem.query_engine.scalars import scalar_key
 from exomem.query_engine.validation import normalize_query
 
@@ -97,10 +97,7 @@ def typed_page(store, *, select, order_by=None):
 
 
 def legacy_read(store, **arguments):
-    with runtime.read_session(store.root, store.handle.path) as session:
-        admitted = session.admit(CID)
-        plan = legacy.normalize(columns_available=admitted.fields, **arguments)
-        return legacy_sql.execute_legacy(admitted, plan, path="source", format="markdown-items").as_dict()
+    return engine_result(store, **arguments).as_dict()
 
 
 def history(store, row_id):
@@ -233,6 +230,23 @@ def test_typed_history_and_spine_abort_update_and_delete(store):
         f"SELECT * FROM {layout.version_table}").fetchall()) == before  # noqa: S608
 
 
+def test_a_typed_payload_that_no_longer_hashes_to_its_effect_is_an_integrity_error(store):
+    """The set-based effect check still decodes each stored typed payload and rehashes it."""
+    create(store)
+    assert migrate(store) == "ready"
+    bulk(store, {"title": "One", "amount": 1}, {"title": "Two", "amount": 2})
+    layout = typed().ready_layout(store.connection, CID)
+    assert store.inspect_collection(CID)["audit"]["status"] == "ok"
+    for (trigger,) in store.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                                               "AND tbl_name=? AND sql LIKE '%BEFORE UPDATE%'",
+                                               (layout.version_table,)).fetchall():
+        store.connection.execute(f'DROP TRIGGER "{trigger}"')
+    store.connection.execute(f"UPDATE {layout.version_table} SET body='altered outside the writer' "  # noqa: S608
+                             "WHERE row_id=(SELECT max(row_id) FROM items)")
+    with pytest.raises(chain.StoreChainError, match="immutable version differs from its audit effect"):
+        store.inspect_collection(CID)
+
+
 def test_spine_refuses_orphan_sources_identities_and_payloads(store):
     """No source, identity or typed payload may exist without its own partner on the spine."""
     create(store)
@@ -272,14 +286,14 @@ def test_encoding_discriminator_is_checked_and_view_path_may_be_null(store):
     bulk(store, {"title": "One", "amount": 1})
     conn = store.connection
     for statement, message in (
-        ("UPDATE items SET values_json=NULL", "CHECK"),
-        ("UPDATE items SET encoding='typed-v1',values_json=NULL", "encoding"),
-        ("UPDATE items SET encoding='bson'", "encoding"),
+        ("UPDATE item_rows SET values_json=NULL", "CHECK"),
+        ("UPDATE item_rows SET encoding='typed-v1',values_json=NULL", "encoding"),
+        ("UPDATE item_rows SET encoding='bson'", "encoding"),
     ):
         with pytest.raises(sqlite3.IntegrityError, match=message), store.handle.transaction() as tx:
             tx.execute(statement)
     with pytest.raises(RuntimeError, match="rolled back"), store.handle.transaction() as tx:
-        tx.execute("UPDATE items SET view_path=NULL")
+        tx.execute("UPDATE item_rows SET view_path=NULL")
         raise RuntimeError("rolled back")
     assert migrate(store) == "ready"
     with pytest.raises(sqlite3.IntegrityError, match="encoding"), store.handle.transaction() as tx:
@@ -476,15 +490,21 @@ def test_existing_json_store_gains_the_spine_without_rewriting_history(tmp_path,
     writer = connection.open_writer(path, lease_check=lambda: True)
     try:
         row_id = _populated(writer)["row_id"]
-        old = {table: writer.connection.execute(f"SELECT * FROM {table}").fetchall()  # noqa: S608
-               for table in ("item_versions", "item_sources", "txns", "audit_effects")}
+        # Later schemas add columns with defaults; every column that the schema-4 rows hold keeps its bytes.
+        columns = {table: ",".join(name for (name,) in writer.connection.execute(
+                       "SELECT name FROM pragma_table_info(?)", (table,)))
+                   for table in ("item_versions", "item_sources", "txns", "audit_effects")}
+        old = {table: writer.connection.execute(f"SELECT {names} FROM {table}").fetchall()  # noqa: S608
+               for table, names in columns.items()}
         old_items = writer.connection.execute("SELECT * FROM items").fetchall()
     finally:
         writer.close()
     monkeypatch.undo()
     with connection.open_writer(path, lease_check=lambda: True) as upgraded:
         conn = upgraded.connection
-        assert {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in old} == old  # noqa: S608
+        assert {table: conn.execute(f"SELECT {names} FROM {table}").fetchall()  # noqa: S608
+                for table, names in columns.items()} == old
+        assert conn.execute("SELECT event_version FROM txns").fetchall() == [(1,)]
         assert [row[:-1] for row in conn.execute("SELECT * FROM items")] == old_items
         assert conn.execute("SELECT encoding FROM items").fetchall() == [("json-v1",)]
         assert conn.execute("SELECT * FROM version_identity").fetchall() == [

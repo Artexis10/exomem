@@ -29,11 +29,12 @@ import logging
 import os
 import posixpath
 import time
-from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -56,6 +57,7 @@ from . import (
     working_set_state,
 )
 from .governance import policy as governance_policy
+from .kbdir import managed_split
 from .runtime_resources import SEMANTIC_PREPARATION_BYTES as TASK_CORPUS_MAX_BYTES
 
 if TYPE_CHECKING:
@@ -63,7 +65,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-DEFAULT_BUDGET_CHARS = 4000
+DEFAULT_BUDGET_CHARS = 6000
 MIN_BUDGET_CHARS = 500
 MAX_BUDGET_CHARS = 8000
 #: The size a unit is designed to fit, and the ceiling past which it is not
@@ -95,9 +97,32 @@ MATERIAL_RESERVE_DIVISOR = 3
 UNIT_LANE_LIMIT = 200
 GRAPH_MAX_NODES = 24
 GRAPH_MAX_EDGES = 40
-GRAPH_TRAVERSAL_PROFILE = "epistemic"
-#: Outbound links one task candidate lists. A packet-shape bound like `MAX_ITEMS_PER_ROLE`: the rest are counted.
+GRAPH_TRAVERSAL_PROFILE = "recall"
+#: Ranked connections one task candidate lists. A packet-shape bound like `MAX_ITEMS_PER_ROLE`: the rest are counted.
 TASK_LINKS_PER_CANDIDATE = 5
+#: Ranked connections the `connections` role serves per resolved anchor, as `pointers[]`.
+GRAPH_CONNECTIONS_PER_ANCHOR = 4
+
+#: The relation registry's closed behaviour values, as `RELATION_BEHAVIOURS` declares them:
+#: these are the values `behaviours_of` returns that code branches on, never a
+#: relation key or family name. Tier 0 is a connection that corrects or settles
+#: the seed itself; tier 1 is the seed's sourcing; generic and associative
+#: edges (plain links included) take the last tier.
+# nosemgrep: ep-word-set -- the closed behaviour values the registry schema declares and this code implements
+_CONNECTION_TIER_ZERO_BEHAVIOURS: frozenset[str] = frozenset(
+    {"replaces", "corrects", "opposes", "settles"}
+)
+_CONNECTION_TIER_ONE_BEHAVIOUR = "sources"  # nosemgrep: ep-word-literal -- the registry's closed behaviour value for sourcing
+# nosemgrep: ep-word-set -- the closed behaviour values that drop a connection to the last tier
+_CONNECTION_LAST_TIER_BEHAVIOURS: frozenset[str] = frozenset(
+    {"associative", "plain_link"}
+)
+#: An inbound edge whose relation carries `replaces` names a newer page that
+#: replaced the seed, so it ranks before even the seed's own corrections.
+_CONNECTION_INBOUND_REPLACES_BEHAVIOUR = "replaces"  # nosemgrep: ep-word-literal -- closed registry behaviour value
+#: The most characters a connection's `why` may occupy, cut on a word boundary.
+CONNECTION_WHY_MAX_CHARS = 140
+_CONNECTION_WHY_SEPARATOR = ": "
 
 #: Entries the working-continuity block may carry, and the characters they may
 #: spend. Both are hard: the block leads every packet, including an abstained
@@ -604,6 +629,8 @@ def build_packet(
     promoted_used = 0
     order = _role_order(roles)
     material_roles = {str(role["id"]) for role in roles if role.get("lane") == "material"}
+    # A graph lane serves pointers by design: its pages are read, not cut for room.
+    pointer_roles = {str(role["id"]) for role in roles if role.get("lane") == "graph"}
     present_paths = {item.path for item in items if item.path}
     material_positions = {
         promoted: {order[item.role] for item in items
@@ -834,7 +861,7 @@ def build_packet(
                 previous_group = group
             if item.role in material_roles:
                 reserve = 0
-            if item.role in material_roles and item.level == "page":
+            if item.role in material_roles | pointer_roles and item.level == "page":
                 _defer(item, "requires_read")
                 continue
             text = bounded_text(item.text)
@@ -1213,6 +1240,7 @@ def run_lanes(
     neighbourhood: frozenset[str] | None = None,
     precedent_reach: Callable[[], tuple[frozenset[str], frozenset[str]]] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     reached: dict[str, set[str]] | None = None,
     analysis: Any = None,
     admit: Callable[[str, Any], bool] | None = None,
@@ -1259,7 +1287,7 @@ def run_lanes(
     material_scopes: dict[str, frozenset[str]] = {}
     if neighbourhood is None:
         neighbourhood = _neighbourhood_paths(
-            root, anchors, reached=reached, material_scopes=material_scopes,
+            root, anchors, reached=reached, material_scopes=material_scopes, visible=visible,
         )
     indexable = _store_indexable(root)
 
@@ -1316,6 +1344,7 @@ def run_lanes(
                     material_scopes=material_scopes,
                     request_anchors=request_anchors,
                     visible=visible,
+                    purpose=purpose,
                     status_basis=status_basis,
                     parent_reads=parent_reads,
                     request_segment=request_segment,
@@ -1480,10 +1509,12 @@ def task_candidates(
     snapshot: Any, limit: int,
     index_token: tuple[int, int, int] | None = None, projections: dict | None = None,
     timings: Any = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], Mapping[str, Any]]:
     """Independent bounded recall over catalogue carriers, never anchor evidence.
 
-    Each lane records a child span of `working_set.task_context`, so a slow recall names its stage.
+    Returns the leads, the missing reasons and the catalogue entries a lead's links may name, for
+    `attach_task_links` once the leads are projected. Each lane records a child span of
+    `working_set.task_context`, so a slow recall names its stage.
     """
     from . import (
         bm25,
@@ -1510,7 +1541,7 @@ def task_candidates(
                     entries.append(entry)
         except BudgetExhausted:
             # A prefix of the catalogue would quietly narrow the allowed set, so a stopped scan gives no lead.
-            return [], [{"role": "task_context", "reason": "budget"}]
+            return [], [{"role": "task_context", "reason": "budget"}], {}
     by_path = {entry.path: entry for entry in entries}
     from . import working_set_runtime
 
@@ -1569,11 +1600,14 @@ def task_candidates(
         query_text = working_set_runtime.content_words(query)
         if index_token is not None:
             with find_types.timing_span(timings, "working_set.task_context_routing"):
-                targets = _routing_targets(
+                targets = _routing_targets_or_none(
                     vault_root, index_token[1], index_token=index_token,
                     visible=(lambda path: path in allowed and metadata_full(path)) if restricted else caller.visible,
                 )
-                route = collection_claims.route(working_set_index.terms_of(query), targets)
+                if targets is None:
+                    # A collection the turn routes to is a lead; an unread manifest index is a failed lane, not no route.
+                    missing.append({"role": "task_context", "reason": "lane_failed"})
+                route = collection_claims.route(working_set_index.terms_of(query), targets or ())
             if route is not None:
                 add(str(route["collection"]), origin)
         if restricted:
@@ -1671,66 +1705,426 @@ def task_candidates(
             found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
         ]
     ordered = ordered[:limit]
-    if ordered and not restricted:
-        # Links are read for the candidates that will be served, so the agent sees what each lead points at
-        # and chooses what to follow; no neighbour page becomes a candidate by itself.
-        if budget_exhausted("working_set.task_context_links"):
-            missing.append({"role": "task_context", "reason": "budget"})
-        else:
-            try:
-                with find_types.timing_span(timings, "working_set.task_context_links"):
-                    links = _task_links(vault_root, ordered, by_path=by_path, visible=caller.visible)
-            except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
-                log.debug("task-context links unavailable", exc_info=True)
-                links = None
-            if links is None:
-                missing.append({"role": "task_context", "reason": "lane_failed"})
-            else:
-                for candidate in ordered:
-                    listed, omitted = links.get(candidate["source_ref"], ((), 0))
-                    if listed:
-                        candidate["links"] = list(listed)
-                    if omitted:
-                        candidate["links_omitted"] = omitted
-    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)]
+    # A restricted caller's leads list no links, so it gets no link targets.
+    link_targets: Mapping[str, Any] = {} if restricted else by_path
+    return ordered, [dict(pair) for pair in dict.fromkeys(tuple(item.items()) for item in missing)], link_targets
 
 
-def _task_links(
-    vault_root: Path, candidates: Sequence[Mapping[str, Any]], *, by_path: Mapping[str, Any],
-    visible: Callable[[str], bool] | None,
-) -> dict[str, tuple[list[dict[str, str]], int]] | None:
-    """Each candidate page's outbound links, typed relations first: `{page: (listed links, omitted count)}`.
+def attach_task_links(
+    vault_root: Path, candidates: Sequence[dict[str, Any]], *, link_targets: Mapping[str, Any], caller: Any,
+    timings: Any = None, target_paths: dict[str, str] | None = None,
+) -> list[str]:
+    """List each served lead's ranked connections on it, and return the task-context missing reasons of a skipped lookup.
 
-    One batched read of the graph owner's neighbour API, so the edge store stays its own. A link lists the
-    relation, the target's canonical ref and its title, never a body. `by_path` holds only the catalogue
-    pages this caller may see, so a target outside it is never named; `visible` is also passed to the
-    owner API, which re-resolves each link in the caller's view. Typed relations rank above plain links
-    by the registry's `plain_link` behaviour (the rule `find_candidates` uses for graph hits), never by
-    relation name; within a rank the owner API's order stands. Returns None while the graph cannot answer.
+    `target_paths`, when given, receives each listed link's `target_ref` mapped to its page path.
+
+    Links are read only for the leads that projection kept, and only with the time that projection left: a lead
+    without its links still serves the turn, but a link lookup that ran first could spend the deadline that
+    projection needed and drop every lead. No neighbour page becomes a candidate by itself.
+
+    A link carries `build_why`, not a `why`: the reason reads pages and the allowance serves about one link per
+    lead, so the caller builds a link's reason only when it first tries the link (see `context_task._reasoned`).
     """
-    from . import epistemic_graph
+    from . import find_types
+
+    def timed(build: Callable[[], str]) -> Callable[[], str]:
+        def run() -> str:
+            with find_types.timing_span(timings, "working_set.task_context_reasons"):
+                return build()
+
+        return run
+
+    if not candidates or not link_targets:
+        return []
+    if budget_exhausted("working_set.task_context_links"):
+        return ["budget"]
+    unread: set[str] = set()
+    try:
+        with find_types.timing_span(timings, "working_set.task_context_links"):
+            links = read_connections(
+                vault_root, [c["source_ref"] for c in candidates],
+                by_path=link_targets, visible=caller.visible, per_seed=TASK_LINKS_PER_CANDIDATE,
+                defer_why=True, purpose=caller.purpose, unread=unread,
+            )
+    except Exception:  # noqa: BLE001 - an unavailable graph does not discard independent recall
+        log.debug("task-context links unavailable", exc_info=True)
+        links = None
+    if links is None:
+        return ["lane_failed"]
+    for candidate in candidates:
+        listed, omitted = links.get(candidate["source_ref"], ((), 0))
+        if target_paths is not None:
+            target_paths.update((connection.target_ref, connection.target_path) for connection in listed)
+        if listed:
+            candidate["links"] = [
+                {
+                    "relation": connection.relation, "direction": connection.direction,
+                    "target_ref": connection.target_ref, "title": connection.title,
+                    "tier": connection.tier, "build_why": timed(connection.build_why),
+                }
+                for connection in listed
+            ]
+        if omitted:
+            candidate["links_omitted"] = omitted
+    # The links read stand; a page the graph could not interpret may author one more, so the lane is not the whole.
+    return ["lane_failed"] if unread else []
+
+
+@dataclass(frozen=True, slots=True)
+class Connection:
+    """One ranked graph connection of a seed page, ready to serve.
+
+    `relation` is the relation key, else its label, else "". `direction` is
+    relative to the seed. `tier` is the ranking the connection won by
+    (`_connection_tier`), kept so the served record can count what was offered.
+    """
+
+    relation: str
+    direction: str
+    target_path: str
+    target_ref: str
+    title: str
+    tier: int
+    why: str
+    #: Builds `why` on demand when `read_connections` defers it; `why` is then "".
+    build_why: Callable[[], str] | None = field(default=None, compare=False, repr=False)
+
+
+def _connection_tier(registry: Any, relation: str, *, generic: bool, typed: bool, direction: str) -> int:
+    """A connection's rank from closed registry attributes only (C4/C6)."""
+    from . import relation_registry
+
+    behaviours = registry.behaviours_of(relation)
+    if direction == "inbound" and relation_registry.has_behaviour(
+        behaviours, _CONNECTION_INBOUND_REPLACES_BEHAVIOUR
+    ):
+        return -1
+    if behaviours & _CONNECTION_TIER_ZERO_BEHAVIOURS:
+        return 0
+    if relation_registry.has_behaviour(behaviours, _CONNECTION_TIER_ONE_BEHAVIOUR):
+        return 1
+    if generic or not typed or behaviours & _CONNECTION_LAST_TIER_BEHAVIOURS:
+        return 3
+    return 2
+
+
+def _link_line(body: str, match: Any) -> str:
+    """The whole source line a wikilink match sits on."""
+    start = body.rfind("\n", 0, match.start()) + 1
+    end = body.find("\n", match.end())
+    return body[start:end if end != -1 else len(body)]
+
+
+def _connection_context(
+    vault_root: Path, body: str, *, other_rel: str, resolver: Any,
+    seen: Callable[[str], bool],
+) -> str | None:
+    """The body line holding a wikilink that resolves to `other_rel`, or None.
+
+    A line that also links a page the caller may not see returns None: its
+    prose could name that page, so the connection takes the target's lede.
+    `seen` is the caller's catalogue view — the same one `by_path` gates with.
+    `resolver` must be borrowed, never None: a None resolver builds a full-vault
+    one per call, which is how the activation path used to take minutes.
+    """
+    if resolver is None:
+        return None
+    from . import vault as vault_module
+
+    resolved: dict[str, Any] = {}
+
+    def _resolve(inner: str) -> Any:
+        if inner not in resolved:
+            _norm, _warning, resolved[inner] = vault_module._normalize_wikilink(
+                inner, vault_root, resolver=resolver, strict=False
+            )
+        return resolved[inner]
+
+    for match in vault_module.iter_body_wikilinks(body):
+        line = _link_line(body, match)
+        hit, withheld = False, False
+        for inner in vault_module.iter_body_wikilinks(line):
+            candidate = _resolve(inner.group(1))
+            if candidate is None:
+                # An unresolved link may name a page the caller's resolver never sees;
+                # the line is not provably free of withheld names, so it is not quoted.
+                withheld = True
+                continue
+            if candidate.path == other_rel:
+                hit = True
+            elif not seen(candidate.path):
+                withheld = True
+        if hit:
+            return None if withheld else line
+    return None
+
+
+def _links_released(vault_root: Path, text: str, *, resolver: Any, seen: Callable[[str], bool]) -> bool:
+    """Whether every wikilink in `text` resolves to a page the caller sees, so its display names may be shown."""
+    if resolver is None:
+        return False
+    from . import vault as vault_module
+
+    for match in vault_module.iter_body_wikilinks(text):
+        _norm, _warning, candidate = vault_module._normalize_wikilink(
+            match.group(1), vault_root, resolver=resolver, strict=False
+        )
+        if candidate is None or not seen(candidate.path):
+            return False
+    return True
+
+
+def _link_display_prose(vault_root: Path, text: str, *, resolver: Any) -> str:
+    """`text` with each wikilink shown as the name a reader sees: the alias, else the resolved
+    title, else the target's last path segment. Callers quote a line only once every link on
+    it resolves to a page the caller may see, so each rendered name is visible.
+    `resolver` must be borrowed, never None (see `_connection_context`)."""
+    if resolver is None:
+        return text
+    from . import vault as vault_module
+
+    pieces: list[str] = []
+    cursor = 0
+    for match in vault_module.iter_body_wikilinks(text):
+        inner = match.group(1)
+        _target, _separator, alias = inner.partition("|")
+        display = alias.strip()
+        if not display:
+            _norm, _warning, candidate = vault_module._normalize_wikilink(
+                inner, vault_root, resolver=resolver, strict=False
+            )
+            title = getattr(candidate, "display_title", None) if candidate is not None else None
+            display = str(title) if title else vault_module.split_wikilink_target(inner)[0].rsplit("/", 1)[-1]
+        pieces.append(text[cursor : match.start()])
+        pieces.append(display)
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
+def _connection_why(
+    vault_root: Path, *, relation: str, direction: str, authoring_rel: str,
+    target_rel: str, authoring_body: str | None, lede_body: str | None,
+    resolver: Any, seen: Callable[[str], bool],
+) -> str:
+    """`relation (direction): context`, at most CONNECTION_WHY_MAX_CHARS on a word boundary.
+
+    Both bodies arrive as the caller's prose, each egressed under the page it was read from,
+    so a line inside an origin carrier is never a quoted line and the lede holds no carrier.
+    """
+    from . import markdown_relations
+    from .governance import egress
+
+    context = ""
+    if authoring_body:
+        line = _connection_context(
+            vault_root, authoring_body, other_rel=target_rel, resolver=resolver, seen=seen
+        )
+        if line is not None:
+            # A bare relation bullet (`- derived_from [[X]]`) holds no prose beyond the
+            # link, so the target's lede stands for its context instead.
+            legacy = markdown_relations._LEGACY_RE.match(line)
+            bare = markdown_relations._CANONICAL_RE.match(line) is not None or (
+                legacy is not None and not line[legacy.end() :].strip()
+            )
+            if not bare:
+                marker = markdown_relations.bullet_marker_length(line)
+                # A bullet that is only links carries no prose of its own, so the lede stands in.
+                stripped = " ".join(egress.without_wikilinks(line[marker:]).split())
+                if stripped and stripped.casefold().rstrip(":") != relation.casefold():
+                    prose = " ".join(
+                        _link_display_prose(vault_root, line[marker:], resolver=resolver).split()
+                    )
+                    for mark in ".,;:!?":
+                        prose = prose.replace(f" {mark}", mark)
+                    context = egress.prose_for_caller(vault_root, prose, owner_path=authoring_rel)
+                    # As for the lede below: a code-span link keeps its raw name through the display pass,
+                    # so the line is not quoted and the lede stands in.
+                    if "[[" in context:
+                        context = ""
+    if not context and lede_body:
+        context = working_set_index.lede(lede_body)
+        # A lede link is shown by its display name only when it names a page the caller sees;
+        # otherwise the bare relation stands, so no path or withheld name reaches the reason.
+        # The wikilink opener is a fixed syntax token: the display pass renders only the links the
+        # body grammar reads, so a code-span link, or one the lede's cut left open, still holds it.
+        if "[[" in context:
+            context = (
+                " ".join(_link_display_prose(vault_root, context, resolver=resolver).split())
+                if _links_released(vault_root, context, resolver=resolver, seen=seen)
+                else ""
+            )
+            if "[[" in context:
+                context = ""
+    if not context:
+        return f"{relation} ({direction})"
+    # The release guard uses this protocol separator to recognize quoted reasons.
+    prefix = f"{relation} ({direction}){_CONNECTION_WHY_SEPARATOR}"
+    room = CONNECTION_WHY_MAX_CHARS - len(prefix)
+    if len(context) > room:
+        cut = context[: room + 1].rpartition(" ")[0]
+        context = cut or context[:room]
+    return prefix + context
+
+
+def packet_has_graph_quotes(packet: Mapping[str, Any]) -> bool:
+    """Whether the compiled packet includes prose from a graph pointer's page body."""
+    roles = {role["id"] for role in packet.get("roles", ()) if role.get("lane") == "graph"}
+    return bool(roles) and any(
+        pointer.get("role") in roles
+        and _CONNECTION_WHY_SEPARATOR in str(pointer.get("why") or "")
+        for pointer in packet.get("pointers") or ()
+    )
+
+
+def graph_quote_access(vault_root: Path, *, purpose: str | None) -> bool:
+    """Use one source-access decision for this invocation's cache and graph compilation."""
+    from .governance import egress, principal
+
+    record = principal.invocation_served()
+    who = principal.effective_principal()
+    key = ("graph_quote_access", Path(vault_root), who, purpose)
+    if record is None:
+        return egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    if key not in record:
+        record[key] = egress.unrestricted_source_access(vault_root, purpose=purpose, principal=who)
+    return record[key]
+
+
+def read_connections(
+    vault_root: Path,
+    seeds: Sequence[str],
+    *,
+    by_path: Mapping[str, Any],
+    visible: Callable[[str], bool] | None,
+    per_seed: int,
+    defer_why: bool = False,
+    purpose: str | None = None,
+    quote_prose: bool | None = None,
+    unread: set[str] | None = None,
+) -> dict[str, tuple[list[Connection], int]] | None:
+    """Each seed's ranked connections, `{seed: (served[:per_seed], omitted count)}`; None while the graph cannot answer.
+
+    `unread`, when given, receives the admitted pages whose selected interpretation the graph could not read for
+    this lookup: an edge such a page authors may be missing from the connections served.
+
+    One batched read of the graph owner's neighbour API in BOTH directions, so the
+    edge store stays its own. A connection lists the relation, the direction, the
+    target's canonical ref and title, its ranking tier and a `why` — never a body.
+    `by_path` holds only the catalogue pages this caller may see, so a target
+    outside it is never named; `visible` is also passed to the owner API, which
+    re-resolves each edge in the caller's view. Ranking reads closed registry
+    attributes (`behaviours`, `generic`) and the open planning class, never a
+    relation key or family name; within a rank the owner API's order stands.
+    The `why` reads pages. A caller that serves fewer connections than it reads sets
+    `defer_why`, and each connection then carries `build_why` instead, to call once
+    for a connection it is about to serve.
+    """
+    from . import epistemic_graph, find, find_corpus, planning_values, relation_registry
+    from .governance import egress
 
     # A request never stacks the O(corpus) cold proof of an inherited sidecar (#1454), as in the find graph lane.
     index = epistemic_graph.EpistemicGraphIndex(vault_root, prove_cold_snapshots=epistemic_graph.SINGLE_FLIGHT)
     if not index.available():
         return None
-    ranked: dict[str, dict[str, tuple[int, int, str]]] = {}
-    for position, neighbor in enumerate(index.neighbors_for([c["source_ref"] for c in candidates], keep=visible)):
-        if neighbor.direction != "outbound" or neighbor.other_rel not in by_path:
+    registry = relation_registry.load_registry(vault_root)
+    plans = planning_values.PlanningValues(Path(vault_root))
+    open_planning: dict[str, bool] = {}
+
+    def _open(target: str) -> bool:
+        if target not in open_planning:
+            status = str(getattr(by_path[target], "status", "") or "").strip().lower()
+            try:
+                open_planning[target] = plans.planning_class(status) == "open"
+            except Exception:  # noqa: BLE001 - an unreadable registry ranks no target first
+                open_planning[target] = False
+        return open_planning[target]
+
+    # Per seed, one entry per target keeps its best-ranked edge.
+    ranked: dict[str, dict[str, tuple[int, int, int, Connection]]] = {}
+    try:
+        neighbors = index.neighbors_for(list(seeds), keep=visible, refuse_unavailable=True, unread=unread)
+    except epistemic_graph.GraphSnapshotUnavailable:
+        # The availability check passed, then the snapshot refused: the graph cannot answer, as when it is unavailable.
+        return None
+    for position, neighbor in enumerate(neighbors):
+        target = str(neighbor.other_rel)
+        if target == neighbor.seed_rel or target not in by_path:
             continue
-        tier = 0 if neighbor.typed else 1
-        relation = neighbor.relation_type or neighbor.relation_label or ""
-        # One line per target: when a typed relation and a plain link reach the same page, the typed one names it.
+        direction = str(neighbor.direction)
+        relation = str(neighbor.relation_type or neighbor.relation_label or "")
+        tier = _connection_tier(
+            registry, str(neighbor.relation_type or ""), generic=registry.is_generic(relation) if relation else False,
+            typed=bool(neighbor.typed), direction=direction,
+        )
+        key = (tier, 0 if _open(target) else 1, position)
+        entry = by_path[target]
+        connection = Connection(
+            relation=relation,
+            direction=direction,
+            target_path=target,
+            target_ref=str(getattr(entry, "ref", None) or target),
+            title=str(getattr(entry, "title", "") or ""),
+            tier=tier,
+            why="",
+        )
         best = ranked.setdefault(neighbor.seed_rel, {})
-        if neighbor.other_rel not in best or (tier, position) < best[neighbor.other_rel][:2]:
-            best[neighbor.other_rel] = (tier, position, relation)
-    result: dict[str, tuple[list[dict[str, str]], int]] = {}
+        if target not in best or key < best[target][:3]:
+            best[target] = (*key, connection)
+    if not ranked:
+        return {}
+    # A reason can quote from anywhere in a body. Callers who need a page projection
+    # get a pointer and the relation, and can open the page through its release boundary.
+    if quote_prose is None:
+        quote_prose = egress.unrestricted_source_access(vault_root, purpose=purpose)
+    resolver = find.borrow_query_resolver(Path(vault_root), visible) if quote_prose else None
+    seed_paths = set(seeds)
+
+    def _seen(rel: str) -> bool:
+        """The catalogue view under the caller's predicate, plus the seeds a line may name."""
+        return rel in seed_paths or (rel in by_path and (visible is None or visible(rel)))
+
+    def _body(rel: str) -> str | None:
+        """The page's prose for this caller, egressed under the path it was read from."""
+        page = find_corpus.CACHE.get(Path(vault_root) / rel, Path(vault_root))
+        if page is None:
+            return None
+        return egress.prose_for_caller(Path(vault_root), str(page.body or ""), owner_path=rel)
+
+    def _reason(seed: str, connection: Connection) -> str:
+        bare = f"{connection.relation} ({connection.direction})"
+        if not quote_prose or budget_exhausted("working_set.connection_why"):
+            # The connection still serves; only the context clause goes unfilled.
+            return bare
+        authoring_rel = seed if connection.direction == "outbound" else connection.target_path
+        target_rel = connection.target_path if connection.direction == "outbound" else seed
+        try:
+            authoring_body = _body(authoring_rel)
+            lede_body = authoring_body if authoring_rel == connection.target_path else _body(connection.target_path)
+            return _connection_why(
+                Path(vault_root), relation=connection.relation, direction=connection.direction,
+                authoring_rel=authoring_rel, target_rel=target_rel,
+                authoring_body=authoring_body, lede_body=lede_body,
+                resolver=resolver, seen=_seen,
+            )
+        except egress.ReaderViewUnavailable:
+            raise
+        except Exception:  # noqa: BLE001 - a failed context read never costs the connection
+            return bare
+
+    def _serve(seed: str, ordered: list[tuple[int, int, int, Connection]]) -> list[Connection]:
+        out: list[Connection] = []
+        for _tier, _open_flag, _position, connection in ordered:
+            if defer_why:
+                out.append(replace(connection, build_why=partial(_reason, seed, connection)))
+            else:
+                out.append(replace(connection, why=_reason(seed, connection)))
+        return out
+
+    result: dict[str, tuple[list[Connection], int]] = {}
     for seed, targets in ranked.items():
-        ordered = sorted(targets.items(), key=lambda pair: pair[1][:2])
-        result[seed] = ([
-            {"relation": relation, "target_ref": by_path[target].ref or target, "title": by_path[target].title}
-            for target, (_tier, _position, relation) in ordered[:TASK_LINKS_PER_CANDIDATE]
-        ], max(0, len(ordered) - TASK_LINKS_PER_CANDIDATE))
+        ordered = [value for _target, value in sorted(targets.items(), key=lambda pair: pair[1][:3])]
+        result[seed] = (_serve(seed, ordered[:per_seed]), max(0, len(ordered) - per_seed))
     return result
 
 
@@ -1874,8 +2268,12 @@ def _store_indexable(vault_root: Path) -> Callable[[str], bool] | None:
 def _neighbourhood_paths(
     vault_root: Path, anchors: Sequence[Any], *, reached: dict[str, set[str]] | None = None,
     material_scopes: dict[str, frozenset[str]] | None = None,
+    visible: Callable[[str], bool] | None = None,
 ) -> frozenset[str]:
-    """Anchor paths plus their typed neighbours, at the depth each status allows."""
+    """Anchor paths plus their typed neighbours, at the depth each status allows.
+
+    A page the reader cannot see is never a hop: otherwise the reach through it would show it exists.
+    """
     paths: set[str] = set()
     for anchor in anchors:
         depth = graph_depth_for(getattr(anchor, "status", "unresolved"))
@@ -1887,7 +2285,7 @@ def _neighbourhood_paths(
         if depth >= 2:
             if budget_exhausted("working_set.graph"):
                 raise BudgetExhausted("working_set.graph")
-            mine.update(_graph_neighbours(vault_root, path, depth=depth))
+            mine.update(_graph_neighbours(vault_root, path, depth=depth, keep=visible))
         paths.update(mine)
         if material_scopes is not None:
             material_scopes[working_set_state._anchor_ref(anchor)] = frozenset(mine)
@@ -1896,7 +2294,9 @@ def _neighbourhood_paths(
     return frozenset(paths)
 
 
-def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[str]:
+def _graph_neighbours(
+    vault_root: Path, path: str, *, depth: int, keep: Callable[[str], bool] | None = None,
+) -> frozenset[str]:
     if not path or not path.endswith(".md"):
         return frozenset()
     try:
@@ -1909,6 +2309,7 @@ def _graph_neighbours(vault_root: Path, path: str, *, depth: int) -> frozenset[s
             max_nodes=GRAPH_MAX_NODES,
             max_edges=GRAPH_MAX_EDGES,
             traversal_profile=GRAPH_TRAVERSAL_PROFILE,
+            keep=keep,
             # Activation consumes nodes, never unavailable-graph diagnostics.
             include_lag=False,
         )
@@ -1940,6 +2341,7 @@ def _lane(
     material_scopes: Mapping[str, frozenset[str]] | None = None,
     request_anchors: Sequence[Any] | None = None,
     visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     parent_reads: UnitParentReads | None = None,
     request_segment: str = "turn",
@@ -1988,7 +2390,9 @@ def _lane(
     if role.lane == "entity":
         return LaneResult(_entity_lane(vault_root, role, anchors=anchors))
     if role.lane == "graph":
-        return LaneResult(_graph_lane(role, anchors=anchors, neighbourhood=neighbourhood))
+        return LaneResult(
+            _graph_lane(vault_root, role, anchors=anchors, visible=visible, purpose=purpose)
+        )
     if role.lane == "evidence":
         return LaneResult(_evidence_lane(role, neighbourhood=neighbourhood))
     return LaneResult(())
@@ -2545,35 +2949,76 @@ def _entity_lane(
 
 
 def _graph_lane(
+    vault_root: Path,
     role: context_roles.ContextRole,
     *,
     anchors: Sequence[Any],
-    neighbourhood: Collection[str] | None = None,
+    visible: Callable[[str], bool] | None = None,
+    purpose: str | None = None,
 ) -> tuple[LaneItem, ...]:
-    """Typed neighbours as pointers. A neighbour's BODY belongs to another lane.
+    """Each resolved anchor's ranked connections as pointers. A target's BODY belongs to another lane.
 
-    `neighbourhood` is the caller's visible neighbourhood: a withheld page must
-    not take one of the GRAPH_MAX_NODES slots before the guard runs.
+    Titles and refs resolve through the catalogue view the task path uses, under
+    the caller's view, so a page the caller may not see never takes a slot. An
+    unanswering graph serves no connections rather than failing the role.
     """
+    from . import context_catalogue, context_views
+
+    seeds = [
+        str(getattr(anchor, "path", "") or "")
+        for anchor in anchors
+        if getattr(anchor, "status", "") == "resolved"
+        and str(getattr(anchor, "path", "") or "").endswith(".md")
+    ]
+    if not seeds:
+        return ()
+    if budget_exhausted("working_set.graph_connections"):
+        return ()
+    indexable = _store_indexable(vault_root)
+    catalogue = context_catalogue.ContextCatalogue(Path(vault_root))
+    by_path = {
+        entry.path: entry
+        for entry in catalogue.task_entries()
+        if entry.path
+        and context_views._admits(entry, visible)
+        and (indexable is None or indexable(entry.path))
+    }
+    if not by_path:
+        return ()
+    try:
+        connections = read_connections(
+            vault_root, seeds,
+            by_path=by_path, visible=visible, per_seed=GRAPH_CONNECTIONS_PER_ANCHOR,
+            quote_prose=graph_quote_access(vault_root, purpose=purpose),
+        )
+    except Exception:  # noqa: BLE001 - the graph lane is optional by contract
+        log.debug("activation graph connections failed", exc_info=True)
+        return ()
+    if connections is None:
+        return ()
     out: list[LaneItem] = []
-    for anchor in anchors:
-        mine = getattr(anchor, "neighbourhood", ()) or ()
-        if neighbourhood is not None:
-            mine = [path for path in mine if path in neighbourhood]
-        for neighbour in sorted(mine)[:GRAPH_MAX_NODES]:
+    anchor_ref_of = {
+        str(getattr(anchor, "path", "") or ""): str(
+            getattr(anchor, "ref", None) or getattr(anchor, "path", "")
+        )
+        for anchor in anchors
+    }
+    for seed in seeds:
+        listed, _omitted = connections.get(seed, ((), 0))
+        for connection in listed:
             out.append(
                 LaneItem(
                     role=role.id,
                     level="page",
-                    ref=str(neighbour),
-                    path=str(neighbour),
-                    title=str(neighbour).rsplit("/", 1)[-1].removesuffix(".md"),
+                    ref=connection.target_ref,
+                    path=connection.target_path,
+                    title=connection.title,
                     text="",
                     lifecycle="active",
                     updated="",
-                    anchor=str(getattr(anchor, "ref", None) or getattr(anchor, "path", "")),
+                    anchor=anchor_ref_of.get(seed, seed),
                     provenance={"source": "graph"},
-                    why="typed neighbour of a resolved anchor",
+                    why=connection.why,
                 )
             )
     return tuple(out)
@@ -2751,7 +3196,7 @@ def signature_evidence(
     if not band_audience_allowed(index.vault_root):
         return {}, "audience_restricted", None
     try:
-        from . import embeddings, ranking_config, readiness, runtime_resources
+        from . import embeddings, ranking_config, readiness, runtime_resources, working_set_runtime
 
         if readiness.should_defer("embeddings"):
             return {}, "warming", None
@@ -2772,6 +3217,8 @@ def signature_evidence(
             return {}, "busy", None
         if query_vector is None:
             return {}, "unavailable", None
+        # The domain profile selection reads this vector in the same request instead of encoding the turn again.
+        working_set_runtime.remember_turn_vector(turn, query_vector)
         bands, state = working_set_resolve.matrix_bands(ids, matrix, query_vector, config)
         return bands, state, query_vector
     except Exception:  # noqa: BLE001 - optional scorer failure is explicit
@@ -2847,7 +3294,7 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
        `posixpath.normpath` would write differently — one rule that covers a
        leading `./`, a doubled slash, a trailing slash, and a literal `.`/
        `..` segment together, rather than one pattern for each.
-    3. Under the knowledge-base folder (`kbdir.kb_prefix()`).
+    3. Under the knowledge-base folder (`kbdir.managed_split`).
     4. A row the LEXICAL catalogue already holds under this EXACT string —
        one indexed lookup (`lexstore.page_content_hashes`), never a search
        and never a directory read.
@@ -2873,9 +3320,8 @@ def _canonical_agent_page_ref(vault_root: Path, ref: str) -> str | None:
         return None
     if posixpath.normpath(text) != text:
         return None
-    from .kbdir import kb_prefix
 
-    if not text.startswith(kb_prefix()):
+    if managed_split(text) is None:
         return None
     from . import lexstore
 
@@ -3426,7 +3872,7 @@ def _resident_vector_paths(
     """
     import numpy as np
 
-    from . import embeddings, ranking_config, readiness, recall_space
+    from . import embeddings, ranking_config, readiness, recall_space, working_set_runtime
 
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return [], "off"
@@ -3462,14 +3908,19 @@ def _resident_vector_paths(
         norm = float(np.linalg.norm(query))
         if norm == 0.0:
             return [], "lane_failed"
+        # The slice encodes nothing on a small catalogue, so the profile selection reads this vector instead of
+        # encoding the same turn again.
+        working_set_runtime.remember_turn_vector(text, query)
         stale = resident.stale_paths or ()
-        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing.
+        # A lagging matrix still holds the old rows of a page rewritten since; those rows answer for nothing. The hits
+        # stand, but a rewritten page the caller may see went unread by meaning, so the reading is not the whole.
+        state = "lane_failed" if any(path in allowed for path in stale) else "ready"
         rows = np.fromiter(
             (index for index, (path, _chunk) in enumerate(resident.metadata) if path in allowed and path not in stale),
             dtype=np.int64,
         )
         if rows.size == 0:
-            return [], "ready"
+            return [], state
         # Score the whole matrix, then mask: indexing first copies most of the matrix on every query (#951).
         similarities = (resident.matrix @ (query / norm))[rows]
         config = ranking_config.DEFAULT_RANKING
@@ -3480,12 +3931,12 @@ def _resident_vector_paths(
         )
         if not cleared:
             # No chunk clears the band, or too few admitted rows to calibrate one: the lane lists nothing.
-            return [], "ready"
+            return [], state
         best: dict[str, float] = {}
         for position in cleared:
             path = resident.metadata[int(rows[position])][0]
             best[path] = max(float(similarities[position]), best.get(path, float("-inf")))
-        return sorted(best, key=lambda page: (-best[page], page))[:limit], "ready"
+        return sorted(best, key=lambda page: (-best[page], page))[:limit], state
     except Exception:  # noqa: BLE001 - a failed dense reading leaves the keyword lanes standing
         log.debug("task-context dense reading unavailable", exc_info=True)
         return [], "lane_failed"
@@ -4035,7 +4486,8 @@ def _carried_material(
         (role for role in candidates.values() if role["id"] not in used_roles),
         key=lambda role: (role["source"] != "turn_cue", registry.roles[role["id"]].priority),
     )
-    slots = max(0, context_roles.MAX_SELECTED_ROLES - len(used_roles))
+    # Carried pages select only unit and material lenses (`_carry_roles`), so each remaining role counts.
+    slots = max(0, context_roles.MAX_SELECTED_ROLES - len(context_roles.lenses(tuple(used_roles.values()))))
     used_roles.update((role["id"], role) for role in remaining[:slots])
     missing.extend({"role": role["id"], "reason": "role_limit"} for role in remaining[slots:])
     # A retrieval-carried page the turn names by its own title has name
@@ -4100,6 +4552,7 @@ def _carried_material(
             freshness_snapshot=freshness_snapshot,
             neighbourhood=frozenset({path}),
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             admit=admit,
             status_basis=status_basis,
@@ -4382,6 +4835,7 @@ def _follow_up_packet(
             timings=timings,
             freshness_snapshot=freshness_snapshot,
             visible=visible,
+            purpose=purpose,
             analysis=analysis,
             status_basis=status_basis,
         )
@@ -5542,6 +5996,7 @@ def _compile_packet(
                 reached=reached,
             ),
             visible=visible,
+            purpose=purpose,
             reached=reached,
             analysis=analysis,
             request_anchors=resolution.anchors,
@@ -5711,7 +6166,19 @@ def _routing_targets(
     index_token: tuple[int, int, int] | None = None,
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[Any, ...]:
-    """Records routing targets for `claims_match`, via the existing claims rule.
+    """Records routing targets for `claims_match`; none when the manifests cannot be read."""
+    targets = _routing_targets_or_none(vault_root, index_generation, index_token=index_token, visible=visible)
+    return () if targets is None else targets
+
+
+def _routing_targets_or_none(
+    vault_root: Path,
+    index_generation: int,
+    *,
+    index_token: tuple[int, int, int] | None = None,
+    visible: Callable[[str], bool] | None = None,
+) -> tuple[Any, ...] | None:
+    """Records routing targets for `claims_match`, via the existing claims rule; None when they cannot be read.
 
     Read from the manifests the index update published for this generation, so
     the request path enumerates no directory to build them. These claims are
@@ -5728,9 +6195,9 @@ def _routing_targets(
         manifests = working_set_index.records_manifests(
             vault_root, index_generation, token=index_token
         )
-    except Exception:  # noqa: BLE001 - no targets simply means no claims evidence
+    except Exception:  # noqa: BLE001 - a caller decides whether a failed read differs from no targets
         log.debug("activation: routing targets unavailable", exc_info=True)
-        return ()
+        return None
     targets: list[Any] = []
     for manifest in manifests:
         path = str(getattr(manifest, "path", ""))
@@ -6304,12 +6771,11 @@ def _recent_reason_for(
     names the recap folder of each configured capture path (`recap_folder.inbox_folders`).
     """
     from . import find_corpus
-    from .kbdir import kb_prefix
+    from .kbdir import managed_relative
 
     if not rel.lower().endswith(".md"):
         return ""
-    prefix = kb_prefix()
-    inner = rel[len(prefix) :] if rel.startswith(prefix) else rel
+    inner = managed_relative(rel)
     parts = inner.split("/")
     if any(part.startswith(".") or part in find_corpus.EXCLUDED_DIR_NAMES for part in parts[:-1]):
         return ""

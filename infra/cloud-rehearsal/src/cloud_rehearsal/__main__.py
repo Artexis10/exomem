@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import (
     build,
+    catalogue_prewarm,
     drill,
     drill_cluster,
     host_speed,
@@ -124,6 +125,15 @@ def _parser() -> argparse.ArgumentParser:
         "the admin token clears the pause; runs after provisioning, in place of the other steps (partial proof; never gates a node)",
     )
     run_parser.add_argument(
+        "--catalogue-prewarm", action="store_true",
+        help="rehearse the pre-upgrade catalogue build on one cell: a completed build, an unfinished one and a node "
+        "without room for it, each ended by a release that changes the catalogue identity; runs after provisioning "
+        "(partial proof; never gates a node)",
+    )
+    run_parser.add_argument("--catalogue-prewarm-notes", type=int, default=catalogue_prewarm.DEFAULT_NOTES,
+                            help="with --catalogue-prewarm: the number of notes in the cell's vault, which sets how long "
+                            "the build takes")
+    run_parser.add_argument(
         "--local-storage-coexistence", action="store_true",
         help="install TopoLVM while keeping Hetzner-class cells for the full P3 lifecycle",
     )
@@ -187,14 +197,19 @@ def main(argv: list[str] | None = None) -> int:
         if args.original_fixity_originals * args.original_fixity_mean_kib * 1024 > original_fixity.MAX_SEED_BYTES:
             parser.error(f"--original-fixity seeds at most {original_fixity.MAX_SEED_BYTES // 1024**3} GiB "
                          "(originals times mean size)")
-    if args.command == "run" and args.release:
+    if args.command == "run" and (args.release or args.catalogue_prewarm):
+        # Each of these modes runs alone, without the other or any other mode.
+        mode = "--release" if args.release else "--catalogue-prewarm"
         others = [flag for flag, chosen in (
             ("--cloud-import", args.cloud_import), ("--owner-export", args.owner_export),
             ("--operator-restore-abort", args.operator_restore_abort), ("--large-import", args.large_import),
             ("--raw-import", args.raw_import), ("--original-fixity", args.original_fixity),
-            ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps)) if chosen]
+            ("--local-storage-coexistence", args.local_storage_coexistence), ("--steps", args.steps),
+            ("--catalogue-prewarm", args.catalogue_prewarm)) if chosen and flag != mode]
         if others:
-            parser.error(f"--release runs alone; remove {', '.join(others)}")
+            parser.error(f"{mode} runs alone; remove {', '.join(others)}")
+        if args.catalogue_prewarm and not 1 <= args.catalogue_prewarm_notes <= catalogue_prewarm.MAX_NOTES:
+            parser.error(f"--catalogue-prewarm-notes takes 1 to {catalogue_prewarm.MAX_NOTES} notes")
     if args.command == "local-storage-drill":
         return asyncio.run(drill.run_drill(args))
     if args.command == "k3s-link":
@@ -231,6 +246,7 @@ async def _run(args: argparse.Namespace) -> int:
         "raw_import": args.raw_import,
         "original_fixity": args.original_fixity,
         "release_rollout": args.release,
+        "catalogue_prewarm": args.catalogue_prewarm,
     }
     if args.cell_image:
         report.valid = False
@@ -243,7 +259,7 @@ async def _run(args: argparse.Namespace) -> int:
     if not report.inputs["exomem_worktree_clean"]:
         report.notes.append("the exomem checkout had uncommitted changes")
     only = {int(part) for part in args.steps.split(",")} if args.steps else None
-    if args.large_import or args.raw_import or args.original_fixity:
+    if args.large_import or args.raw_import or args.original_fixity or args.catalogue_prewarm:
         # The cell must exist and be paid for; every later step is a P3 lifecycle check this mode does not make.
         only = {1, 2}
     if args.release:
@@ -256,6 +272,7 @@ async def _run(args: argparse.Namespace) -> int:
             else "the raw-import mode runs steps 1 and 2, then its own scenario" if args.raw_import
             else "the original-fixity mode runs steps 1 and 2, then its own scenario" if args.original_fixity
             else "the release mode runs steps 1 to 3, then its own proofs" if args.release
+            else "the catalogue-prewarm mode runs steps 1 and 2, then its own scenarios" if args.catalogue_prewarm
             else f"only steps {sorted(only)} were selected")
     # The CLI journey needs the disposable CA in the images and versioned object storage.
     native_cli = args.cloud_import or args.large_import or args.raw_import
@@ -265,6 +282,8 @@ async def _run(args: argparse.Namespace) -> int:
     node: drill_cluster.Agent | None = None
     plan: large_import.LargeImportPlan | None = None
     raw_plan: raw_import.RawImportPlan | None = None
+    # One set of values: cellctl is configured with it, and the scenarios read it back as what to expect.
+    prewarm_settings = platform.CataloguePrewarm() if args.catalogue_prewarm else None
 
     stack: infra.Stack | None = None
     code = 1
@@ -280,6 +299,8 @@ async def _run(args: argparse.Namespace) -> int:
             v1, v2, broken = build.build_cell_images(run_id, workdir, prebuilt=args.cell_image)
             gateway_tag = build.build_gateway_image(run_id, workdir, source, mode=args.gateway_build)
             cellctl_tag = build.build_cellctl_image(run_id, workdir, mode=args.cellctl_build)
+            catalogue_tags = (build.build_catalogue_target_images(run_id, workdir, v1, len(catalogue_prewarm.RELEASES))
+                              if args.catalogue_prewarm else [])
         with stage(report, "infrastructure"):
             stack = infra.create_stack(run_id, workdir, node_storage=node_storage,
                                        tls_storage=native_cli or args.operator_restore_abort or args.owner_export)
@@ -322,12 +343,14 @@ async def _run(args: argparse.Namespace) -> int:
                 gateway_build=args.gateway_build,
                 build_seconds={},
             )
+            catalogue_images = tuple(build.load_into_k3s(stack.k3s.container, tag) for tag in catalogue_tags)
             run(["docker", "pull", "--quiet", images.TRAEFIK], timeout=900)
             run(["docker", "tag", images.TRAEFIK, f"rehearsal.local/ingress-traefik:{run_id}"])
             traefik = build.load_into_k3s(stack.k3s.container, f"rehearsal.local/ingress-traefik:{run_id}")
             report.inputs["images"] = {
                 "cell_v1": built.cell_v1, "cell_v2": built.cell_v2, "cell_broken": built.cell_broken,
                 "gateway": built.gateway, "cellctl": built.cellctl, "ingress_traefik": traefik,
+                **({"catalogue_targets": list(catalogue_images)} if catalogue_images else {}),
             }
         if args.large_import:
             with stage(report, "large_import_sizing"):
@@ -375,6 +398,7 @@ async def _run(args: argparse.Namespace) -> int:
                     upgrade_idle_minutes=release_rollout.IDLE_MINUTES if args.release else None,
                     upgrade_force_minutes=release_rollout.FORCE_MINUTES if args.release else None,
                     gateway_hold_budget_seconds=release_rollout.HOLD_BUDGET_SECONDS if args.release else None,
+                    catalogue_prewarm=prewarm_settings,
                 ),
                 cellctl_secrets=platform.cellctl_secrets(
                     stack, cell_token_key=control.secrets.cell_token_key,
@@ -401,7 +425,10 @@ async def _run(args: argparse.Namespace) -> int:
                       operator_restore_abort=args.operator_restore_abort, large_import=plan, release_rollout=args.release,
                       original_fixity=original_fixity.FixityPlan(
                           originals=args.original_fixity_originals, mean_bytes=args.original_fixity_mean_kib * 1024,
-                          notes=args.original_fixity_notes) if args.original_fixity else None)
+                          notes=args.original_fixity_notes) if args.original_fixity else None,
+                      catalogue_prewarm=catalogue_prewarm.CataloguePlan(
+                          notes=args.catalogue_prewarm_notes, images=catalogue_images,
+                          settings=prewarm_settings) if prewarm_settings else None)
         with stage(report, "release"):
             # The owner's first release: cell_image through Substrate's own route. The release mode sends it as
             # the workflow does, with the deploy token, which may send the image and its tag and nothing else.
@@ -443,7 +470,7 @@ async def _run(args: argparse.Namespace) -> int:
             code = 0 if report.stages["large_import"]["verdict"] in ("pass", "smoke_only") else 1
         elif args.raw_import:
             code = 0 if report.stages["raw_import"]["verdict"] == raw_import.PASS else 1
-        elif args.original_fixity:
+        elif args.original_fixity or args.catalogue_prewarm:
             # Its stage passed, or StageFailed would have ended the run; steps 3 to 12 did not run.
             code = 0
         elif args.release:

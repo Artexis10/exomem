@@ -5,13 +5,14 @@ hits cannot pass. Only the bytes, the store and the tombstones change between de
 """
 
 import sqlite3
+from pathlib import Path
 
 import pytest
 from test_collection_store_writer import CID, KEY, manifest_path, manifest_text
 from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
-from exomem.collection_store import views
+from exomem.collection_store import history, views
 from exomem.collection_store.preview import preview_store
 from exomem.governance import egress, lifecycle
 from exomem.governance.principal import owner_principal, request_scope
@@ -29,6 +30,20 @@ def renders(monkeypatch):
         return render(conn, identity, projection, *args, **kwargs)
 
     monkeypatch.setattr(views, "render_view", counted)
+    return built
+
+
+@pytest.fixture
+def history_renders(monkeypatch):
+    """The history pages that an authorization decision rendered, in order."""
+    built = []
+    render_many = history.PageContext.render_many
+
+    def counted(context, paths):
+        built.extend(paths)
+        return render_many(context, paths)
+
+    monkeypatch.setattr(history.PageContext, "render_many", counted)
     return built
 
 
@@ -69,6 +84,70 @@ def test_a_committed_row_change_ends_the_proof_of_the_page_it_has_not_yet_publis
         assert egress.filter_withheld_entries(store.root, payload) == payload
 
 
+def _published_history(store, history_renders):
+    """A published history page, and the render log cleared of its publication."""
+    _path, _payload, receipt = _published_page(store)
+    path = Path(manifest_path()).with_name("_history.md").as_posix()
+    assert "capture" in (store.root / path).read_text()
+    history_renders.clear()
+    return path, {"items": [{"path": path}]}, receipt
+
+
+def test_a_history_page_is_rendered_once_while_its_bytes_store_and_release_inputs_stand(store, history_renders):
+    """Defect: a history page's proof was never kept, so every decision of it rendered the page again."""
+    path, payload, _ = _published_history(store, history_renders)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert history_renders == [path]
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert history_renders == [path]
+
+
+def test_a_policy_change_ends_the_proof_of_a_history_page_it_changes(store, history_renders):
+    """A policy moves no store stamp and leaves the bytes alone, so only the release inputs end the proof.
+    The owner sees every row, so only the proof can withhold the page that now omits the capture."""
+    path, payload, _ = _published_history(store, history_renders)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert history_renders == [path]
+
+        write_scope(store.root, paths="Records/Work/Items/**")
+        write_rule(store.root, ceiling=0)
+        assert egress.filter_withheld_entries(store.root, payload) == {"items": []}
+        assert history_renders == [path, path]
+
+
+def test_edited_history_bytes_are_not_covered_by_the_proof_of_the_bytes_they_replaced(store, history_renders):
+    path, payload, _ = _published_history(store, history_renders)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert history_renders == [path]
+
+        page = store.root / path
+        page.write_text(page.read_text() + "\nForged line\n")
+        assert egress.filter_withheld_entries(store.root, payload) == {"items": []}
+        assert history_renders == [path, path]
+
+
+def test_a_committed_row_change_ends_the_proof_of_the_history_page_it_has_not_yet_published(store, history_renders):
+    """A managed write keeps the other caches, so only the store stamp in the proof notices the new event."""
+    path, payload, receipt = _published_history(store, history_renders)
+    with preview_store(store.root, store.handle), request_scope(owner_principal()):
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+        assert history_renders == [path]
+
+        store.update_record(CID, item_key=KEY, changes={"title": "Changed"},
+                            expected_container_hash=receipt["after_container_hash"],
+                            expected_item_version=receipt["after_item_hash"], why="correct")
+        assert egress.filter_withheld_entries(store.root, payload) == {"items": []}
+        store.reconcile_views()
+        assert "correct" in (store.root / path).read_text()
+        assert egress.filter_withheld_entries(store.root, payload) == payload
+
+
 def test_a_policy_or_audience_change_flips_the_verdict_while_the_proof_stays_warm(store, renders):
     """The proof is about bytes; who may read them is decided again on every request."""
     path, payload, _ = _published_page(store)
@@ -104,7 +183,7 @@ def test_a_commit_from_another_connection_ends_the_proof_though_the_cache_restam
             if not committed and not elsewhere:
                 other = sqlite3.connect(store.handle.path, timeout=5, isolation_level=None)
                 try:
-                    other.execute("UPDATE items SET body=? WHERE view_path=?", ("Edited elsewhere", path))
+                    other.execute("UPDATE item_rows SET body=? WHERE view_path=?", ("Edited elsewhere", path))
                 finally:
                     other.close()
                 elsewhere.append(path)

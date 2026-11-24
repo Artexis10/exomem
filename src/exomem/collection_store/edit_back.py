@@ -28,7 +28,9 @@ import uuid
 from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
-from pathlib import Path
+from itertools import chain
+from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from .. import held_fs, memory_refs, planning, record_formats, records, vault
 from .. import structured_collections as collections
@@ -175,6 +177,33 @@ def _stamp(frontmatter) -> dict | None:
     return stamp
 
 
+def owned_stamp(conn) -> Callable[[Mapping], bool]:
+    """A test for view stamps of this store under any instance of its lineage; any other stamp is foreign.
+
+    An adoption or a takeover starts a new instance and rewrites no view, so an unchanged view
+    keeps the stamp of the earlier instance that rendered it.
+    """
+    store_id = views.store_identity(conn)["store_id"]
+    lineage = {entry["instance_id"] for entry in json.loads(
+        conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+    return lambda stamp: stamp["s"] == store_id and stamp["i"] in lineage
+
+
+def earlier_identity(conn, projection, manifest, raw: bytes) -> dict[str, str] | None:
+    """The identity of the earlier instance of this store whose stamp view bytes ``raw`` carry, else None."""
+    try:
+        if projection["kind"] == "log":
+            stamp = log_view.split_frame_stamp(manifest, raw)[1]
+        else:
+            stamp = _stamp(vault.parse_frontmatter(raw.decode(), strict=True)[0])
+    except (UnicodeError, ValueError, collections.CollectionError):
+        return None
+    identity = views.store_identity(conn)
+    if stamp is None or stamp["i"] == identity["instance_id"] or not owned_stamp(conn)(stamp):
+        return None
+    return {**identity, "instance_id": stamp["i"]}
+
+
 def current_version(conn, projection) -> int | None:
     """The row or manifest version a view of ``projection`` renders now."""
     if projection["kind"] == "item":
@@ -210,9 +239,7 @@ def classify(writer, projection, raw: bytes, *, refusal: tuple = (), edit_back: 
         # Only the exact imported bytes may be unstamped, and those are the published digest.
         return Classification(INVALID, None, None, current_version(conn, projection)
                               if projection["kind"] in EDITABLE_KINDS else None)
-    identity = views.store_identity(conn)
-    lineage = json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
-    if stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}:
+    if not owned_stamp(conn)(stamp):
         return Classification(FOREIGN, stamp, stamp["v"])
     if projection["kind"] == "summary":
         from . import derived_rows
@@ -357,11 +384,9 @@ def _classify_log(writer, projection, raw, refusals) -> Classification:
     proposed = log_view.capture(manifest, authored, parsed.records)
     blocks = [(record, authored[record.span.start:record.span.end]) for record in parsed.records]
     stamps = [record_formats.read_log_block_stamp(block) for _, block in blocks]
-    identity = views.store_identity(conn)
-    lineage = {entry["instance_id"] for entry in
-               json.loads(conn.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+    owned = owned_stamp(conn)
     for stamp in [frame_stamp, *stamps]:
-        if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+        if stamp is not None and not owned(stamp):
             return Classification(FOREIGN, stamp, stamp["v"])
     if refusals.get(None):
         return Classification(INVALID, None, generation, generation, issues=tuple(refusals[None]))
@@ -507,12 +532,10 @@ def resumed_update(writer, held, manifest, before) -> dict:
             raise records._held_not_found()
         record = log_view.decode_block(writer.root, manifest, held["held_bytes"])
         stamp = record_formats.read_log_block_stamp(held["held_bytes"])
-        identity = views.store_identity(writer.connection)
-        lineage = json.loads(writer.connection.execute("SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])
         version = writer.connection.execute("SELECT payload_hash FROM item_versions WHERE row_id=? AND row_version=?",
                                             (before["row_id"], held["base_row_version"])).fetchone()
         if (record.identity.inferred or record.identity.key != before["item_key"] or stamp is None
-                or stamp["s"] != identity["store_id"] or stamp["i"] not in {entry["instance_id"] for entry in lineage}
+                or not owned_stamp(writer.connection)(stamp)
                 or stamp["v"] != held["base_row_version"] or version is None or version[0][:12] != stamp["h"]):
             raise records._held_not_found()
         base = typed_storage.version_values(writer.connection, before["row_id"], stamp["v"])[0]
@@ -552,6 +575,7 @@ class Observation:
     stat: str | None
     raw: bytes | None = None
     refusal: tuple = ()
+    native_version: held_fs.FileVersion | None = None
 
     @property
     def own(self) -> bool:
@@ -628,22 +652,113 @@ def observe(writer, paths=None, *, force=(), after="", limit=None, errors=None) 
                     before = file.version()
                     if row["path"] not in force and unchanged(writer.connection, row, before):
                         continue
-                    raw = fs.read(file, max_bytes=_read_bound(row)).require()
-                    if file.version() != before:
-                        raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
+                    _, raw = _read_native(fs, file, _read_bound(row), before=before)
             except (held_fs.HeldFsError, OSError) as error:
                 if errors is not None:
                     errors(row["collection_id"], row["path"], getattr(error, "code", "IO_ERROR"))
                 continue
-            found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw))
+            found.append(Observation(row["path"], row, hashlib.sha256(raw).hexdigest(), _stat(before), raw,
+                                     native_version=before))
     return found
+
+
+@dataclass(frozen=True)
+class NativeInput:
+    """Detached bytes and exact native version; no open file or SQL resource crosses phases."""
+
+    projection_path: str
+    path: str
+    token: str | None
+    slot: str | int
+    # These are the native observation protocol's closed outcomes, not content classifications.
+    state: Literal["present", "absent", "unavailable"]
+    version: held_fs.FileVersion | None = None
+    raw: bytes | None = None
+
+
+@dataclass(frozen=True)
+class NativeInputs:
+    values: tuple[NativeInput, ...]
+    complete: bool
+
+
+def dependency_inputs(root, projections, *, observations=(), limit=512, byte_limit=8 * 1024 * 1024) -> NativeInputs:
+    """Read a bounded preservation window through the existing native observer.
+
+    The caller supplies detached projection rows after closing SQL. Unobserved recovery
+    slots stay unavailable for preservation; this window never claims their absence.
+    """
+    found, complete, consumed = [], True, 0
+    observed = {value.path: value for value in observations}
+    with ExitStack() as stack:
+        fs = stack.enter_context(held_fs.acquire(root).require())
+        parents = {}
+        for projection in projections:
+            path = projection["path"]
+            try:
+                for native_path, token, slot in _dependency_paths(projection):
+                    if len(found) >= limit or consumed >= byte_limit:
+                        return NativeInputs(tuple(found), False)
+                    prior = observed.get(native_path) if slot == "offline" else None
+                    if prior is not None and prior.raw is not None and prior.native_version is not None:
+                        if consumed + len(prior.raw) > byte_limit:
+                            return NativeInputs(tuple(found), False)
+                        value = NativeInput(path, native_path, token, slot, "present", prior.native_version, prior.raw)
+                    else:
+                        try:
+                            opened = _open_view(fs, stack, parents, native_path)
+                            if opened is None:
+                                value = NativeInput(path, native_path, token, slot, "absent")
+                            else:
+                                with opened as file:
+                                    version, raw = _read_native(fs, file, byte_limit - consumed)
+                                value = NativeInput(path, native_path, token, slot, "present", version, raw)
+                        except (held_fs.HeldFsError, OSError):
+                            value = NativeInput(path, native_path, token, slot, "unavailable")
+                    consumed += len(value.raw or b"")
+                    complete = complete and value.state != "unavailable"
+                    found.append(value)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                complete = False
+    return NativeInputs(tuple(found), complete)
+
+
+def _dependency_paths(projection):
+    path = projection["path"]
+    yield path, None, "offline"
+    descriptor = json.loads(projection.get("install_json") or "null")
+    if descriptor is None:
+        return
+    for source in chain((descriptor,), descriptor.get("preserved", ())):
+        # The publication protocol owns two asides and one stage per token.
+        for slot in range(3):
+            leaf = (views.ASIDE_PREFIX + source["token"] + f"-{slot}" if slot < 2
+                    else views.STAGE_PREFIX + source["token"])
+            # Held paths stay POSIX-style; `str(Path(...))` joins with backslashes on Windows.
+            yield PurePosixPath(path).parent.joinpath(leaf).as_posix(), source["token"], slot
+
+
+def _read_native(fs, file, bound, *, before=None):
+    before = file.version() if before is None else before
+    raw = fs.read(file, max_bytes=bound).require()
+    if file.version() != before:
+        raise held_fs.HeldFsError("INPUT_CHANGED", "view changed during observation")
+    return before, raw
+
+
+def _read_render(fs, file, *, before=None):
+    """Read a view the store rendered, or its aside or stage copy, whole.
+
+    A kind's parser bound limits untrusted owner edits; the history and summary renderers grow pages
+    past it, so applying it here would strand those pages unpublished."""
+    return _read_native(fs, file, None, before=before)
 
 
 def _open_view(fs, stack, parents, path):
     """The view's file as a context manager, or None when it or its directory is missing.
 
     ``parents`` keeps each directory opened on ``stack``, so a window opens it once."""
-    relative = str(Path(path).parent)
+    relative = held_fs.split_relative(path)[0]
     if relative not in parents:
         opened = fs.parent(relative)
         if not opened.ok and opened.error.code != "MISSING":

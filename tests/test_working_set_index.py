@@ -9,12 +9,14 @@ kill switch's refusal to create the file at all.
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
-from exomem import working_set_index
+from exomem import foreground_priority, working_set_index, working_set_runtime
 
 
 def _write(path: Path, text: str) -> None:
@@ -217,7 +219,7 @@ def test_collect_caps_to_distinct_anchor_ids_not_list_positions(
         "_walk_page_entries",
         lambda vault_root, **_kwargs: ([r0_dup, r1, r2], outbound, names, project_members),
     )
-    monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root: ([], []))
+    monkeypatch.setattr(working_set_index, "_collection_candidates", lambda vault_root, **_: ([], []))
     monkeypatch.setattr(
         working_set_index, "_project_candidates", lambda vault_root, member_paths, **kwargs: ([], {})
     )
@@ -1968,3 +1970,35 @@ def test_an_entity_signature_reads_its_public_lede_and_never_its_carrier(vault: 
 
     assert "public cartographer" in signature
     assert "exomem-origin" not in signature and "PRIVATEREASON" not in signature
+
+
+def test_the_background_warm_waits_for_a_request_between_pages(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The warm walks every page in the service's one interpreter, so it reads none
+    while a request runs beside it, and reads every one once the request ends."""
+    kb = vault / "Knowledge Base" / "Products"
+    for index in range(4):
+        _write(kb / f"p{index}.md", f"---\ntitle: P {index}\nstatus: active\n---\n\n# P {index}\n\nBody.\n")
+    read: list[str] = []
+    real_entry = working_set_index._page_entry
+
+    def counted_entry(path, rel, *args, **kwargs):
+        read.append(rel)
+        return real_entry(path, rel, *args, **kwargs)
+
+    monkeypatch.setattr(working_set_index, "_page_entry", counted_entry)
+    walked = threading.Event()
+
+    def walk() -> None:
+        working_set_index._walk_page_entries(vault)
+        walked.set()
+
+    with foreground_priority.foreground():
+        working_set_runtime._schedule_build(vault, job=walk)
+        time.sleep(0.3)
+        read_beside_a_request = len(read)
+    assert walked.wait(timeout=10)
+
+    assert read_beside_a_request == 0
+    assert len(set(read)) >= 4

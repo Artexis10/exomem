@@ -169,7 +169,8 @@ def test_capture_source_declares_openai_file_parameters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     command = _command("capture_source")
-    assert command.mcp_meta == {"openai/fileParams": ("files",)}
+    # capture_source also declares its service capabilities under their own key.
+    assert command.mcp_meta["openai/fileParams"] == ("files",)
     assert _command("preserve_artifacts").mcp_meta == {"openai/fileParams": ("files",)}
 
 
@@ -216,6 +217,7 @@ def test_no_tool_schema_takes_a_local_path_for_a_file() -> None:
             "file_id",
             "mime_type",
             "file_name",
+            "diarize",
         ]
 
 
@@ -836,6 +838,45 @@ async def test_attach_hold_then_preserve_over_the_local_listener(
     assert ISSUER not in json.dumps(held.json())
 
 
+async def _mcp_tool_call(
+    client: httpx.AsyncClient, home: dict[str, str], public_name: str, arguments: dict, request_id: int
+) -> dict:
+    """One `tools/call` over the local listener's `/mcp`, as an agent sends it."""
+    name, arguments = public_call(public_name, arguments)
+    response = await client.post(
+        "/mcp",
+        headers={
+            **home,
+            "accept": "application/json, text/event-stream",
+            "content-type": "application/json",
+            "mcp-protocol-version": PROTOCOL_VERSION,
+            "mcp-method": "tools/call",
+            "mcp-name": name,
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "tools/call",
+            "params": {
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                    "io.modelcontextprotocol/clientInfo": {"name": "local-client", "version": "1"},
+                },
+                "name": name,
+                "arguments": arguments,
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    text = response.text
+    if text.lstrip().startswith("event:") or "\ndata:" in text:
+        text = next(
+            line.removeprefix("data:").strip() for line in text.splitlines() if line.startswith("data:")
+        )
+    return json.loads(text)
+
+
 @pytest.mark.anyio
 async def test_a_hold_is_redeemed_over_the_mcp_transport(
     real_worker: _RealWorker,  # noqa: F811 - the imported fixture, by name
@@ -847,49 +888,12 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
     app = real_worker.app
 
     async def call(client: httpx.AsyncClient, handle: dict, request_id: int) -> dict:
-        name, arguments = public_call("preserve_artifacts", {
+        return await _mcp_tool_call(client, home, "preserve_artifacts", {
             "scope": "Clinic",
             "category": "Appointments",
             "files": [handle],
             "transcriptions": [{"file_id": handle["file_id"], "text": TRANSCRIPTION}],
-        })
-        response = await client.post(
-            "/mcp",
-            headers={
-                **home,
-                "accept": "application/json, text/event-stream",
-                "content-type": "application/json",
-                "mcp-protocol-version": PROTOCOL_VERSION,
-                "mcp-method": "tools/call",
-                "mcp-name": name,
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": "tools/call",
-                "params": {
-                    "_meta": {
-                        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-                        "io.modelcontextprotocol/clientCapabilities": {},
-                        "io.modelcontextprotocol/clientInfo": {
-                            "name": "local-client",
-                            "version": "1",
-                        },
-                    },
-                    "name": name,
-                    "arguments": arguments,
-                },
-            },
-        )
-        assert response.status_code == 200, response.text
-        text = response.text
-        if text.lstrip().startswith("event:") or "\ndata:" in text:
-            text = next(
-                line.removeprefix("data:").strip()
-                for line in text.splitlines()
-                if line.startswith("data:")
-            )
-        return json.loads(text)
+        }, request_id)
 
     async with app.router.lifespan_context(app):
         async with _real_doors(real_worker) as doors:
@@ -914,6 +918,66 @@ async def test_a_hold_is_redeemed_over_the_mcp_transport(
     assert spent["result"]["structuredContent"]["files"] == [row]
     assert not list(_store_dir(vault).glob("*.bin"))
     assert not list(_store_dir(vault).glob("*.json"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("title", "truncates"),
+    [
+        (
+            "Harbour authority maintenance walkthrough: north pier lighting, east slipway ramp "
+            "and the old customs shed roof, photographed before the winter closure",
+            True,
+        ),
+        ("Harbour walkthrough photographs", False),
+    ],
+    ids=["slug-over-the-cap", "short-title"],
+)
+async def test_a_held_pair_saves_as_two_sources_whatever_the_title_length(
+    real_worker: _RealWorker,  # noqa: F811 - the imported fixture, by name
+    vault: Path,
+    title: str,
+    truncates: bool,
+) -> None:
+    """A long title makes `add()` warn about the slug of each file; that never un-saves the file.
+
+    Each file of a batch is titled `<title> - <file name>`, so a batch passes the slug cap
+    with a title that a single file would not. Only the title differs between the two cases.
+    """
+    originals = {"harbour-north.png": _png(2, 2), "harbour-east.png": _png(3, 3)}
+    home = {"authorization": f"Bearer {real_worker.local_token}"}
+    app = real_worker.app
+
+    async with app.router.lifespan_context(app):
+        async with _real_doors(real_worker) as doors:
+            handles = []
+            for name, payload in originals.items():
+                held = await doors.local.post(
+                    "/upload",
+                    headers=home,
+                    files={"file": (name, payload, "image/png")},
+                    data={"hold": "1", "lane": "source"},
+                )
+                assert held.status_code == 201, held.text
+                handles.append(held.json()["file"])
+            reply = await _mcp_tool_call(
+                doors.local, home, "save_source", {"title": title, "source_kind": "photograph", "files": handles}, 1
+            )
+
+    result = reply["result"]
+    assert not result.get("isError"), result
+    receipt = result["structuredContent"]
+    assert "files" in receipt, receipt
+    rows = receipt["files"]
+    assert [row["outcome"] for row in rows] == ["stored", "stored"], rows
+    assert sorted(receipt["paths"]) == sorted(row["stored_path"] for row in rows)
+    assert receipt["user_summary"].startswith("Saved 2 files"), receipt["user_summary"]
+    for row, payload in zip(rows, originals.values(), strict=True):
+        expected = hashlib.sha256(payload).hexdigest()
+        assert row["hash"] == expected
+        assert hashlib.sha256((vault / row["stored_path"]).read_bytes()).hexdigest() == expected
+        # The condition under test is really present in one case and absent in the other.
+        assert any(w.startswith("SLUG_TRUNCATED") for w in row["warnings"]) is truncates, row["warnings"]
 
 
 # ---- exomem attach ----------------------------------------------------------------

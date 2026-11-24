@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import call_spans, lifecycle_statuses, note_types, recall_space, runtime_resources
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative, managed_split
 from .vault import content_hash
 
 log = logging.getLogger(__name__)
@@ -218,8 +218,8 @@ def _advisory_path(
     if not clean.lower().endswith(".md"):
         clean = f"{clean}.md"
     root = Path(vault_root)
-    if not (root / clean).is_file() and not clean.startswith(kb_prefix()):
-        clean = f"{kb_prefix()}{clean}"
+    if not (root / clean).is_file() and managed_split(clean) is None:
+        clean = managed_join(clean)
     if require_file and not (root / clean).is_file():
         raise ValueError(f"write advisory endpoint is unreadable: {path}")
     return clean
@@ -780,9 +780,7 @@ def _canon(path: str) -> str:
     p = (path or "").strip().replace("\\", "/").split("#", 1)[0].strip()
     if p.lower().endswith(".md"):
         p = p[:-3]
-    if p.startswith(kb_prefix()):
-        p = p[len(kb_prefix()):]
-    return p.lower()
+    return managed_relative(p).lower()
 
 
 def _why(hit, *, ranks: bool = True) -> str:
@@ -813,7 +811,7 @@ def _is_relation_target_eligible(vault_root: Path, rel_path: str) -> bool:
     from . import access, recall_policy
 
     normalized = (rel_path or "").replace("\\", "/").lstrip("/")
-    if not normalized.casefold().startswith(kb_prefix().casefold()):
+    if managed_split(normalized, key=str.casefold) is None:
         return False
     if not recall_policy.is_recall_candidate(vault_root, vault_root / normalized):
         return False
@@ -916,9 +914,15 @@ def _best_cosine_per_file(
     k: int = 15,
     published_path: str | None = None,
     strict: bool = False,
+    chunks: list[str] | None = None,
 ) -> dict[str, float]:
     """Embed a draft (title+body) as PASSAGES and return the max cosine per
     existing file over the sidecar: ``{file_path: best_score}``.
+
+    `chunks`, when given, are the exact texts the index will encode for this
+    draft (a declared-passage capture's cut). The sweep scores and remembers
+    those, so the index takes their vectors instead of encoding each passage
+    a second time.
 
     The shared core of `detect_duplicates` / `detect_contradictions`: one encode
     + search pass, so a single write can partition the same scores into the dup
@@ -966,8 +970,9 @@ def _best_cosine_per_file(
             call_spans.span("advisory.best_cosine", {}) as measured,
             contextlib.ExitStack() as in_space,
         ):
-            _require_complete_advisory_body(body, title=title)
-            chunks = embeddings.chunk_text(title, body)
+            if chunks is None:
+                _require_complete_advisory_body(body, title=title)
+                chunks = embeddings.chunk_text(title, body)
             if not chunks:
                 if measured is not None:
                     measured["texts"] = 0

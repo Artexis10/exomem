@@ -14,7 +14,7 @@ SAMPLES = Path(__file__).parent / "fixtures" / "media-samples"
 
 
 def test_real_heic_decodes_at_ocr_and_image_embedding_boundaries(monkeypatch):
-    pytest.importorskip("pillow_heif")
+    pytest.importorskip("pi_heif")
     from PIL import Image
 
     from exomem import image_codecs
@@ -50,7 +50,7 @@ def test_real_heic_decodes_at_ocr_and_image_embedding_boundaries(monkeypatch):
 
 
 def test_missing_heic_decoder_is_actionable_for_both_consumers(monkeypatch):
-    monkeypatch.setitem(sys.modules, "pillow_heif", None)
+    monkeypatch.setitem(sys.modules, "pi_heif", None)
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: pytest.fail("decoder absence must precede model load"))
     source = SAMPLES / "ocr-eng.heic"
     with pytest.raises(extract.ExtractionUnavailable, match="image-codecs"):

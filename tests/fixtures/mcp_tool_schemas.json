@@ -71,6 +71,10 @@
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
         },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
+        },
         "preview": {
           "type": "boolean"
         },
@@ -124,7 +128,7 @@
     }
   },
   "add_record": {
-    "description": "Add a row to a Records collection the person owns. Outcomes go here; intentions go to Planning.",
+    "description": "Add a Records row. Outcomes go here; intentions go to Planning. If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, your proposals and outside claims each get a field; `options.new_fields` adds one.",
     "inputSchema": {
       "properties": {
         "collection": {
@@ -137,17 +141,18 @@
         "why": {
           "type": "string"
         },
+        "new_collection": {
+          "type": "object",
+          "description": "{natural_key: [item fields that identify a row]}"
+        },
         "body": {
-          "type": "string",
-          "description": "Free text kept with the row."
+          "type": "string"
         },
         "hold": {
-          "type": "boolean",
-          "description": "Hold a row that fails validation."
+          "type": "boolean"
         },
         "held": {
-          "type": "string",
-          "description": "The id of a held row to resume."
+          "type": "string"
         },
         "options": {
           "type": "object",
@@ -169,8 +174,35 @@
       "type": "object"
     }
   },
+  "cancel_uploads": {
+    "description": "Cancel this session's unclaimed uploads and release their held capacity. Each reference gets an ordered outcome.",
+    "inputSchema": {
+      "properties": {
+        "uploads": {
+          "description": "The exomem-held references of waiting uploads owned by this session.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "type": "array"
+        },
+        "detail": {
+          "enum": [
+            "compact",
+            "full"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "uploads"
+      ],
+      "type": "object"
+    }
+  },
   "create_note": {
-    "description": "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
+    "description": "Save a conclusion. Named items compared or tracked: add_record. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -244,6 +276,10 @@
         "suggest_links": {
           "type": "boolean",
           "description": "Also return pages to link."
+        },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
         },
         "preview": {
           "type": "boolean"
@@ -485,6 +521,10 @@
           "type": "string",
           "description": "Why your review found no useful link; never added to note text."
         },
+        "review": {
+          "type": "string",
+          "description": "This call's preview `review_token`; a profile page's write needs it."
+        },
         "preview": {
           "type": "boolean"
         },
@@ -573,6 +613,10 @@
           "type": "boolean",
           "description": "Rebuild the row's Markdown view; `changes` may then be empty."
         },
+        "options": {
+          "type": "object",
+          "description": "Rare knobs: new_fields."
+        },
         "detail": {
           "enum": [
             "compact",
@@ -591,7 +635,7 @@
     }
   },
   "inspect_memory": {
-    "description": "Read-only operations that no typed tool covers: files, schema, governance, imports, maintenance, connections, review context, episodes, media, collection and plan details.",
+    "description": "Read-only fallback for files, schema, governance, imports, maintenance, connections, reviews, episodes, media, collections and plans.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -607,6 +651,7 @@
             "plans.validate",
             "plans.history",
             "writer.status",
+            "maintenance.name_drift",
             "settings.inspect",
             "graph.map",
             "files.overview",
@@ -618,6 +663,7 @@
             "imports.work_item",
             "media.video",
             "media.image",
+            "media.preview",
             "media.status",
             "review.item_context",
             "review.item",
@@ -625,6 +671,7 @@
             "review.provenance",
             "review.evolution",
             "review.advisory_result",
+            "review.queued_write",
             "review.held",
             "connections.suggest_links",
             "connections.suggest_relations",
@@ -638,6 +685,7 @@
             "files.reclassify",
             "files.create",
             "files.append",
+            "files.move",
             "episodes.material",
             "episodes.inspect",
             "episodes.candidates",
@@ -664,6 +712,8 @@
             "maintenance.cutover",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.capture_metadata",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.job",
             "maintenance.structured_files",
@@ -731,6 +781,7 @@
           "type": "string",
           "enum": [
             "records.create",
+            "records.retract",
             "records.bulk_upsert",
             "records.discard",
             "records.revise",
@@ -757,6 +808,7 @@
             "media.process",
             "media.retry",
             "media.reprocess",
+            "media.replicate",
             "review.set_family",
             "review.set_envelope",
             "review.decide_vocabulary",
@@ -802,6 +854,8 @@
             "session.close",
             "maintenance.fix",
             "maintenance.backfill_ids",
+            "maintenance.capture_metadata",
+            "maintenance.convert_originals",
             "maintenance.reconcile",
             "maintenance.cancel_job",
             "maintenance.held_resolve",
@@ -813,7 +867,8 @@
             "curation.resume",
             "curation.propose_compensation",
             "curation.apply_compensation",
-            "curation.revert"
+            "curation.revert",
+            "curation.relocate"
           ],
           "description": "area.action; read_instructions(topic=<operation>) lists its fields."
         },
@@ -1011,10 +1066,11 @@
           "enum": [
             "text",
             "history",
-            "units"
+            "units",
+            "brief"
           ],
           "type": "string",
-          "description": "text (default), history, or units: observations with their ids."
+          "description": "text (default), history, units: observations with ids, or brief: a topic's brief."
         },
         "more": {
           "type": "string",
@@ -1032,7 +1088,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and method scope/exclusions with a page read.\nDiscard held methods on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nPage-read map/task_context refs and approach scope/exclusions.\nmethods.reset: drop held skills, collections, approaches. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1042,7 +1098,7 @@
           "type": "string"
         },
         "max_chars": {
-          "default": 4000,
+          "default": 6000,
           "description": "Prose cap clamped to 500..8,000; overflow becomes pointers.",
           "type": "integer"
         },
@@ -1249,6 +1305,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1283,7 +1343,7 @@
     }
   },
   "save_source": {
-    "description": "Save original material verbatim. Never retype a file: pass attached files in `files`.",
+    "description": "Save originals verbatim. Never retype files. Use `files`.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -1318,6 +1378,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1347,9 +1411,13 @@
         "why": {
           "type": "string"
         },
+        "document_form": {
+          "type": "string",
+          "description": "The form of this record of the work, as an open slug such as abstract."
+        },
         "options": {
           "type": "object",
-          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction."
+          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity."
         },
         "detail": {
           "enum": [
@@ -1516,11 +1584,11 @@
     }
   },
   "upload_files": {
-    "description": "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
+    "description": "Get a file handoff. Follow its next step. Held files go to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).",
+          "description": "Source, Evidence or import archive.",
           "enum": [
             "source",
             "evidence",
@@ -1530,11 +1598,20 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of the file you intend to send."
+          "description": "File SHA-256."
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer",
+          "description": "Exact Source bytes."
+        },
+        "import_identity": {
+          "type": "string",
+          "description": "Held Source import ID."
         },
         "hold": {
           "type": "boolean",
-          "description": "Keep the upload for this session; needs expected_sha256."
+          "description": "Hold bytes for a later save."
         },
         "detail": {
           "enum": [

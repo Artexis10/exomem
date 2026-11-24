@@ -208,8 +208,8 @@ def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) 
 
     old_text = _read(vault / result.old_path)
     new_text = _read(vault / result.new_path)
-    assert "[[Notes/Insights/nested-root-new]]" in old_text
-    assert "[[Notes/Insights/nested-root-old]]" in new_text
+    assert f"[[Notes/Insights/{Path(result.new_path).stem}]]" in old_text
+    assert f"[[Notes/Insights/{Path(old_rel).stem}]]" in new_text
     assert "[[Knowledge Base/" not in old_text + new_text
 
 
@@ -553,13 +553,13 @@ def test_concurrent_replace_has_exactly_one_winner(
         / "Knowledge Base"
         / "Notes"
         / "Insights"
-        / f"concurrent-successor-{loser_label.lower()}.md"
+        / f"Concurrent Successor {loser_label}.md"
     )
     assert not loser_path.exists()
     log_text = _read(vault / "Knowledge Base" / "log.md")
     winner_log_target = winner.new_path.removeprefix("Knowledge Base/").removesuffix(".md")
     assert winner_log_target in log_text
-    assert f"concurrent-successor-{loser_label.lower()}" not in log_text
+    assert f"Concurrent Successor {loser_label}" not in log_text
 
 
 def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
@@ -596,7 +596,7 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
 
     assert _markdown_snapshot(vault) == before
     resolver = replace_module.find_module._get_query_resolver(vault)
-    assert "Knowledge Base/Notes/Insights/atomic-successor" not in resolver.full_paths
+    assert "Knowledge Base/Notes/Insights/Atomic Successor" not in resolver.full_paths
 
 
 @pytest.mark.parametrize("registry_existed", [False, True])
@@ -673,13 +673,13 @@ def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
     real_create_artifact = vault_module._BatchWorkspace.create_artifact
     stage_writes = 0
 
-    def fail_second_stage(workspace, name: str, content: bytes):  # noqa: ANN001
+    def fail_second_stage(workspace, name: str, content: bytes, **options):  # noqa: ANN001, ANN003
         nonlocal stage_writes
         if name.startswith("stage-"):
             stage_writes += 1
             if stage_writes == 2:
                 raise OSError("injected supersession staging failure")
-        return real_create_artifact(workspace, name, content)
+        return real_create_artifact(workspace, name, content, **options)
 
     monkeypatch.setattr(vault_module._BatchWorkspace, "create_artifact", fail_second_stage)
 

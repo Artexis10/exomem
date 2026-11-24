@@ -89,7 +89,7 @@ def test_personal_baseline_contribution_pins_ordinary_prose_and_exact_routing() 
 
 
 def _eligible(case: dict) -> bool:
-    """Fixture invariant only; semantic judgment remains with the active agent."""
+    """Whether the claim is a durable baseline. Fixture invariant only; semantic judgment remains with the active agent."""
     evidence = case["evidence"]
     return (
         evidence["stability_or_recurrence"]
@@ -220,6 +220,10 @@ def _expected_operation(case: dict) -> dict | None:
 def _expected_route(case: dict) -> str:
     evidence = case["evidence"]
     context = case["starting_context"]
+    if evidence["tentative_or_unresolved"]:
+        # Never a baseline (no facet, no affiliation, no Record): it keeps whatever reuse value it has as
+        # one compiled observation that says it is unconfirmed.
+        return "compiled_observation" if evidence["reusable_comparison_value"] else "no_write"
     if not _eligible(case):
         return "no_write"
     if evidence["observed_measurement"]:
@@ -424,23 +428,36 @@ def test_stable_low_reuse_trivia_kills_the_reusable_value_mutant() -> None:
         _validate_case(mutant)
 
 
-def test_tentative_or_unresolved_affiliation_stays_quiet_despite_durable_signals() -> None:
+def test_a_tentative_affiliation_is_saved_as_tentative_never_as_a_baseline() -> None:
     tentative = next(
         case
         for case in _fixture()["cases"]
-        if case["id"] == "tentative-unresolved-affiliation-quiet"
+        if case["id"] == "tentative-unresolved-affiliation-saved-as-tentative"
     )
     assert _eligible(tentative) is False
-    assert tentative["expected"]["route"] == "no_write"
-    for mutation in (
-        ("expected.route", "compiled_observation"),
-        ("evidence.tentative_or_unresolved", False),
-    ):
-        mutant = copy.deepcopy(tentative)
-        section, field = mutation[0].split(".")
-        mutant[section][field] = mutation[1]
+    assert tentative["evidence"]["reusable_comparison_value"] is True
+    assert tentative["expected"]["route"] == "compiled_observation"
+    assert tentative["expected"]["expected_tools"] == ["remember"]
+    # A uniquely resolved Entity with a confirmed relation match is the strongest durable signal; the
+    # tentative flag alone must still keep the claim out of a facet and out of an edge.
+    strong = copy.deepcopy(tentative)
+    strong["starting_context"] = {
+        "entity_resolution": "unique",
+        "entity_write_shape": "accepted_relation",
+        "compatible_existing_records_collection": False,
+        "exact_relation_confirmation": True,
+    }
+    _validate_case(strong)
+    for route in ("entity_facet", "accepted_relation", "no_write"):
+        mutant = copy.deepcopy(strong)
+        mutant["expected"]["route"] = route
         with pytest.raises(AssertionError):
             _validate_case(mutant)
+    # The same context without the flag is a baseline, so the flag is what changes the route.
+    settled = copy.deepcopy(strong)
+    settled["evidence"]["tentative_or_unresolved"] = False
+    with pytest.raises(AssertionError):
+        _validate_case(settled)
 
 
 def test_no_write_cases_forbid_every_baseline_write_surface() -> None:
@@ -471,8 +488,11 @@ _BASELINE_MARKERS = (
     "records",
     "one-off",
     "incidental",
-    "tentative",
 )
+# The scaffold's baseline sections say a tentative claim never becomes a baseline. The served
+# bootstrap, the activation block and the copyable blocks leave it to "only when stability or
+# recurrence ... are clear", so their budgets pay for no second statement of it.
+_SCAFFOLD_BASELINE_MARKERS = ("tentative",)
 _DELEGATION_MARKERS = ("proactive_capture", "link_acceptance", "restructure_execution")
 
 
@@ -612,6 +632,9 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
         block = " ".join(block.lower().split())
         for marker in _BASELINE_MARKERS:
             assert marker in block, (name, marker)
+        if name in {"scaffold", "capture workflow", "operations"}:
+            for marker in _SCAFFOLD_BASELINE_MARKERS:
+                assert marker in block, (name, marker)
         _assert_baseline_authority_mapping(name, block)
         for marker in _DELEGATION_MARKERS:
             mutant = block.replace(marker, "")
@@ -621,8 +644,10 @@ def test_active_baseline_blocks_preserve_doctrine_and_delegation() -> None:
     assert "not mid-thought exploration" in blocks["balanced docs"]
     # The generic "records" marker above is satisfied by the Planning/Records
     # routing line, so it cannot tell whether the engagement reference still carries the
-    # Records-compatibility rule. Pin it.
-    assert "records only" in " ".join(blocks["scaffold"].lower().split())
+    # Records route. Pin it: recurring items reuse a collection, else a minimal one.
+    scaffold_block = " ".join(blocks["scaffold"].lower().split())
+    assert "goes to records" in scaffold_block and "minimal one" in scaffold_block
+    assert "records only" not in scaffold_block
 
 
 @pytest.mark.parametrize("disposition", ("advisory", "silent"))

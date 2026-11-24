@@ -25,10 +25,11 @@ from . import (
     relation_registry,
     semantic_contract,
     semantic_language_registry,
+    trash_metadata,
     vault,
 )
 from .cli_ops import OpError
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root, managed_root_rel, managed_split_parts
 from .memory_refs import ID_FIELD, new_id, normalize_id
 from .vault_store import availability as store_availability
 from .vault_store import targets as store_targets
@@ -169,6 +170,13 @@ class RelationReviewError(ValueError):
 
     def as_dict(self) -> dict[str, str]:
         return {"code": self.code, "reason": self.reason}
+
+
+class AuxiliaryGuardMoved(RelationReviewError):
+    """A server-planned auxiliary's guard moved between the write's plan and
+    its pre-commit recheck. It keeps the guard's own PATH_GUARD_* code and
+    message for direct callers; the writer lease converts only this — never a
+    guard on the write's own basis — into an absorbable, re-plannable busy."""
 
 
 # The three request parameters of a relation review, fixed by the tool schema
@@ -669,8 +677,7 @@ def _normalize_destination(root: Path, path: object) -> tuple[Path, str]:
         posix.is_absolute()
         or any(part in {"", ".", ".."} for part in posix.parts)
         or posix.suffix.casefold() != ".md"
-        or not posix.parts
-        or posix.parts[0] != kb_dirname()
+        or managed_split_parts(posix.parts) is None
     ):
         raise RelationReviewError("INVALID_DRAFT_PATH", "draft path is not a managed Markdown path")
     try:
@@ -754,14 +761,11 @@ def draft_token_hash(value: object) -> str:
 
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
-    return Path(vault_root, kb_dirname(), *REVIEW_FOLDER) / f"{identity}.json"
+    return Path(managed_root(Path(vault_root)), *REVIEW_FOLDER) / f"{identity}.json"
 
 
 def _lifecycle_reference(page_identity: str, name: str) -> str:
-    return (
-        f"{'/'.join((kb_dirname(), *REVIEW_FOLDER))}/lifecycle/"
-        f"{page_identity}/{name}"
-    )
+    return managed_join(f"{'/'.join(REVIEW_FOLDER)}/lifecycle/{page_identity}/{name}")
 
 
 def _canonical_fingerprint(value: object) -> str:
@@ -831,10 +835,7 @@ def _canonical_lifecycle_json(value: dict[str, Any]) -> str:
 
 def _bounded_lifecycle_text(value: dict[str, Any]) -> str:
     text = _canonical_lifecycle_json(value)
-    if len(text.encode("utf-8")) > _MAX_ARTIFACT_BYTES:
-        raise RelationReviewError(
-            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
-        )
+    _require_artifact_size(len(text.encode("utf-8")))
     return text
 
 
@@ -1321,6 +1322,15 @@ def _load_lifecycle_decision_bound(
     root = Path(vault_root).absolute()
     name = f"{fingerprint}.json"
     _require_artifact_admission(admission, _lifecycle_reference(identity, name))
+    stored = _stored_artifact(root, _lifecycle_reference(identity, name), admission)
+    if stored is not None:
+        raw, guard = stored
+        if raw is None:
+            return None, None
+        return (
+            _parse_lifecycle_decision(raw, page_identity=identity, after_fingerprint=fingerprint),
+            guard,
+        )
     inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
@@ -1365,6 +1375,12 @@ def _load_lifecycle_prepared_bound(
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
     _require_artifact_admission(admission, _lifecycle_reference(identity, "prepared.json"))
+    stored = _stored_artifact(root, _lifecycle_reference(identity, "prepared.json"), admission)
+    if stored is not None:
+        raw, guard = stored
+        if raw is None:
+            return None, None
+        return _parse_lifecycle_prepared(raw, page_identity=identity), guard
     inspected = _inspect_lifecycle_identity(root, identity, admission=admission)
     _, names, census = inspected
     if census.directory_identity is None:
@@ -1458,20 +1474,34 @@ def list_lifecycle_prepared_identities(vault_root: Path) -> tuple[str, ...]:
     return tuple(identities)
 
 
-def _safe_trash_original_path(value: object) -> bool:
+def _trash_original_parts(value: object) -> tuple[str, ...] | None:
+    """The parts of a well-formed relative POSIX ``original_path``, else ``None``."""
     if type(value) is not str:
-        return False
+        return None
     posix = PurePosixPath(value)
-    return bool(
+    if not (
         value
         and "\\" not in value
         and "\0" not in value
         and posix.as_posix() == value
         and not posix.is_absolute()
-        and not any(part in {"", ".", ".."} for part in posix.parts)
         and posix.parts
-        and posix.parts[0] == kb_dirname()
-    )
+        and not any(part in {"", ".", ".."} for part in posix.parts)
+    ):
+        return None
+    return posix.parts
+
+
+def _safe_trash_original_path(value: object) -> bool:
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts) is not None
+
+
+def _trash_original_outside_managed_root(value: object) -> bool:
+    # The casefold comparison keeps a root spelled in other letter case failing closed: on a
+    # case-insensitive filesystem that spelling can still name a real managed page.
+    parts = _trash_original_parts(value)
+    return parts is not None and managed_split_parts(parts, key=str.casefold) is None
 
 
 def _read_bounded_lifecycle_sidecar_bytes(
@@ -1656,7 +1686,7 @@ def _capture_bounded_lifecycle_sidecar_guard(
 
 
 def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
-    start = f"{kb_dirname()}/_trash"
+    start = managed_join(trash_metadata.TRASH_SUBPATH)
     pending = [start]
     files: set[str] = set()
     file_identities: dict[str, vault.PathIdentity] = {}
@@ -1741,7 +1771,10 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             source = raw.decode("utf-8", errors="strict")
             metadata = parse_exact_json_object(source)
             original = metadata.get("original_path")
-            if not _safe_trash_original_path(original):
+            # Prepared paths are managed paths, so a sidecar outside the managed root can never
+            # prove one.
+            unrelated = _trash_original_outside_managed_root(original)
+            if not unrelated and not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
             guard = _capture_bounded_lifecycle_sidecar_guard(
                 root,
@@ -1759,6 +1792,8 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             ) from error
         aggregate_sidecar_bytes += len(raw)
         content_guards.append(guard)
+        if unrelated:
+            continue
         assert isinstance(original, str)
         trash_root = relative.removesuffix(".meta.json")
         target_kind: Literal["file", "directory", "missing"] = "missing"
@@ -1805,6 +1840,40 @@ def _guard_lifecycle_primary_paths(
     return tuple(guards)
 
 
+def _stored_artifact(
+    root: Path, relative: str, admission: Callable[[str], bool] | None
+) -> tuple[bytes | None, vault.PathGuard] | None:
+    """A review artifact that a store-mode vault serves, read from the store with its guard; None
+    when the store does not serve the path, and the caller reads the disk.
+
+    In store mode the review folder is store-owned (the schema overlay), so its file is only a
+    projection, which lags a commit: a review that a write just committed is in the store first.
+    """
+    from .vault_store import read
+
+    if not read.serves(root, relative):
+        return None
+    _require_artifact_admission(admission, relative)
+    # The size is read first, from the snapshot that the bytes come from, so an artifact over the
+    # limit is refused before its body is loaded, as the file reader refuses one.
+    with read.snapshot(root) as view:
+        meta = view.page_meta(relative)
+        if meta is None:
+            return None, vault.PathGuard.of_stored(relative, None)
+        _require_artifact_size(meta.size)
+        page = view.page(relative)
+    assert page is not None  # the snapshot that held its metadata holds the page
+    return page.body, vault.PathGuard.of_stored(relative, hashlib.sha256(page.body).hexdigest())
+
+
+def _require_artifact_size(size: int) -> None:
+    """Refuse an artifact over the size limit, read from the disk or held in the store."""
+    if size > _MAX_ARTIFACT_BYTES:
+        raise RelationReviewError(
+            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
+        )
+
+
 def _read_bound(root: Path, relative: str) -> tuple[bytes | None, vault.PathGuard]:
     """The bytes at ``relative``, None when nothing is there, and the guard that binds them.
 
@@ -1838,7 +1907,7 @@ def _prepared_primary_binding(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
     if len(owner_paths) == 1 and owner_paths[0] in corpus.pages:
         state = corpus.pages[owner_paths[0]]
@@ -1868,7 +1937,7 @@ def _trash_proof_for_prepared(
         for path in corpus.identity_census.paths_by_identity.get(
             prepared.page_identity, ()
         )
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
     target_guards: list[vault.PathGuard] = []
     parts = PurePosixPath(prepared.after_path).parts
@@ -2045,7 +2114,7 @@ def _live_identity_owner_paths(
     return tuple(
         path
         for path in census.paths_by_identity.get(page_identity, ())
-        if not path.startswith(f"{kb_dirname()}/_trash/")
+        if not trash_metadata.is_inside_trash(path)
     )
 
 
@@ -2467,11 +2536,12 @@ def _validate_exact_lifecycle_trash_proof(
         and bool(_HASH.fullmatch(proof.source_hash))
         and bool(_HASH.fullmatch(proof.review_fingerprint))
         and proof.source_guard.target == proof.trash_path
-        and proof.source_guard.leaf_policy == "content"
+        # A guard binds exact bytes on disk (`content`) or, in store mode, in the store (`store`).
+        and proof.source_guard.binds_bytes
         and proof.source_guard.expected_content_hash == proof.source_hash
         and sidecar_target == f"{trash_root}.meta.json"
         and (directory_proof or trash_root == proof.trash_path)
-        and proof.sidecar_guard.leaf_policy == "content"
+        and proof.sidecar_guard.binds_bytes
         and proof.sidecar_guard.expected_content_hash
         == vault.content_hash(proof.sidecar_source)
         and not proof.live_owner_paths
@@ -2698,9 +2768,9 @@ def _capture_review_directory(
     root: Path,
     nested: tuple[str, ...] = (),
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
-    directory = Path(root, kb_dirname(), *REVIEW_FOLDER, *nested)
+    directory = Path(managed_root(Path(root)), *REVIEW_FOLDER, *nested)
     current = root
-    components = (kb_dirname(), *REVIEW_FOLDER, *nested)
+    components = (managed_root_rel(), *REVIEW_FOLDER, *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:
@@ -2901,10 +2971,7 @@ def _read_artifact_bytes(
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
     _recheck_review_directory(opened.root, opened.chain)
     _require_artifact_admission(opened.admission, relative)
-    if len(raw) > _MAX_ARTIFACT_BYTES:
-        raise RelationReviewError(
-            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
-        )
+    _require_artifact_size(len(raw))
     try:
         guard = vault.PathGuard.capture(
             opened.root,
@@ -2947,8 +3014,7 @@ def _safe_record_path(value: str) -> bool:
         and posix.as_posix() == value
         and not posix.is_absolute()
         and not any(part in {"", ".", ".."} for part in posix.parts)
-        and posix.parts
-        and posix.parts[0] == kb_dirname()
+        and managed_split_parts(posix.parts) is not None
         and posix.suffix.casefold() == ".md"
     )
 
@@ -2957,6 +3023,12 @@ def _parse_record(
     opened: _OpenReviewDirectory, name: str, reference: str
 ) -> tuple[RelationReviewRecord, str]:
     raw, _ = _read_artifact_bytes(opened, name)
+    return _parse_record_bytes(raw, name, reference)
+
+
+def _parse_record_bytes(
+    raw: bytes, name: str, reference: str
+) -> tuple[RelationReviewRecord, str]:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -3093,6 +3165,13 @@ def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, s
     def admission(path: str) -> bool:
         return not access.refuse_if_excluded(root, path) and connector_boundary.permits(root, path, who)
 
+    name = f"{identity}.json"
+    reference = managed_join(f"{'/'.join(REVIEW_FOLDER)}/{name}")
+    # A receipt that the caller may not read goes to the listing below, which drops it.
+    stored = _stored_artifact(root, reference, None) if admission(reference) else None
+    if stored is not None:
+        raw, _ = stored
+        return (None, None) if raw is None else _parse_record_bytes(raw, name, reference)
     with _open_review_directory(root, admission=admission) as opened:
         matches = _artifact_children_for(opened, identity)
         if not matches or opened is None:
@@ -3363,6 +3442,14 @@ def _evaluate(
     )
 
 
+#: What a save's structural evaluation built: a corpus, the candidate page and the corpus with it.
+StructuralImages = tuple[
+    semantic_contract.SemanticCorpusContext,
+    semantic_contract.SemanticPageState,
+    semantic_contract.SemanticCorpusContext,
+]
+
+
 def _attempt(
     root: Path,
     *,
@@ -3377,6 +3464,7 @@ def _attempt(
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
     reuse: _PrevalidatedAttempt | None = None,
+    structural: StructuralImages | None = None,
 ) -> _Attempt:
     status_basis = lifecycle_statuses.Basis(root)
     if operation not in _OPERATIONS:
@@ -3489,8 +3577,14 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_DESTINATION_OCCUPIED", "draft destination is already occupied"
         )
-    # `with_candidate` is a pure function of the two inputs a reuse carries.
-    after = reused.after_corpus if reused is not None else before.with_candidate(candidate)
+    # `with_candidate` is a pure function of the two inputs a reuse carries, and of the two that the
+    # structural evaluation judged: the same corpus object and an equal candidate.
+    if reused is not None:
+        after = reused.after_corpus
+    elif structural is not None and structural[0] is before and structural[1] == candidate:
+        after = structural[2]
+    else:
+        after = before.with_candidate(candidate)
     if reused is not None:
         contracts = reused.contracts
         result = reused.result
@@ -3729,9 +3823,13 @@ def revalidate_prepared_creation_attempt(
     requested_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    structural: StructuralImages | None = None,
 ) -> _Attempt:
     """``revalidate_prepared_creation_draft``, returning the whole attempt so a
-    caller can offer it to the commit through ``prevalidated_attempt``."""
+    caller can offer it to the commit through ``prevalidated_attempt``.
+
+    ``structural`` is what the caller's structural evaluation built; see ``_attempt``.
+    """
     try:
         requested_disposition = normalize_relation_disposition(requested_disposition)
         if requested_disposition not in {None, "reviewed_none"}:
@@ -3750,6 +3848,7 @@ def revalidate_prepared_creation_attempt(
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            structural=structural,
         )
         record = attempt.artifact
         if record is None:
@@ -3846,7 +3945,15 @@ def _detach_auxiliaries(
                 raise RelationReviewError(
                     "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
                 )
-            value.guard.recheck(root)
+            try:
+                value.guard.recheck(root)
+            except vault.PathGuardError as error:
+                # A writer ahead in line committed between this write's plan
+                # and its pre-boundary prepare: the auxiliary it moved is
+                # re-planned on the absorbed retry, as it already is when the
+                # in-boundary commit reports the same race. The subclass keeps
+                # the guard's own code for callers that plan no retry.
+                raise AuxiliaryGuardMoved(error.code, error.reason) from error
         else:
             try:
                 from .vault_store import read as store_read

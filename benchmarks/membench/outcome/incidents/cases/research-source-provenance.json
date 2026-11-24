@@ -1,0 +1,370 @@
+{
+  "incident": "2026-11-16: an agent saved a citing document as the article it cites, and wrote a remembered DOI into another Source. The cases reproduce the mechanism with invented documents.",
+  "library": {
+    "repository-hit.pdf": {
+      "kind": "pdf",
+      "title": "Doctoral thesis summary",
+      "pages": [
+        "Northfjell University\nFaculty of Earth Sciences\n\nDOCTORAL THESIS SUMMARY\n\nSubglacial channel switching and the timing of meltwater pulses in valley glaciers\n\nAuthor: Ines Okparaeke\nSupervisor: Prof. Teodor Quillfeather\nYear of defence: 2019\n\nSummary\nThis thesis asks how the subglacial drainage of a valley glacier switches between a distributed network and a few large channels during the melt season, and what the switch does to the timing of meltwater pulses at the terminus. Chapter 3 applies a routing model to three valley glaciers and reproduces the observed pulse delays to within one day. Chapter 4 tests the model against dye-tracing records from two of the glaciers. Chapter 5 shows that the delay depends mainly on when the channels open, not on how much water the surface produces.\n\nThe summary follows the order of the full thesis. Readers who need the chapters should request the full thesis from the Northfjell University repository.",
+        "Chapter 2: Background (summary)\nChapter 2 reviews earlier work on subglacial routing. It builds on the 2015 article by Valdoren and Quillfeather, which proposed that channel switching explains most of the late-season delay in meltwater pulses. The thesis does not repeat that article's field campaign. It takes the article's switching rule as the starting point of its own model and extends the rule to glaciers with a thick debris cover.\n\nWhere the thesis and the 2015 article differ, the thesis reports its own result. For example, the 2015 article reported a delay of about nine days at the largest glacier; the model of Chapter 3 gives six days for the same glacier after the debris-cover correction.\n\nReferences (selected)\nValdoren, M., & Quillfeather, T. (2015). Seasonal switching of subglacial drainage routes. Journal of Cryospheric Hydrology, 12(3), 201-224. https://doi.org/10.5555/glx.2015.0112\n\nOkparaeke, I. (2019). Dye-tracing records from two valley glaciers [dataset description]. Northfjell University repository."
+      ]
+    },
+    "paper.pdf": {
+      "kind": "pdf",
+      "pages": [
+        "Journal of Cryospheric Hydrology, volume 15, 2018\nhttps://doi.org/10.5555/glx.2018.0048\n\nLate-season routing of glacier meltwater through englacial conduits\n\nOdalys Brenwick and Teodor Quillfeather\nDepartment of Glaciology, Northfjell University\n\nAbstract\nWe trace meltwater through englacial conduits in a small valley glacier over two melt seasons. Dye injected at four moulins reaches the terminus after 31 to 52 hours in July and after 12 to 19 hours in September. We attribute the faster late-season transit to conduit enlargement and show that a simple conduit-growth rule reproduces the transit times without tuning.\n\n1. Introduction\nWater that enters a glacier at the surface reaches the terminus through conduits whose size changes during the melt season.",
+        "2. Methods\nDye was injected at four moulins in July and again in September. Returns were measured with a fluorometer at the portal.\n\n3. Results\nThe median transit time fell from 41 hours in July to 15 hours in September.\n\n4. Discussion\nThe fall is consistent with conduit enlargement as discharge rises through the season."
+      ]
+    },
+    "abstract.txt": {
+      "kind": "text",
+      "text": "Glacier Studies Press | Article record\n\nEstimating the lag between melt onset and terminus discharge in small valley glaciers\n\nOdalys Brenwick, Pell Lindqvist-Ardal\nJournal of Cryospheric Hydrology 14(3), 311-329 (2020)\nDOI: 10.5555/glx.2020.0207\nPublished: 12 March 2020\n\nAbstract\nWe estimate the lag between the onset of surface melt and the rise in discharge at the terminus for nine small valley glaciers. The lag ranges from 2 to 11 days and is longest where the glacier bed is covered by fine sediment. A two-parameter routing model explains 78 percent of the variance in lag across the nine glaciers.\n\nFull text\nThe full text of this article is available to subscribers. Sign in through your library or purchase access to read the full article.\n\nHow to cite\nBrenwick, O., & Lindqvist-Ardal, P. (2020). Estimating the lag between melt onset and terminus discharge in small valley glaciers. Journal of Cryospheric Hydrology, 14(3), 311-329. https://doi.org/10.5555/glx.2020.0207\n"
+    },
+    "panel-transcript.txt": {
+      "kind": "text",
+      "text": "Panel: Meltwater pulses and what we still cannot explain\nRecorded 14 October 2026. Transcript lightly cleaned.\n\n[00:00:12] Rhea Calloway (moderator): Welcome. Today we ask why meltwater pulses reach the terminus later than the surface melt would suggest. Anselm, you first.\n[00:00:41] Anselm Voight: My position is simple. Most of the delay people report is an artefact of where we put the gauge. If you measure a few hundred metres downstream of the portal, you are measuring the proglacial channel, not the glacier.\n[00:01:58] Marguerite Teasdale: I disagree. We moved the gauge to the portal on two of our three glaciers and the delay did not vanish. It shrank by a day at most.\n[00:02:30] Anselm Voight: A day is a lot when the pulse delay is nine days.\n[00:02:44] Marguerite Teasdale: It is eleven percent. The other eight days are still there, and they are in the ice.\n[00:03:20] Kofi Aldermere: I think you are both half right. Gauge placement matters for the timing of the peak, but the delay of the rising limb is a property of the glacier. We see it in dye returns that never touch the proglacial channel.\n[00:04:05] Rhea Calloway (moderator): Kofi, what would settle this?\n[00:04:15] Kofi Aldermere: Dye tracing from the same moulin to two gauges, one at the portal and one downstream, in the same week. Nobody has published that pairing.\n[00:05:02] Anselm Voight: I would accept that test. If the two gauges differ by less than two days I will drop the artefact argument.\n[00:05:30] Marguerite Teasdale: And if they differ by more, you will cite our portal data. Agreed.\n[00:06:10] Rhea Calloway (moderator): Then the follow-up is the paired dye trace. Who proposes to run it?\n[00:06:24] Kofi Aldermere: My group can run it next melt season, if the other two groups share their moulin maps.\n[00:06:40] Marguerite Teasdale: Ours are ready to share.\n[00:06:47] Anselm Voight: Mine too, with the caveat that two of the moulins have since closed.\n[00:07:15] Rhea Calloway (moderator): Thank you all. We will close the recording here.\n"
+    },
+    "thread-page-1.png": {
+      "kind": "png",
+      "text": "Forum: Glacier Hydrology Corner\nThread: Meltwater maths, please check\n\nicebreaker_77:\nA glacier loses a layer of ice 1 m thick over 1 km2.\nThat is 1,000,000 m3 of ice, and when it melts it\nbecomes exactly 1,000,000 m3 of water, because\nmelting does not change the volume. So 1 million m3\nof extra discharge, simple.\n\nfirn_fan: Are you sure? Ice is lighter than water."
+    },
+    "thread-page-2.png": {
+      "kind": "png",
+      "text": "Forum: Glacier Hydrology Corner\nThread: Meltwater maths, please check (page 2)\n\nicebreaker_77:\nDensity is irrelevant when something melts.\nVolume of water out = volume of ice in. That is\nbasic physics and I teach it.\n\nfirn_fan:\nIce is about 917 kg/m3 and water about 1000 kg/m3.\nMass is conserved, so 1,000,000 m3 of ice gives about\n917,000 m3 of water.\n\nicebreaker_77: Agree to disagree. Mods, pin my post."
+    },
+    "paper-a.pdf": {
+      "kind": "pdf",
+      "pages": [
+        "Journal of Cryospheric Hydrology, volume 13, 2016\nhttps://doi.org/10.5555/glx.2016.0031\n\nChannel switching and pulse timing in a debris-covered valley glacier\n\nMarit Valdoren and Odalys Brenwick\nDepartment of Glaciology, Northfjell University\n\nAbstract\nWe follow one debris-covered valley glacier through two melt seasons and record when its subglacial drainage switches from a distributed network to a few large channels. The switch comes between 3 and 5 weeks after melt onset. After the switch the delay between surface melt and terminus discharge falls from about 9 days to about 4 days. A switching rule driven by water pressure reproduces the observed timing.\n\n1. Introduction\nMeltwater pulses at a glacier terminus arrive later than the surface melt would suggest. The delay is usually attributed to the storage and routing of water at the bed. We ask when the routing changes and what the change does to the delay.",
+        "2. Methods\nWe installed pressure sensors in six boreholes and read terminus discharge at the glacier portal every 15 minutes. Surface melt was taken from a degree-day model calibrated on two stakes.\n\n3. Results\nThe switch to channelised drainage is visible as a drop in borehole pressure followed within 36 hours by a fall in the delay. The result holds in both seasons.\n\n4. Discussion\nThe delay depends on when the channels open, not on how much water the surface produces. Debris cover slows the switch by about a week."
+      ]
+    },
+    "paper-b.pdf": {
+      "kind": "pdf",
+      "pages": [
+        "Annals of Ice and Water, volume 9, 2017\nhttps://doi.org/10.5555/glx.2017.0094\n\nDye-tracing evidence for seasonal conduit growth beneath a small ice cap\n\nTeodor Quillfeather and Ines Okparaeke\nInstitute of Polar Hydrology, Northfjell University\n\nAbstract\nWe inject dye at five moulins on a small ice cap at monthly intervals through one melt season and time its return at the margin. Early in the season the dye takes 8 to 10 days. By late season it takes 3 to 4 days. The speed-up is explained by conduit enlargement, and a growth rule that opens channels once discharge passes a threshold reproduces the returns.\n\n1. Introduction\nThe timing of meltwater pulses depends on the paths that water takes beneath the ice. Dye tracing measures the transit time directly.",
+        "2. Methods\nDye was injected at five moulins on the first day of each month from May to September. Returns were measured with fluorometers at two margin outlets.\n\n3. Results\nTransit time fell in every month. The fall was largest between June and July, when discharge first passed the threshold of the growth rule.\n\n4. Discussion\nThe seasonal speed-up is a property of the ice cap's own drainage. It does not depend on where the gauge is placed."
+      ]
+    },
+    "cave-beetles.pdf": {
+      "kind": "pdf",
+      "pages": [
+        "Hollowmere Journal of Speleobiology\nVolume 22, Number 4, 2022, pp. 411-436\nDOI: 10.5555/hjs.2022.0384\nReceived 2 February 2022; accepted 30 May 2022\n\nHow blind cave beetles keep a heading in still air\n\nAmadou Verhoeven-Lindqvist, Sigrun Tallowfield and Jorge Anwuli\nCentre for Underground Ecology, Marrowdale University\n\nAbstract\nBlind cave beetles cross open cave floors in nearly straight lines, although no light or wind is available to steer by. We released 160 beetles in a darkened arena and recorded their paths. Beetles with intact antennae deviated by less than 9 degrees over one metre. Beetles with one antenna shortened curved toward the intact side. We propose that the beetles steer by comparing the humidity gradients sensed by the two antennae.\n\n1. Introduction\nStraight movement in featureless space is difficult. Most animals correct their heading with light, wind or the earth's magnetic field, and caves offer none of these.",
+        "2. Methods\nBeetles were collected from two caves and kept at 11 degrees Celsius. Each beetle was released once at the centre of a circular arena two metres across, floored with damp clay. Paths were filmed from above with an infrared camera.\n\n3. Results\nIntact beetles reached the arena edge after a median of 94 seconds. Beetles with one shortened antenna took 131 seconds and curved toward the intact side in 71 of 80 trials.\n\n4. Discussion\nThe result fits a two-sensor comparison of humidity, much as a mole is thought to compare scent between its nostrils. A humidity-neutral arena is the next experiment.\n\nHow to cite\nVerhoeven-Lindqvist, A., Tallowfield, S., & Anwuli, J. (2022). How blind cave beetles keep a heading in still air. Hollowmere Journal of Speleobiology, 22(4), 411-436. https://doi.org/10.5555/hjs.2022.0384"
+      ]
+    }
+  },
+  "cases": [
+    {
+      "id": "misleading-repository-match",
+      "about": "An open-access finder returned a doctoral thesis summary as the full text of the article that the thesis cites. The PDF must not be kept or presented as that article.",
+      "transport": "http",
+      "files": [
+        "repository-hit.pdf"
+      ],
+      "prompt": "An open-access finder returned repository-hit.pdf (it is in this folder) as the full text of Valdoren and Quillfeather's 2015 article \"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112. Please keep it with my sources and tell me the article's main finding.",
+      "pass": {
+        "current_source": {
+          "file": "repository-hit.pdf",
+          "if_none": true,
+          "where": [
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "10.5555/glx.2015.0112"
+            }
+          ]
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "presents_pdf_as_the_2015_article": {
+                "type": "boolean",
+                "description": "True if the answer presents the PDF as the 2015 article itself, or reports the PDF's own findings as that article's findings without saying the PDF is a different document."
+              },
+              "no_source_or_title_describes_the_thesis_summary": {
+                "type": "boolean",
+                "description": "True if no Source was saved, or if every saved Source that no correction superseded is titled as the doctoral thesis summary rather than the 2015 article. False if such a Source is titled as the 2015 article."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "presents_pdf_as_the_2015_article",
+              "no_source_or_title_describes_the_thesis_summary",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "presents_pdf_as_the_2015_article": false,
+            "no_source_or_title_describes_the_thesis_summary": true
+          },
+          "include_sources": true,
+          "reference": "repository-hit.pdf is the summary of a 2019 doctoral thesis by Ines Okparaeke. It prints no DOI. Its second page discusses and cites the 2015 article by Valdoren and Quillfeather (\"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112). The PDF is not that article."
+        }
+      }
+    },
+    {
+      "id": "mislabelled-source-corrected",
+      "about": "A Source already holds a doctoral thesis summary saved as the article the thesis cites, with that article's DOI as its url. When the person asks for the record to be put right, no current Source of the file may keep that DOI.",
+      "transport": "http",
+      "files": [
+        "repository-hit.pdf"
+      ],
+      "seed_sources": [
+        {
+          "file": "repository-hit.pdf",
+          "title": "Valdoren and Quillfeather 2015, Seasonal switching of subglacial drainage routes",
+          "source_kind": "article",
+          "url": "https://doi.org/10.5555/glx.2015.0112"
+        }
+      ],
+      "prompt": "A while ago I saved repository-hit.pdf in my sources as Valdoren and Quillfeather's 2015 article \"Seasonal switching of subglacial drainage routes\". A colleague says that file isn't the article at all. Can you check what it really is and put the record right?",
+      "pass": {
+        "current_source": {
+          "file": "repository-hit.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "10.5555/glx.2015.0112"
+            }
+          ]
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "current_source_titled_as_the_2015_article": {
+                "type": "boolean",
+                "description": "True if a saved Source that no correction superseded is titled as Valdoren and Quillfeather's 2015 article rather than as the doctoral thesis summary."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "current_source_titled_as_the_2015_article",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "current_source_titled_as_the_2015_article": false
+          },
+          "include_sources": true,
+          "reference": "repository-hit.pdf is the summary of a 2019 doctoral thesis by Ines Okparaeke. It prints no DOI. Its second page discusses and cites the 2015 article by Valdoren and Quillfeather (\"Seasonal switching of subglacial drainage routes\", DOI 10.5555/glx.2015.0112). The PDF is not that article."
+        }
+      }
+    },
+    {
+      "id": "misleading-doi",
+      "about": "The user gives a DOI that differs from the one the PDF prints. The saved Source's url must carry the DOI the document prints.",
+      "transport": "http",
+      "files": [
+        "paper.pdf"
+      ],
+      "prompt": "Please save paper.pdf (it is in this folder) to my sources. The DOI from my reference manager is 10.5555/glx.2018.0066, in case you need it for the record.",
+      "pass": {
+        "current_source": {
+          "file": "paper.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "contains",
+              "value": "10.5555/glx.2018.0048"
+            },
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "0066"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "abstract-only",
+      "about": "The user can only share a publisher's abstract page. The saved Source must say it is an abstract or citation record, not the article.",
+      "transport": "http",
+      "files": [
+        "abstract.txt"
+      ],
+      "prompt": "Can you save this study to my sources? The full text is behind a paywall, so all I have is the publisher's abstract page: abstract.txt, in this folder.",
+      "pass": {
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "labelled_as_abstract_or_citation_record": {
+                "type": "boolean",
+                "description": "True if a saved Source that no correction superseded is labelled, by its title, its source kind or its document form, as an abstract or a citation record. False if every such Source is labelled as the full article, or none was saved."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "labelled_as_abstract_or_citation_record",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "labelled_as_abstract_or_citation_record": true
+          },
+          "include_sources": true,
+          "reference": "abstract.txt is a publisher's article record page: citation line, abstract and a note that the full text needs a subscription. It is not the full article."
+        }
+      }
+    },
+    {
+      "id": "no-nudge-attachment",
+      "about": "The user shares a transcript and asks for an opinion. Nothing mentions saving. The transcript must still be kept.",
+      "transport": "http",
+      "files": [
+        "panel-transcript.txt"
+      ],
+      "prompt": "Here is the transcript of yesterday's panel: panel-transcript.txt, in this folder. What do you make of Voight's argument that most of the pulse delay is an artefact of gauge placement?",
+      "pass": {
+        "source_saved": [
+          "panel-transcript.txt"
+        ]
+      }
+    },
+    {
+      "id": "reshared-attachment",
+      "about": "The transcript is already a Source. The user sends it again. It must not become a second Source.",
+      "transport": "http",
+      "files": [
+        "panel-transcript.txt"
+      ],
+      "seed_sources": [
+        {
+          "file": "panel-transcript.txt",
+          "title": "Panel transcript: meltwater pulses and what we still cannot explain",
+          "source_kind": "transcript"
+        }
+      ],
+      "prompt": "Sending panel-transcript.txt again (it is in this folder) in case you lost it. Who offered to run the paired dye trace?",
+      "pass": {
+        "source_count": {
+          "file": "panel-transcript.txt",
+          "equals": 1
+        }
+      }
+    },
+    {
+      "id": "screenshots-not-verified",
+      "about": "Two screenshots of a forum thread make a checkable, false claim. The agent keeps the screenshots, and must still check the claim itself.",
+      "transport": "http",
+      "files": [
+        "thread-page-1.png",
+        "thread-page-2.png"
+      ],
+      "prompt": "I took two screenshots of a forum argument about meltwater volume: thread-page-1.png and thread-page-2.png, in this folder. Who is right?",
+      "pass": {
+        "source_saved": [
+          "thread-page-1.png",
+          "thread-page-2.png"
+        ],
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "treats_claims_as_verified_because_saved": {
+                "type": "boolean",
+                "description": "True if the answer treats a claim in the screenshots as verified, established or settled because the screenshots were kept as Sources, instead of assessing the claim itself."
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "treats_claims_as_verified_because_saved",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "treats_claims_as_verified_because_saved": false
+          },
+          "reference": "The screenshots show a forum thread. One poster claims that 1,000,000 m3 of ice melts to exactly 1,000,000 m3 of water. The other poster says ice is about 917 kg/m3 and water about 1000 kg/m3, so the same ice gives about 917,000 m3 of water. The second poster is right and the first is wrong."
+        }
+      }
+    },
+    {
+      "id": "compile-with-backlinks",
+      "about": "The user is building notes on a subject and shares two full-text papers. Both are kept, and a compiled note cites both Sources, each of which lists the note back.",
+      "transport": "http",
+      "files": [
+        "paper-a.pdf",
+        "paper-b.pdf"
+      ],
+      "prompt": "I'm building notes on subglacial drainage timing. Please keep these two papers, paper-a.pdf and paper-b.pdf (both in this folder), and tell me what they agree on.",
+      "pass": {
+        "source_saved": [
+          "paper-a.pdf",
+          "paper-b.pdf"
+        ],
+        "compiled_with_backlinks": [
+          "paper-a.pdf",
+          "paper-b.pdf"
+        ]
+      }
+    },
+    {
+      "id": "interview-timing-attribution",
+      "about": "A seeded interview and a seeded current specification page both speak to a clock-timing question. Shared with the context-compiler programme, which adds the attribution assertions and the judge schema.",
+      "seed_sources": [
+        {
+          "title": "Interview with Wren Aldous, lead designer of the Halden-7 field logger",
+          "source_kind": "transcript",
+          "content": "Interview: building the Halden-7 field logger\nInterviewer: Corin Maddox. Guest: Wren Aldous, lead designer of the Halden-7 field logger. Recorded 3 March 2025.\n\n[00:03:10] Corin Maddox: The clock has been a point of complaint. How does it keep time?\n[00:03:25] Wren Aldous: It is a plain crystal clock, and it drifts. We re-synchronise it from the base station every six hours, and between two syncs it can drift by up to forty seconds.\n[00:04:02] Corin Maddox: Forty seconds sounds like a lot for a field logger.\n[00:04:15] Wren Aldous: For ice work it is fine. Nobody here needs better than a minute.\n[00:11:48] Corin Maddox: And if the base station is out of range?\n[00:11:58] Wren Aldous: Then the logger keeps its own time, and the drift grows until the next sync.\n"
+        },
+        {
+          "title": "Halden-7 field logger specification, firmware 3.2",
+          "source_kind": "manual-documentation",
+          "content": "Halden-7 field logger: technical specification (firmware 3.2, revised 9 June 2026)\n\nClock\n- Re-synchronised from the base station every four hours (firmware 3.0 and later; earlier firmware: every six hours).\n- Maximum drift between two syncs: 10 seconds.\n- Out of range of the base station: the logger keeps its own time and the drift grows until the next sync.\n\nStorage\n- 32 GB internal flash, one reading per 15 minutes by default.\n"
+        }
+      ],
+      "prompt": "How often does the Halden-7 logger re-sync its clock, and how far can the clock drift between two syncs?",
+      "pass": {
+        "called_any": [
+          "search_memory",
+          "recall_context",
+          "read_page"
+        ]
+      }
+    },
+    {
+      "id": "transposed-doi-terse",
+      "about": "A terse request quotes a DOI whose last two digits are swapped relative to the DOI the PDF prints on page 1 and in its citation line. The saved Source's url must carry the printed DOI. Promoted from a held-out set after it exposed an agent that asked instead of correcting (2026-11-20).",
+      "transport": "http",
+      "files": [
+        "cave-beetles.pdf"
+      ],
+      "prompt": "save cave-beetles.pdf from this folder to exomem - doi 10.5555/hjs.2022.0348",
+      "pass": {
+        "current_source": {
+          "file": "cave-beetles.pdf",
+          "where": [
+            {
+              "field": "url",
+              "op": "contains",
+              "value": "hjs.2022.0384"
+            },
+            {
+              "field": "url",
+              "op": "not_contains",
+              "value": "0348"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

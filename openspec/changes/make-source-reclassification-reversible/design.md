@@ -6,7 +6,7 @@ Reclassification (`reclassify_source.py`) moves a Source through `move_file(upda
 
 **Goals:** move the legacy `Sources/Other` files without changing any append-only byte; make every move reversible; show every referrer outcome before a move.
 
-**Non-Goals:** rewriting append-only pages; redirecting writes; inferring a classification that was never recorded.
+**Non-Goals:** rewriting append-only content; redirecting writes; inferring a classification that was never recorded.
 
 ## Decisions
 
@@ -16,7 +16,7 @@ Reclassification (`reclassify_source.py`) moves a Source through `move_file(upda
 
 ### 2. Canonical frontmatter holds a reversible history
 
-`reclassified_from` becomes a list of entries, oldest first. Each entry records the prior path, kind and domain. A legacy scalar reads as one entry whose classification is unknown. The field name and entry keys are closed protocol tokens.
+`moved_from` holds the history: a list of entries, oldest first. Each entry records the prior path, kind and domain. Phase 1 shipped the list as `reclassified_from`. That spelling stays readable as entries older than every `moved_from` entry, and no writer renames the key. A legacy scalar reads as one entry whose classification is unknown. The field names and entry keys are closed protocol tokens. `add-curation-relocation-protocol` makes every move append to the same list.
 
 Reclassification writes this field, the classification fields and the companion pointers (`evidence_file`, `data_file`, `raw_protection.artifact_path`) by patching the source spans that the existing YAML loader reports. That replaces `_set_scalar`, `_drop_scalar`, which are regexes over a parsed language (C6), and the whole-frontmatter reserialization in `_repoint_artifact`. The transform proves body-byte equality before the transaction commits.
 
@@ -28,9 +28,11 @@ A revert mode restores the latest entry's path, kind and domain through the same
 
 The preview lists the destination, the mutable referrers it would rewrite, and the append-only referrers it leaves unchanged, grouped by link form. It also lists each refusal with its cause. A restricted mover sees only referrers it can see. A refusal names no withheld page, so the answer matches a vault without withheld pages.
 
-### 5. Phase 2 is conditional
+### 5. Phase 2 is delivered by `add-curation-relocation-protocol`
 
-The live drain preview counts the Sources whose append-only referrers name them by path. If that count is zero, the drain completes in Phase 1 and Phase 2 is withdrawn. If it is not zero, Phase 2 adds history-aware resolution under these constraints:
+`add-curation-relocation-protocol` delivers history-aware resolution for every page with lineage, under its own requirements. It keeps every write target literal, reserves each claimed prior path, and resolves graph, audit and inbound owners through the same resolver. It widens the claims below from Sources to every page with lineage. Its history store is a derived `prior_paths` table beside `identities`, refilled from page bytes. After it ships, reclassification repoints a path link in an append-only page through the governed pointer write, like any move. Its revert restores that page from the pointer-write record. Lineage stays the safety net for every reference that the move does not write.
+
+The constraints first written for this phase follow. The delivered design supersedes them where it differs.
 
 - Only read-only commands resolve through history, through a dedicated read-only resolver. `resolve_visible_identifier`, `prepare_page_read` and every write path stay literal.
 - A claim is admitted only from a page under `Sources/` or `Evidence/` and only for a Markdown path under `Sources/`.
@@ -39,11 +41,37 @@ The live drain preview counts the Sources whose append-only referrers name them 
 - Completeness is proved only when `delta_since` is complete and no changed, deleted or pending path lies under a claimant tree. A restart does not make every Sources read warm.
 - The history store is chosen then, between extending `.refs.sqlite` and adding history to the shared broad `WikilinkResolver`, which is already tied to the vault checkpoint.
 
-Phase 2 requires its own design update and review before implementation.
+The delivered design had its own review in `add-curation-relocation-protocol`.
+
+### 6. A large managed preview produces a paged approval report
+
+Bound candidate collection and response size in the interactive request. A positive overflow starts or rejoins a read-only preview through the maintenance job runner. A current publication must still prove the candidate set. Contention or incomplete evidence yields the existing warming response.
+
+Use the existing job receipt and a report-local cursor to report one bounded page at a time. Publish the summary and approval digest after the job proves the complete report. Admit the managed report only while the owner's authority covers every contributor. An owner-scoped rule or Access exclusion can withhold a contributor even if it does not appear in the report. Refuse managed previews under those conditions before counting references.
+
+Bind page delivery to live owner credentials, the governing policy, the connector ceiling, and the erasure set. Preview and paged apply decide the same candidate paths before counting or planning effects. Each completed report needs a current membership snapshot, since a file can change its container binding. A changed or unknown snapshot needs a fresh preview. The release filter checks guarded report and continuation paths without enumerating their directories. The lifecycle verifier reuses its validated set until physical evidence changes and checks the request deadline during a refresh. Refuse the whole response if the filter changes any value. A failed or interrupted job cannot expose staged rows.
+
+The paged approval digest binds the Source, destination, full referrer report, and pointer-write proof. The writer checks it against the current plan and rechecks the proof before saving pointer records and renaming the Source. The existing inline approval digest stays readable.
+
+The product load target is 20,000 pages, about 100,000 units, and 120,000 edges, with a hub of 10,000 links. Use the existing request deadline and maintenance receipt response bound. Prove that a large preview leaves Records responsive and can report all 10,000 referrers over bounded pages.
+
+### 7. Governed pages reuse exact evidence
+
+Receipt verification must survive ordinary concurrent appends. A current tail or an unchanged erasure marker does not prove the integrity of older receipt bytes. Verify the historical evidence on bounded physical segments and carry the verified chain endpoint to the next segment. Reuse proof while the held segment identity is current. Reverify changed segments before releasing a report. Keep legacy evidence readable and preserve the ordinary full audit across storage formats.
+
+Bound the size of any segment that an ordinary append can change. Use the existing receipt writer, chain checks, and recovery worker. Verify old oversized evidence off the request path. Keep the final report gate after disclosure recording so an edit to a prior receipt can still withhold the whole response. Keep the verification state separate from the retained report body.
+
+For page-local release, retain the page evidence that the background job already checked. Use the existing guarded generation and simple-page proof. The terminal gate must still check current policy, the connector ceiling, RAW authority, custody, and erasure evidence. Referrers with external dependencies need current evidence for those dependencies too. Feed the already proved byte hash and size to the disclosure receipt rather than reopening the referrer to calculate them.
+
+The release check covers a production-sized reference report, existing governed erasures, a long receipt history, and independent disclosure appends. Compare the same route with and without the change. Require every bounded page to finish within its deadline. Edit historical evidence between disclosure recording and release, and verify that no report facts reach the caller.
+
+### Known limit: large governed previews
+
+A governed vault does not yet meet the load target. On 10,001 governed referrers in one flat folder, each referrer costs about 20 ms of admission work. Most of that time goes to re-listing the folder to resolve one physical name. The background build needs about 209 s, so it stops at the 50 s request budget with no saved progress. Without that cap, it fails its final snapshot check, because index and governance generations move during a long build. These costs predate this change. Ungoverned vaults meet the target. A follow-up change takes governed preview scale and bounded release for referrers with dependencies.
 
 ## Controls and costs
 
-- The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.
+- The append-only guard prevents any write to Sources and Evidence. After Decision 1 it fires only for links that would otherwise dangle. After Decision 5 a path link is repointed through the governed pointer write, so the guard holds a file back only when the source carries no `exomem_id`. When it fires, the file stays in place and the preview lists it. The operator pays one deferred file.
 - Revert refusal for an unknown classification prevents inventing a classification. When it fires, the owner reclassifies explicitly. The owner pays one step.
 
 ## Migration Plan
@@ -51,4 +79,4 @@ Phase 2 requires its own design update and review before implementation.
 1. Ship Phase 1. No page changes until a reclassification runs.
 2. After release and installation on the personal service, preview the whole drain.
 3. Apply the moves that the preview clears in reviewed batches through governed reclassification, and check references after each batch.
-4. Roll back a file with revert. Decide Phase 2 from the count of files that the preview held back.
+4. Roll back a file with revert. Move the files that the preview held back after `add-curation-relocation-protocol` ships.

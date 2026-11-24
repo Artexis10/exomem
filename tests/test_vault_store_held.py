@@ -12,22 +12,18 @@ file, and the row records both.
 from __future__ import annotations
 
 import hashlib
-import sys
 from datetime import UTC, datetime
 
 import pytest
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, DIAGRAM, migrate_apply, vault  # noqa: F401
 from test_vault_store_read_write import put, rows, stored, writer  # noqa: F401
+from test_vault_store_write_path import commits_since
 
 from exomem import state_paths
 from exomem.cli_ops import OpError
 from exomem.curation import MAX_WHY_CHARS
 from exomem.vault_store import held, projector, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 EXOMEM = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe page that Exomem changed.\n"
 MINE = b"---\ntitle: Alpha\ntype: note\n---\n# Alpha\n\nThe edit that a person made in the file.\n"
@@ -234,16 +230,16 @@ def test_keep_mine_on_an_edit_makes_the_persons_bytes_the_page_without_projectin
     """
     revision = hold(stored, writer, "edit", body=False)
     resolved = resolve(stored, writer, held.KEEP_MINE)
-    assert resolved.revision == revision + 1
-    assert stored_page(stored) == [(MINE, revision + 1)]
+    assert commits_since(stored, revision) == 1
+    assert stored_page(stored) == [(MINE, resolved.revision)]
     assert (stored / ALPHA).read_bytes() == MINE
     assert queue(stored) == []
     assert rows(stored, "SELECT sha256, revision FROM store_manifest WHERE path = ?", ALPHA) == [
-        (digest(MINE), revision + 1)
+        (digest(MINE), resolved.revision)
     ]
     assert rows(stored, "SELECT path FROM store_held") == []
     assert rows(
-        stored, "SELECT operation, origin, reason FROM store_audit WHERE revision = ?", revision + 1
+        stored, "SELECT operation, origin, reason FROM store_audit WHERE revision = ?", resolved.revision
     ) == [("import", "outside editor", f"held keep-mine: {WHY}")]
     assert held.list_held(stored) == []
 
@@ -272,7 +268,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     """A keep-store that loses the person's bytes, saves them inside the vault, or leaves nothing
     queued, so the store's page never reaches the file. The held body is stale, so only the file can
     be the source of the export."""
-    revision = hold(stored, writer, "edit")
+    hold(stored, writer, "edit")
     with writer.handle.transaction() as tx:
         tx.execute("UPDATE store_held SET body = ? WHERE path = ?", (b"stale", ALPHA))
     resolved = resolve(stored, writer, held.KEEP_STORE)
@@ -282,7 +278,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     assert exported.parts[-len(ALPHA.split("/")) :] == tuple(ALPHA.split("/"))
     assert datetime.now(UTC).strftime("%Y-%m-%d") in exported.parts
     assert digest(exported.read_bytes()) == digest(MINE) == resolved.exported_sha256
-    assert stored_page(stored) == [(EXOMEM, revision + 1)]
+    assert stored_page(stored) == [(EXOMEM, resolved.revision)]
     assert queue(stored) == [(ALPHA, "write")]
     assert rows(stored, "SELECT sha256 FROM store_manifest WHERE path = ?", ALPHA) == [
         (digest(MINE),)
@@ -290,7 +286,7 @@ def test_keep_store_saves_the_persons_exact_bytes_outside_the_vault_and_queues_t
     assert rows(stored, "SELECT path FROM store_held") == []
     copy = exported.relative_to(state_paths.vault_state_dir(stored)).as_posix()
     assert rows(
-        stored, "SELECT operation, reason FROM store_audit WHERE revision = ?", revision + 1
+        stored, "SELECT operation, reason FROM store_audit WHERE revision = ?", resolved.revision
     ) == [
         (
             "write",
@@ -327,12 +323,12 @@ def test_keep_mine_on_a_delete_removes_the_page_and_projects_nothing(stored, wri
     """
     revision = hold(stored, writer, "delete")
     resolved = resolve(stored, writer, held.KEEP_MINE)
-    assert resolved.revision == revision + 1
+    assert commits_since(stored, revision) == 1
     assert rows(stored, "SELECT path FROM store_pages WHERE path = ?", ALPHA) == []
     assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", ALPHA) == []
     assert queue(stored) == []
     assert rows(stored, "SELECT path FROM store_held") == []
-    assert rows(stored, "SELECT operation FROM store_audit WHERE revision = ?", revision + 1) == [
+    assert rows(stored, "SELECT operation FROM store_audit WHERE revision = ?", resolved.revision) == [
         ("delete",)
     ]
     assert not (stored / ALPHA).exists()
@@ -344,10 +340,10 @@ def test_keep_store_on_a_delete_queues_the_page_and_exports_nothing(stored, writ
     Or one that leaves the manifest row, so the projector holds the missing file again instead of
     writing it.
     """
-    revision = hold(stored, writer, "delete")
+    hold(stored, writer, "delete")
     resolved = resolve(stored, writer, held.KEEP_STORE)
     assert (resolved.exported_to, exports_exist(stored)) == (None, False)
-    assert stored_page(stored) == [(EXOMEM, revision + 1)]
+    assert stored_page(stored) == [(EXOMEM, resolved.revision)]
     assert queue(stored) == [(ALPHA, "write")]
     assert rows(stored, "SELECT path FROM store_manifest WHERE path = ?", ALPHA) == []
     assert rows(stored, "SELECT path FROM store_held") == []
@@ -413,7 +409,7 @@ def test_a_held_row_that_goes_between_the_read_and_the_commit_rolls_the_whole_re
     with pytest.raises(write.StoreConflict):
         resolve(stored, writer, held.KEEP_MINE, seen=seen)
     assert stored_page(stored) == [(EXOMEM, revision)]
-    assert read.current_revision(stored) == revision
+    assert commits_since(stored, revision) == 0
 
 
 def test_an_unknown_choice_and_an_item_that_is_not_held_each_name_what_to_change(stored, writer):

@@ -126,11 +126,11 @@ def _canonical(raw, table, name, row_id):
 def _extent(conn, source, row_id):
     """Inspect lengths before fetching values, including the source proof's key and body."""
     raw = native_metadata.sqlite_connection(conn)
-    with raw.blobopen("items", "item_key", row_id, readonly=True) as key, \
-            raw.blobopen("items", "body", row_id, readonly=True) as body:
+    with raw.blobopen("item_rows", "item_key", row_id, readonly=True) as key, \
+            raw.blobopen("item_rows", "body", row_id, readonly=True) as body:
         size = len(key) + len(body)
     if source is None:
-        with raw.blobopen("items", "values_json", row_id, readonly=True) as values:
+        with raw.blobopen("item_rows", "values_json", row_id, readonly=True) as values:
             return size + len(values)
     count = len(source.fields)
     # A tag is fetched only when stored as an integer; every other cell is sized through its blob handle.
@@ -194,7 +194,7 @@ def _publish(conn, plan, source):
     old = index_migrations.ready_plan(conn, cid)
     conn.execute("UPDATE typed_encoding_mappings SET state='retired' WHERE collection_id=? AND state='ready'", (cid,))
     conn.execute("UPDATE collections SET encoding=? WHERE collection_id=?", (typed_storage.TYPED_V2, cid))
-    conn.execute("UPDATE items SET encoding=?,values_json=NULL WHERE collection_id=?", (typed_storage.TYPED_V2, cid))
+    conn.execute("UPDATE item_rows SET encoding=?,values_json=NULL WHERE collection_id=?", (typed_storage.TYPED_V2, cid))
     conn.execute("UPDATE typed_encoding_mappings SET state='ready' WHERE collection_id=? AND generation=?",
                  (cid, plan.layout.generation))
     conn.execute(typed_storage._identity_trigger(plan.layout))

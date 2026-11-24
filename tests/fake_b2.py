@@ -35,10 +35,14 @@ class FakeB2:
     def __init__(self, *, bucket: str = "media-bucket", minimum_part: int = 1000, shape: str = "listed",
                  hiding_days: int = 7):
         self.bucket, self.bucket_id = bucket, "bucket-id-1"
+        self.api_url, self.download_url, self.upload_url = API, DOWNLOAD, UPLOAD
+        self.name_prefix: str | None = None
+        self.capabilities = ["readFiles", "writeFiles"]
         self.hiding_days, self.day = hiding_days, 0
         self.minimum_part, self.shape = minimum_part, shape
         self.files: dict[str, dict] = {}
         self.calls: list[str] = []
+        self.parts_sent: list[tuple[str, int]] = []
         self.upload_bytes = 0
         self.outage = False
         self._lost: dict[str, tuple[str, bool]] = {}  # endpoint -> (mode, whether an outage follows)
@@ -129,15 +133,19 @@ class FakeB2:
             return "authorize", self._authorize(request)
         token = request.headers.get("authorization", "")
         listing = token == self._list_token()
-        if token != self.account_token and not listing and url.host != "up000.fake-b2.test":
+        origin = f"{url.scheme}://{url.netloc.decode()}"
+        uploading = origin == self.upload_url and (url.path == "/file" or url.path.startswith("/part/"))
+        if token != self.account_token and not listing and not uploading:
             return "unauthorized", self._json(401, {"code": "bad_auth_token"})
         # Each key holds only its own capabilities: the edge key cannot list, and the list key can only list.
         if listing != url.path.endswith("/b2_list_file_versions"):
             return "unauthorized", self._json(401, {"code": "unauthorized"})
-        if url.host == "up000.fake-b2.test":
+        if uploading:
             return await self._upload(request)
-        if url.host == "dl000.fake-b2.test":
+        if origin == self.download_url and (url.path.endswith("/b2_download_file_by_id") or url.path.startswith("/file/")):
             return self._download(request)
+        if origin != self.api_url:
+            return "wrong_origin", self._json(404, {"code": "wrong_origin"})
         endpoint = url.path.rsplit("/", 1)[-1]
         payload = json.loads(request.content) if request.content else {}
         handler = getattr(self, f"_api_{endpoint}", None)
@@ -156,13 +164,13 @@ class FakeB2:
                                     "message": f"This request is not currently supported on API version number {version}"})
         if request.headers.get("authorization", "").startswith("Basic "):
             listing = base64.b64decode(request.headers["authorization"][6:]).decode().startswith(f"{LIST_KEY_ID}:")
-            storage = {"apiUrl": API, "downloadUrl": DOWNLOAD, "absoluteMinimumPartSize": self.minimum_part,
+            storage = {"apiUrl": self.api_url, "downloadUrl": self.download_url, "absoluteMinimumPartSize": self.minimum_part,
                        "recommendedPartSize": 100_000_000}
             bucket = {"id": self.bucket_id, "name": self.bucket}
             storage["allowed"] = {
-                "capabilities": ["listFiles"] if listing else ["readFiles", "writeFiles"],
+                "capabilities": ["listFiles"] if listing else self.capabilities,
                 "buckets": None if self.shape == "unrestricted" else [bucket],
-                "namePrefix": None,
+                "namePrefix": self.name_prefix,
             }
             token = self._list_token() if listing else self.account_token
             return self._json(200, {"accountId": "account", "authorizationToken": token,
@@ -170,19 +178,22 @@ class FakeB2:
         return self._json(401, {"code": "unauthorized"})
 
     def _api_b2_get_upload_url(self, payload: dict) -> httpx.Response:
-        return self._json(200, {"bucketId": payload["bucketId"], "uploadUrl": f"{UPLOAD}/file", "authorizationToken": "token-small"})
+        return self._json(200, {"bucketId": payload["bucketId"], "uploadUrl": f"{self.upload_url}/file",
+                                "authorizationToken": "token-small"})
 
     def _api_b2_start_large_file(self, payload: dict) -> httpx.Response:
         file_id = self._id()
         self.files[file_id] = {"name": payload["fileName"], "action": "start", "parts": {},
                                "info": payload.get("fileInfo", {}), "data": None}
-        return self._json(200, {"fileId": file_id, "fileName": payload["fileName"], "action": "start"})
+        return self._json(200, {"fileId": file_id, "bucketId": self.bucket_id,
+                                "fileName": payload["fileName"], "action": "start"})
 
     def _api_b2_get_upload_part_url(self, payload: dict) -> httpx.Response:
         file_id = payload["fileId"]
         if self.files.get(file_id, {}).get("action") != "start":
             return self._json(400, {"code": "bad_request"})
-        return self._json(200, {"fileId": file_id, "uploadUrl": f"{UPLOAD}/part/{file_id}", "authorizationToken": "token-part"})
+        return self._json(200, {"fileId": file_id, "uploadUrl": f"{self.upload_url}/part/{file_id}",
+                                "authorizationToken": "token-part"})
 
     def _api_b2_finish_large_file(self, payload: dict) -> httpx.Response:
         item = self.files.get(payload["fileId"])
@@ -242,9 +253,10 @@ class FakeB2:
     def _api_b2_get_file_info(self, payload: dict) -> httpx.Response:
         item = self.files.get(payload["fileId"])
         if item is None:
-            return self._json(404, {"code": "file_not_present"})
+            return self._json(404, {"status": 404, "code": "not_found"})
         size = len(item["data"]) if item["data"] is not None else 0
-        return self._json(200, {"fileId": payload["fileId"], "fileName": item["name"], "action": item["action"],
+        return self._json(200, {"fileId": payload["fileId"], "bucketId": self.bucket_id,
+                                "fileName": item["name"], "action": item["action"],
                                 "contentLength": size, "fileInfo": item["info"]})
 
     async def _upload(self, request: httpx.Request) -> tuple[str, httpx.Response]:
@@ -254,11 +266,14 @@ class FakeB2:
         if request.headers.get("x-bz-content-sha1") != sha1:
             return "upload", self._json(400, {"code": "bad_request", "message": "sha1 mismatch"})
         if request.url.path.startswith("/part/"):
-            item = self.files.get(request.url.path.removeprefix("/part/"))
+            file_id = request.url.path.removeprefix("/part/")
+            item = self.files.get(file_id)
             if item is None or item["action"] != "start" or request.headers.get("authorization") != "token-part":
                 return "upload_part", self._json(400, {"code": "bad_request"})
-            item["parts"][int(request.headers["x-bz-part-number"])] = data
-            return "upload_part", self._json(200, {"partNumber": int(request.headers["x-bz-part-number"])})
+            number = int(request.headers["x-bz-part-number"])
+            self.parts_sent.append((file_id, number))
+            item["parts"][number] = data
+            return "upload_part", self._json(200, {"partNumber": number})
         if request.headers.get("authorization") != "token-small":
             return "upload_file", self._json(401, {"code": "bad_auth_token"})
         info = {key[len("x-bz-info-"):]: unquote(value) for key, value in request.headers.items()
@@ -278,7 +293,7 @@ class FakeB2:
             item = self.current(unquote(path.removeprefix(f"/file/{self.bucket}/")))
             endpoint = "head_name"
         if item is None or item["action"] != "upload":
-            return endpoint, self._json(404, {"code": "not_found"})
+            return endpoint, self._json(404, {"status": 404, "code": "not_found"})
         data = item["data"]
         file_id = next(key for key, value in self.files.items() if value is item)
         headers = {"x-bz-file-id": file_id, "x-bz-file-name": quote(item["name"], safe="/"),

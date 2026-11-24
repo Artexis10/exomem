@@ -209,7 +209,7 @@ def _allowed_github_user_id() -> int | None:
     return value if value > 0 else None
 
 
-def build_session_authority(*, base_url: str) -> SessionAuthority:
+def build_session_authority(*, base_url: str, authoritative_only: bool = False) -> SessionAuthority:
     """Build the authoritative durable session store for this deployment."""
     signing_root = _required_signing_root()
     allowed_github_user_id = _allowed_github_user_id()
@@ -218,7 +218,7 @@ def build_session_authority(*, base_url: str) -> SessionAuthority:
     shared = _shared_storage_settings()
     if shared is not None:
         storage_url, namespace, storage_token, timeout = shared
-        stale_grace_seconds = _session_stale_grace_seconds()
+        stale_grace_seconds = 0.0 if authoritative_only else _session_stale_grace_seconds()
         state_raw = os.environ.get("EXOMEM_WRITER_LEASE_STATE_DIR", "").strip()
         state_dir = (
             Path(state_raw).expanduser()

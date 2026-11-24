@@ -277,6 +277,12 @@ class WriterConnection:
         # how many checks in a row failed.
         self.import_retry: dict[str, tuple[float, int]] = {}
         self.import_readers: dict[str, Any] = {}
+        # Per running job, what this host saw of its batches (``importer._Activity``). The store thread
+        # replaces a job's whole value at each phase, so a status read off that thread sees one value.
+        self.import_telemetry: dict[str, Any] = {}
+        # Each collection's row-id head map at the generation it was read, or None for a collection
+        # too large to keep one (``row_binding``); a write advances the generation, and a new handle starts with none.
+        self.row_heads: dict[str, tuple[tuple[int, str], Any]] = {}
         self.import_last_turn: tuple[str, str] | None = None
         # This handle's connection to the derived-rows file (``derived_rows``), opened and
         # reconciled on first use, so a new handle, as after a takeover, reconciles again.
@@ -332,22 +338,36 @@ class WriterConnection:
             )
 
     @contextmanager
-    def transaction(self, *, resolve_divergence: bool = False) -> Iterator[sqlite3.Connection]:
-        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back."""
+    def transaction(
+        self, *, resolve_divergence: bool = False, before_commit: Callable[[], None] | None = None,
+        collection_free: bool = False,
+    ) -> Iterator[sqlite3.Connection]:
+        """One ``BEGIN IMMEDIATE`` transaction: commit on success, else roll back.
+
+        ``collection_free`` declares that the body writes only the vault store's own tables, never a row
+        that a collection's release reads, so the release cache keeps what it holds across the commit
+        (``ReleaseCache.begin``).
+        """
         from sqlalchemy.exc import DBAPIError
 
         self.require_write_authority(allow_diverged=resolve_divergence)
+        from .. import write_intake
+
+        # The store's commit gate: a queued save's replay records that it reached its commit first.
+        write_intake.mark_replay_reached_commit()
         cache = self.release_cache
         cache.check()
         try:
             self.core.begin()
         except DBAPIError as error:
             raise error.orig from error
-        cache.begin()
+        cache.begin(collection_free=collection_free)
         self._owns_transaction = True
         try:
             yield self.connection
             cache.prepare()
+            if before_commit is not None:
+                before_commit()
             self.core.commit()
             cache.finish(True)
         except BaseException as error:
@@ -388,20 +408,23 @@ class WriterConnection:
         except DBAPIError as error:
             raise error.orig from error
 
-    def checkpoint(self) -> bool:
+    def checkpoint(self, *, passive: bool = False) -> bool:
         """Copy every WAL commit into the store file and empty the WAL (design §11).
 
         Closing the writer does this only as the last connection: another open reader,
         even an idle one, keeps the commits in the WAL beside a store file that lacks
         them. It never waits, so a release or shutdown keeps its deadline: a reader's
         open read transaction holds the copy back at once, and it returns False with
-        every commit still in the WAL.
+        every commit still in the WAL. ``passive`` copies the commits that no reader
+        still needs and keeps the WAL file, as SQLite's own autocheckpoint does.
         """
         self.require_write_authority()
         conn = self.connection
         conn.execute("PRAGMA busy_timeout=0")
         try:
-            blocked, _, _ = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            blocked, _, _ = conn.execute(
+                "PRAGMA wal_checkpoint(PASSIVE)" if passive else "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
         finally:
             conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
         return blocked == 0
@@ -414,6 +437,7 @@ class WriterConnection:
             for reader in self.import_readers.values():
                 reader.close()
             self.import_readers.clear()
+            self.row_heads.clear()
             if self.derived is not None:
                 self.derived.close()
                 self.derived = None
@@ -431,6 +455,62 @@ class WriterConnection:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+class SnapshotHandle:
+    """A read-only stand-in for the writer handle: one pooled reader, on the thread that opened it.
+
+    A ``CollectionWriter`` over it reads the store's last commit under the same governance
+    checks as over the writer, without the store thread (``runtime.StoreServer.read_beside``).
+    It shows the live writer handle's host-local import facts read-only, and refuses every write.
+    ``derived`` False, for a request on a collection the store keeps in full, skips the derived file.
+    """
+
+    def __init__(self, path: Path, conn: sqlite3.Connection, live: WriterConnection, *,
+                 derived: bool = True) -> None:
+        from types import MappingProxyType
+
+        from . import derived_rows
+
+        self.path = path
+        self.connection = conn
+        self._owner_thread = threading.get_ident()
+        self._closed = False
+        self._release_cache = None
+        self._inspection_identity = object()
+        self.import_proofs = MappingProxyType(live.import_proofs)
+        self.import_blocked = MappingProxyType(live.import_blocked)
+        self.import_telemetry = MappingProxyType(live.import_telemetry)
+        # Read before this reader's first store read, so a record either names a member the store
+        # snapshot has not checkpointed past or is dropped (``derived_rows.member_progress``).
+        # None, unread or unreadable, is a status's unknown, never an absent member.
+        records = derived_rows.progress_records(path) if derived else None
+        self.derived_progress = None if records is None else MappingProxyType(records)
+
+    @property
+    def release_cache(self):
+        self.require_owner_thread()
+        if self._release_cache is None:
+            from .governance import ReleaseCache
+
+            self._release_cache = ReleaseCache(self.connection)
+        return self._release_cache
+
+    def require_owner_thread(self) -> None:
+        if threading.get_ident() != self._owner_thread:
+            raise CollectionStoreError(
+                "COLLECTION_STORE_WRITER_THREAD", "only the thread that opened a snapshot may read through it"
+            )
+
+    def require_write_authority(self, *, allow_diverged: bool = False) -> None:
+        raise CollectionStoreError("COLLECTION_STORE_SNAPSHOT_READ_ONLY", "a store snapshot cannot write")
+
+    # The writer's two write entry points (``WriterConnection``), so a write refuses as designed.
+    def transaction(self, *, resolve_divergence: bool = False, collection_free: bool = False) -> None:
+        self.require_write_authority()
+
+    def execute(self, statement, parameters=None) -> None:
+        self.require_write_authority()
 
 
 def open_writer(
@@ -506,10 +586,12 @@ def open_writer(
         raise
 
 
-def open_reader(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
-    """Open an existing store read-only at the current schema version."""
+def open_reader(
+    path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS, oldest: int | None = None,
+) -> sqlite3.Connection:
+    """Open an existing store read-only at schema ``oldest`` or later, by default the current schema version."""
     conn, found = _open_read_only(path, busy_timeout_ms)
-    if found < schema.SCHEMA_VERSION:
+    if found < (schema.SCHEMA_VERSION if oldest is None else oldest):
         conn.close()
         raise CollectionStoreError(
             "COLLECTION_STORE_SCHEMA_PENDING",
@@ -717,15 +799,15 @@ class ReaderPool:
         self._idle: dict[bool, list[_Idle]] = {True: [], False: []}
 
     @contextmanager
-    def lend(self, *, head: bool, current: bool) -> Iterator[sqlite3.Connection]:
-        """Lend a head or plain reader; ``current`` also refuses a store that awaits its writer's migration."""
+    def lend(self, *, head: bool, oldest: int = 0) -> Iterator[sqlite3.Connection]:
+        """Lend a head or plain reader that refuses a store whose recorded schema is below ``oldest``."""
         conn, version, identity = self._take(head)
         healthy = False
         try:
             if version > schema.SCHEMA_VERSION:
                 raise CollectionStoreError(
                     "COLLECTION_STORE_SCHEMA_NEWER", str(schema.SchemaVersionError(version, schema.SCHEMA_VERSION)))
-            if current and version < schema.SCHEMA_VERSION:
+            if version < oldest:
                 raise CollectionStoreError(
                     "COLLECTION_STORE_SCHEMA_PENDING", "the collection store has not been migrated by its writer yet")
             yield conn
@@ -799,17 +881,19 @@ def _quiet(conn: sqlite3.Connection) -> bool:
 
 def head_reader(path: Path, pool: ReaderPool | None = None):
     """A head reader for one ``with`` block: lent by ``pool`` when given, else freshly opened and closed."""
-    return closing(open_head_reader(path)) if pool is None else pool.lend(head=True, current=False)
+    return closing(open_head_reader(path)) if pool is None else pool.lend(head=True)
 
 
 def ownership_reader(path: Path, pool: ReaderPool | None = None):
     """A plain reader at any supported schema (ownership declarations ride the unchanged metadata wire)."""
-    return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False, current=False)
+    return closing(_open_read_only(path, BUSY_TIMEOUT_MS)[0]) if pool is None else pool.lend(head=False)
 
 
-def store_reader(path: Path, pool: ReaderPool | None = None):
-    """A plain reader at the current schema, as ``open_reader`` opens it."""
-    return closing(open_reader(path)) if pool is None else pool.lend(head=False, current=True)
+def store_reader(path: Path, pool: ReaderPool | None = None, *, oldest: int | None = None):
+    """A plain reader at schema ``oldest`` or later, by default the current schema, as ``open_reader`` opens it."""
+    if pool is None:
+        return closing(open_reader(path, oldest=oldest))
+    return pool.lend(head=False, oldest=schema.SCHEMA_VERSION if oldest is None else oldest)
 
 
 def open_query_reader(path: Path, *, busy_timeout_ms: int = 200) -> sqlite3.Connection:

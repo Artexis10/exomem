@@ -18,9 +18,10 @@ from contextlib import ExitStack, closing, contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 
-from .. import held_fs, state_migration, state_paths, vault, writer_lease
+from .. import held_fs, state_migration, state_paths, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
+from ..kbdir import managed_root
 from . import authority, capability, chain, connection, custody, owner, replica, schema, takeover
 from .connection import CollectionStoreError
 
@@ -34,7 +35,7 @@ def _isolated_session(parent):
     if not state_paths.state_store_root().resolve().is_relative_to(parent):
         raise CollectionStoreError("COLLECTION_STORE_CUSTODY_REQUIRED", "state must be inside the isolated parent")
     root = Path(tempfile.mkdtemp(prefix="collection-create-", dir=parent))
-    (root / vault.kb_dirname()).mkdir()
+    managed_root(root).mkdir()
     with _ProducerSession.open(root, production=False) as session:
         yield session
 
@@ -75,7 +76,7 @@ class _ProducerSession:
         self.fs = stack.enter_context(held_fs.acquire(parent).require())
         self.directory = stack.enter_context(self.fs.parent(self.root.name).require())
         self.kb_directory = stack.enter_context(self.fs.parent(
-            (self.root / vault.kb_dirname()).relative_to(parent).as_posix(),
+            managed_root(self.root).relative_to(parent).as_posix(),
         ).require())
         self.namespace = stack.enter_context(self.fs.parent(
             authority.marker_path(self.root).parent.relative_to(parent).as_posix(), create=True, access="mutate",
@@ -189,7 +190,7 @@ class _ProducerSession:
 
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
-               fence_client, scaffold=True, facade_profile=None):
+               fence_client, scaffold=True, facade_profile=None, automatic=False):
     if session.production:
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
@@ -221,7 +222,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                 with writer._authorization(), writer.read_snapshot():
                     _, _, replay = writer._identity(
                         "create", manifest_path,
-                        {"manifest_text": manifest_text, "why": why, "scaffold": scaffold}, request_id,
+                        writer.create_arguments(manifest_text, why, scaffold, automatic), request_id,
                     )
                     if replay is not None:
                         result = _replay_create(writer, request_id, replay)
@@ -246,7 +247,8 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                         else:
                             prepared = _prepare_new(writer, manifest_path, manifest_text, why=why,
                                                     request_id=request_id, scaffold=scaffold,
-                                                    fence_client=fence_client, facade_profile=facade_profile)
+                                                    fence_client=fence_client, facade_profile=facade_profile,
+                                                    automatic=automatic)
                     finally:
                         # A rejected prepare cannot revoke admission; a durable intent must gate reports.
                         runtime = manager._collection_store
@@ -258,7 +260,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
 
 
 def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client,
-                 facade_profile=None):
+                 facade_profile=None, automatic=False):
     from . import ownership
 
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -279,7 +281,7 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode(),
-                           facade_profile=facade_profile)
+                           facade_profile=facade_profile, automatic=automatic)
 
 
 def target_marker(root, old, sid, entries, *, fence, supersede=False):
@@ -1677,12 +1679,12 @@ class _CreateAdmission:
 
 
 def _prepare_create(writer, manifest_path, manifest_text, *, why, request_id,
-                    expected_marker, target_marker, scaffold=True, facade_profile=None):
+                    expected_marker, target_marker, scaffold=True, facade_profile=None, automatic=False):
     admission = _CreateAdmission(writer, expected_marker, target_marker)
     # The calling tool's profile: the create requires it and applies that profile's scaffold.
     writer._facade_profile = facade_profile
     receipt = writer._create_collection(manifest_path, manifest_text, why=why, request_id=request_id,
-                                        scaffold=scaffold, admission=admission)
+                                        scaffold=scaffold, admission=admission, automatic=automatic)
     try:
         return _recover_create(writer)
     except (CollectionStoreError, collections.CollectionError, chain.StoreChainError, sqlite3.Error, OpError) as error:

@@ -8,16 +8,17 @@ Nothing else, and no environment flag, changes file-mode routing.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import cache, wraps
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from .. import memory_refs, published_admission, request_budget, state_paths
 from .. import structured_collections as collections
-from .connection import CollectionStoreError, WriterConnection
+from .connection import CollectionStoreError, SnapshotHandle, WriterConnection
 
 if TYPE_CHECKING:
     from .writer import CollectionWriter
@@ -27,6 +28,108 @@ if TYPE_CHECKING:
 _BOUND: ContextVar[tuple[Path, CollectionWriter, bool] | None] = ContextVar(
     "collection_store_preview", default=None
 )
+_PHASE: ContextVar[_PreviewPhase | None] = ContextVar("collection_store_preview_phase", default=None)
+
+
+class _WriterAccess:
+    """Preview-lifetime access; each acquired resource belongs to one checkout phase."""
+
+    def __init__(self, phase):
+        object.__setattr__(self, "_phase", phase)
+
+    def __getattr__(self, name):
+        return getattr(self._phase.writer(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._phase.writer(), name, value)
+
+
+class _PreviewPhase:
+    """Own real checkout departure without changing the cached connection's lifetime."""
+
+    def __init__(self, root, checkout, runtime=None):
+        self.root, self.checkout, self.runtime = root, checkout, runtime
+        self.context = self.current = None
+
+    def writer(self):
+        if self.current is None:
+            raise CollectionStoreError("COLLECTION_STORE_CHECKOUT_CLOSED", "the preview has no active checkout")
+        self.current._scope.check()
+        return self.current
+
+    def open(self):
+        context = self.checkout()
+        current = context.__enter__()
+        self.context, self.current = context, current
+
+    def close(self):
+        context, self.context, self.current = self.context, None, None
+        if context is not None:
+            context.__exit__(None, None, None)
+
+    def depart(self):
+        current = self.writer()
+        current._scope.require_departure(current._value)
+        handle = current._value.handle
+        self.close()
+        return handle
+
+    @contextmanager
+    def lent(self):
+        """End the request checkout while its trusted producer may replace the cached handle."""
+        self.depart()
+        lend = SimpleNamespace(resume=True)
+
+        def resume():
+            if lend.resume:
+                self.open()
+            else:
+                _BOUND.set(None)  # The enclosing preview restores its original binding at exit.
+
+        try:
+            yield lend
+        except BaseException:
+            with suppress(Exception):
+                resume()
+            raise
+        resume()
+
+    @contextmanager
+    def source_metadata(self):
+        """Lend the idle handle to canonical metadata after ending request SQL and borrowing."""
+        from ..writer_lease import active_manager
+        from .writer import CollectionWriter
+
+        manager = active_manager()
+        boundary = manager._mutation_coordinator_for(self.root)
+        if not boundary.current_thread_holds_boundary() or boundary.current_thread_borrows_boundary():
+            raise CollectionStoreError("COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
+        handle = self.depart()
+        try:
+            with manager._lock:
+                if manager._store_borrowers:
+                    raise CollectionStoreError("COLLECTION_STORE_BUSY", "another checkout still borrows the store")
+            handle.require_write_authority()
+            # Custody metadata itself lives in vault_store. Keep trusted producer routing while
+            # the request facade and all resources acquired from its old phase are unavailable.
+            metadata = (self.runtime.source_metadata_writer(handle) if self.runtime is not None
+                        else nullcontext(CollectionWriter(self.root, handle)))
+            with metadata as writer, producing(self.root, writer):
+                yield
+        except BaseException:
+            with suppress(Exception):
+                self.open()
+            raise
+        else:
+            self.open()
+
+
+def source_metadata_phase(vault_root):
+    """The current preview's Source-specific departure operation, or None for a direct writer."""
+    phase = _PHASE.get()
+    binding = _BOUND.get()
+    return (phase if phase is not None and phase.root == Path(vault_root).resolve()
+            and binding is not None and isinstance(binding[1], _WriterAccess) and binding[1]._phase is phase else None)
 
 
 # Records and Planning share this disclosure protocol boundary.
@@ -34,26 +137,42 @@ QUERY_RECEIPT_BOUNDARY = "record_query"
 
 
 @contextmanager
-def preview_store(vault_root: Path, handle: WriterConnection) -> Iterator[CollectionWriter]:
-    """Bind a dark writer for this call context; ownership remains with the caller."""
-    from ..writer_lease import active_manager
+def preview_store(
+    vault_root: Path, handle: WriterConnection | SnapshotHandle, *, production: bool = False
+) -> Iterator[CollectionWriter]:
+    """Bind a dark writer for this call context; ownership remains with the caller.
+
+    A runtime says itself whether a production session serves it; a handle takes ``production``
+    from its trusted caller, as a read beside the store thread does (``runtime.StoreServer.read_beside``).
+    """
+    from ..writer_lease import _ACTIVE_LEASE_MANAGER, active_manager
     from .runtime import CollectionStoreRuntime, borrowed_writer
 
     root = Path(vault_root).resolve()
-    production = False
     if isinstance(handle, CollectionStoreRuntime):
         if root != handle.root:
             raise CollectionStoreError("COLLECTION_STORE_VAULT_MISMATCH", "foreign preview runtime")
         production = handle._session is not None and handle._session.production
-        checkout = handle.checkout()
+        checkout = handle.checkout
     else:
-        checkout = borrowed_writer(root, handle, active_manager())
-    with checkout as writer:
-        token = _BOUND.set((root, writer, production))
+        def checkout():
+            return borrowed_writer(root, handle, active_manager())
+    phase = _PreviewPhase(root, checkout, handle if isinstance(handle, CollectionStoreRuntime) else None)
+    manager = handle.manager if isinstance(handle, CollectionStoreRuntime) else active_manager()
+    manager_token = _ACTIVE_LEASE_MANAGER.set(manager)
+    try:
+        phase.open()
+        access = _WriterAccess(phase)
+        token = _BOUND.set((root, access, production))
+        phase_token = _PHASE.set(phase)
         try:
-            yield writer
+            yield access
         finally:
+            _PHASE.reset(phase_token)
             _BOUND.reset(token)
+            phase.close()
+    finally:
+        _ACTIVE_LEASE_MANAGER.reset(manager_token)
 
 
 @contextmanager
@@ -83,9 +202,11 @@ def producing(vault_root: Path, writer: CollectionWriter) -> Iterator[None]:
         yield
         return
     token = _BOUND.set((binding[0], writer, binding[2]))
+    phase_token = _PHASE.set(None)
     try:
         yield
     finally:
+        _PHASE.reset(phase_token)
         _BOUND.reset(token)
 
 
@@ -263,6 +384,9 @@ class Batch:
     expects_hash: str | None = None
     #: A call that no other page may share: it records an effect, or carries a value of one page.
     alone: Callable[[Mapping[str, Any]], bool] | None = None
+    #: Keywords that hold the calling page's own callback. They never split a shared request: the
+    #: calling page is decided with its callback, and every other page in the request without one.
+    effects: frozenset[str] = frozenset()
 
 
 #: The content hash each page of the store request being served was checked against, or None outside one.
@@ -357,10 +481,11 @@ def _decide_through_store(server, read, batch, vault_root, path, args, kwargs):
         if shared.get(keyword) is None:
             shared[keyword] = decisions.once(("pinned", keyword, vault_root), lambda pin=pin: pin(vault_root))
     expected = shared.pop(batch.expects_hash, None) if batch.expects_hash is not None else None
+    effects = {keyword: shared.pop(keyword) for keyword in batch.effects if keyword in shared}
     # The ambient principal is an input of the answer wherever a call leaves its own out.
     answers = decisions.answers((read, vault_root, effective_principal(), shared))
     if path not in answers:
-        calls = {path: ((path,), shared)}
+        calls = {path: ((path,), {**shared, **effects})}
         for other in decisions.pending():
             request_budget.checkpoint()
             if other == path or other in answers:
@@ -504,6 +629,12 @@ def released_summary(vault_root, path, principal, *, include_raw=False):
 def _mutate(vault_root, method, *args, **kwargs):
     """Own the leaf boundary when the dispatcher holds only its writer fence."""
     from ..writer_lease import active_manager
+    from . import source_dependencies
+
+    # These are the prepared record entry points, a closed internal protocol.
+    if source_dependencies.preparing_acquisition() and method.__name__ in {
+            "append_record", "update_record", "bulk_upsert_records"}:
+        return method(*args, **kwargs)
 
     if kwargs.get("_prepare") is not None:
         # A prepare writes no row and rolls back. The curation command that asks already holds the
@@ -524,21 +655,59 @@ def _validate_create(writer, profile, args):
         writer.validate_create(args["manifest_path"], args["manifest_text"], scaffold=args.get("scaffold", True))
 
 
+def _prover(vault_root: Path, writer, binding):
+    @cache
+    def prove():
+        # One ownership proof serves one request's checks; the next request proves again.
+        from . import ownership
+
+        return ownership.current(vault_root, conn=writer.connection, private=not binding[2])
+
+    return prove
+
+
+def bind_row(vault_root: Path, collection: str, item_id: str) -> dict[str, str] | None:
+    """The `item_key` and guards a Records row id stands for, bound by one key-and-version read.
+
+    It enters as a query of the collection would, so an absent or withheld collection or row
+    refuses alike. None where the generic scan of the leaf's own query must answer: no served
+    store, a collection the store does not own, or one the binder cannot read by key.
+    """
+    binding = _BOUND.get()
+    if binding is None or binding[0] != Path(vault_root).resolve():
+        return None
+    writer = binding[1]
+    prove = _prover(vault_root, writer, binding)
+    if binding[2]:
+        from .capability import require_records_summary_route
+
+        require_records_summary_route(vault_root, writer, "query", {"collection": collection}, prove=prove)
+    if prove().marker is not None and selected_writer(vault_root, collection, prove=prove) is None:
+        return None
+    from .. import collection_refs
+    from .row_binding import readable_matches
+
+    writer._require_operation_context()
+    writer._facade_profile = "records"
+    with writer.read_collection(collection, facade_profile="records") as manifest:
+        found = readable_matches(writer, manifest, collection_refs.id_head(item_id))
+    return None if found is None else collection_refs.bound_row(item_id, *found, profile="records")
+
+
 def dispatch(
     vault_root: Path, profile: str, action: str, values: Mapping[str, Any]
 ) -> tuple[bool, Any]:
     """Use a bound preview only after the facade's unchanged argument validation."""
     binding = _BOUND.get()
     if binding is None or binding[0] != Path(vault_root).resolve():
+        from . import source_dependencies
+
+        server = source_dependencies.request_server()
+        if server is not None and server.root == Path(vault_root).resolve():
+            return source_dependencies.dispatch_request(server, profile, action, values)
         return False, None
     writer = binding[1]
-    from . import ownership
-
-    @cache
-    def prove():
-        # One ownership proof serves this dispatch's checks; the next dispatch proves again.
-        return ownership.current(vault_root, conn=writer.connection, private=not binding[2])
-
+    prove = _prover(vault_root, writer, binding)
     if binding[2]:
         from .capability import require_records_summary_route
 
@@ -581,6 +750,9 @@ def dispatch(
             _validate_create(writer, profile, args)
             return False, None
         return True, writer.validate_revision(args["collection"], manifest_text=args["manifest_text"])
+    if action == "manifest_text":
+        current, text = writer.manifest_text(args["collection"])
+        return True, (current, text, writer.created_automatically(current.collection_id))
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
     if action == "inspect" and profile == "records":
@@ -686,6 +858,8 @@ def dispatch(
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
     if action == "rebaseline":
         return True, _mutate(vault_root, writer.rebaseline_collection, collection, **args)
+    if action == "retract" and profile == "records":
+        return True, _mutate(vault_root, writer.retract_record, collection, **args)
     if action == "discard":
         return True, _mutate(vault_root, writer.discard_held, collection, **args)
     if action == "history":

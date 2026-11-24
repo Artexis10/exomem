@@ -10,11 +10,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import asdict, fields
 from pathlib import Path
 
 from .. import document_containers, find_corpus, vault
 from ..find_types import ParsedPage
+from ..kbdir import managed_root_rel
 from . import bridges, membership, raw_protection
 from .policy import Policy
 
@@ -35,29 +38,48 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 def simple_page(path: str, raw: bytes, page: ParsedPage | None) -> bool:
     """Whether one page's scopes determine its content floor and release selection."""
+    return scope_parents(path, raw, page) == () and not raw_protection.marked(path)
+
+
+def scope_parents(path: str, raw: bytes, page: ParsedPage | None) -> tuple[str, ...] | None:
+    """The other pages whose bytes this page's scopes and content floors read.
+
+    `()` for none, and the one inheritance parent (`membership.inheritance_edge`) of an extraction
+    part or a scene frame. None when they read anything else: a container binding, a bridge's
+    sources, collection state, or a frontmatter that the normalized parse reads differently. A RAW
+    marking is not judged here: its floor reads the caller's authority, not another page.
+    """
     from ..collection_store import ownership as collections
     from ..vault_store import ownership
 
     if page is None:
-        return False
+        return None
     try:
         frontmatter, _, _ = vault.parse_frontmatter(raw.decode("utf-8"))
     except (UnicodeDecodeError, vault.FrontmatterError):
-        return False
+        return None
     # Custody reads raw bytes; normalized Markdown must agree before it can prove any claim absent.
     if frontmatter != page.frontmatter:
-        return False
-    return (
+        return None
+    if not (
         ownership.classify(path) is ownership.Ownership.PAGE
-        and path.lower().endswith(".md")
-        # These closed custody, extraction and frame fields require the scalar dependency chain.
+        and ownership.is_markdown(path)
+        # A container claim names its parent through a stored binding, which no path names.
         and "container_member" not in frontmatter
-        and "part_of" not in frontmatter and "parent_media" not in frontmatter
         # Only the parsed bridge grammar proves absence; the byte probe is a positive cache guard.
         and bridges.parse_bridge_frontmatter(frontmatter) == (None, None)
-        and not raw_protection.marked(path)
         and not document_containers.in_payload_tree(path) and not collections.relevant(path)
-    )
+    ):
+        return None
+    part, frame = "part_of" in frontmatter, "parent_media" in frontmatter
+    if not (part or frame):
+        return ()
+    edge = membership.inheritance_edge(path, part_of=part, parent_media=page.parent_media)
+    # Exactly one of these closed extraction and frame claims, with the edge membership reads for it.
+    # A claim without its edge, or both claims, stays on the scalar dependency chain.
+    if edge is None or part == frame or edge.kind != (membership.PART_EDGE if part else membership.FRAME_EDGE):
+        return None
+    return (edge.parent,)
 
 
 def replace_row(
@@ -115,19 +137,156 @@ def _subject(raw: str, path: str) -> membership.MarkdownSubject:
     return subject
 
 
+#: Entries kept for each vault's scope sets. The bound sits above the 50,000-page case, so the load target never evicts.
+_SCOPE_ENTRIES_MAX = 65_536
+#: Summed subject-text bytes kept for each vault (the stored text is ASCII, so characters are bytes). It bounds the text and the page path inside it, not the whole memo: with about 245 B of table and string headers for each entry, one vault holds at most about 80 MiB.
+_SCOPE_BYTES_MAX = 32 * 1024 * 1024
+#: Distinct scope sets shared between entries: a vault has few, and a larger table means pages rarely agree, so sharing gains little and the table restarts.
+_SCOPE_SHARED_MAX = 1_024
+
+
+class _ScopeMemo:
+    """One vault's scope sets, valid only under the header that every entry was evaluated with."""
+
+    __slots__ = ("header", "entries", "size", "shared")
+
+    def __init__(self, header: tuple) -> None:
+        self.header = header
+        #: Subject text to `(decoded path, scope set)`; the set is None when membership was unresolved.
+        self.entries: OrderedDict[str, tuple[str, frozenset[str] | None]] = OrderedDict()
+        self.size = 0
+        #: One object for each distinct scope set, so equal sets across entries are stored once.
+        self.shared: dict[frozenset[str], frozenset[str]] = {}
+
+
+_SCOPE_MEMOS: dict[str, _ScopeMemo] = {}
+_SCOPE_LOCK = threading.Lock()
+
+
+def forget_scopes(vault_root: Path | None = None) -> None:
+    """Hand back the scope-set memo of one vault, or of every vault; the next request fills it again."""
+    with _SCOPE_LOCK:
+        if vault_root is None:
+            _SCOPE_MEMOS.clear()
+        else:
+            _SCOPE_MEMOS.pop(str(vault_root), None)
+
+
+def _scope_header(root: Path, policy: Policy, memo: dict) -> tuple:
+    """The facts version and every input of `membership.evaluate_subject` beyond the subject text.
+
+    Read once for each request.
+    """
+    key = (__name__, "scope header", policy.fingerprint, managed_root_rel())
+    kept = memo.get(key)
+    if kept is None:
+        kept = memo[key] = (FACTS_VERSION, *membership.subject_inputs(root, policy))
+    return kept
+
+
+def _remember(root: Path, header: tuple, touched: list[str], fresh: dict[str, tuple]) -> None:
+    """Insert one request's new scope sets and drop the least recently used past the bounds, under one lock.
+
+    A map under another header is replaced whole, so an entry never outlives its header.
+    """
+    with _SCOPE_LOCK:
+        held = _SCOPE_MEMOS.get(str(root))
+        if held is None or held.header != header:
+            held = _SCOPE_MEMOS[str(root)] = _ScopeMemo(header)
+        entries = held.entries
+        for text in touched:
+            if text in entries:
+                entries.move_to_end(text)
+        for text, (path, found) in fresh.items():
+            if text not in entries:
+                held.size += len(text)
+            if found is not None:
+                found = held.shared.setdefault(found, found)
+            entries[text] = (path, found)
+            entries.move_to_end(text)
+        if len(held.shared) > _SCOPE_SHARED_MAX:
+            held.shared.clear()
+        while len(entries) > _SCOPE_ENTRIES_MAX or held.size > _SCOPE_BYTES_MAX:
+            held.size -= len(entries.popitem(last=False)[0])
+
+
+def _resolve(
+    root: Path, policy: Policy, memo: dict, facts: dict, scopes: dict, pending: dict[str, tuple],
+) -> None:
+    """Fill the request's `scopes` for `pending` pages, evaluating only subjects that no earlier request did."""
+    header = _scope_header(root, policy, memo)
+    held = _SCOPE_MEMOS.get(str(root))
+    # No lock for the reads: one lookup is atomic, and a map under another header is never read.
+    known = held.entries if held is not None and held.header == header else {}
+    touched, fresh = [], {}
+    for path, (sha256, text, _size) in pending.items():
+        entry = known.get(text)
+        if entry is not None and entry[0] == path:  # a row that names another page is no hit
+            scopes[(path, sha256)] = entry[1]
+            touched.append(text)
+            continue
+        try:
+            subject = _subject(text, path)
+        except (TypeError, ValueError):
+            facts[path] = None  # Malformed derived state cannot supply a visibility proof.
+            continue
+        try:
+            found = membership.evaluate_subject(root, subject, policy)
+        except membership.MembershipUnresolved:
+            found = None  # Unresolved stays unresolved: an empty set would release the page as unscoped.
+        scopes[(path, sha256)] = found
+        fresh[text] = (path, found)
+    if touched or fresh:
+        _remember(root, header, touched, fresh)
+
+
 def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, frozenset[str]]:
     """Resolve proven ordinary pages; every omitted path still needs the scalar chain.
 
-    Facts, membership and misses live only in the request's pinned snapshot. The keyed join proves
-    the facts describe that snapshot's exact bytes, including when a concurrent commit is newer.
+    Facts and the per-page results live in the request's pinned snapshot. The keyed join proves the
+    facts describe that snapshot's exact bytes, including when a concurrent commit is newer. A scope
+    set depends only on the subject text and the header's inputs, so one process-wide map for each
+    vault serves later requests and other caller views. It stores memberships, never a verdict.
     """
     from ..vault_store import read
 
     memo = read.request_memo(root)
     if memo is None:
         return {}
+    unique_paths = dict.fromkeys(paths)
+    facts = _facts(root, memo, unique_paths)
+    scopes = memo.setdefault((__name__, "scopes", policy.fingerprint), {})
+    pending = {
+        path: fact for path in unique_paths
+        if (fact := facts.get(path)) is not None and (path, fact[0]) not in scopes
+    }
+    if pending:
+        _resolve(root, policy, memo, facts, scopes, pending)
+    return {
+        path: found for path in unique_paths
+        if (fact := facts.get(path)) is not None
+        and (found := scopes.get((path, fact[0]))) is not None
+    }
+
+
+def proven_simple(root: Path, paths: list[str]) -> dict[str, str]:
+    """The paths whose current facts prove a simple page (`simple_page`), with the hash of the bytes
+    that the facts describe, in the request's pinned snapshot. Empty outside a store request."""
+    from ..vault_store import read
+
+    memo = read.request_memo(root)
+    if memo is None:
+        return {}
+    facts = _facts(root, memo, dict.fromkeys(paths))
+    return {path: fact[0] for path in paths if (fact := facts.get(path)) is not None}
+
+
+def _facts(root: Path, memo: dict, unique_paths: dict[str, None]) -> dict:
+    """The request's facts by path: `(sha256, subject text, size)` for a proven simple page, else None."""
+    from ..vault_store import read
+
     facts = memo.setdefault((__name__, "facts"), {})
-    wanted = [path for path in dict.fromkeys(paths) if path not in facts]
+    wanted = [path for path in unique_paths if path not in facts]
     if wanted:
         pages = read.owned_as_pages(root, wanted)
         with read.snapshot(root) as snapshot:
@@ -140,36 +299,18 @@ def scopes_many(root: Path, paths: list[str], policy: Policy) -> dict[str, froze
                     facts.update(dict.fromkeys(chunk))
                     for path, sha256, version, simple, raw, size in conn.execute(
                         "SELECT f.path, f.sha256, f.facts_version, f.simple, f.subject, p.size "
-                        "FROM page_admission f JOIN store_pages p ON p.path = f.path AND p.sha256 = f.sha256 "
+                        "FROM page_admission f JOIN store_pages p INDEXED BY store_pages_meta "
+                        "ON p.path = f.path AND p.sha256 = f.sha256 "
                         "WHERE f.path IN (SELECT value FROM json_each(?))", (json.dumps(chunk),),
                     ):
-                        if version != FACTS_VERSION or not simple or not pages[path]:
-                            continue
-                        try:
-                            facts[path] = (sha256, _subject(raw, path), size)
-                        except (TypeError, ValueError):
-                            pass  # Malformed derived state cannot supply a visibility proof.
-    scopes = memo.setdefault((__name__, "scopes", policy.fingerprint), {})
-    result = {}
-    for path in paths:
-        fact = facts.get(path)
-        if fact is None:
-            continue
-        sha256, subject, _size = fact
-        key = (path, sha256)
-        if key not in scopes:
-            try:
-                scopes[key] = membership.evaluate_subject(root, subject, policy)
-            except membership.MembershipUnresolved:
-                scopes[key] = None
-        if scopes[key] is not None:
-            result[path] = scopes[key]
-    return result
+                        if version == FACTS_VERSION and simple and pages[path]:
+                            facts[path] = (sha256, raw, size)  # decoded only on a miss of the scope-set memo
+    return facts
 
 
 def evidence(root: Path, path: str) -> tuple[str, int]:
     """The hash and size that the current batch proved, for the unchanged disclosure receipt."""
     from ..vault_store import read
 
-    sha256, _subject, size = read.request_memo(root)[(__name__, "facts")][path]
+    sha256, _text, size = read.request_memo(root)[(__name__, "facts")][path]
     return sha256, size

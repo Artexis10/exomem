@@ -45,6 +45,7 @@ PYTHON_IMAGE = "python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83
 CELLCTL_ROOT = images.REPO_ROOT / "infra/cellctl"
 ENTRY_MODULE = Path(__file__).with_name("cellctl_entry.py")
 CUSTODIAN_ENTRY_MODULE = Path(__file__).with_name("custodian_entry.py")
+BUMP_MODULE = Path(__file__).with_name("bump_parser_version.py")
 
 # What the broken target writes into each backed-up path before it fails, as a half-run migration would.
 # The release mode reads it while the attempt runs and again after the restore.
@@ -99,6 +100,36 @@ def build_cell_images(run_id: str, workdir: Path, *, prebuilt: str | None) -> tu
         labels=docker_labels(run_id, image=True),
     )
     return v1, v2, broken
+
+
+def build_catalogue_target_images(run_id: str, workdir: Path, base: str, count: int) -> list[str]:
+    """`count` images chained from `base`, each one parser version above its parent.
+
+    The catalogue identity includes the parser version, so each image is the same product with a new
+    catalogue identity: the upgrade the catalogue-prewarm mode needs, with no change to the code a
+    cell runs. Each tag is one release's `cellImage`.
+    """
+
+    tags: list[str] = []
+    parent = base
+    for index in range(1, count + 1):
+        tag = f"{CELL_REPOSITORY}:{run_id}-catalogue-{index}"
+        context = workdir / f"cell-catalogue-{index}"
+        context.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(BUMP_MODULE, context / BUMP_MODULE.name)
+        _derive(
+            context,
+            parent,
+            tag,
+            "USER root\n"
+            f"COPY {BUMP_MODULE.name} /tmp/{BUMP_MODULE.name}\n"
+            f"RUN python3 /tmp/{BUMP_MODULE.name} 1 && rm /tmp/{BUMP_MODULE.name}\n"
+            "USER 10001:10001\n",
+            labels=docker_labels(run_id, image=True),
+        )
+        tags.append(tag)
+        parent = tag
+    return tags
 
 
 def build_cell_image(tag: str, *, labels: list[str] | None = None) -> None:

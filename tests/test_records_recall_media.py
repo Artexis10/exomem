@@ -35,6 +35,9 @@ class _MutationManager:
     def mutation_guard(self, *_args: object, **_kwargs: object):
         yield
 
+    def yield_to_waiting_writes(self, *_args: object, **_kwargs: object) -> float:
+        return 0.0
+
 
 @pytest.fixture
 def mutation_manager(monkeypatch: pytest.MonkeyPatch) -> _MutationManager:

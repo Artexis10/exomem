@@ -20,7 +20,6 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress
 from functools import wraps
 from pathlib import Path
-from types import SimpleNamespace
 from typing import NamedTuple
 
 from .. import call_spans, foreground_priority, mutation_lock, request_budget, state_paths
@@ -203,6 +202,31 @@ class _Scope:
     def __init__(self):
         self.active = True
         self.thread = threading.get_ident()
+        self.entered = 0
+        self.cursors = weakref.WeakSet()
+        self.iterators = weakref.WeakSet()
+
+    def require_departure(self, writer):
+        self.check()
+        # Departing with live SQL would let canonical metadata escape its caller's snapshot or rollback.
+        if self.entered or writer.connection.in_transaction or writer._operation is not None:
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_BUSY", "Source metadata requires closed store read and operation scopes")
+
+    def close(self):
+        try:
+            for borrowed in tuple(self.iterators):
+                # SQL-bearing iterators expose close; materialized iterators own no SQL resources.
+                close = getattr(borrowed._value, "close", None)
+                if close is not None:
+                    close()
+        finally:
+            self.active = False
+            for cursor in self.cursors:
+                with suppress(sqlite3.Error):
+                    cursor.close()
+            self.cursors.clear()
+            self.iterators.clear()
 
     def check(self):
         if not self.active:
@@ -224,13 +248,18 @@ class _Scope:
         # they are ordinary values, not resources borrowed from this checkout.
         if isinstance(value, Path):
             return value
+        if isinstance(value, sqlite3.Cursor):
+            self.cursors.add(value)
         if isinstance(value, (
             sqlite3.Connection, sqlite3.Cursor, connection.WriterConnection,
             CollectionWriter, OperationAuthorization, ReleaseCache, InspectionCache,
             Census,
             AbstractContextManager, Iterator,
         )):
-            return _Borrowed(value, self)
+            borrowed = _Borrowed(value, self)
+            if isinstance(value, Iterator) and not isinstance(value, sqlite3.Cursor):
+                self.iterators.add(borrowed)
+            return borrowed
         return value
 
 
@@ -250,14 +279,20 @@ class _Borrowed:
 
         @wraps(value)
         def call(*args, **kwargs):
+            from .preview import _WriterAccess
+
             self._scope.check()
             # Internal evidence uses handle identity, not proxy identity.
-            for arg in (*args, *kwargs.values()):
+            def unwrap(arg):
+                if isinstance(arg, _WriterAccess):
+                    arg = arg._phase.writer()
                 if isinstance(arg, _Borrowed):
                     arg._scope.check()
-            args = tuple(arg._value if isinstance(arg, _Borrowed) else arg for arg in args)
-            kwargs = {key: arg._value if isinstance(arg, _Borrowed) else arg
-                      for key, arg in kwargs.items()}
+                    return arg._value
+                return arg
+
+            args = tuple(unwrap(arg) for arg in args)
+            kwargs = {key: unwrap(arg) for key, arg in kwargs.items()}
             return self._scope.wrap(value(*args, **kwargs))
         return call
 
@@ -275,11 +310,16 @@ class _Borrowed:
 
     def __enter__(self):
         self._scope.check()
-        return self._scope.wrap(self._value.__enter__())
+        value = self._value.__enter__()
+        self._scope.entered += 1
+        return self._scope.wrap(value)
 
     def __exit__(self, *args):
         self._scope.check()
-        return self._value.__exit__(*args)
+        try:
+            return self._value.__exit__(*args)
+        finally:
+            self._scope.entered -= 1
 
 
 @contextmanager
@@ -295,7 +335,7 @@ def borrowed_writer(root, handle, manager):
         try:
             yield scope.wrap(CollectionWriter(root, handle))
         finally:
-            scope.active = False
+            scope.close()
             _ACTIVE_LEASE_MANAGER.reset(manager_context)
 
 
@@ -447,6 +487,10 @@ class CollectionStoreRuntime:
             self._handle = None
             self._writer_token = None
             handle.close()
+            # The commit's resident resolver belongs to the writer that held the store.
+            from ..vault_store import resident_catalogue
+
+            resident_catalogue.forget(self.root)
         return True
 
     def retire_idle_handle(self):
@@ -549,7 +593,39 @@ class CollectionStoreRuntime:
         if progress:
             self.manager._renew_collection_store(token, due_only=True)
         self._admit(token, reads=reads)
-        return self.manager._mutation_coordinator_for(self.root).current_thread_holds_boundary()
+        if self.manager._mutation_coordinator_for(self.root).current_thread_holds_boundary():
+            return True
+        from ..vault_store import derivation
+
+        # Derived rows, and the WAL checkpoint, follow committed pages without the vault boundary
+        # (``vault_store.derivation``): the writer stays on its owner thread, ``_admit`` still checks
+        # the fencing token, a canonical commit refuses in this scope, and a handoff stops it here.
+        return derivation.in_scope(self.root) and not self.manager._store_handoff
+
+    @contextmanager
+    def source_metadata_writer(self, handle):
+        """Keep canonical metadata authority and commit accounting outside request checkouts."""
+        from .writer import CollectionWriter
+
+        boundary = self.manager._mutation_coordinator_for(self.root)
+        if not boundary.current_thread_holds_boundary() or boundary.current_thread_borrows_boundary():
+            raise connection.CollectionStoreError(
+                "COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
+        if handle.connection.in_transaction:
+            raise connection.CollectionStoreError("COLLECTION_STORE_BUSY", "Source metadata requires idle SQL")
+        with self.manager._lock:
+            if (self._handle is not handle or self._writer_token != self.manager._fencing_token
+                    or self.manager._store_borrowers):
+                raise connection.CollectionStoreError(
+                    "COLLECTION_STORE_BUSY", "Source metadata requires the current unborrowed writer")
+        handle.require_write_authority()
+        before = handle.connection.total_changes
+        try:
+            yield CollectionWriter(self.root, handle)
+        finally:
+            if (not handle._closed and handle.connection.total_changes != before
+                    and self._publisher is not None):
+                self._publisher.note_commit()
 
     @contextmanager
     def checkout(self):
@@ -606,6 +682,9 @@ class CollectionStoreRuntime:
                                     token, version, reads=True),
                             )
                             opening[0] = False
+                            # The store thread checkpoints after its drains (``StoreServer._checkpoint``),
+                            # so a commit under the vault boundary never copies the WAL in its COMMIT.
+                            self._handle.connection.execute("PRAGMA wal_autocheckpoint=0")
                             self._writer_token = token
             handle, changed = self._handle, False
             before = handle.connection.total_changes
@@ -749,11 +828,38 @@ class CollectionStoreRuntime:
         except Exception:  # noqa: BLE001 - the next holder's startup pass installs what is left
             logger.warning("pending collection views were not installed before the handoff", exc_info=True)
 
+    def _derive_pending(self, handle, *, deadline, cancelled=None):
+        """Derive the rows that committed pages still owe, before a handoff or a stop (``vault_store.derivation``).
+
+        The store thread cannot: the handoff refuses its checkouts. This flush holds the vault boundary,
+        so no writer waits on the drain, and the published replica carries the rows. It takes a share of
+        the time left, at most ``STOP_DERIVATION_SECONDS``; the next holder's start derives the rest.
+        """
+        from ..governance import policy, principal
+        from ..vault_store import derivation
+        from ..vault_store import mode as store_mode
+        from .writer import CollectionWriter
+
+        if cancelled is not None and cancelled():
+            return
+        now = time.monotonic()
+        try:
+            if not store_mode.store_mode_for_reads(self.root):
+                return
+            with (principal.library_scope(), state_paths.outside_resolution_scope(),
+                  policy.outside_request_policy_snapshot()):
+                derivation.drain(self.root, CollectionWriter(self.root, handle), deadline=min(
+                    now + STOP_DERIVATION_SECONDS, now + max(0.0, deadline - now) * DRAIN_SHARE))
+        except Exception:  # noqa: BLE001 - the intents stay queued, and the next holder's start derives them
+            logger.warning("the derived rows of the vault store did not advance before the handoff",
+                           exc_info=True)
+
     def flush(self, token, *, deadline, cancelled=None, drain_views=True):
         """Called only after admission stops, drainage and boundary acquisition."""
         from ..vault_store import marker as vault_marker
 
         with self._publication_writer(token) as writer:
+            self._derive_pending(writer, deadline=deadline, cancelled=cancelled)
             if drain_views:
                 self._drain_views(writer, deadline=deadline, cancelled=cancelled)
             result = replica.publish_replica(
@@ -813,6 +919,12 @@ VIEWS_POLL_DEFER_SECONDS = 10.0
 _VIEW_CHANGE_CAPACITY = 1024
 #: How often it retries a vault whose store it could not open.
 OPEN_RETRY_SECONDS = 30.0
+#: How long a clean stop, or another handoff, derives the rows that committed pages still owe; the next
+#: holder's start derives the rest.
+STOP_DERIVATION_SECONDS = 10.0
+#: The 4 KiB WAL pages after which the store thread copies the WAL into the store, as SQLite's own
+#: default autocheckpoint would; the runtime writer turns that off so no COMMIT under the boundary does it.
+CHECKPOINT_WAL_PAGES = 1000
 _SERVERS: dict[Path, StoreServer] = {}
 _SERVED: dict[Path, object] = {}  # vault root -> the lease manager of the service serving it
 _SERVERS_LOCK = threading.Lock()
@@ -848,7 +960,8 @@ def route(command, vault_root, arguments, *, write=False):
 def route_with_proof(command, vault_root, arguments, *, write=False):
     """The store thread a request must run on, or None when file collections answer it, with the proof.
 
-    A selector the vault's marker routes to the store, a NEW summary collection's create,
+    A selector the vault's marker routes to the store, a NEW summary collection's create (or an append that
+    starts one from its row, ``automatic_collection.creates_from_row``),
     Records discovery, a Planning progress review, and a curation or episode command that runs a Records step or
     structured-files maintenance on a store collection run on the store thread of the service serving this vault;
     a caller that bound its own writer keeps it. Without that service a routed selector
@@ -859,6 +972,7 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     through the store, which only the store thread holds, so every such write runs there, and
     without the service it refuses.
     """
+    from .. import automatic_collection
     from .preview import bound_writer
 
     root = Path(vault_root).resolve()
@@ -880,6 +994,11 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
     selector = arguments.get("collection", arguments.get("manifest_path"))
     proof = ownership.current(root)
     summary = arguments.get("action") == "create" and summary_create(root, arguments)
+    # A call that may create its collection keeps its title (`titled_arguments`), so a vault with a store runs it
+    # where `summary` runs: its collection is new, or the facade resolves the title there to the one that exists.
+    # Without a store the new collection is a file collection, created in process.
+    from_row = proof.marker is not None and automatic_collection.creates_from_row(
+        arguments.get("action"), selector, arguments.get("new_collection"))
     if proof.marker is not None or summary:
         # Only a vault with a store, or a summary create that may enrol one, pays for the store libraries.
         from . import connection
@@ -895,14 +1014,125 @@ def route_with_proof(command, vault_root, arguments, *, write=False):
         # Inventory and composite review need the writer for every collection they select.
         server = None if proof.marker is None else _server(root)
         return Routed(server, proof) if server is not None and server.runtime is not None else Routed(None)
-    elif selector is None or (proof.selected(root, selector) is None and not _creating(root, selector)):
+    elif selector is None or (
+        proof.selected(root, selector) is None and not _creating(root, selector) and not from_row
+    ):
         return Routed(None)
     server = _server(root)
     if server is None and not summary:
-        return Routed(None)  # Collection resolution decides visibility before reporting an unavailable store.
+        # Collection resolution decides visibility before reporting an unavailable store. A call that may create
+        # gets the same refusal there, in process, once its collection proves to be new.
+        return Routed(None)
     if server is None:
         refuse_unserved_create(root, proof.marker)
     return Routed(server, proof)
+
+
+def titled_arguments(command, vault_root, arguments, *, write=False):
+    """`arguments` with a collection title replaced by the manifest path of the collection it names.
+
+    A title is no path, UUID or reference, so `route` cannot tell whether the store owns the
+    collection, and the facade resolves it without the store's collections. This resolves it with the
+    one resolver the facade uses (``collection_refs.resolve_collection``), over both kinds, on the
+    caller's thread over the store's last commit (``StoreServer.read_beside``), which queues on the
+    store thread only where that read does. So a title waits on a running batch no more than the
+    store's import status does. While the store is not open, or after the owner's rollback disabled
+    it, file collections answer here. A title that a visible store collection may carry queues as
+    that manifest path would where no file collection carries it, and the store thread answers it
+    once open or refuses it as it refuses the path. While the store is not open, a `write` queues so
+    even where a file collection carries the title, because the open store may call it ambiguous. A
+    vault with no store, a process that serves no store, a title that names no visible
+    collection, and a call that may create its collection (``creates_from_row``) leave `arguments` as they are,
+    and the facade answers.
+    """
+    from .. import automatic_collection, collection_refs
+    from ..collection_profiles import PROFILES
+    from . import capability
+
+    selector = arguments.get("collection")
+    profile = next((profile.name for profile in PROFILES.values() if profile.tool == command), None)
+    if profile is None or not isinstance(selector, str) or collection_refs.names_a_manifest(selector.strip()):
+        return arguments
+    if automatic_collection.creates_from_row(arguments.get("action"), selector, arguments.get("new_collection")):
+        # Such a call may create its collection, so it names it by title until it runs and the facade resolves it.
+        # Swapping in the path of a collection that an earlier attempt created would change the call's identity,
+        # and the retry of that attempt would be refused as a reused idempotency key instead of replayed.
+        return arguments
+    root = Path(vault_root).resolve()
+    served = _unbound_server(root)
+    if served is None:
+        return arguments
+    server, proof = served
+
+    def resolve(unserved=None, certain=False):
+        return collection_refs.resolve_collection(root, selector, profile=profile, unserved=unserved,
+                                                  certain=certain)
+
+    opened = server.runtime is not None
+    if opened and not capability.records_summary_disabled(root):
+        path = server.read_beside(resolve, initial=proof, progress=False)
+    else:
+        # A rolled-back store refuses every store collection until the owner restores it, so there a
+        # file collection is the only one a write by title can reach, even while the store opens.
+        certain = write and not opened and not capability.records_summary_disabled(root)
+        path = resolve(unserved=lambda: server.call(resolve, read_only=True, wake_maintenance=False),
+                       certain=certain)
+    return arguments if path == selector else {**arguments, "collection": path}
+
+
+def _unbound_server(root):
+    """The store thread serving ``root`` and its ownership proof, for a call that no request binds to the store.
+
+    None where a request already binds the store, where the store owns nothing in the vault, or where this
+    process serves no store for it: there a call reads files alone.
+    """
+    from . import ownership
+    from .preview import bound_writer
+
+    if bound_writer(root) is not None:
+        return None
+    proof = ownership.current(root)
+    server = None if proof.marker is None else _server(root)
+    if server is None:
+        return None
+    connection.load_store_libraries()
+    return server, proof
+
+
+def writer_admitted(vault_root):
+    """Whether this process serves the vault's store with an admitted writer that a read can borrow now.
+
+    A cheap check for the request path: it opens nothing and never waits on the store thread.
+    """
+    with _SERVERS_LOCK:
+        server = _SERVERS.get(Path(vault_root).resolve())
+    if server is None or server.runtime is None:
+        return False
+    with server.manager._lock:
+        token = server.manager._fencing_token
+    handle = server.runtime._handle
+    return token is not None and handle is not None and not handle._closed and server.runtime._writer_token == token
+
+
+def read_served(vault_root, work):
+    """Run read-only ``work`` over the store this process serves for the vault, from a thread no request binds.
+
+    A background pass, such as the service's activation index build, otherwise reads every store
+    collection as unserved and leaves it out. The work reads one snapshot of the store's last commit
+    beside the store thread (``StoreServer.read_beside``), so keep it short. It never queues on the
+    store thread: where no admitted writer is open, as while the store opens or after it released its
+    lease when idle, it is refused as busy (`COLLECTION_STORE_BUSY`). A call that a request already
+    binds, a vault whose store owns nothing, a process that serves no store for it and a rolled-back
+    store run ``work`` as it is.
+    """
+    from . import capability
+
+    root = Path(vault_root).resolve()
+    served = _unbound_server(root)
+    if served is None or capability.records_summary_disabled(root):
+        return work()
+    server, proof = served
+    return server.read_beside(work, initial=proof, progress=False, queue=False)
 
 
 def _store_mode_server(root):
@@ -916,8 +1146,9 @@ def _store_mode_server(root):
             availability.SERVICE_REQUIRED,
             "this vault's pages live in the collection store, so a write needs the service that "
             "serves it",
-            "Send the request to the service that serves this vault. "
-            f"Run {availability.ROLLBACK} to return the pages to files.",
+            "Send this request to the Exomem service for this vault, through its MCP or REST "
+            "interface, and start that service first if none runs. To work without a service, "
+            f"run {availability.ROLLBACK} to return the pages to files.",
         )
     return server
 
@@ -1076,7 +1307,7 @@ def served_create(vault_root, arguments, facade_profile=None):
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
-            facade_profile=facade_profile)
+            facade_profile=facade_profile, automatic=bool(arguments.get("automatic")))
         if (receipt := result.get("receipt")) and receipt.get("warnings"):
             # The create's own warnings lead, where the tool result shows them.
             result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}
@@ -1122,6 +1353,28 @@ def _server(root):
         if server is None and manager is not None:
             server = _SERVERS[root] = StoreServer(root, manager)
         return server
+
+
+def on_store_thread(vault_root) -> bool:
+    """Whether this thread is the store thread of ``vault_root``, which drains its derivation queue
+    before it takes any other work (``StoreServer._derive_owed``). A plain dict read."""
+    server = _SERVERS.get(Path(vault_root).resolve())
+    return server is not None and server.thread is threading.current_thread()
+
+
+def drains(vault_root) -> bool:
+    """Whether a store thread in this process derives ``vault_root``'s rows: it runs, its store is
+    open, and its lease is not idle-released. A read waits for those rows only then
+    (``vault_store.read.request_snapshot``); with none, they would not arrive within the wait. A
+    plain dict read."""
+    server = _SERVERS.get(Path(vault_root).resolve())
+    return (
+        server is not None
+        and server.thread.is_alive()
+        and server.runtime is not None
+        and not server._stopping()
+        and not server._idle_released()
+    )
 
 
 def notify_view_change(root, path, *, destination=None, directory=False):
@@ -1174,7 +1427,7 @@ def _call_site(frame):
 class _Call:
     """One request handed to the store thread, run in a copy of the caller's context."""
 
-    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None):
+    def __init__(self, work, *, wake_maintenance=True, read_only=False, initial=None, execution="store"):
         import contextvars
 
         self.context = contextvars.copy_context()
@@ -1183,6 +1436,8 @@ class _Call:
         self.read_only = read_only
         self.checkpoint = request_budget.current_checkpoint() if read_only else None
         self.initial = initial  # the caller's ownership proof, which only a read-only request may carry
+        self.execution = execution
+        self.client = None
         self.thread = threading.get_ident()  # the caller, which keeps any boundary it holds while it waits here
         self.taken = False
         self.done = threading.Event()
@@ -1223,6 +1478,9 @@ class StoreServer:
         }
         self._served_at = 0.0  # when the store thread last finished a request
         self._derived_handle = None  # the writer handle whose derived file the last derived tick reconciled
+        self._derivation_handle = None  # the writer handle whose start made every derivation intent due
+        self._derive_failing = False  # whether the last owed drain raised, so a repeat logs at debug
+        self._checkpointed_changes = None  # the writer's change count at the last WAL copy
         self._derived_pass = None  # the running rebuild's bulk pass budget, across its steps
         self._derived_retry = DERIVED_RETRY_SECONDS
         self._views_after = None  # where the current pass over pending views continues
@@ -1245,16 +1503,20 @@ class StoreServer:
         self._view_census_needed = False
         self._view_retry_at = 0.0
         self._backfill_refused = {}  # collection id -> when its refused backfill is retried
+        self._lease_refused = {}  # maintenance step -> the lease refusal last logged for it
         self._backfill_last = ""  # the collection the last batch advanced; the next one follows it
         self._references_seeded = None  # the writer handle whose reference build states were last seeded
         self.pending_create = None  # the marker entries a served create left pending, until it finishes
         self._requests = deque()
+        self._record_requests = set()
+        self._record_workers = set()
         self._closed = False
         self._condition = threading.Condition()
         self.thread = threading.Thread(target=self._run, name="exomem-collection-store", daemon=True)
         self.thread.start()
 
-    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None):
+    def call(self, work, *, wake_maintenance=True, read_only=False, extend=None, on_refusal=None, initial=None,
+             _execution="store"):
         """Run ``work`` on the store thread and return its result or raise its error.
 
         ``read_only`` says the work changes nothing, so it runs under one view of path
@@ -1279,22 +1541,39 @@ class StoreServer:
             try:
                 return self._call(
                     work, wake_maintenance=wake_maintenance, read_only=read_only,
-                    extend=extend, on_refusal=on_refusal, initial=initial,
+                    extend=extend, on_refusal=on_refusal, initial=initial, execution=_execution,
                 )
             except BaseException:
                 fields["refused"] = 1
                 raise
 
-    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial):
+    def call_record_request(self, work, *, wake_maintenance=True, extend=None, on_refusal=None):
+        """Accept one bounded acquisition envelope; its short SQL units still use ordinary store calls."""
+        return self.call(work, wake_maintenance=wake_maintenance, extend=extend, on_refusal=on_refusal,
+                         _execution="record")
+
+    def call_store_unit(self, work, *, wake_maintenance=True):
+        """Return one unit's result, failure and commit observation after checkout cleanup finishes."""
+        return self.call(work, wake_maintenance=wake_maintenance, _execution="unit")
+
+    def _call(self, work, *, wake_maintenance, read_only, extend, on_refusal, initial, execution="store"):
         from ..cli_ops import OpError
         from ..writer_lease import acknowledgement_budget_deadline
+        from .source_dependencies import request_server
+
+        # nosemgrep: ep-word-membership -- These execution modes form the internal request protocol, not caller values.
+        if execution not in ("store", "record", "unit"):
+            raise ValueError("unknown collection request execution mode")
+        record_request = execution == "record"
 
         checkpoint = request_budget.current_checkpoint() if read_only else None
         if checkpoint is not None:
             checkpoint()
         entry = time.monotonic()
         # The explicit read allowance already reserves delivery; mutation acknowledgements reserve it separately.
-        completion_deadline = (
+        # The outer accepted envelope owns its acknowledgement; an internal accepted unit keeps its inputs until done.
+        accepted_unit = not record_request and request_server() is self
+        completion_deadline = entry + self.manager._mutation_timeout_seconds if accepted_unit else (
             entry + checkpoint.remaining() if checkpoint is not None else acknowledgement_budget_deadline(entry)
         )
         deadline = min(completion_deadline, entry + self.manager._mutation_timeout_seconds)
@@ -1316,11 +1595,29 @@ class StoreServer:
                 on_refusal(error, time.monotonic() - entry)
             return error
 
-        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial)
+        refusal = None
+        request = _Call(work, wake_maintenance=wake_maintenance, read_only=read_only, initial=initial,
+                        execution=execution)
+        if record_request:
+            from .. import runtime_resources
+            from ..governance.principal import effective_principal
+
+            who = effective_principal()
+            request.client = (who.issuer_family, who.audience_id, who.client_binding)
+            maximum = max(1, runtime_resources.resolve_policy().sync_workers // 2)
         with self._condition:
+            if record_request and (len(self._record_requests) >= maximum
+                    or any(active.client == request.client for active in self._record_requests)):
+                # One client cannot occupy every acquisition worker; plain reads and writes bypass this pool.
+                refusal = self._busy_refusal("original input acquisition is busy; retry this request shortly")
             if not self._closed:
-                self._requests.append(request)
-                self._condition.notify_all()
+                if refusal is None:
+                    if record_request:
+                        self._record_requests.add(request)
+                    self._requests.append(request)
+                    self._condition.notify_all()
+        if refusal is not None:
+            raise refuse(refusal)
         # Between two rebuild steps this thread waits as a bulk pass while other requests run;
         # a request waiting to be taken waits on it, so it releases the pass (``_derived_tick``).
         refusal = None
@@ -1336,6 +1633,7 @@ class StoreServer:
                         # A caller that sees an error must leave nothing queued to run later.
                         if request in self._requests:
                             self._requests.remove(request)
+                            self._record_requests.discard(request)
                         raise
                     if later is not None and later > deadline:
                         deadline = later
@@ -1343,6 +1641,7 @@ class StoreServer:
                 if remaining <= 0 or self._closed:
                     if request in self._requests:
                         self._requests.remove(request)
+                        self._record_requests.discard(request)
                     # Built here, where the queue is stable; journaled below, off the lock the store thread takes.
                     refusal = self._busy_refusal(
                         "the collection store did not take this request within the mutation timeout")
@@ -1357,6 +1656,9 @@ class StoreServer:
                    else foreground_priority.outside_foreground)
         with waiting(), call_spans.span("store.serve"):
             completed = request.done.wait(max(0.0, completion_deadline - time.monotonic()))
+            if not completed and accepted_unit:
+                request.done.wait()
+                completed = True
         if not completed and checkpoint is not None:
             # Accepted audited reads stop at their next unit; retain ownership until they unwind.
             with waiting():
@@ -1378,6 +1680,72 @@ class StoreServer:
         if request.error is not None:
             raise request.error
         return request.result
+
+    def read_beside(self, work, *, initial, collection=None, progress=True, queue=True):
+        """Run a read-only ``work`` on the caller's thread, over a pooled reader of the store's last commit.
+
+        For import status, which must answer while a batch keeps the store thread busy. The
+        caller borrows the store as a checkout does, so the writer handle and its readers stay
+        open, and passes the same admission (``CollectionStoreRuntime.checkout``). The work runs
+        under the views of placement, policy and ownership a store-thread read runs under
+        (``_serve``), with a writer over a ``connection.SnapshotHandle``, which refuses every write.
+        Where this process holds no admitted writer, the request queues on the store thread as
+        before (``call``), whose checkout opens one. ``collection`` is the request's selector: a
+        collection the store keeps in full needs no read of the derived file. Work that reads no
+        import progress, as title resolution reads titles alone, passes ``progress`` False and
+        skips that file. A background reader passes ``queue`` False: where no admitted writer is
+        open it is refused as busy instead, so it never runs on the store thread or takes back a
+        lease the store released.
+        """
+        from ..cli_ops import OpError
+        from ..governance import policy
+        from . import capability, derived_rows, ownership
+        from .preview import preview_store
+
+        manager, runtime = self.manager, self.runtime
+        with call_spans.span("store.read_beside"), ExitStack() as scope:
+            handle = None
+            # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.
+            if runtime is not None and not (runtime._bootstrap and not runtime.reporting_ready(manager._fencing_token)):
+                capability.require_not_disabled(self.root)
+                scope.enter_context(manager._collection_store_checkout())
+                # A rollback between the first check and borrowing must also refuse this read, as in ``checkout``.
+                capability.require_not_disabled(self.root)
+                with manager._lock:
+                    token = manager._fencing_token
+                handle = runtime._handle
+                if token is None or handle is None or handle._closed or runtime._writer_token != token:
+                    handle = None
+                else:
+                    try:
+                        runtime._admit(token, reads=True)
+                    except OpError as error:
+                        if error.code != "WRITER_FENCED":
+                            raise
+                        handle = None  # the store thread's checkout reacquires, as it does for any read
+            if handle is None:
+                scope.close()
+                if not queue:
+                    raise connection.busy("the store has no open writer to read beside, and this read never queues")
+                return self.call(work, wake_maintenance=False, read_only=True, initial=initial)
+            reader = scope.enter_context(connection.store_reader(runtime.path, handle.readers))
+            entry = None if initial is None or collection is None else initial.selected(self.root, collection)
+            # Read before the snapshot begins; a selection this proof cannot name reads the derived file.
+            derived = progress and (entry is None or derived_rows.is_derived(reader, entry["collection_id"]))
+            production = runtime._session is not None and runtime._session.production
+            scope.enter_context(state_paths.resolution_scope())
+            scope.enter_context(policy.request_policy_snapshot())
+            snapshot = connection.SnapshotHandle(runtime.path, reader, handle, derived=derived)
+            scope.enter_context(preview_store(self.root, snapshot, production=production))
+            if initial is not None:
+                scope.enter_context(ownership.read_scope(self.root, initial=initial))
+            # One read transaction, so the job row and every check of it read the same commit.
+            reader.execute("BEGIN")
+            try:
+                return work()
+            finally:
+                if reader.in_transaction:
+                    reader.execute("ROLLBACK")
 
     def _busy_refusal(self, message):
         """The retryable refusal for a request this store thread did not serve in time."""
@@ -1414,11 +1782,16 @@ class StoreServer:
                 now = time.monotonic()
                 if self.runtime is None and now >= self._retry_at:
                     self._open()
+                # Derived rows first: every request and tick below reads the rows of every earlier commit.
+                self._derive_owed()
                 if self._view_work_due(now):
                     self._ticks["views"] = min(self._ticks["views"], now)
                 name = self._next_tick(now)
                 request = self._take(self._idle_wait(name, now))
                 if request is not None:
+                    if request.execution == "record":
+                        self._start_record_request(request)
+                        continue
                     self._serve(request)
                     served = self._served_at = time.monotonic()
                     if request.wake_maintenance:
@@ -1437,8 +1810,120 @@ class StoreServer:
                     self._held_elsewhere_since = None
                     with self._maintaining(name):
                         self._ticks[name] = time.monotonic() + getattr(self, f"_{name}_tick")()
+                self._checkpoint()
         finally:
+            # A clean stop derives what is owed in the lease's own flush (``CollectionStoreRuntime.flush``).
             self._close()
+
+    def _derive_owed(self):
+        """Derive the rows that committed store pages still owe (``vault_store.derivation``).
+
+        A writing request derives its own intents after it releases the vault boundary; this step
+        derives what one left (a deadline, a kill, a failure whose retry fell due) before the thread
+        takes other work. It holds no vault boundary. A new writer handle (a start, a takeover)
+        first makes every intent due, so a start retries each failed one. After an idle release it
+        waits, as every tick does, for a request to take the lease again: the release derived what
+        was due.
+        """
+        from ..vault_store import derivation
+
+        if self.runtime is None or self._idle_released() or not derivation.owed(self.root):
+            return
+        from ..governance import policy, principal
+        from ..vault_store import mode as store_mode
+        from .preview import preview_store
+
+        try:
+            if not store_mode.store_mode_for_reads(self.root):
+                derivation.settled(self.root)
+                return
+            with (principal.library_scope(), preview_store(self.root, self.runtime) as writer,
+                  state_paths.outside_resolution_scope(), policy.outside_request_policy_snapshot()):
+                if self._derivation_handle is not writer.handle:
+                    with derivation.scope(self.root):
+                        derivation.started(self.root, writer)
+                    self._derivation_handle = writer.handle
+                derivation.drain(self.root, writer)
+        except Exception:  # noqa: BLE001 - the intents stay queued, and a later turn derives them
+            # The first failure of a run warns; its repeats, one per retry, log at debug.
+            (logger.debug if self._derive_failing else logger.warning)(
+                "the derived rows of the vault store could not advance; retrying later", exc_info=True)
+            self._derive_failing = True
+            derivation.owe_after_failure(self.root, time.monotonic() + DERIVED_RETRY_SECONDS)
+        else:
+            self._derive_failing = False
+
+    def _checkpoint(self):
+        """Copy the WAL into the store once it passes ``CHECKPOINT_WAL_PAGES``, holding no boundary.
+
+        One stat when the WAL is small. The copy never waits on a reader: a blocked one leaves the
+        rest for the next turn.
+        """
+        from ..vault_store import derivation
+        from .preview import preview_store
+
+        handle = None if self.runtime is None else self.runtime._handle
+        if handle is None or handle._closed:
+            return
+        try:
+            # SQLite reuses a checkpointed WAL without shrinking it, so its size alone would repeat a
+            # copy that has nothing left to do: only a turn with new changes looks at it.
+            changes = handle.connection.total_changes
+            if changes == self._checkpointed_changes:
+                return
+            wal = self.runtime.path.with_name(self.runtime.path.name + "-wal")
+            if not wal.exists() or wal.stat().st_size <= CHECKPOINT_WAL_PAGES * 4096:
+                return
+            with preview_store(self.root, self.runtime) as writer, derivation.scope(self.root):
+                writer.handle.checkpoint(passive=True)
+            self._checkpointed_changes = changes
+        except Exception:  # noqa: BLE001 - the WAL keeps every commit; the next turn copies it
+            logger.debug("the store WAL could not be copied this turn", exc_info=True)
+
+    def _start_record_request(self, request):
+        """Accepted execution owns its slot and inputs after a caller's acknowledgement deadline."""
+        from .source_dependencies import request_execution
+
+        if self.runtime is None:
+            with self._condition:
+                self._record_requests.discard(request)
+                request.error = self.unserved()
+                request.done.set()
+                self._condition.notify_all()
+            return
+
+        def unbound():
+            with request_budget.checking(None), request_execution(self):
+                return request.work()
+
+        def execute():
+            try:
+                request.result = request.context.run(unbound)
+            except BaseException as error:  # noqa: BLE001 - the original failure returns through the existing request
+                request.error = error
+            finally:
+                with self._condition:
+                    self._record_requests.discard(request)
+                    self._record_workers.discard(threading.current_thread())
+                    if request.wake_maintenance:
+                        now = time.monotonic()
+                        self._ticks = {tick: min(due, now) for tick, due in self._ticks.items()}
+                        self._views_after, self._views_passes, self._views_owed = None, 0, True
+                    request.done.set()
+                    self._condition.notify_all()
+
+        worker = threading.Thread(target=execute, name="exomem-record-acquisition", daemon=True)
+        with self._condition:
+            self._record_workers.add(worker)
+        try:
+            worker.start()
+        except BaseException as error:  # noqa: BLE001 - an accepted request must receive its thread-start failure
+            with self._condition:
+                self._record_workers.discard(worker)
+                self._record_requests.discard(request)
+                request.error = error
+                request.done.set()
+                self._condition.notify_all()
 
     @contextmanager
     def _maintaining(self, name):
@@ -1520,7 +2005,14 @@ class StoreServer:
         return now - self._held_elsewhere_since < self.manager._mutation_timeout_seconds
 
     def _idle_wait(self, name, now):
-        """Seconds to wait for a request before the next look at the tick gate."""
+        """Seconds to wait for a request before the next look at the tick gate, or at an owed drain."""
+        from ..vault_store import derivation
+
+        owed = None if self._idle_released() else derivation.owed_in(self.root)
+        wait = self._tick_wait(name, now)
+        return wait if owed is None else min(wait, owed)
+
+    def _tick_wait(self, name, now):
         due = self._ticks[name]
         if due > now:
             return min(due, now + IMPORT_IDLE_SECONDS) - now
@@ -1607,6 +2099,10 @@ class StoreServer:
             logger.warning("the collection store could not be served; retrying", exc_info=True)
             return
         self._stack, self.session, self.runtime = stack, session, self.manager._collection_store
+        from ..vault_store import derivation
+
+        # A start retries the intents that the last run left, before it takes any request.
+        derivation.owe(self.root)
 
     def unserved(self):
         """The refusal for a request that arrives while this vault's store is not open."""
@@ -1662,6 +2158,13 @@ class StoreServer:
                 error = connection.busy(str(error).removeprefix("COLLECTION_STORE_BUSY: "))
             request.error = error
         finally:
+            if request.execution == "unit":
+                from ..writer_lease import active_mutation_committed
+                from .source_dependencies import StoreUnitOutcome
+
+                committed = request.context.run(active_mutation_committed)
+                request.result = StoreUnitOutcome(request.result, request.error, committed)
+                request.error = None
             request.done.set()
 
     @contextmanager
@@ -1672,27 +2175,13 @@ class StoreServer:
         the rest of the request is bound to a fresh checkout. Its mutation boundary and
         active mutation stay held throughout, so no release or publication runs meanwhile.
         """
-        from .preview import preview_store, unbound
+        from .preview import source_metadata_phase
 
-        manager, thread = self.manager, threading.get_ident()
-        with manager._lock:
-            held = manager._store_borrowers.pop(thread, 0)
-        # The producer clears ``resume`` when it leaves the store to a pending create, which
-        # no fresh checkout can enter; the rest of the request then runs unbound.
-        lend = SimpleNamespace(resume=True)
-
-        def resume():
-            with manager._lock:
-                manager._store_borrowers[thread] = manager._store_borrowers.get(thread, 0) + held
-            self._scope.enter_context(preview_store(self.root, self.runtime) if lend.resume else unbound())
-
-        try:
+        phase = source_metadata_phase(self.root)
+        if phase is None:
+            raise connection.CollectionStoreError("COLLECTION_STORE_CHECKOUT_CLOSED", "producer lending requires the request checkout")
+        with phase.lent() as lend:
             yield lend
-        except BaseException:
-            with suppress(Exception):
-                resume()
-            raise
-        resume()
 
     def _create_tick(self):
         """Finish a create whose replica publication did not complete; returns the seconds until the next tick.
@@ -1816,9 +2305,26 @@ class StoreServer:
                                    collection_id, exc_info=True)
                     self._backfill_refused[collection_id] = time.monotonic() + IMPORT_RETRY_SECONDS
         except Exception:  # noqa: BLE001 - a store that cannot be checked out is retried later
-            logger.warning("derived backfill could not check out the store; retrying later", exc_info=True)
+            self._retrying("derived backfill could not check out the store")
             return IMPORT_RETRY_SECONDS
         return 0.0
+
+    def _retrying(self, step):
+        """Log a maintenance step that failed and retries later, from inside its handler.
+
+        A replica without the writer lease is refused each time a request wakes this thread, and
+        in store mode every request does: that refusal is its expected state, so it is said once
+        per step and holder, without a traceback. Any other failure is logged in full.
+        """
+        from ..cli_ops import OpError
+
+        error = sys.exc_info()[1]
+        if isinstance(error, OpError) and error.code == "WRITER_LEASE_REQUIRED":
+            if self._lease_refused.get(step) != error.message:
+                self._lease_refused[step] = error.message
+                logger.info("%s until this replica holds the writer lease: %s", step, error.message)
+            return
+        logger.warning("%s; retrying later", step, exc_info=True)
 
     def _derived_tick(self):
         """Reconcile a new writer handle's derived file and advance a rebuild one bounded step.
@@ -1851,8 +2357,7 @@ class StoreServer:
                 # another request runs (``foreground_priority``), holding no boundary and no store
                 # checkout, so a handoff or a publication never waits on it. A store request ends
                 # the wait (``call``), and the step then ends after one batch (``_aside``).
-                with foreground_priority.bulk(budget=rebuild):
-                    foreground_priority.yield_to_foreground()
+                foreground_priority.give_way(rebuild)
             with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
                 outcome = derived_rows.step(self.root, writer, aside=self._aside)
                 self._derived_handle = writer.handle
@@ -1879,11 +2384,12 @@ class StoreServer:
         store's own cursor after a restart. A plain read decides first, as the import and derived
         ticks do: a file-mode vault costs one stat of the manifest, and a store-mode vault whose
         rows already reflect the overlay, or that waits for the projector, costs one read. Only a
-        batch that can run takes the store checkout and the vault's mutation boundary.
+        batch that can run takes the store checkout, under the derived-row authority that a drain
+        holds: no batch takes the vault's mutation boundary, and none runs while an intent is due.
         """
-        from ..governance import principal
+        from ..governance import policy, principal
+        from ..vault_store import derivation, rederive
         from ..vault_store import mode as store_mode
-        from ..vault_store import rederive
         from .preview import preview_store
 
         if self.runtime is None or self._idle_released():
@@ -1893,9 +2399,15 @@ class StoreServer:
                 return IMPORT_RETRY_SECONDS
             with connection.store_reader(self.runtime.path, self.runtime.reader_pool()) as reader:
                 outcome = rederive.pending(reader, self.root)
+                if outcome == rederive.READY and derivation.due(reader):
+                    # Committed pages derive first; the job re-derives rows that are current.
+                    outcome = rederive.WAITING
             if outcome == rederive.READY:
-                with principal.library_scope(), preview_store(self.root, self.runtime) as writer:
-                    outcome = self._write(rederive.settle, self.root, writer)
+                # Derived rows only, so the batch holds no vault boundary, as a drain does.
+                with (principal.library_scope(), preview_store(self.root, self.runtime) as writer,
+                      state_paths.outside_resolution_scope(), policy.outside_request_policy_snapshot(),
+                      derivation.scope(self.root)):
+                    outcome = rederive.settle(self.root, writer)
         except Exception:  # noqa: BLE001 - a refused batch leaves the rows behind the store, and a later tick retries
             logger.warning(
                 "the registry state of the vault store could not advance; retrying later",
@@ -2043,7 +2555,7 @@ class StoreServer:
             except (Exception, mutation_lock.WaitEnded) as error:  # noqa: BLE001
                 stopped = isinstance(error, mutation_lock.WaitEnded)
                 if not stopped:
-                    logger.warning("collection view edits could not be applied; retrying later", exc_info=True)
+                    self._retrying("collection view edits could not be applied")
                     wait = IMPORT_RETRY_SECONDS
                     self._view_retry_at = time.monotonic() + IMPORT_RETRY_SECONDS
                 self._sweep_pending, self._sweep_seen = {}, {}  # the next sweep finds the edits again
@@ -2089,7 +2601,7 @@ class StoreServer:
                     if self._views_after is None or self._aside() or self._stopping():
                         break
         except Exception:  # noqa: BLE001 - views a tick cannot publish stay pending for a later one
-            logger.warning("pending collection views could not publish; retrying later", exc_info=True)
+            self._retrying("pending collection views could not publish")
             self._views_after = None
             return min(wait, IMPORT_RETRY_SECONDS)
         if self._views_after is None:
@@ -2187,6 +2699,7 @@ class StoreServer:
                 request.taken = True
                 request.error = connection.busy("the collection store is shutting down")
                 request.done.set()
+                self._record_requests.discard(request)
             self._requests.clear()
             self._condition.notify_all()
         with _SERVERS_LOCK:

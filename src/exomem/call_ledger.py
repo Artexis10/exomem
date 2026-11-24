@@ -60,7 +60,7 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -255,7 +255,9 @@ _TARGET_ARG_NAMES = ("path", "old_path", "new_path", "paths", "target", "targets
 
 
 def _target_paths(
-    arguments: dict[str, Any], committed: Sequence[str] | None = None
+    arguments: dict[str, Any],
+    committed: Sequence[str] | None = None,
+    withheld: Collection[str] = (),
 ) -> tuple[list[str], bool]:
     from .privacy_log import content_private_logging_enabled
 
@@ -268,7 +270,8 @@ def _target_paths(
     # assembled from `scope`/`category` and a filename the server derives, so
     # every `preserve_artifacts` row said `target_paths: []` and the ledger
     # could not state what landed. The outcome knows; the arguments never did.
-    targets = _distinct([*_addressed_targets(arguments), *(committed or ())])
+    targets = [target for target in _distinct([*_addressed_targets(arguments), *(committed or ())])
+               if target not in withheld]
     return [_clip(target) for target in targets[:_MAX_TARGET_PATHS]], (
         len(targets) > _MAX_TARGET_PATHS
     )
@@ -336,7 +339,8 @@ def _note_call_fact(record: Callable[[dict[str, Any]], None]) -> None:
                 _call_facts.pop(oldest, None)
             record(
                 _call_facts.setdefault(
-                    token, {"at": now, "paths": [], "access": None, "released": None}
+                    token,
+                    {"at": now, "paths": [], "withheld": set(), "access": None, "released": None},
                 )
             )
     except Exception:  # noqa: BLE001 - the ledger must never break a call
@@ -358,6 +362,19 @@ def note_committed_targets(paths: Iterable[Any]) -> None:
         _note_call_fact(lambda entry: entry["paths"].extend(clean))
 
 
+def withhold_targets(paths: Iterable[Any]) -> None:
+    """Keep these paths out of this call's row: an erasable Source's path names its content.
+
+    The row still counts them in `item_count`; a count is not content.
+    """
+    try:
+        clean = _distinct(paths)
+    except Exception:  # noqa: BLE001 - the ledger must never break a call
+        return
+    if clean:
+        _note_call_fact(lambda entry: entry["withheld"].update(clean))
+
+
 def note_call_access(read_only: bool) -> None:
     """Record how the dispatcher classified this invocation: `read` or `write`."""
     access = "read" if read_only else "write"
@@ -374,7 +391,7 @@ def note_released_items(count: int | None) -> None:
 
 def pop_call_facts(token: str | None) -> dict[str, Any]:
     """Pop this call's facts. Unconditional, like the span pop."""
-    empty: dict[str, Any] = {"paths": [], "access": None, "released": None}
+    empty: dict[str, Any] = {"paths": [], "withheld": set(), "access": None, "released": None}
     if token is None:
         return empty
     with _facts_lock:
@@ -431,6 +448,7 @@ def build_row(
     activation_result: Mapping[str, Any] | None = None,
     timestamp: str | None = None,
     committed_targets: Sequence[str] | None = None,
+    withheld_targets: Collection[str] = (),
     access: str | None = None,
     released_items: int | None = None,
     rendering: str | None = None,
@@ -445,7 +463,7 @@ def build_row(
     client_name = log_client_label(client_name)
     client_version = log_client_version(client_version)
     arg_names, args, args_truncated = _argument_shape(arguments or {})
-    targets, targets_truncated = _target_paths(arguments or {}, committed_targets)
+    targets, targets_truncated = _target_paths(arguments or {}, committed_targets, withheld_targets)
     shaped_spans = _shaped_spans(spans)
     row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -793,6 +811,7 @@ def record_call(
                 budget=budget,
                 activation_result=activation_result,
                 committed_targets=facts["paths"],
+                withheld_targets=facts["withheld"],
                 access=facts["access"],
                 released_items=facts["released"],
                 rendering=rendering,

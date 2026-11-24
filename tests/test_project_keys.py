@@ -60,9 +60,8 @@ def test_register_new_project_key_writes_yaml(vault: Path) -> None:
     assert folder == "Vehicles"
     yaml_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
     assert yaml_path.exists()
-    text = yaml_path.read_text(encoding="utf-8")
-    assert "vehicles:" in text
-    assert "folder: Vehicles" in text
+    registry = project_keys_module.load_project_registry(vault)
+    assert registry.folder_for("vehicles") == "Vehicles"
     # Folder was created.
     folder_path = vault / "Knowledge Base" / "Notes" / "Research" / "Vehicles"
     assert folder_path.is_dir()
@@ -95,7 +94,7 @@ def test_note_auto_registers_unknown_project_key(vault: Path) -> None:
         today=TODAY,
     )
     # Note landed under the new folder.
-    assert result.path == "Knowledge Base/Notes/Research/Vehicles/vehicle-test-note.md"
+    assert result.path == "Knowledge Base/Notes/Research/Vehicles/Vehicle test note.md"
     assert (vault / result.path).exists()
     # Warning surfaced the registration.
     assert any(

@@ -52,9 +52,11 @@ def _marker_path(vault_root: Path) -> Path:
 
 def _clear_policy_caches(vault_root: Path) -> None:
     policy_module._CACHE.pop(str(policy_module.governance_root(vault_root)), None)
-    from . import membership
+    from . import admission_memo, membership, page_admission
 
     membership.clear_memo()
+    page_admission.forget_scopes(vault_root)
+    admission_memo.forget(vault_root)
     try:
         from . import egress
 

@@ -159,6 +159,11 @@ def import_txns(conn):
     return count(conn, "SELECT COUNT(*) FROM txns WHERE request_id LIKE 'import:%'", ())
 
 
+def _inserts(statement, per_row, table):
+    """The single-row statement, or a bulk batch's multi-row INSERT into ``table``."""
+    return statement is per_row or (isinstance(statement, str) and statement.startswith(f"INSERT INTO {table} "))
+
+
 def small(monkeypatch, rows=40):
     monkeypatch.setattr(importer(), "MAX_BATCH_ROWS", rows)
 
@@ -402,6 +407,39 @@ def test_batches_close_at_500_rows_or_4_mebibytes(tmp_path):
 # Lineage, authority and takeover
 
 
+def _shared_export(store, monkeypatch):
+    """The wearable export preserved in a shared archive, which keeps its bytes in the pool and no file at its path."""
+    import io
+
+    from conftest import initialize_vault_state_offline
+
+    from exomem import artifact_lifecycle, original_pool, preserve
+
+    data = ndjson(iter_exercises())
+    if not original_pool.enabled(store.root):
+        initialize_vault_state_offline(store.root, source="importer test vault")
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    if not original_pool.enabled(store.root):
+        original_pool.enable(store.root)
+    preserved = preserve.preserve(store.root, scope="wearable", category="export", filename="exercises.ndjson",
+                                  content_stream=io.BytesIO(data), max_stream_bytes=len(data))
+    assert not os.path.lexists(store.root / preserved.path)
+    return preserved.path
+
+
+def test_a_shared_archive_imports_a_preserved_export_that_no_file_holds_at_its_path(store, monkeypatch):
+    """A new archive pools a preserved NDJSON export, so an importer that opens its path refuses every import."""
+    setup(store, path="Knowledge Base/Evidence/wearable/unused/placeholder.ndjson")
+    source = _shared_export(store, monkeypatch)
+    preview = call(store, owner_principal(), mode="preview", source_ref=source, format="ndjson", mapping=MAPPING)
+    assert preview["source"]["bytes"] == len(ndjson(iter_exercises()))
+    job = start(store, source_ref=source)
+    run(store)
+    result = status(store, job)
+    assert (result["state"], result["rows"]["imported"]) == ("complete", len(valid(iter_exercises())))
+    assert count(store.connection) == len(valid(iter_exercises()))
+
+
 def test_job_binds_exact_source_receipt_and_target_lineage(store):
     """A job that re-resolves its source by path imports bytes it never bound."""
     setup(store)
@@ -524,7 +562,7 @@ def test_source_release_revoked_during_commit_rolls_back_the_batch(store, monkey
 
     def revoke_mid_batch(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_SOURCE:
+        if _inserts(statement, tables.INSERT_SOURCE, "item_sources"):
             write_scope(store.root, paths="Evidence/**")
             write_rule(store.root, ceiling=0)
         return result
@@ -1229,7 +1267,7 @@ def test_crash_inside_a_batch_leaves_it_absent_and_resumes_once(store, monkeypat
 
     def crash(self, statement, *args, **kwargs):
         result = execute(self, statement, *args, **kwargs)
-        if statement is tables.INSERT_EFFECT:
+        if _inserts(statement, tables.INSERT_EFFECT, "audit_effects"):
             raise _Crash
         return result
 
@@ -1344,6 +1382,213 @@ def test_duplicate_keys_resolve_to_the_last_occurrence_whatever_the_batching(sto
     state, counts, stored = outcomes[0]
     assert state == "complete" and stored["r1"] == "second" and len(stored) == 12
     assert (counts["imported"], counts["duplicates"], counts["rejected"]) == (12, 1, 0)
+
+
+def test_job_totals_equal_the_sum_of_its_batch_receipts_whatever_the_batching(store, monkeypatch):
+    """Totals folded apart from the receipts, or a duplicate counted by where batches end, make the two disagree."""
+    mapping = {"fields": {"exercise_id": "id", "kind": "kind"}, "on_invalid": "skip",
+               "coverage": {name: {"classification": None} for name in ("id", "kind")}}
+    setup(store, ndjson({"id": f"r{i}", "kind": "first"} for i in range(2)))
+    start(store, mapping=mapping)
+    run(store)
+    batches = [
+        [{"id": "n0", "kind": "a"}, {"id": "n1", "kind": "a"}, {"id": "n1", "kind": "b"}, {"id": "n2", "kind": "a"}],
+        [{"id": "n3", "kind": "a"}, {"id": "r0", "kind": "first"}, {"id": "n0", "kind": "c"}, {"id": None, "kind": "a"}],
+        [{"id": "n4", "kind": "a"}, {"id": "n5", "kind": "a"}, {"id": "r1", "kind": "changed"}, {"id": "n6", "kind": "a"}],
+    ]
+    write_source(store.root, ndjson(row for batch in batches for row in batch))
+    small(monkeypatch, rows=4)
+    job = start(store, mapping=mapping)
+    run(store)
+    result = status(store, job)
+    receipts = [
+        json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+            "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+            (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+    ]
+    assert len(receipts) == result["batches"] == 3
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    assert {name: sum(receipt[name] for receipt in receipts) for name in names} == {name: result["rows"][name] for name in names}
+    assert {name: result["rows"][name] for name in names} == {
+        "inserted": 7, "updated": 1, "unchanged": 1, "rejected": 1, "collapsed_in_source": 2, "restated_existing": 2}
+    assert result["rows"]["duplicates"] == 4 and result["rows"]["imported"] == 9
+
+
+NULL_TAIL_FIELDS = (
+    "  natural_key: [list_id, position]\n  fields:\n"
+    "    list_id: {type: string, required: true}\n    position: {type: integer, required: true}\n"
+    "    title: {type: string}\n"
+)
+NULL_TAIL_MAPPING = {
+    "fields": {"list_id": "list", "position": "position", "title": "title"},
+    "on_invalid": "skip",
+    "coverage": {name: {"classification": None} for name in ("list", "position", "title")},
+}
+
+
+def null_tail_rows(valid_rows=25, null_rows=12, tail="unplaced"):
+    ordered = [{"list": "a", "position": index, "title": f"entry {index}"} for index in range(1, valid_rows + 1)]
+    return ordered + [{"list": "a", "position": None, "title": f"{tail} {index}"} for index in range(null_rows)]
+
+
+def test_a_null_required_key_part_rejects_each_row_and_never_collapses_the_tail(store, monkeypatch):
+    """A null position admitted into the key stores the whole tail as one row and counts the rest as duplicates."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    result = status(store, job)
+    assert result["state"] == "complete"
+    assert (result["rows"]["imported"], result["rows"]["rejected"], result["rows"]["duplicates"]) == (25, 12, 0)
+    stored = [values for _, values in typed_storage.collection_values(store.connection, CID)]
+    assert sorted(values["position"] for values in stored) == list(range(1, 26))
+    assert [(entry["row"], entry["code"], entry["at"]) for entry in result["rejections"]] == [
+        (ordinal, "SCHEMA_REQUIRED_FIELD", "position") for ordinal in range(25, 37)
+    ]
+    # The default stop policy names the same field where it fails.
+    stopped = start(store, mapping={name: value for name, value in NULL_TAIL_MAPPING.items() if name != "on_invalid"})
+    run(store)
+    error = status(store, stopped)["error"]
+    assert (error["code"], error["at"], error["row"]) == ("SCHEMA_REQUIRED_FIELD", "position", 25)
+
+
+def test_job_totals_equal_its_receipts_plus_the_batches_that_committed_nothing(store, monkeypatch):
+    """A batch that commits no row writes no receipt, so totals folded from it would match no receipt."""
+    setup(store, ndjson(null_tail_rows()), fields=NULL_TAIL_FIELDS)
+    small(monkeypatch, rows=10)  # the fourth and last batch holds only rejected rows
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    first = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    # An identical start returns the first job, so the tail differs; every stored row restates unchanged.
+    write_source(store.root, ndjson(null_tail_rows(tail="pending")))
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+
+    for job, uncommitted in ((first, {"rejected": 7}), (again, {"unchanged": 25, "restated_existing": 25, "rejected": 12})):
+        result = status(store, job)
+        receipts = [
+            json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+                "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+                (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+        ]
+        assert result["uncommitted"] == {name: uncommitted.get(name, 0) for name in names}
+        assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
+            name: result["rows"][name] for name in names}
+
+
+def test_a_batch_closed_by_its_time_budget_commits_fewer_rows_and_totals_still_match(store, monkeypatch):
+    """A batch sized only by rows takes all 500 however slowly they come; one closed early must count each row once."""
+    setup(store, ndjson(null_tail_rows(valid_rows=6, null_rows=2)), fields=NULL_TAIL_FIELDS)
+    monkeypatch.setattr(importer(), "BATCH_SECONDS", 0.0)  # spent before each batch reads its second row
+    names = ("inserted", "updated", "unchanged", "rejected", "collapsed_in_source", "restated_existing")
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    result = status(store, job)
+    receipts = [
+        json.loads(body)["import_batch"] for (body,) in store.connection.execute(
+            "SELECT receipt_json FROM txns WHERE request_id LIKE ? ORDER BY txn_id",
+            (f"import:{job['continuation'].removeprefix('import-job:')}:%",))
+    ]
+    assert (result["state"], result["rows"]["imported"], result["rows"]["rejected"]) == ("complete", 6, 2)
+    assert [receipt["inserted"] for receipt in receipts] == [1] * 6  # one row per batch, each in its own receipt
+    assert result["uncommitted"] == {name: 2 if name == "rejected" else 0 for name in names}
+    assert {name: sum(receipt[name] for receipt in receipts) + result["uncommitted"][name] for name in names} == {
+        name: result["rows"][name] for name in names}
+
+
+def test_activity_of_a_job_this_process_did_not_run_is_unknown_never_zero(store, monkeypatch):
+    """Activity is the running process's own timing; after a restart or an upgrade a zero would read as a stall."""
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=2)
+    timed = status(store, job)
+    path = store.handle.path
+    store.handle.close()
+    with connection.open_writer(path, lease_check=lambda: True) as handle:
+        restarted = status(store, job, handle=handle)
+    activity = timed["activity"]
+    assert (activity["timed_batches"], activity["last_batch"]["batch"], activity["last_batch"]["rows"]) == (2, 1, 40)
+    assert activity["rows_per_second"] > 0 and activity["eta_seconds"] > 0 and activity["phase"] is None
+    assert set(restarted["activity"].values()) == {None}
+    assert (restarted["state"], restarted["rows"]["imported"]) == ("running", timed["rows"]["imported"])
+    assert (restarted["resumable"], restarted["cancellable"]) == (False, True)
+
+
+def test_a_batch_whose_boundary_hold_is_unknown_makes_the_summed_wait_and_hold_unknown(store, monkeypatch):
+    """A sum that counts an unknown hold as zero reports less boundary time than the job spent."""
+    from exomem import mutation_lock
+
+    setup(store)
+    small(monkeypatch)
+    job = start(store)
+    run(store, max_batches=1)
+    monkeypatch.setattr(mutation_lock, "last_mutation_timing", lambda coordinator=None: None)
+    run(store, max_batches=1)
+    activity = status(store, job)["activity"]
+    assert activity["timed_batches"] == 2
+    assert (activity["last_batch"]["wait_ms"], activity["last_batch"]["hold_ms"]) == (None, None)
+    assert (activity["timings_ms"]["wait"], activity["timings_ms"]["hold"]) == (None, None)
+    assert activity["timings_ms"]["read"] >= 0
+
+
+def preview_of(store, mapping=NULL_TAIL_MAPPING, **overrides):
+    return call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="ndjson", mapping=mapping,
+                **overrides)
+
+
+def test_preview_counts_the_whole_source_and_the_job_agrees(store, monkeypatch):
+    """A 100-row sample sees a clean source; the tail's rejections, a repeated key and a stored row must show before the job."""
+    setup(store, ndjson(null_tail_rows(valid_rows=3, null_rows=0)), fields=NULL_TAIL_FIELDS)
+    job = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    assert status(store, job)["rows"]["imported"] == 3
+    rows = null_tail_rows(valid_rows=130, null_rows=12)
+    rows.insert(130, {"list": "a", "position": 50, "title": "again"})  # repeats a key that comes earlier in the source
+    write_source(store.root, ndjson(rows))
+
+    preview = preview_of(store)
+
+    assert preview["rows"] == {"sampled": 100, "valid": 100, "invalid": 0, "complete": False}
+    assert (preview["coverage"], preview["rows_total"]) == ("full", 143)
+    assert (preview["would_insert"], preview["would_match_stored"]) == (127, 3)
+    assert preview["would_collapse"]["rows"] == 1 and len(preview["would_collapse"]["sample_keys"]) == 1
+    starts = [len(ndjson(rows[:ordinal])) for ordinal in range(len(rows))]
+    assert preview["would_reject"] == {"SCHEMA_REQUIRED_FIELD": {"rows": 12, "first": [
+        {"row": ordinal, "byte": starts[ordinal], "at": "position"} for ordinal in range(131, 143)]}}
+    assert preview["survey"]["on_invalid"] == "skip" and preview["survey"]["rows_read"] == 143
+
+    small(monkeypatch, rows=40)
+    again = start(store, mapping=NULL_TAIL_MAPPING)
+    run(store)
+    done = status(store, again)["rows"]
+    assert done["inserted"] == preview["would_insert"] and done["rejected"] == 12
+    assert done["collapsed_in_source"] == preview["would_collapse"]["rows"]
+    assert done["restated_existing"] == preview["would_match_stored"]
+
+
+def test_preview_that_reaches_its_budget_is_partial_and_keeps_its_counts_apart(store, monkeypatch):
+    """Preview holds the store thread; past its budget it must stop, and the rows it read are not the source."""
+    setup(store, ndjson(null_tail_rows(valid_rows=130, null_rows=12)), fields=NULL_TAIL_FIELDS)
+    monkeypatch.setattr(importer(), "PREVIEW_HOLD_SECONDS", 0.0)  # spent before the survey reads its second row
+
+    preview = preview_of(store)
+
+    assert preview["coverage"] == "partial" and preview["survey"]["unread"] == "time_budget"
+    assert preview["survey"]["budget_seconds"] == 0.0 and preview["survey"]["rows_read"] == 1
+    assert [preview[name] for name in ("rows_total", "would_insert", "would_reject", "would_collapse")] == [None] * 4
+    assert preview["survey"]["partial_counts"]["would_insert"] == 1
+
+
+def test_preview_stopped_by_a_malformed_row_is_partial_and_names_where(store):
+    """A read that ends where the source has no row boundary must not read as a clean, complete count."""
+    setup(store, b'[{"list": "a", "position": 1}, {"list": "a", "position": 2} {"list": "a", "position": 3}]', fields=NULL_TAIL_FIELDS)
+
+    preview = call(store, owner_principal(), mode="preview", source_ref=SOURCE, format="json-array",
+                   mapping={**NULL_TAIL_MAPPING, "fields": {"list_id": "list", "position": "position"}})
+
+    assert preview["coverage"] == "partial" and preview["rows_total"] is None and preview["would_insert"] is None
+    assert preview["survey"]["stopped"]["code"] == "IMPORT_SOURCE_MALFORMED" and preview["survey"]["stopped"]["row"] == 2
 
 
 @pytest.mark.parametrize("change,before,after,refusal", [

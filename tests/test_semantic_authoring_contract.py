@@ -14,6 +14,26 @@ from exomem import observe_memory, semantic_authoring, semantic_units
 
 pytestmark = pytest.mark.reads_repository_docs
 
+#: The ownership review's guidance, in the words that were evaluated against a real model
+#: on a misfiled group. A rewording is a new evaluation, so it changes here on purpose.
+OWNERSHIP_ROUTES = {
+    "ownership_question": "Ownership check: does this material belong in its current home?",
+    "ownership_test": (
+        "Ownership test. A page belongs to a project when it serves that project's own goal. "
+        "Material that has its own goal, institution, schedule or course of events, and would "
+        "still matter if the home project ended, is its own programme, even when it informs "
+        "the home project. Its home is a separate project (new_project when none exists), "
+        "linked to the related project by a relation rather than filed inside it. Mentioning "
+        "another project, or offering lessons for it, does not make material part of it. "
+        "Pages that already sit in a home are not evidence that more such material belongs "
+        "there."
+    ),
+    "ownership_deferral": (
+        "If the user already decided this page's home and nothing since bears on ownership, "
+        "answer abstain and say that the earlier decision stands."
+    ),
+}
+
 COMPILED_DESTINATIONS = {
     "experiment": "Notes/Experiments",
     "failure": "Notes/Failures",
@@ -21,11 +41,12 @@ COMPILED_DESTINATIONS = {
     "pattern": "Notes/Patterns",
     "procedure": "Notes/Procedures",
     "production-log": "Notes/Productions",
+    "profile": "Notes/Profiles",
     "research-note": "Notes/Research",
 }
 EXPECTED_NORMATIVE_IDENTITY = (
-    11,
-    "sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8",
+    12,
+    "sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9",
 )
 PORTABLE_CORE_KEYS = [
     "action",
@@ -72,7 +93,7 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
     contract = semantic_authoring.build_semantic_authoring_contract().as_dict()
 
     assert contract["contract_id"] == "exomem.semantic-authoring"
-    assert contract["version"] == 11
+    assert contract["version"] == 12
     assert (contract["version"], contract["content_digest"]) == (
         EXPECTED_NORMATIVE_IDENTITY
     )
@@ -239,6 +260,8 @@ def test_contract_pins_exact_language_applicability_and_findings() -> None:
 
     routes = dict(contract["routes"])
     assert routes.pop("destination_fitness")
+    # Worded and evaluated in `test_ownership_routes_carry_the_evaluated_text`.
+    assert all(routes.pop(name) for name in OWNERSHIP_ROUTES)
     assert routes == {
         "new_compiled_note": "create_note",
         "replacement": "supersede_note",
@@ -752,3 +775,13 @@ def test_portable_selection_rule_is_not_duplicated_and_teaches_distinct_richness
     assert "satisfy a quota" in teaching
     assert "never duplicate the same fact" in teaching
     assert teaching in concise
+
+
+def test_ownership_routes_carry_the_evaluated_text() -> None:
+    contract = semantic_authoring.get_semantic_authoring_contract().routes
+
+    for name, text in OWNERSHIP_ROUTES.items():
+        assert contract[name] == text
+        for profile in ("full", "compact"):
+            served = semantic_authoring.bootstrap_projection(profile=profile)["routes"]
+            assert served[name] == text

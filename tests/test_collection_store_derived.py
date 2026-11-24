@@ -384,10 +384,11 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
     log = tmp_path / "metadata-timeout.jsonl"
     real_assess, real_target = derived_rows.assess, derived_rows.target
     real_time = runtime.time
-    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.monotonic, runtime.ReadSession.check
+    real_flag, real_clock, real_check = derived_rows.is_derived, real_time.thread_time, runtime.ReadSession.check
     offset, errors = [0.0], []
-    clock = SimpleNamespace(monotonic=lambda: offset[0], perf_counter=real_time.perf_counter,
-                            thread_time=real_time.thread_time, process_time=real_time.process_time,
+    # The deadline counts the thread's CPU time; the offset spends it without burning any.
+    clock = SimpleNamespace(monotonic=real_time.monotonic, perf_counter=real_time.perf_counter,
+                            thread_time=lambda: real_clock() + offset[0], process_time=real_time.process_time,
                             time_ns=real_time.time_ns)
     # Baseline and recovery reads use the same clock as the injected deadline.
     monkeypatch.setattr(runtime, "time", clock)
@@ -418,7 +419,7 @@ def test_timeout_observation_separates_derived_metadata_without_changing_the_ref
         assert derived_rows.assess is assess
         assert derived_rows.is_derived is real_flag
         assert derived_rows.target is real_target
-        assert real_time.monotonic is real_clock
+        assert real_time.thread_time is real_clock
     [record] = [json.loads(line) for line in log.read_text().splitlines()]
     phases = record["phases"]
     parent = phases["derived.row_source"]
@@ -580,6 +581,11 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
     before = _rows_file(file)
     writer.handle.close()
     with closing(sqlite3.connect(path, isolation_level=None)) as raw:
+        # Schema 19 put a view of the current rows under the name of the table of all rows, which it renamed.
+        raw.execute("DROP VIEW items")
+        raw.execute("DROP INDEX item_rows_current")
+        raw.execute("ALTER TABLE item_rows DROP COLUMN retracted_txn")
+        raw.execute("ALTER TABLE item_rows RENAME TO items")
         for trigger in ("collections_item_key_scheme_fixed", "collections_ordered_keys_derived"):
             raw.execute(f"DROP TRIGGER {trigger}")
         raw.execute("ALTER TABLE collections DROP COLUMN item_key_scheme")
@@ -587,6 +593,13 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
             raw.execute(f"DROP TABLE {table}")
         for table in ("item_references", "item_reference_state"):  # schema 17 added these
             raw.execute(f"DROP TABLE {table}")
+        # Schema 18 added the Source dependency columns, their indexes and the version bindings.
+        raw.execute("DROP TABLE version_source_bindings")
+        for index in ("held_candidates_by_publication", "projection_state_by_dependency_window"):
+            raw.execute(f"DROP INDEX {index}")
+        for table, column in (("txns", "event_version"), ("audit_effects", "dependency_current_complete"),
+                              ("audit_effects", "dependency_prior_complete"), ("held_candidates", "dependency_json")):
+            raw.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
         raw.execute("UPDATE store_meta SET value='13' WHERE key=?", (schema.META_SCHEMA_VERSION,))
         raw.execute("UPDATE alembic_version SET version_num='13'")
 
@@ -886,6 +899,32 @@ def test_a_row_page_continued_after_another_batch_of_the_open_member_is_stale(de
     with pytest.raises(OpError) as stale:
         page(after=first["next_cursor"])
     assert stale.value.code == "QUERY_CURSOR_STALE"
+
+
+def test_status_beside_the_store_thread_reports_an_unreadable_open_member_as_unknown(derived, monkeypatch, tmp_path):
+    """Defect: status read off the store thread swallowed a failed read of the derived file, so a running
+    job's totals silently fell back to its ended members, as if the open member had imported nothing."""
+    writer, job = derived("unreadable")
+    run_jobs(writer, max_batches=1)  # one batch of three rows; the member's fourth row keeps it open
+
+    def status_beside():
+        with connection.store_reader(writer.handle.path, writer.handle.readers) as reader:
+            snapshot = connection.SnapshotHandle(writer.handle.path, reader, writer.handle)
+            reader.execute("BEGIN")
+            try:
+                return agent(writer, snapshot, mode="status", continuation=job["continuation"])
+            finally:
+                reader.execute("ROLLBACK")
+
+    readable = status_beside()
+    unreadable_file = tmp_path / "unreadable.sqlite"
+    unreadable_file.write_bytes(b"not a database file" * 8)
+    monkeypatch.setattr(derived_rows, "path", lambda store_path: unreadable_file)
+    unreadable = status_beside()
+
+    assert (readable["state"], readable["rows"]["imported"], readable["batches"]) == ("running", 3, 1)
+    assert (unreadable["state"], unreadable["rows"]["imported"], unreadable["batches"]) == ("running", None, None)
+    assert unreadable["members"]["read"] is None and len(unreadable["warnings"]) == 1
 
 
 def test_a_writer_that_lost_the_lease_stages_no_derived_rows(derived):

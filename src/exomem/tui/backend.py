@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import cli_ops
-from ..kbdir import kb_dirname
+from ..kbdir import managed_root
 
 _LEAN_FALLBACK_VARS = (
     "EXOMEM_DISABLE_EMBEDDINGS",
@@ -190,7 +190,7 @@ class ExomemBackend:
         from ..vault_store import availability
         from ..vault_store import mode as store_mode
 
-        # The service's rollout fence, so a session never serves a vault that the service refuses.
+        # Use the same vault admission checks as the service.
         availability.require_servable(self._vault)
 
         if store_mode.store_mode_for_reads(self._vault):
@@ -431,7 +431,11 @@ class ExomemBackend:
         # Mutating specialized ops return the commit envelope; the human-facing
         # report lives under `diagnostics` when present (CLI renderer parity).
         diagnostics = result.get("diagnostics")
-        return diagnostics if isinstance(diagnostics, dict) else result
+        if not isinstance(diagnostics, dict):
+            return result
+        from ..mutation_terminal import reply_leaf
+
+        return dict(reply_leaf(diagnostics))
 
     @property
     def vault_root(self) -> Path | None:
@@ -487,7 +491,7 @@ class ExomemBackend:
         from ..vault_store import mode as store_mode
 
         root = Path(self._vault)
-        kb = root / kb_dirname()
+        kb = managed_root(root)
         if store_mode.store_mode_for_reads(root):
             # The corpus holds a stored page whether or not its file exists yet.
             corpus = tuple(

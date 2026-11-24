@@ -18,7 +18,7 @@ from typing import Any
 
 from . import capabilities, operation_entries
 from .entity_types import ENTITY_TYPE_IDS, load_entity_types
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join
 from .text_scripts import comparison_words
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
@@ -189,7 +189,7 @@ def pack_schema() -> dict:
         "allowed_primitives": sorted(PACK_ALLOWED_PRIMITIVES),
         "allowed_actions": sorted(PACK_ALLOWED_ACTIONS),
         "workflow_required_fields": sorted(PACK_WORKFLOW_REQUIRED_FIELDS),
-        "selection_manifest": f"{kb_prefix()}{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}",
+        "selection_manifest": managed_join(f"{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}"),
         "selection_schema_version": PACK_SELECTION_SCHEMA_VERSION,
     }
 
@@ -494,7 +494,7 @@ def normalize_pack_ids(pack_ids: list[str] | tuple[str, ...] | None) -> tuple[st
 
 
 def _selection_rel_path() -> str:
-    return f"{kb_prefix()}{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}"
+    return managed_join(f"{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}")
 
 
 def _selection_path(root: Path) -> Path:
@@ -576,7 +576,7 @@ def write_selected_packs(
     if not kb.is_dir():
         raise PackSelectionError(
             "KB_NOT_INITIALIZED",
-            f"{kb_dirname()}/ is required before selecting packs",
+            f"{managed_join('')} is required before selecting packs",
         )
     selected_ids = normalize_pack_ids(pack_ids)
     date_iso = (today or dt.date.today()).isoformat()

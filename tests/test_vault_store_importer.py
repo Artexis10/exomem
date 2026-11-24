@@ -14,9 +14,7 @@ import itertools
 import multiprocessing
 import os
 import queue
-import signal
 import sqlite3
-import sys
 import threading
 import time
 from contextlib import closing
@@ -26,6 +24,7 @@ import pytest
 import test_managed_collections_migration as managed_suite
 import test_vault_store_migration as migration_suite
 import test_vault_store_projector as projector_suite
+from hard_kill import KILLED, kill_self
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, migrate_apply
 from test_vault_store_projector import NOTES, commit, put, rows
 
@@ -42,10 +41,6 @@ vault = migration_suite.vault
 stored = projector_suite.stored
 writer = projector_suite.writer
 projecting = projector_suite.projecting
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 GENERATED = f"{NOTES}/Generated"
 PERSON = b"A person edited this page in an outside editor.\n"
@@ -343,7 +338,7 @@ def test_a_killed_importer_leaves_no_duplicate_imports(stored):
     )
     child.start()
     child.join(300)
-    assert child.exitcode == -signal.SIGKILL, "the child must be killed inside the fifth import"
+    assert child.exitcode == KILLED, "the child must be killed inside the fifth import"
     done = {path for path, _ in imports(root)}
     assert len(done) == 4, "each import before the kill is durable on its own"
 
@@ -377,7 +372,7 @@ def _import_and_die(environment, root, countdown):
             if statement.startswith("INSERT INTO store_audit"):
                 seen.add(statement)
                 if len(seen) == countdown:
-                    os.kill(os.getpid(), signal.SIGKILL)
+                    kill_self()
 
         handle.connection.set_trace_callback(trace)
         importer.Importer(root, run=lambda work: work(CollectionWriter(root, handle))).sweep()
@@ -492,7 +487,9 @@ def test_a_path_the_importer_cannot_read_is_reported_and_never_taken_for_a_delet
     (stored / ALPHA).unlink()
     (stored / ALPHA).symlink_to(target)
     folder = stored / "Knowledge Base" / "Sources"
-    if os.geteuid() != 0:
+    # A POSIX mode is the only way to make this folder unreadable; Windows has no such mode, so
+    # there the test covers the symlink refusal alone.
+    if os.name == "posix" and os.geteuid() != 0:
         folder.chmod(0)
     try:
         events = importing.import_paths([ALPHA])
@@ -732,6 +729,42 @@ def test_a_move_after_a_kill_that_lost_the_manifest_row_removes_the_old_file_and
     assert rows(stored, "SELECT path FROM store_pages WHERE path IN (?, ?)", old, new) == [(new,)]
     assert (report.imported, report.held) == ([], [])
     assert imports(stored) == [] and rows(stored, "SELECT COUNT(*) FROM store_held") == [(0,)]
+
+
+def test_a_sweep_adopts_the_file_of_a_page_that_the_store_lost_though_a_manifest_row_remains(
+    stored, writer, importing
+):
+    """A sweep that takes the file for Exomem's own because a manifest row remembers its bytes: the
+    store holds no page there, so no reader serves the file and nothing imports it later."""
+    with writer.handle.transaction() as tx:
+        tx.execute("DELETE FROM store_pages WHERE path = ?", (ALPHA,))
+    assert rows(stored, "SELECT COUNT(*) FROM store_manifest WHERE path = ?", ALPHA) == [(1,)]
+
+    report = importing.sweep()
+
+    assert report.imported == [ALPHA] and report.held == []
+    assert rows(stored, "SELECT body FROM store_pages WHERE path = ?", ALPHA) == [
+        ((stored / ALPHA).read_bytes(),)
+    ]
+    assert importing.sweep().imported == [], "the page is the store's now: nothing is left to adopt"
+
+
+def test_a_sweep_leaves_the_files_of_a_delete_and_a_move_that_the_projector_has_not_run(
+    stored, writer, importing
+):
+    """A sweep that adopts the file of a page that Exomem just deleted or moved, so that the page
+    comes back at its old path before the projector removes the file."""
+    commit(
+        writer,
+        deletes=(write.PageDelete(BETA),),
+        moves=(write.PageMove(ALPHA, f"{NOTES}/Archive/Alpha.md"),),
+    )
+    assert (stored / BETA).exists() and (stored / ALPHA).exists()
+
+    report = importing.sweep()
+
+    assert (report.imported, report.held) == ([], [])
+    assert rows(stored, "SELECT path FROM store_pages WHERE path IN (?, ?)", ALPHA, BETA) == []
 
 
 def test_a_held_delete_clears_when_the_file_comes_back_with_exomems_bytes(stored, importing):

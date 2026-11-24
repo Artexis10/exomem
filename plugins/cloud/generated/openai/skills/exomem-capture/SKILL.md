@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 3d4880105d82b10aa21287aaf541540136fdb5e112262be2476f2ea35ef992fd
+  skill_contract: ae2e5a4556dc287788daee5b0be781557ab1db0a3dad11d43b0099cd12aea415
   version: "0.1.0"
 ---
 
@@ -24,8 +24,10 @@ Use `manage_memory` `settings.set` or `settings.clear` only for an explicit user
 Recall, capture, installation and missing hooks use the existing preference;
 none authorizes changing it. Inspect first when the user requests a change.
 
-Sources/Evidence are immutable, and content outside the managed Knowledge Base
-is read-only. Before a compiled write: reuse current relevant search/read results,
+Sources/Evidence content is immutable; their pointers change only through governed
+moves and pointer corrections. Vault content outside the managed Knowledge Base is
+read-only; ordinary workspace files are not the vault, so write them with your own
+file tools. Before a compiled write: reuse current relevant search/read results,
 check for duplicates, and include known source references and reviewed connections
 in the first write. Use `inspect_memory(operation="connections.suggest_links")` when useful
 connections are still unknown, not to recheck links already established in context.
@@ -74,22 +76,50 @@ or uncertainty changes materially; ordinary memory reads alone do not trigger re
 A stable preference, recurring routine, historical baseline, or durable affiliation
 is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise write one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative events stay quiet. Durable interpretations retain explicit
-attribution and uncertainty rather than becoming established facts. Eligibility never creates an Entity,
+uniquely resolved Entity; otherwise write one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Durable
+interpretations retain explicit attribution and uncertainty rather than becoming
+established facts. Eligibility never creates an Entity,
 collection, or schema. Concise observations and narrow additive facts follow
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation uses `link_acceptance`; merge or substantial curation uses
 confirmed `restructure_execution`.
+
+## Recurring structured work and agreed decisions
+A **decision or standing rule agreed in conversation** is durable. Under `proactive_capture`,
+save it when it is agreed: `silent` saves it and reports one line, `advisory` offers the
+save, and `off` waits for an explicit request.
+
+**Recurring structured work** goes to Records: stable identities that recur, repeated
+observations or evaluations of the same items, comparisons, changing state, or a need to
+query exactly. Judge it from meaning. A passing mention gets no collection, and narrative
+stays in Notes. Follow `references/planning-records.md`: list the collections, reuse a
+compatible one and update rows by natural key, else `add_record` with `new_collection`
+creates a minimal collection and adds the first row, under the served disposition. A later
+fact that has no field is added with `new_fields`, never put into another field. Backfill
+what the conversation established with dates and attribution, and report the collection and
+the rows in the reply.
+
+When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
+the same payload, or read the collection and the row by natural key before submitting that write again.
+Never retry with a new identity. A `bulk_upsert` needs `source`, once for the batch or on
+each row.
 
 ## Workflow
 Before choosing a destination, partition the exchange into independently reusable
 objects by retrieval question, subject/domain, temporal episode, and epistemic
 role. Reuse current relevant recall and resolve each meaningful cluster against
 canonical homes. The open note has no priority; keep details within one coherent
-scope together. Preserve durable hypotheses as attributed, uncertain claims.
+scope together. Save each claim at its true strength, never more certain, more general
+or more settled than its source made it. A held view, interpretation or working hypothesis
+the evidence does not settle is saved attributed to whoever holds it, with its uncertainty,
+never as fact; a remark made in passing is not a held view. A person's unsure report that
+later work could use is saved as unsure and attributed, never as an event, fact or baseline.
+Also save a question the work leaves open (as an open question, including whether something
+happened) and settled values (in full, not file pointers). No write mentions what stays unwritten.
 Perform one completeness/destination review for the whole write plan, not a new
 review after every write. During development, repository/specification artifacts
 carry transient progress; capture reusable decisions and verified milestones.
@@ -126,7 +156,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    `references/writing.md` § Names in another script.
 
 ## Lifecycle
-Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits propose one rather than creating it silently. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome.
+Two more classes land here. A **stated intent or commitment** routes to Planning after resolving workflow posture and inspecting for an existing item to update before creating one. An **observed outcome or event** routes only to one compatible Records collection with `add_record(...)`; when collections compete ask one focused question, and when none fits and the identity, type and scope are clear, create a minimal one under the served capture disposition. Records never transition Planning: only explicit user intent may request a guarded transition, while a `propose-after-outcome` posture may only propose one. A tentative claim is never written as an event, and elapsed time is never an outcome. When a write receipt or recall names a collection's capture method, read it and follow it.
 
 ## Artifact role and current state
 Read the supporting units for `artifact_role_promotion` and
@@ -189,7 +219,7 @@ transient participant stays in source/note context. Do not create a parallel
 page when an existing active note or entity should be edited, linked, or
 superseded.
 
-<!-- exomem-semantic-authoring:v11 sha256:6ab1c7e3ef04f6ad089520f568fe613e159860bf813cb25227b52cfd239067a8 -->
+<!-- exomem-semantic-authoring:v12 sha256:de9bfeb8a2de231246fb6a793df874d113cf29ddd2ed7bbb2e6c123510bf46e9 -->
 ## Semantic authoring contract
 
 Choose homes by future use and accumulated content, not mentions or broad scope. Keep coherent long notes; reuse or create a home for independent material.
@@ -213,7 +243,7 @@ Compact grammar: `- [category] content #tags (context) ^anchor`. Parse valid com
 - Rich: write `## <Governed Kind>` with optional leading metadata `- category: <open category>`, `- id: <stable-id>`, `- tags: <comma-separated tags>`, `- context: <context>`, `- relations: <relation-type>: [[Target]]`, `- verdict: <epistemic outcome>`, `- check_by: <ISO revisit date>`, `- as_of: <ISO start date>`, `- until: <ISO last valid date>`. Metadata rows are optional and leading; the canonical writer emits category, id, tags, context, relations, verdict, check_by, as_of and until; category defaults to the governed kind when omitted. Accepted metadata order is flexible while rows remain leading. After optional leading metadata, add a blank line and a substantive Markdown body. Typed unit relations require the rich form. A `#anchor` target addresses a unit.
 - Epistemic corrections: Inspect affected claims and evidence. Distinguish attributed accounts from established facts. Correct suitable existing units with guarded writers, justified verdicts and exact links; verify current state. Refutation alone changes neither lifecycle nor rank. Writers retain prior interpretations; request read_instructions with profile=full for history guidance. Keep an anchored unit's identity when its wording changes. Preserve a false historical proposition and author its verdict; add a distinct corrective unit when useful. Refutation and contradiction do not imply supersession or reduce rank. The semantic writer retains prior interpretations atomically. Read revision_history with read_page(part=history), optionally for unit_ref, using history_limit and history_continuation in options. When it carries lookup=stale, repeat the same call shortly instead of reading absence or paging on. Existing history remains the page's operation log. Entities and legacy pages use their existing edit owner; Records use guarded row corrections and history. Corrections need no dated child, special user nudge, or confirmation beyond the active engagement policy.
 - Rich boundary: A heading at level N owns content until the next non-fenced heading at level N or shallower; deeper headings remain in its body. `empty_rich_unit` means a recognized rich heading has no substantive body; Add substantive body content or remove the empty recognized heading.
-- Exact applicability: obtain `read_instructions(profile='compact', section='authoring')` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`, `procedure` in `Notes/Procedures`. More may be registered; `inspect_memory(operation='schema.inspect', arguments={'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `inspect_memory(operation='schema.inspect', arguments={'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
+- Exact applicability: obtain `read_instructions(profile='compact', section='authoring')` and read `semantic_authoring.minimum_semantic_unit` for current structural applicability and the status-class rule. Apply `compiled_intent(after_state) = canonical_compiled_destination(path) OR the normalized type's note-type role is compiled`. Shipped compiled types and their default folders: `research-note` in `Notes/Research`, `insight` in `Notes/Insights`, `failure` in `Notes/Failures`, `pattern` in `Notes/Patterns`, `experiment` in `Notes/Experiments`, `production-log` in `Notes/Productions`, `procedure` in `Notes/Procedures`, `profile` in `Notes/Profiles`. More may be registered; `inspect_memory(operation='schema.inspect', arguments={'subject': 'note-types'})` lists the live set. Reject missing, invalid, or mismatched compiled frontmatter before evaluating the minimum-unit predicate. A page in a type folder needs a compiled type; a compiled type may sit in any Notes folder, and a compiled page outside Notes is refused. Folders are defaults. `create_note` files research notes in their `project` home. Other compiled notes use the first `topics` entry with a home. `inspect_memory(operation='schema.inspect', arguments={'subject': 'homes'})` lists homes. The draft's `placement` gives the folder, basis and call to make a topic a home. The minimum predicate applies when the path and normalized compiled type structurally match; the result is writable managed Markdown in the governed subtree; the result is outside Sources, Evidence, and trash; no activation exclusion applies; the admitted effective status class is live. Check live creates, replacements and transitions to live; pending compiled notes may remain unit-free until activation.
 - Existing active pages: A post-activation compliant page cannot lose its final valid semantic unit.
 - Exempt content: arbitrary non-compiled Markdown, dataset cards, Evidence artifacts, hubs, indexes, logs, non-Markdown files, schema and admin artifacts, snapshots, Sources, templates, trash.
 - Routes: use `create_note` for a new compiled note, `supersede_note` for a replacement, `add_observation/edit_note` for one unit, and `edit_note` for a small edit or activation. Tier 2 manage_memory `files.create` and `files.append` receive the same semantic precommit contract on the complete resulting compiled Markdown; prefer create_note or supersede_note when their typed route fits.

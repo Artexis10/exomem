@@ -15,7 +15,7 @@ from test_governance_egress import _external, write_rule, write_scope
 
 from exomem import mutation_terminal, record_formats, record_history, records
 from exomem import structured_collections as collections
-from exomem.collection_store import chain
+from exomem.collection_store import chain, edit_back
 from exomem.collection_store.preview import preview_store
 from exomem.governance.principal import request_scope
 
@@ -117,6 +117,10 @@ def test_control_history_keeps_business_predecessor_and_verifies_after_reopen(st
     ("txns", "UPDATE txns SET why='changed outside the writer' WHERE operation='append'", "event hash differs"),
     ("audit_effects", "UPDATE audit_effects SET hash_before='" + "0" * 64 + "' WHERE version_before IS NOT NULL",
      "effect predecessor payload differs"),
+    ("audit_effects", "UPDATE audit_effects SET hash_after='" + "0" * 64 + "' WHERE version_before IS NOT NULL",
+     "effect version binding differs"),
+    ("audit_effects", "UPDATE audit_effects SET version_after=version_after+1 WHERE version_before IS NULL",
+     "effect version binding differs"),
 ])
 def test_native_corruption_is_an_integrity_error_even_for_cached_inspection(store, table, statement, reason):
     create(store)
@@ -128,6 +132,19 @@ def test_native_corruption_is_an_integrity_error_even_for_cached_inspection(stor
     store.connection.execute(f'DROP TRIGGER "{trigger}"')
     store.connection.execute(statement)
     with pytest.raises(chain.StoreChainError, match=reason):
+        store.inspect_collection(CID)
+
+
+def test_a_json_payload_that_no_longer_hashes_to_its_effect_is_an_integrity_error(store):
+    create(store)
+    _append(store)
+    _correct(store, 2)
+    store.inspect_collection(CID)
+    for (trigger,) in store.connection.execute("SELECT name FROM sqlite_master WHERE type='trigger' "
+                                               "AND tbl_name='item_versions' AND sql LIKE '%BEFORE UPDATE%'").fetchall():
+        store.connection.execute(f'DROP TRIGGER "{trigger}"')
+    store.connection.execute("UPDATE item_versions SET body='altered outside the writer' WHERE row_version=1")
+    with pytest.raises(chain.StoreChainError, match="immutable version differs from its audit effect"):
         store.inspect_collection(CID)
 
 
@@ -251,6 +268,29 @@ def test_history_pages_are_queued_then_repair_generated_edits(store):
     store.reconcile_views()
     assert (store.root / path).read_text() == content
     assert not store.connection.execute("SELECT 1 FROM held_candidates").fetchone()
+
+
+def test_a_history_page_larger_than_the_item_parser_bound_republishes_after_a_write(store, monkeypatch):
+    """Defect: a write re-read the store's own history page under the item parser bound, so a page that the
+    renderer had grown past that bound stayed pending and never showed the new entry."""
+    create(store)
+    _append(store)
+    for count in range(2, 8):
+        _correct(store, count)
+    store.reconcile_views()
+    store.reconcile_views()
+    path = "Knowledge Base/Records/Work/_history.md"
+    page = store.root / path
+    bound, size = edit_back._read_bound, page.stat().st_size
+    # The renderer grows a history page past its kind's parser bound; model that bound below this page.
+    monkeypatch.setattr(edit_back, "_read_bound", lambda row: size // 2 if row["kind"] == "history" else bound(row))
+
+    _correct(store, 99)
+    store.reconcile_views()
+    store.reconcile_views()
+
+    assert store.connection.execute("SELECT state FROM projection_state WHERE path=?", (path,)).fetchone() == ("current",)
+    assert "correct count to 99" in page.read_text()
 
 
 def test_history_page_partition_grows_only_at_its_tail_and_policy_repairs_old_pages(store, monkeypatch):
@@ -396,19 +436,19 @@ def test_verified_prefix_reuses_only_accounted_committed_work_and_a_new_handle_r
     _correct(store, 2)
     assert len(checked) == 1
     checked.clear()
-    insert = store._insert_txn
+    insert = type(store)._insert_txn
 
     manifest = store._projection_manifest(CID)
     page = history.main_path(manifest)
     rendered = history.render_page(store.connection, store.root, manifest, page, cache=store.handle.release_cache)
 
-    def interrupted(txn, receipt):
-        insert(txn, receipt)
+    def interrupted(writer, txn, receipt):
+        insert(writer, txn, receipt)
         assert "correct count to 3" in history.render_page(
             store.connection, store.root, manifest, page, cache=store.handle.release_cache)[1]
         raise RuntimeError("interrupt before commit")
 
-    monkeypatch.setattr(store, "_insert_txn", interrupted)
+    monkeypatch.setattr(type(store), "_insert_txn", interrupted)
     watermark = store.connection.execute("SELECT verified_through_txn FROM collections").fetchone()
     with pytest.raises(RuntimeError, match="interrupt"):
         _correct(store, 3)
@@ -727,7 +767,7 @@ def test_external_sql_rechecks_history_release_without_local_total_changes(store
     assert KEY in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]
     changes = store.connection.total_changes
     with sqlite3.connect(store.handle.path) as external:
-        external.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+        external.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                          ('{"classes":[],"projects":[],"tags":["restricted"]}', KEY))
     assert store.connection.total_changes == changes
     assert KEY not in history.render_page(store.connection, store.root, manifest, path, cache=store.handle.release_cache)[1]

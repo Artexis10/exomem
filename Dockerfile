@@ -140,6 +140,107 @@ assert v.shape == (1, recall_space.declared_dim(MODEL_NAME)), v.shape; \
 print('offline load verified', MODEL_NAME, v.shape)"
 
 ########################################################################
+# av-lgpl — PyAV built against an LGPL-only, decode-only FFmpeg (change
+# `adopt-fair-source-licence`, D5). Only the `cloud` stage installs PyAV.
+#
+# The PyPI `av` wheel declares BSD-3-Clause, but it bundles an FFmpeg linked with
+# libx264 and libx265, which are GPL. An image that carries that wheel conveys GPL
+# code. Exomem only decodes audio and video; no module opens a container for
+# writing, adds a stream or encodes. This stage therefore builds the pinned FFmpeg
+# release from its source tarball with no `--enable-gpl` and no `--enable-nonfree`
+# (configure refuses any GPL component without them), with no encoder or muxer,
+# and then builds the PyAV release that uv.lock pins against it. FFmpeg's own H.264,
+# HEVC, AAC, MP3, Opus and Vorbis decoders are LGPL. libdav1d (BSD-2-Clause) decodes
+# AV1 as the wheel's FFmpeg did; the Debian package supplies it.
+#
+# `--disable-network`: the decode paths read local files and held originals, the
+# preview child already runs with `protocol_whitelist=none`, and a cell has no egress.
+#
+# The FFmpeg shared libraries stay separate .so files under /opt/ffmpeg-lgpl/lib,
+# found through ld.so.conf.d, so a user can replace them. /rootfs is the overlay the
+# `cloud` stage copies: those libraries, their licence and source pointer under
+# /usr/share/doc/ffmpeg-lgpl (where the image's apt packages keep their notices),
+# and the loader entry. /wheels holds the PyAV wheel.
+#
+# FFmpeg security releases are ours to track: bump FFMPEG_VERSION and FFMPEG_SHA256
+# together (the checksum of the release's .tar.xz, after its .asc verifies against
+# the FFmpeg release signing key, fingerprint FCF986EA15E6E293A5644F10B4322F04D67658D8).
+# PyAV's own build requirements are pinned below, because the wheel is compiled here.
+# If PyAV publishes an official LGPL-only wheel, this stage goes away.
+########################################################################
+FROM python:3.12-slim AS av-lgpl
+COPY --from=uv /uv /usr/local/bin/uv
+
+ARG FFMPEG_VERSION=8.1.3
+ARG FFMPEG_SHA256=7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3
+ARG CYTHON_VERSION=3.3.1
+ARG SETUPTOOLS_VERSION=84.2.1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential nasm pkg-config xz-utils zlib1g-dev libdav1d-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# BuildKit fetches the release and fails the build when its SHA-256 differs.
+ADD --checksum=sha256:${FFMPEG_SHA256} https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz /src/
+RUN tar -xJf /src/ffmpeg-${FFMPEG_VERSION}.tar.xz -C /src \
+ && cd /src/ffmpeg-${FFMPEG_VERSION} \
+ && ./configure \
+      --prefix=/opt/ffmpeg-lgpl \
+      --enable-shared --disable-static \
+      --disable-autodetect --disable-programs --disable-doc \
+      --disable-encoders --disable-muxers --disable-network \
+      --disable-indevs --disable-outdevs \
+      --enable-zlib --enable-libdav1d \
+ && make -j4 \
+ && make install \
+ && mkdir -p /rootfs/usr/share/doc/ffmpeg-lgpl \
+ && cp COPYING.LGPLv2.1 LICENSE.md /rootfs/usr/share/doc/ffmpeg-lgpl/
+
+# The version and hashes come from the lock, so PyAV cannot drift from what uv.lock
+# selects; pip refuses an sdist whose hash is not in that list, and `--no-binary`
+# keeps the PyPI wheel out.
+WORKDIR /lock
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --no-emit-project --extra frame-codecs --output-file all.txt \
+ && awk '/^av==/ { found = 1 } found { print } found && !/\\$/ { exit }' all.txt > av.txt \
+ && test -s av.txt \
+ && pip install --no-cache-dir "cython==${CYTHON_VERSION}" "setuptools==${SETUPTOOLS_VERSION}" \
+ && PKG_CONFIG_PATH=/opt/ffmpeg-lgpl/lib/pkgconfig \
+    pip wheel --no-cache-dir --no-deps --no-build-isolation --no-binary av --require-hashes -r av.txt -w /wheels
+
+# The runtime keeps the shared libraries only: no headers, pkg-config files or
+# development symlinks.
+RUN CONFIGURE_LINE="$(sed -n 's/^#define FFMPEG_CONFIGURATION "\(.*\)"$/\1/p' /src/ffmpeg-${FFMPEG_VERSION}/config.h)" \
+ && test -n "${CONFIGURE_LINE}" \
+ && mkdir -p /rootfs/opt/ffmpeg-lgpl /rootfs/etc/ld.so.conf.d \
+ && cp -a /opt/ffmpeg-lgpl/lib /rootfs/opt/ffmpeg-lgpl/lib \
+ && rm -rf /rootfs/opt/ffmpeg-lgpl/lib/pkgconfig /rootfs/opt/ffmpeg-lgpl/lib/*.so \
+ && echo /opt/ffmpeg-lgpl/lib > /rootfs/etc/ld.so.conf.d/ffmpeg-lgpl.conf \
+ && cat > /rootfs/usr/share/doc/ffmpeg-lgpl/README.md <<NOTICE
+# FFmpeg shared libraries (LGPL-2.1-or-later)
+
+The PyAV audio and video decoder in this image runs against FFmpeg ${FFMPEG_VERSION}.
+The libraries are the separate files /opt/ffmpeg-lgpl/lib/libav*.so.* and
+libsw*.so.*. The loader finds them through /etc/ld.so.conf.d/ffmpeg-lgpl.conf.
+
+- Licence: LGPL version 2.1 or later, in COPYING.LGPLv2.1 next to this file.
+  LICENSE.md is FFmpeg's own licence guide.
+- Source: https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz, unmodified.
+  Its SHA-256 is ${FFMPEG_SHA256}.
+- Build: configured without --enable-gpl, --enable-nonfree and --enable-version3,
+  and with no encoder, muxer or network protocol. The exact configure line,
+  which libavutil also reports through avutil_configuration(), is:
+  ${CONFIGURE_LINE}
+- Replace a library: rebuild it from that source with the same configure line,
+  install it in /opt/ffmpeg-lgpl/lib, and run ldconfig.
+- AV1 decoding uses libdav1d (BSD-2-Clause) from the Debian package libdav1d7;
+  its notice is /usr/share/doc/libdav1d7/copyright.
+- PyAV is BSD-3-Clause. Its licence file is in the av distribution's dist-info
+  directory in /app/.venv. It was built from the PyPI source distribution that
+  uv.lock pins.
+NOTICE
+
+########################################################################
 # restic-fetch — the static restic binary for the cloud image's backup and
 # restore Jobs (design D8). Fetched and verified in its own small stage, not
 # the final `cloud` image, so no curl/bzip2/apt residue ships in the runtime
@@ -193,7 +294,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_CONTAINER_VARIANT=ml
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (ml: hybrid embeddings + CLIP search, CPU-only torch, no GPU)"
 
 # No HEALTHCHECK here by design (design.md D5) — a Dockerfile-level HEALTHCHECK
@@ -225,7 +326,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
 
 # No HEALTHCHECK here by design — a Dockerfile-level HEALTHCHECK would run
@@ -312,7 +413,7 @@ COPY --from=builder-cloud-model /opt/exomem-cloud-models /opt/exomem-models
 USER root
 RUN usermod --home /data/host exomem \
  && apt-get update \
- && apt-get install -y --no-install-recommends age \
+ && apt-get install -y --no-install-recommends age libdav1d7 \
  && rm -rf /var/lib/apt/lists/*
 
 # Media engines (change `add-cloud-multimodal-processing`, design D3–D5).
@@ -330,6 +431,10 @@ RUN usermod --home /data/host exomem \
 # requirement unmet. It has no CUDA wheel and no torch; the gate below fails the
 # build if either arrives.
 #
+# PyAV is the exception: the export leaves it out, and the `av-lgpl` stage's wheel
+# replaces the PyPI one, so no GPL encoder library reaches the image. That stage's
+# FFmpeg libraries and notice come in as an overlay, and `ldconfig` indexes them.
+#
 # EXOMEM_OCR_INVENTORY: reading each OCR model's script reads every traineddata
 # file (about 350 MB), and every media child is fresh. The gate's first OCR run
 # writes that inventory here, read-only at run time, so a child reads one small file.
@@ -345,12 +450,16 @@ RUN packs="$(echo "${EXOMEM_OCR_LANGS}" | tr '+_' ' -' | sed 's/[^ ][^ ]*/tesser
  && apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-osd 'tesseract-ocr-script-*' ${packs} \
  && rm -rf /var/lib/apt/lists/*
+COPY --from=av-lgpl /rootfs/ /
+RUN ldconfig
 RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
     --mount=type=bind,from=builder-lean,source=/app,target=/src,rw \
-    uv export --project /src --frozen --no-dev --no-emit-project --extra media-cpu \
+    --mount=type=bind,from=av-lgpl,source=/wheels,target=/wheels \
+    uv export --project /src --frozen --no-dev --no-emit-project --extra media-cpu --no-emit-package=av \
       $(/app/.venv/bin/python -c 'import importlib.metadata as m; print(*{"--no-emit-package=" + d.metadata["Name"] for d in m.distributions()})') \
       --output-file /tmp/media-cpu.txt \
  && uv pip install --python /app/.venv/bin/python --no-cache --require-hashes --no-deps -r /tmp/media-cpu.txt \
+ && uv pip install --python /app/.venv/bin/python --no-cache --no-deps /wheels/av-*.whl \
  && uv pip check --python /app/.venv/bin/python \
  && rm /tmp/media-cpu.txt
 ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
@@ -426,7 +535,7 @@ print('image load verified', MODEL_NAME, v.shape)" \
  && find /tmp -mindepth 1 -delete
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — Exomem Cloud cell runtime (fixed UID/GID 10001, home /data/host, restic-equipped, standalone trust model)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment
@@ -454,7 +563,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_CONTAINER_VARIANT=lean
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
-      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND Apache-2.0" \
       org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (lean: keyword/BM25 search, no torch, no model download)"
 
 # No HEALTHCHECK here by design (design.md D5) — see the `ml` stage's comment

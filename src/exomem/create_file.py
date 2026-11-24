@@ -50,6 +50,7 @@ from .vault import (
     normalize_body_wikilinks,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     resolve_under_vault,
     respell_new_path,
     serialize_frontmatter,
@@ -176,6 +177,13 @@ def create_file(
     existing_text: str | None = None
     existing_guard: vault_module.PathGuard | None = None
     existing_file = abs_path.exists()
+    if not existing_file:
+        from . import prior_claims
+
+        try:
+            prior_claims.require_unreserved(vault_root, rel_path, newest=not validate_only)
+        except prior_claims.ReservedPathError as error:
+            raise CreateFileError(code=error.code, reason=error.reason) from None
     if existing_file:
         # A file the writer may not see is never overwritten: it is refused
         # exactly as an occupied path is without `overwrite`, before any read.
@@ -344,6 +352,8 @@ def create_file(
     if is_markdown and not existing_file:
         token = creation_token
         try:
+            if not validate_only:
+                semantic_writes.require_profile_preview(vault_root, fm.get("type"), previewed=draft_hash is not None)
             preflight = semantic_writes.preflight_creation(
                 vault_root,
                 path=rel_path,
@@ -368,8 +378,11 @@ def create_file(
         auxiliary: list[PlannedWrite] = []
         derived_auxiliaries: list[tuple[str, PlannedWrite]] = []
         top_index = kb_root(vault_root) / "index.md"
+        from .vault_store import read as store_read
+
+        # A store-mode top index is a stored page that may have no file yet, so the store answers first.
         if (
-            top_index.is_file()
+            store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
             and preflight.applicability in {"full", "structural"}
             and connector_boundary.effect_admission(vault_root)(top_index)
         ):

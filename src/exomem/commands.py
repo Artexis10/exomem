@@ -53,7 +53,9 @@ from . import audit_fix as audit_fix_module
 from . import bootstrap_core as bootstrap_core_module
 from . import call_spans as call_spans_module
 from . import capabilities as capabilities_module
+from . import capture_attempts as capture_attempts_module
 from . import capture_carrier as capture_carrier_module
+from . import capture_inventory as capture_inventory_module
 from . import cloud_cell as cloud_cell_module
 from . import compile_proposal as compile_proposal_module
 from . import context_pack as context_pack_module
@@ -111,8 +113,10 @@ from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import mutation_terminal as mutation_terminal_module
+from . import name_drift as name_drift_module
 from . import note as note_module
 from . import observe_memory as observe_memory_module
+from . import ocr_facts as ocr_facts_module
 from . import overview as overview_module
 from . import page_ids as page_ids_module
 from . import page_names as page_names_module
@@ -150,10 +154,10 @@ from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
-from . import skills_context as skills_context_module
 from . import source_coverage as source_coverage_module
 from . import state_paths as state_paths_module
 from . import structured_files as structured_files_module
+from . import topic_brief as topic_brief_module
 from . import traversal_profiles as traversal_profiles_module
 from . import vault_skills as vault_skills_module
 from . import vocabulary_delta as vocabulary_delta_module
@@ -197,7 +201,7 @@ from .governance import principal as principal_module
 from .governance import projection_runtime as projection_runtime_module
 from .governance import projection_timing as projection_timing_module
 from .governance import tool as governance_tool_module
-from .kbdir import kb_dirname, kb_page_target
+from .kbdir import is_in_managed_root, kb_page_target, managed_join, managed_root, managed_root_rel
 from .query_compat import public_filter_annotation as _public_filter_annotation
 from .vault import (
     VaultPathError,
@@ -511,7 +515,7 @@ RecallResult = retrieval_models.RecallResult
 #: nothing branches on it; the runtime payload is unchanged, and
 #: `tests/test_mcp_output_schema_conformance.py` still validates it.
 _RecallOutput = Annotated[
-    RecallResult,
+    RecallResult | dict[str, Any],
     WithJsonSchema({"anyOf": [{"type": "array"}, {"type": "object"}]}, mode="serialization"),
 ]
 
@@ -528,6 +532,7 @@ class ClientArtifactFile(TypedDict):
     file_id: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=256)]
     mime_type: NotRequired[Annotated[str, Field(max_length=255)]]
     file_name: NotRequired[str]
+    diarize: NotRequired[Annotated[bool, Field(strict=True, description="Request or skip speaker labels for this audio or video file.")]]
 
 
 _OptionalArtifactAdoption = Annotated[
@@ -1490,8 +1495,11 @@ def op_bootstrap(
             "capture_examples": (
                 "Route durable measurements, completed sessions, transactions, maintenance "
                 "events, and current state here without waiting for a magic save or log verb. "
-                "Resolve one compatible collection before append or update; if none fits, "
-                "describe and propose a concise collection before validate and explicit create. "
+                "Resolve one compatible collection before append or update; if none fits and the "
+                "identity, type and scope are clear, call add_record with new_collection under "
+                "silent capture to create the minimal collection from the row; under advisory "
+                "capture propose it, then records.create once confirmed. "
+                "A passing mention gets no collection. "
                 "A recorded outcome never closes Planning automatically; propose or perform "
                 "a guarded transition only with explicit user intent."
             ),
@@ -1696,7 +1704,7 @@ def op_bootstrap(
         "server": {
             "name": "exomem",
             "version": package_version,
-            "kb_dir": kb_dirname(),
+            "kb_dir": managed_root_rel(),
             "pure_substrate": True,
             "content_included": False,
             "published_mcp_tool_surface_sha256": tool_surface_module.sha256(),
@@ -1918,9 +1926,11 @@ def op_bootstrap(
                 "stable_named_entity": call_text("connect_memory", {"operation": "create-entity"}),
             },
             "preflight": {
-                tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
+                tools_text("connect_memory", "read"): (
+                    "read-only link and relation check before a compiled note write"
+                ),
                 "near_duplicate_warnings": (
-                    "if they fire, consider edit or replace instead of a parallel page; a write advisory "
+                    "if they fire, prefer edit or replace over a parallel page; a write advisory "
                     "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
                     "signal stays quiet until "
                     + (
@@ -1934,12 +1944,16 @@ def op_bootstrap(
                 "remember_suggestions": f"non-binding related pages: {suggest_links}, {detail_full}",
                 "write_feedback": f"create_note() structural feedback: semantic blocks, typed note/block relations, generic/source links, provenance presence, relation debt, unresolved wikilinks, and next actions; diagnostics with {detail_full}",
                 "structure_suggestion": (
-                    "A committed response may carry one advisory. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
+                    "A committed response may carry one advisory. rename: a retitle left the file name behind the title; the outcome, current and planned names and the relocate call. ownership: the written page is asked whether it belongs in its project; the item's ref and fingerprint, one question. note_cohesion: the written compiled page reached a size step; counts, the item's ref and fingerprint, one question. source_classification_debt: strength (strong|moderate), reasons, and the sources without a chosen kind with their Sources/ folders."
                     if profile == "compact"
-                    else "advisory in the default committed response. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
+                    else "advisory in the default committed response. kind='rename': a write changed the page's title so that its file name no longer follows it; it carries the outcome, the current and planned names and the spelled-out relocate call for that page, and the user's edit is the approval. kind='ownership': the written page is asked whether it belongs in its current project and home folder while its review item is open; it carries the item's ref and fingerprint and one question, and the runtime never says the page is misfiled. kind='note_cohesion': the written compiled page reached a size step while its review item is open; it carries units, step_units, next_step_units, the item's ref and fingerprint, and one question. The runtime measures size and never says the page is overloaded. kind='source_classification_debt': carries strength (strong|moderate) and ordered reasons; the vault holds sources with no chosen kind, counted with their Sources/ folders"
                 ),
                 "structure_suggestion_handling": (
-                    "note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
+                    "rename: preview the call, tell the user the new name in one line and apply it; the user's retitle is the approval. ownership: answer its question about the page in hand and never change the page to answer it. Serves the project's goal: "
+                    + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the project goal>"})
+                    + ". Unsure: dismiss with a `deferred:` reason or make no call. Elsewhere or several: tell the user, and on their yes propose it with "
+                    + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
+                    + ". note_cohesion: answer its question about the page in hand. One question: keep the page whole with "
                     + call_text("triage_memory", {"item_id": "<id>", "action": "dismiss", "why": "intentional: <the one question>"})
                     + "; it stays quiet until the next size step. Several: propose a split with "
                     + call_text("maintain_memory", {"mode": "curation", "curation_action": "propose"})
@@ -1959,10 +1973,10 @@ def op_bootstrap(
                 ),
                 "collection_candidate": (
                     "a strong collection_candidate is a proposal: draft its schema through "
-                    f"{tools_text('record_memory', 'read')} describe and validate, ask one "
-                    "question in domain language, "
-                    "and create only after that inline confirmation. Backfill only exactly dated "
-                    "evidence units, citing each unit or artifact in sources"
+                    f"{tools_text('record_memory', 'read')} describe and validate. Under silent capture "
+                    "create it with automatic true; if a bound refuses, or under advisory capture, ask one "
+                    "question in domain language and create only after that inline confirmation. "
+                    "Backfill only exactly dated evidence units, citing each unit or artifact in sources"
                 ),
                 "accepted_links": "persist only through edit_note/create_note/supersede_note; never auto-write suggestions",
                 # Deliberately command-free, exactly like the epistemic
@@ -2720,6 +2734,7 @@ def op_find(
     rerank: bool | None = None,
     rerank_max_candidates: _RerankCandidateLimit | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -3070,6 +3085,7 @@ def op_find(
             rerank=rerank,
             auto_rerank=auto_rerank,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             rank_config=find_module._active_ranking(),
             principal=who,
@@ -3079,6 +3095,8 @@ def op_find(
         projected_continuation = projected.continuation
         projected_hits = list(projected.hits)
         degraded.extend(projected.warming_components)
+        if projected.incomplete_source_passages:
+            failed.append("source_passages")
         release = egress_module.annotate_projected_hits(
             Path(vault_root),
             projected_hits,
@@ -3129,6 +3147,7 @@ def op_find(
                 # true/false from the caller always wins over auto.
                 auto_rerank=auto_rerank,
                 prefer_compiled=prefer_compiled,
+                prefer_source_passages=prefer_source_passages,
                 prefer_active=prefer_active,
                 prefer_used=prefer_used,
                 widen_outside_kb=widen_outside_kb,
@@ -3294,10 +3313,19 @@ def op_find(
                 refs = ref_index.refs_for_paths(
                     [str(hit.get("path") or "") for hit in hit_dicts]
                 )
+            basis = note_types.Basis(vault_root)
+            source_refs: dict[str, str] = {}
             for hit in hit_dicts:
                 ref = refs.get(str(hit.get("path") or ""))
                 if ref:
                     hit["ref"] = ref
+                    if basis.selects(hit.get("type"), note_types.captured_source):
+                        source_refs[str(hit["path"])] = ref
+            # One receipt lookup per Source hit, so a reader of a stale Source learns its successor.
+            successors = source_corrections.corrected_by(vault_root, source_refs) if source_refs else {}
+            for hit in hit_dicts:
+                if successor := successors.get(str(hit.get("path") or "")):
+                    hit["corrected_by"] = successor
         if retrieval_trace is not None:
             retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
         # Notices occupy only the slots the over-fetch pool could not backfill.
@@ -3446,7 +3474,7 @@ def _refuse_withheld_page_seed(vault_root: Path, path: str) -> get_page_module.G
     try:
         page = get_page_module.get_page(vault_root, path=path)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if egress_module.page_withheld_entirely(
         vault_root,
         page.as_dict(include_raw=False),
@@ -3517,6 +3545,7 @@ def _search_result_from_hit(hit: dict) -> SearchResult:
         media_type=hit.get("media_type"),
         media_file=hit.get("media_file"),
         ref=hit.get("ref"),
+        corrected_by=hit.get("corrected_by"),
     )
     return {"id": path, "title": title, "url": _citation_url(path), "metadata": metadata}
 
@@ -3606,6 +3635,25 @@ def op_search(
     return {"results": [_search_result_from_hit(hit) for hit in hits]}
 
 
+def _page_read_error(vault_root: Path, error: get_page_module.GetError) -> Exception:
+    """A ``GetError`` from a direct page read, as the error that its caller sees.
+
+    A read that found no page answers ``NOT_FOUND``. While rows of the writes acknowledged before
+    this request still lag, a moved path or a title may name a page that those rows do not hold
+    yet, so the read refuses with ``VAULT_STORE_DERIVED_BEHIND`` instead
+    (``vault_store.read.require_caught_up``). Only a caller from whom nothing can be withheld gets
+    that refusal: a restricted caller's withheld pages answer ``NOT_FOUND`` on other exits, so its
+    absent ones answer ``NOT_FOUND`` too. The page seed of a graph context or a link ranking comes
+    here; a hint, a conversation ref, a topic brief's seed and an anchor do not, because a name
+    that resolves to nothing degrades there, and the read's derived-behind notice says what lags.
+    """
+    from .vault_store import read as store_read
+
+    if error.code == "NOT_FOUND" and not egress_module.caller_restricted(vault_root):
+        store_read.require_caught_up(vault_root)
+    return ValueError(f"{error.code}: {error.reason}")
+
+
 def _refuse_policy_tree_read(
     candidate: object,
     *,
@@ -3662,7 +3710,7 @@ def op_fetch(
         )
         page = get_page_module.get_page(vault_root, path=id, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     # Release gate. `fetch` is the deep-research read step between metadata-only
     # `search` and full `get`, and it reached `get_page` directly — so a
     # sub-notice item's body, title, frontmatter and canonical path crossed the
@@ -3682,7 +3730,9 @@ def op_fetch(
         stable_ref=snapshot_ref,
     )
     if released is None:
-        raise ValueError(f"NOT_FOUND: file does not exist: {id}")
+        # The absent branch's own spelling, as in `op_get`: the raw `id` kept a
+        # suffix-less or backslashed spelling that the absent refusal normalizes.
+        raise ValueError(f"NOT_FOUND: file does not exist: {prepared.missing_path}")
     body_for_text = str(released.get("body", ""))
     # Below full disclosure the ladder caps what may be rendered: `annotate_page`
     # has already bounded the body at L5, so honour that ceiling rather than
@@ -4010,8 +4060,11 @@ def _add_source(
     raw_protection: bool = False,
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
-    correction: source_corrections.SourceCorrection | None = None,
+    correction: source_corrections.SourceCorrection | source_corrections.CorrectionPlan | None = None,
     reuse: bool = False,
+    passages: list[source_capture.DeclaredPassage] | None = None,
+    document_form: str | None = None,
+    custody_only: bool | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4044,12 +4097,16 @@ def _add_source(
                 expected_sha256=expected_sha256,
                 correction=correction,
                 reuse_payload=reuse,
+                passages=passages,
+                document_form=document_form,
+                custody_only=custody_only,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
         raise ValueError(_leaf_error_message(e)) from e
     if result.capture_outcome != "reused":
-        query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
+        query_log.log_write_call(tool="add", written_path=None if result.path_withheld else result.path,
+                                 cited_sources=[])
     return result.as_dict()
 
 
@@ -4080,7 +4137,9 @@ def op_add(
         title: Unicode display title stored in frontmatter and the H1.
         source_type: What the artifact IS. Same axis as source_kind; supply
             either. Open vocabulary, not a closed set.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            derived name under every filename style; without it the name derives from
+            the title (a lowercase slug unless the vault sets the `title` style).
         url: Required for kinds that declare it, such as article, paper, video.
         tags: Lowercase dash-separated; the server normalizes case/spacing.
         why_captured: One short paragraph on why this is worth keeping.
@@ -4133,6 +4192,8 @@ def op_audit(
     - `orphan_entity`: `Entities/...` file with no inbound wikilinks
     - `unprocessed_source`: source without a live citing derivative (no page
       in its `ingested_into:` is live and cites it in its own `sources:`)
+    - `custody_source`: the same uncompiled condition on a Source marked
+      `custody_only: true`; the quiet count, always `info`
     - `unresolved_source_citation`: a compiled page explicitly cites material
       that is not an authorized governed Source or Evidence page. Capture the
       original or remove the unsupported citation; audit never reconstructs it.
@@ -4676,7 +4737,7 @@ def op_get(
     except get_page_module.GetError as e:
         if e.code == "NOT_FOUND" and (row := _retired_item(vault_root, path)) is not None:
             return row
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     _refuse_policy_tree_read(
         prepared.resolved_relative,
         missing_path=prepared.missing_path,
@@ -4685,7 +4746,7 @@ def op_get(
         with call_spans_module.span("read.page"):
             result = get_page_module.get_page(vault_root, path=path, _prepared=prepared)
     except get_page_module.GetError as e:
-        raise ValueError(f"{e.code}: {e.reason}") from e
+        raise _page_read_error(vault_root, e) from e
     if frontmatter_only:
         out = {
             "path": result.path,
@@ -5353,6 +5414,19 @@ def _leaf_error_message(error: Any) -> str:
     return message
 
 
+def _candidates_by_title(vault_root: Path, candidates: list[dict[str, str]]) -> list[Any]:
+    """Entity candidates as a refusal names them: by title and id, with no storage path for an agent.
+
+    The public tool shape names a page by title everywhere else, so a path here would be the one place
+    it leaks. The id is the handle that the caller's "update or link it instead" follows; an alias or
+    title match carries only a path, so it is named through the page it points at. REST and CLI
+    callers keep the whole candidate.
+    """
+    if not capabilities_module.shows_links_by_title():
+        return candidates
+    return page_names_module.candidates_by_handle(vault_root, candidates)
+
+
 def _creation_origin(vault_root: Path, ref: str | None) -> dict[str, str | None] | None:
     """The origin a creation records for its `ref`; None when none was given.
 
@@ -5427,7 +5501,8 @@ def op_link(
             organization, concept, library, decision — plus any vault-defined type in
             `_Schema/entity-types.yaml`.
         name: Unicode display name stored in frontmatter and the H1.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            file name derived from `name` under every filename style.
         summary: One-paragraph description for the `## Summary` section.
         why_in_kb: Optional `## Why in the KB` paragraph — explains what
             this entity is relevant to in your work.
@@ -5497,7 +5572,7 @@ def op_link(
     except link_module.LinkError as e:
         msg = _leaf_error_message(e)
         if e.candidates:
-            msg += f" (candidates: {e.candidates})"
+            msg += f" (candidates: {_candidates_by_title(vault_root, e.candidates)})"
         if e.candidate_fingerprint is not None:
             msg += f" (candidate_fingerprint: {e.candidate_fingerprint})"
         raise ValueError(msg) from e
@@ -5785,7 +5860,9 @@ def op_note(
         note_type: One of research-note, insight, failure, pattern,
             experiment, production-log.
         title: Unicode display title stored in frontmatter and the H1.
-        slug: Optional lowercase ASCII kebab-case filename component.
+        slug: Optional lowercase ASCII kebab-case filename component. It overrides the
+            file name derived from the title under every filename style (without it the
+            name is the title unless the vault sets the `slug` style).
             Experiments and production-logs auto-prefix with YYYY-MM.
         project: REQUIRED for research-note. __PROJECT_KEYS_HINT__
         projects: List of project keys (plural). Optional for insight,
@@ -6334,6 +6411,8 @@ def op_move_file(
     update_wikilinks: bool = True,
     allow_curated: bool = False,
     promotion_reason: str | None = None,
+    validate_only: bool = False,
+    preview_digest: str | None = None,
 ) -> dict:
     """Tier 2: relocate a file, optionally rewriting inbound wikilinks.
 
@@ -6347,21 +6426,38 @@ def op_move_file(
     When `update_wikilinks=true` (default), scans the full vault for
     `[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the
     basename is unique vault-wide) and rewrites them to point at the
-    new location. Preserves full-form vs stripped-form per link.
+    new location. Preserves full-form vs stripped-form per link. It also
+    renames the exact old vault path where a page body cites it in prose,
+    and leaves a Source or Evidence page that cites it as captured (a
+    warning counts those). A link in a Source or Evidence page is repointed
+    through the governed pointer write when the moved page has an
+    `exomem_id`. A link that the move cannot rewrite still resolves through
+    the moved page's lineage.
+
+    `validate_only=true` previews the move: one outcome per referrer you may
+    see and a `preview_digest`. A move that repoints a Source or Evidence page
+    commits only with that digest.
 
     Args:
         old_path: Vault-relative source.
         new_path: Vault-relative destination (must not exist).
-        update_wikilinks: Default true.
+        update_wikilinks: Default true; also covers prose path mentions.
         allow_curated: Required if either end is in a curated tree.
         promotion_reason: Required only for a Sources/ -> Evidence/ promotion;
             recorded in the activity log as the audit trail for the
             reclassification.
+        validate_only: Preview the move without writing.
+        preview_digest: The preview's digest, which approves its repoints.
 
-    Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
+    Returns: {old_path, new_path, wikilinks_updated, path_mentions_updated,
+    files_touched, warnings[, pointer_writes]}; a preview adds referrers and
+    preview_digest, and store_rows, the one outcome of the rows the collection
+    store keeps without a page, when the vault keeps collections in the store.
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
-            CURATED_PROTECTED; PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH
-            (either end is a store collection's view path).
+            POINTER_PREVIEW_REQUIRED; CURATED_PROTECTED;
+            PROMOTION_REASON_REQUIRED; COLLECTION_VIEW_PATH (either end is a
+            store collection's view path); SHARED_ORIGINAL_NEEDS_EXTENSION
+            (a shared original renamed to a name without an extension).
     """
     old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
@@ -6372,6 +6468,8 @@ def op_move_file(
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
             promotion_reason=promotion_reason,
+            preview=validate_only,
+            preview_digest=preview_digest,
         )
     except move_file_module.MoveFileError as e:
         raise ValueError(f"{e.code}: {e.reason}") from e
@@ -6815,7 +6913,8 @@ def op_get_video_frames(
     # Local reads gate before extraction. Cloud's preparation handshake supplies
     # the exact retained source proof before the worker decodes anything.
     if not cloud_cell_module.cloud_mode_enabled() and not egress_module.release_allows_frames(vault_root, path):
-        raise ValueError(f"NOT_FOUND: file does not exist: {path}")
+        # `get_frames`' own absent text, so a withheld video reads as a missing one.
+        raise ValueError(f"NOT_FOUND: {vault.missing_path_reason(path)}")
     video_frames_module = _video_frames_module()
     try:
         result = video_frames_module.get_frames(
@@ -6877,13 +6976,13 @@ def op_ask_memory(
     limit: int = 15,
     continuation: str | None = None,
     scope: str = "kb",
-    mode: str = "hybrid",
+    mode: str | None = None,
     detail: str = "compact",
     deep: bool = False,
     graph: bool = True,
     rerank: bool | None = None,
     rerank_max_candidates: _RerankCandidateLimit | None = None,
-    prefer_compiled: bool = True,
+    prefer_compiled: bool | None = None,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -6914,11 +7013,11 @@ def op_ask_memory(
         relation_of: Anchor path; restrict `relations` to pages connected to it.
         relation_direction: outbound, inbound or any.
         filters: Structured page/unit metadata filters.
-        result_level: auto, page, unit or mixed.
+        result_level: auto, page, unit, mixed or passage.
         limit: Max hits.
         continuation: Token from a prior recall page.
         scope: kb, vault or kb-only.
-        mode: hybrid, keyword or vector.
+        mode: hybrid, keyword or vector. Omitted, pages rank hybrid and passages vector.
         detail: compact or full.
         deep: Return a packed context for reasoning.
         graph: Graph-neighbour ranking in hybrid/vector search.
@@ -6934,6 +7033,10 @@ def op_ask_memory(
         explain: Add retrieval-plan and ranking evidence.
         purpose: Declared purpose; governance may widen or narrow visibility.
     """
+    if result_level == "passage":
+        from . import passage_evidence
+
+        return passage_evidence.search_memory(vault_root, locals())
     with recall_timing_module.measure_recall(include_timings) as trace:
         # Reuse request-local placement and policy work; terminal egress opens fresh scopes.
         with state_paths_module.resolution_scope():
@@ -6958,11 +7061,13 @@ def op_ask_memory(
                 limit=limit,
                 continuation=continuation,
                 scope=scope,
-                mode=mode,
+                # Omitted, page search keeps its own default.
+                **({} if mode is None else {"mode": mode}),
                 graph=graph,
                 rerank=rerank,
                 rerank_max_candidates=rerank_max_candidates,
-                prefer_compiled=prefer_compiled,
+                prefer_compiled=prefer_compiled is not False,
+                prefer_source_passages=prefer_compiled is None,
                 prefer_active=prefer_active,
                 prefer_used=prefer_used,
                 widen_outside_kb=widen_outside_kb,
@@ -6985,7 +7090,7 @@ def op_ask_memory(
 def op_served_context(vault_root: Path, *, served_context_id: str | None = None) -> dict:
     """Inspect retained composed response metadata with verified owner authority.
 
-    Omit served_context_id for retained-row counts and unknown usage.
+    Omit served_context_id for retained-row counts, unknown usage and each served method's use evidence.
     Args:
         served_context_id: Exact row id from a maps response; grants no authority.
     """
@@ -7148,8 +7253,8 @@ def op_activate_context(
 
     Reuse held context; conversation gives excerpts. Agent focus is not human intent.
     Keep identity/scope; clarify ambiguity. Due/refresh grants no writes.
-    Read map/task_context refs and method scope/exclusions with a page read.
-    Discard held methods on methods.reset. Follow next_action.
+    Page-read map/task_context refs and approach scope/exclusions.
+    methods.reset: drop held skills, collections, approaches. Follow next_action.
     epistemic_status: counts/completeness; a page read: provenance.
 
     Args:
@@ -7301,7 +7406,10 @@ def op_activate_context(
                         from . import sensed_model
                         from . import upkeep as upkeep_module
 
-                        upkeep_module.for_packet(vault_root, packet, session=session)
+                        # An empty turn is the hook's session-context fetch, which it may abandon at its deadline, so it
+                        # must not consume this once-only delivery: the agent's first recall with a turn receives it.
+                        if str(turn or "").strip():
+                            upkeep_module.for_packet(vault_root, packet, session=session)
                         # Also outside the cache: each resolved anchor page's sensed status.
                         sensed_model.for_packet(vault_root, packet)
                         from . import due_state as due_state_module
@@ -7309,13 +7417,19 @@ def op_activate_context(
                         # Guarded material supplies relevance; the agent decides whether to raise it.
                         due_state_module.for_activation(vault_root, packet, purpose=purpose)
                         # Vocabulary added since this conversation was last told, once per admitted
-                        # digest change and counted inside the packet's own `limit_chars`.
-                        vocabulary_delta_module.for_packet(vault_root, packet, session=session)
-                        # A store-mode vault serves its rows while a registry pass re-derives them:
-                        # the diagnostics name the pass, and the lanes serve.
+                        # digest change and counted inside the packet's own `limit_chars`. Recorded
+                        # delivered on attach, so like upkeep it waits for the agent's first recall with a turn.
+                        if str(turn or "").strip():
+                            vocabulary_delta_module.for_packet(vault_root, packet, session=session)
+                        # A store-mode vault serves its rows while a registry pass re-derives them,
+                        # or while the rows of recent saves are still being derived: the packet says
+                        # so in the words of every store-mode reader, the diagnostics name the pass,
+                        # and the lanes serve.
                         registry_lag = store_read_module.request_registry_notice(vault_root)
-                        if registry_lag is not None and isinstance(packet.get("generation"), dict):
-                            packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
+                        if registry_lag is not None:
+                            packet.update(_store_registry_lag(vault_root) or {})
+                            if isinstance(packet.get("generation"), dict):
+                                packet["generation"]["store_registry"] = registry_lag["lag"]["registry"]
                     _carry_thread_through_abstention(packet, continuity)
                     # Last among the paths that set the token: the token names the policy its holder holds.
                     capture_carrier_module.stamp(packet, capture_policy)
@@ -7341,6 +7455,8 @@ def op_activate_context(
                         block = active_budget.as_response_block() if active_budget is not None else None
                         if block is not None:
                             packet["request_budget"] = block
+                    # Last, after every consumer above read the arrays.
+                    context_views_module.drop_empty_anchors_mode_arrays(packet)
                     if "map" in packet and isinstance(packet.get("budget"), dict):
                         packet["budget"]["serialized_chars"] = context_views_module.serialized_chars(packet)
                     return packet
@@ -8030,17 +8146,32 @@ def _op_activate_context_body(
         # carries none, and the caller then gets the whole map.
         held_map = working_set_runtime_module.decode_continuity(continuity)
 
+        from . import context_task as context_task_module
+
+        # The pages the task context serves for this turn; the positions block reads only these.
+        reach = context_task_module.Reach()
+        # Already bounded by the caller; bounding a bounded value again would return none.
+        task_conversation = conversation if conversation is not None else working_set_conversation_module.NONE
+
         def task_context(caller, catalogue, allowance, prepare_slice):
             from . import context_task
 
             return context_task.compile_context(
                 vault_root, caller=caller, catalogue=catalogue, turn=turn,
-                # Already bounded by the caller; bounding a bounded value again would return none.
-                conversation=conversation if conversation is not None else working_set_conversation_module.NONE,
+                conversation=task_conversation,
                 snapshot=snapshot,
                 held=(held_map or {}).get("method_versions", ()), max_chars=allowance, timings=timings,
                 index_token=evidence_token,
                 prepare_slice=prepare_slice,
+                reach=reach,
+            )
+
+        def recorded_positions(caller):
+            from . import positions
+
+            return positions.compile_block(
+                vault_root, caller, reach=reach.paths, turn=turn, focus=task_conversation.focus, snapshot=snapshot,
+                discovery_gap=reach.gap(),
             )
 
         try:
@@ -8056,7 +8187,12 @@ def _op_activate_context_body(
                     turn_leads=slice_leads if working_set_runtime_module.activation_turn_slice() else None,
                     known_generation=(held_map or {}).get("map_generation"),
                     native_skills=native_skills, known_skills=(held_map or {}).get("skills_generation"),
+                    known_stance=(held_map or {}).get("stance_generation"),
+                    known_profiles=(held_map or {}).get("profile_generations"),
+                    turn=turn, snapshot=snapshot,
                     task_context=task_context,
+                    positions=recorded_positions,
+                    reached=lambda: reach.paths,
                     packet_limit=working_set_module.clamp_budget(max_chars),
                     spent_after=reserved_chars,
                 )
@@ -8090,7 +8226,11 @@ def _op_activate_context_body(
                 identity=map_generation, roles_hash=packet["generation"]["roles_hash"],
                 conventions_hash=packet["generation"]["conventions_hash"], generation=0,
                 refs=(), roles=(), map_generation=map_generation,
-                skills_generation=skills_context_module.held_generation(packet.get("skills")),
+                skills_generation=working_set_runtime_module.held_session_generation(packet.get("skills")),
+                stance_generation=working_set_runtime_module.held_session_generation(packet.get("stance")),
+                profile_generations=working_set_runtime_module.held_profile_generations(
+                    packet.get("domain_profiles"), (held_map or {}).get("profile_generations"),
+                ),
             )
             packet["task_context"] = context_task.pin(
                 vault_root, context_views_module.CallerView.current(vault_root, purpose=purpose),
@@ -8304,8 +8444,8 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     window never shows what the release withheld. The window is part of the page, not the
     page, so it carries no `content_hash` and cannot guard a write of the whole body.
     """
-    from . import extraction_parts
-    from .vault import content_hash, parse_frontmatter, read_guarded_text
+    from . import extraction_parts, transcript_passages
+    from .vault import content_hash, markdown_lf, parse_frontmatter, read_guarded_text
 
     if offset is not None and type(offset) is not int:  # a bool is an int to Python, never an offset
         raise ValueError("INVALID_OFFSET: offset must be a whole number of characters")
@@ -8316,32 +8456,36 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
     # takes exactly the one guarded read it took before parts existed.
     released = result.get("frontmatter")
     released = released if isinstance(released, dict) else {}
-    if not note_types.Basis(vault_root).selects(str(released.get("type") or "").casefold(), note_types.raw):
+    if not transcript_passages.allows_window(released.get("type"), note_types.Basis(vault_root)):
         return _refuse_unused_offset(result, offset)
-    if (
-        extraction_parts.count_of(released) == 1
-        and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS
-    ):
-        return _refuse_unused_offset(result, offset)
+    media_sidecar = bool(released.get("media_type"))
+    timed = False
+    if extraction_parts.count_of(released) == 1:
+        timed = offset is not None and transcript_passages.is_transcript(
+            transcript_passages.source_text(body, media_sidecar=media_sidecar),
+        )
+        if not timed and len(_preserve_module().extracted_text(body)) <= extraction_parts.WINDOW_CHARS:
+            return _refuse_unused_offset(result, offset)
     path = str(result["path"])
     page = Path(vault_root) / path
     try:
         raw, _guard = read_guarded_text(vault_root, page)
     except (OSError, UnicodeError):
         return _refuse_unused_offset(result, offset)
-    frontmatter, stored, _ = parse_frontmatter(raw)
-    first = _preserve_module().extracted_text(stored)
+    frontmatter, stored, _ = parse_frontmatter(markdown_lf(raw))
+    first = (
+        transcript_passages.source_text(stored, media_sidecar=bool(frontmatter.get("media_type")))
+        if timed else _preserve_module().extracted_text(stored)
+    )
     # A read whose hash is not the file's served something other than the stored page (a
     # projected collection summary, or a page that changed meanwhile): it passes through whole.
     if content_hash(raw) != result["content_hash"]:
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result
-    # The served body has normalised line endings; a CRLF page is still the stored page.
-    served = body.replace("\r\n", "\n")
-    if served != stored.replace("\r\n", "\n") and served != provenance_module.withheld_prose(
-        stored, owner_path=path
-    ).replace("\r\n", "\n"):
+    # The public reader and search both use CommonMark's physical line endings.
+    served = markdown_lf(body)
+    if served != stored and served != provenance_module.withheld_prose(stored, owner_path=path):
         if offset:
             raise ValueError("INVALID_OFFSET: this read releases the page only as a whole")
         return result
@@ -8371,6 +8515,7 @@ def _window_extracted_text(vault_root: Path, result: dict, offset: int | None) -
             "total_chars": window.total_chars,
             "part": window.part,
             "parts": window.parts,
+            **({"incomplete": True} if window.total_chars is None else {}),
         },
     }
 
@@ -8379,6 +8524,19 @@ def _refuse_unused_offset(result: dict, offset: int | None) -> dict:
     if offset:
         raise ValueError("INVALID_OFFSET: this page has no extracted text longer than one window")
     return result
+
+
+def _with_registry_lag(vault_root: Path, view: dict) -> dict:
+    """A derived view that says so when a store-mode registry pass may still re-derive its rows.
+
+    A view that would read ready and current is marked stale, in the words every store-mode reader uses.
+    """
+    registry_lag = _store_registry_lag(vault_root)
+    if registry_lag is not None:
+        view = {**view, **registry_lag}
+        if view.get("state") == context_views_module.READY:
+            view["stale"] = True
+    return view
 
 
 def read_memory_stored(
@@ -8396,8 +8554,9 @@ def read_memory_stored(
     follow_corrections: bool = True,
     offset: int | None = None,
     units: bool = False,
+    brief: bool = False,
 ) -> dict:
-    """Read a page, exact unit, or exomem://map view.
+    """Read a page, exact unit, exomem://map view, or topic brief.
 
     Missing/stale units report status; never substituted.
     Sensing: epistemic_status includes readings/provenance; incomplete counts are partial.
@@ -8417,7 +8576,18 @@ def read_memory_stored(
         follow_corrections: False reads the historical Source; unit reads stay exact.
         offset: Start, in characters, of a window of a long Source's extracted text; follow `window.next_offset`.
         units: List the page's observation units with the id each edit takes; `unavailable` when the principal sees a released view.
+        brief: Read `path` as a topic (a page or free text) and serve its brief: conclusions, sources, open questions, and changes since this principal's last read.
     """
+    if brief:
+        # A brief is a derived view over one subject, never a page: it takes none of a page's read options.
+        if unit_ref is not None or frontmatter_only or include_history or links or include_raw or units or offset is not None:
+            raise ValueError(
+                "INVALID_VIEW_READ_OPTIONS: a brief read cannot be combined with "
+                "unit_ref, frontmatter_only, include_history, links, include_raw, units, or offset"
+            )
+        return _with_registry_lag(vault_root, topic_brief_module.read(
+            vault_root, path, continuation=continuation, purpose=purpose
+        ))
     # A derived view is not a page: it is dispatched before any identifier resolves. It takes
     # `purpose` as an argument, the one the terminal guard decides it under (`egress.postfilter`).
     if context_views_module.in_view_namespace(path):
@@ -8426,17 +8596,9 @@ def read_memory_stored(
                 "INVALID_VIEW_READ_OPTIONS: a derived view cannot be combined with "
                 "unit_ref, frontmatter_only, include_history, links, include_raw, or offset"
             )
-        view = context_views_module.read_view(
+        return _with_registry_lag(vault_root, context_views_module.read_view(
             vault_root, path, continuation=continuation, purpose=purpose
-        )
-        # A store-mode view is compiled over rows that a registry pass may still re-derive: a view
-        # that would read ready and current says so, in the words every store-mode reader uses.
-        registry_lag = _store_registry_lag(vault_root)
-        if registry_lag is not None:
-            view = {**view, **registry_lag}
-            if view.get("state") == context_views_module.READY:
-                view["stale"] = True
-        return view
+        ))
     # `purpose` is a per-call leaf parameter, not a surface property: layer it
     # onto the bound principal so the release decisions taken inside `op_get`
     # (which has no `purpose` parameter of its own) see the declared purpose.
@@ -8471,7 +8633,7 @@ def read_memory_stored(
         try:
             prepared = get_page_module.prepare_page_read(vault_root, path=resolved_path)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         _refuse_policy_tree_read(
             prepared.resolved_relative,
             missing_path=prepared.missing_path,
@@ -8479,7 +8641,7 @@ def read_memory_stored(
         try:
             page = get_page_module.get_page(vault_root, path=resolved_path, _prepared=prepared)
         except get_page_module.GetError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
+            raise _page_read_error(vault_root, e) from e
         # The page decision `op_get` takes, taken BEFORE any unit is resolved.
         # A unit, its parent citation and its surrounding Markdown are the
         # page's own contents, and whether a reference resolves is itself a
@@ -8576,6 +8738,15 @@ def read_memory_stored(
 @wraps(read_memory_stored)
 def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
     result = read_memory_stored(vault_root, *args, **kwargs)
+    frontmatter = result.get("frontmatter")
+    if (
+        isinstance(frontmatter, Mapping)
+        and frontmatter.get("processing_state") == "completed"
+        and frontmatter.get("media_type") in (None, "image")  # Prior extraction pages carry no media type.
+    ):
+        available = ocr_facts_module.ocr_text_available(frontmatter.get("extracted_by"))
+        if available is not None:
+            result["ocr_text_available"] = available
     if capabilities_module.shows_links_by_title():
         result = _show_links_by_title(vault_root, result)
     return result
@@ -8999,10 +9170,10 @@ def op_observe_memory(
     except memory_refs_module.ReferenceError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
     if raw_path.lower().startswith(("exomem://vault/", "exomem://source/")) and not (
-        resolved_path == kb_dirname() or resolved_path.startswith(f"{kb_dirname()}/")
+        is_in_managed_root(resolved_path)
     ):
         raise ValueError(
-            f"INVALID_PATH: observe_memory parent reference resolves outside {kb_dirname()}/"
+            f"INVALID_PATH: observe_memory parent reference resolves outside {managed_join('')}"
         )
     try:
         result = observe_memory_module.observe_memory(
@@ -9155,11 +9326,30 @@ def op_replace_memory(
     )
 
 
+def op_reserve_source_capture(
+    vault_root: Path,
+    source_identity: source_capture.SourceIdentity,
+    request_sha256: str,
+    capture_wire_version: Literal[1] = 1,
+) -> dict:
+    """Reserve exact text-capture admission without sending or retaining its content."""
+    return capture_attempts_module.reserve(vault_root, source_identity, request_sha256, capture_wire_version)
+
+
+def op_settle_source_capture(
+    vault_root: Path,
+    reservation: capture_attempts_module.CaptureReservation,
+    retire_owned: bool = False,
+) -> dict:
+    """Close local capture admission or observe its retained receipt under the canonical boundary."""
+    return capture_attempts_module.settle(vault_root, reservation, retire_owned=retire_owned)
+
+
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
     title: str,
-    content: str = "",
+    content: str | None = None,
     slug: str | None = None,
     source_type: str | None = None,
     url: str | None = None,
@@ -9176,6 +9366,11 @@ def op_capture_source(
     source_identity: source_capture.SourceIdentity | None = None,
     expected_sha256: str | None = None,
     correction: source_corrections.SourceCorrection | None = None,
+    passages: Any = None,
+    capture_reservation: capture_attempts_module.CaptureReservation | None = None,
+    document_form: str | None = None,
+    custody_only: bool | None = None,
+    import_identity: str | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9185,7 +9380,8 @@ def op_capture_source(
     needs HTTP MCP. source_kind is required.
 
     Args:
-        content: Authored text, or supply files.
+        content: Authored text, or supply files or passages.
+        passages: Ordered key/text objects; excludes content and files.
         source_type: source_kind alias.
         url: Source URL.
         tags: Labels.
@@ -9198,9 +9394,35 @@ def op_capture_source(
         adoption: The handle handed to the user; proactive_capture applies.
         raw_protection: Owner-only original.
         source_identity: Durable text-capture identity.
+        import_identity: Durable external ID for one file under the authenticated importer.
         expected_sha256: Original SHA-256 (UTF-8 for content).
-        correction: Correct a Source; expected_hash is its page hash.
+        correction: Correct a Source; expected_hash is its page hash. With no files, content or
+            passages it keeps the stored original; fields the call omits carry over.
+        capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
+        document_form: What the document is as a record of a work; a new key registers.
+        custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
     """
+    from . import source_imports
+
+    import_key = None
+    if import_identity is not None:
+        if not files or len(files) != 1 or adoption is not None or correction is not None:
+            raise ValueError("INVALID_IMPORT_IDENTITY: use one file without adoption or correction")
+        import_key = source_imports.issuer_key(import_identity)
+    if custody_only is not None and type(custody_only) is not bool:
+        raise ValueError("INVALID_CUSTODY_ONLY: custody_only must be true or false")
+    if capture_reservation is not None:
+        capture_attempts_module.require_active_capture(vault_root, capture_reservation)
+    if passages is not None:
+        if content is not None:
+            raise ValueError("INVALID_PASSAGES: remove content when supplying passages")
+        passages = source_capture.validate_passages(passages)
+        if files or adoption is not None:
+            raise ValueError("INVALID_PASSAGES: remove files and adoption when supplying passages")
+        content = "\n\n".join(passage["text"] for passage in passages)
+    content = content or ""
+    # A correction that supplies no new bytes keeps the predecessor's stored original.
+    metadata_only = correction is not None and not files and not content and passages is None and adoption is None
     if correction is not None:
         correction = source_corrections.validate_correction(correction)
         if source_identity is not None or adoption is not None or files and len(files) != 1:
@@ -9209,7 +9431,7 @@ def op_capture_source(
         source_capture.validate_sha256(expected_sha256)
         if files and len(files) != 1:
             raise ValueError("SOURCE_HASH_REQUIRES_ONE_FILE: expected_sha256 binds exactly one original file")
-        if not files:
+        if not files and not metadata_only:
             source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
     if files and content:
         raise ValueError("INVALID_SOURCE: supply content or files, not both")
@@ -9218,29 +9440,54 @@ def op_capture_source(
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
         source_identity = source_capture.validate_identity(source_identity)
         source_capture.require_authority(vault_root)
-    # Resolved before any byte is fetched or written, for files and text alike.
-    kind = _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    carried: dict[str, Any] = {}
+    plan: source_corrections.CorrectionPlan | None = None
+    if correction is not None and not metadata_only:
+        # Prepared once, so a correction with a new file or new text keeps every field it omits, as a
+        # metadata-only one does (`client_artifacts.capture_source_correction`), and `add` reuses the plan.
+        plan = source_corrections.prepare_correction(vault_root, correction)
+        carried = add_module.correction_carry(plan.old_source)
+        url = url if url is not None else carried.get("url")
+        tags = tags if tags is not None else carried.get("tags")
+        why_captured = why_captured if why_captured is not None else carried.get("why_captured")
+        domain = domain if domain is not None else carried.get("domain")
+        projects = projects if projects is not None else carried.get("projects")
+        document_form = document_form if document_form is not None else carried.get("document_form")
+        custody_only = custody_only if custody_only is not None else carried.get("custody_only")
+        from .governance import raw_protection as raw_guard
+
+        # A successor is never less protected than its predecessor, as in the metadata-only route.
+        raw_protection = raw_protection or raw_guard.marked(plan.old_path)
+    named_kind = bool((source_type or "").strip() or (source_kind or "").strip())
+    # Resolved before any byte is fetched or written, for files and text alike. A correction that names no
+    # kind keeps its predecessor's.
+    kind = (
+        None if metadata_only and not named_kind
+        else str(carried["source_type"]) if not named_kind and carried.get("source_type")
+        else _resolve_source_kind_argument(vault_root, source_type, source_kind)
+    )
+    from . import source_result_attribution
+
     out: dict
-    if files or adoption is not None:
+    stores_original = bool(files) or adoption is not None or metadata_only
+    if stores_original:
         from . import client_artifacts
 
-        captured = client_artifacts.capture_source_artifacts(
-            vault_root,
-            source_schema=source_schema,
-            title=title,
-            files=files,
-            slug=slug,
-            source_type=kind,
-            url=url,
-            tags=tags,
-            why_captured=why_captured,
-            domain=domain,
-            projects=projects,
-            adoption=adoption,
-            raw_protection=raw_protection,
-            expected_sha256=expected_sha256,
-            correction=correction,
-        )
+        source_fields: dict[str, Any] = {
+            "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
+            "domain": domain, "projects": projects, "raw_protection": raw_protection,
+            "expected_sha256": expected_sha256, "document_form": document_form,
+            "custody_only": custody_only,
+        }
+        if metadata_only:
+            captured = client_artifacts.capture_source_correction(
+                vault_root, source_schema=source_schema, title=title, correction=correction, **source_fields,
+            )
+        else:
+            captured = client_artifacts.capture_source_artifacts(
+                vault_root, source_schema=source_schema, title=title, files=files, adoption=adoption,
+                correction=plan, import_key=import_key, **source_fields,
+            )
         _note_committed_artifact_targets(captured)
         out = captured
         # Stored/replayed are the successful outcomes fixed by the artifact receipt protocol.
@@ -9248,6 +9495,10 @@ def op_capture_source(
             row["page"] for row in captured.get("files", [])
             if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
         ]
+        source_refs = {
+            row["page"]: source_result_attribution.recipe(row).sources for row in captured.get("files", [])
+            if row.get("outcome") in {"stored", "replayed"} and isinstance(row.get("page"), str)
+        }
     else:
         source = _add_source(
             vault_root,
@@ -9264,10 +9515,15 @@ def op_capture_source(
             raw_protection=raw_protection,
             source_identity=source_identity,
             expected_sha256=expected_sha256,
-            correction=correction,
+            correction=plan,
             reuse=True,
+            passages=passages,
+            document_form=document_form,
+            custody_only=custody_only,
         )
-        out = {"source": source}
+        out = {"source": source, "text_only": True}
+        if custody_only is True:
+            out["custody_only"] = True
         if source_identity is not None:
             out["capture_outcome"] = source["capture_outcome"]
             out["mutated"] = source["capture_outcome"] == "created"
@@ -9278,15 +9534,18 @@ def op_capture_source(
         for key in ("vocabulary_resolution", "vocabulary_receipt"):
             if key in source:
                 out[key] = source[key]
+                source_result_attribution.carry(source, out, moves={(key,): (key,)})
         # What the duplicate check found moves up, so a reused reply (which the terminal passes through whole)
         # states it once.
         for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable"):
             if key in source:
+                source_result_attribution.carry_fields(source, out, {key: key})
                 out[key] = source.pop(key)
         source_paths = [source["path"]]
-    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths)
+        source_refs = {source["path"]: (source["ref"],)}
+    out["semantic_compilation"] = source_coverage_module.compilation_guidance(vault_root, source_paths, source_refs=source_refs)
     if compile_guidance:
-        if files or adoption is not None:
+        if stores_original:
             # Originals remain usable while extraction is pending; preparation is optional.
             out["compile_guidance"] = {"semantic_compilation": out["semantic_compilation"]}
         else:
@@ -9713,11 +9972,15 @@ def op_transfer_artifact(
     vault_root: Path, operation: str = "upload", lane: str = "evidence",
     artifact: str | None = None, expected_sha256: str | None = None,
     hold: bool = False, artifacts: list[str] | None = None,
+    uploads: list[str] | None = None,
+    import_identity: str | None = None,
+    size_bytes: int | None = None,
 ) -> dict:
-    """Prepare an upload or download; a handoff does not prove custody.
+    """Prepare a file transfer or cancel owned waiting uploads.
 
     Upload: hold=true, expected_sha256; use exomem attach --handoff-file or POST upload_url.
     Capture its handle. Download: supply artifact or artifacts; use MCP or HTTPS delivery.
+    Cancel: supply uploads, with each held reference from the same authenticated session.
 
     Args:
         artifact: Vault-relative stored original or its custody page for download.
@@ -9725,12 +9988,65 @@ def op_transfer_artifact(
             Each gets its own handoff or its own refusal in the reply.
         expected_sha256: Intended original SHA-256.
         hold: One-use upload bound to this session; requires expected_sha256.
+        import_identity: Durable external ID for a held Source upload.
+        size_bytes: Exact Source size in bytes to select resumable upload.
         lane: Upload target: source (raw) or evidence (proof); token-bound.
             Ignored for downloads.
+        uploads: Cancellation only: held-upload references owned by this authenticated session.
     """
     from . import cloud_cell
     from .cli_ops import OpError
 
+    if import_identity is not None and (
+        operation != "upload" or lane != "source" or expected_sha256 is None
+        or artifact is not None or artifacts is not None or uploads is not None
+    ):
+        raise ValueError("INVALID_IMPORT_IDENTITY: use a held Source upload with expected_sha256")
+
+    if size_bytes is not None and (
+        operation != "upload" or lane != "source" or expected_sha256 is None
+        or artifact is not None or artifacts is not None or uploads is not None
+    ):
+        raise ValueError("INVALID_MODE: size_bytes needs a Source upload with expected_sha256")
+    held_only = hold
+
+    if operation == "cancel":
+        from . import held_uploads
+
+        if (artifact is not None or artifacts is not None or expected_sha256 is not None or hold
+                or not isinstance(uploads, list) or not 1 <= len(uploads) <= held_uploads.HOLD_MAX_COUNT
+                or any(not isinstance(reference, str) for reference in uploads)):
+            raise ValueError(
+                f"INVALID_MODE: cancellation takes 1 to {held_uploads.HOLD_MAX_COUNT} held-upload references only"
+            )
+        malformed = [index for index, reference in enumerate(uploads)
+                     if not held_uploads.is_cancellable_reference(reference)]
+        if malformed:
+            # Checked before any cancellation, so a rejected batch changes nothing and fetches nothing.
+            raise ValueError(
+                f"INVALID_MODE: uploads[{malformed[0]}] is not a held-upload handle; submit the "
+                f"{held_uploads.HELD_SCHEME} reference that the held upload returned, not a URL or file id"
+            )
+        outcomes = []
+        for index, reference in enumerate(uploads):
+            try:
+                released = held_uploads.cancel(vault_root, reference)
+                outcomes.append({"index": index, "state": "cancelled", "released_bytes": released})
+            except held_uploads.HeldUploadError as error:
+                if error.code == "HELD_UPLOAD_UNAVAILABLE":
+                    outcomes.append({"index": index, "state": "unavailable"})
+                else:
+                    outcomes.append({"index": index, "state": "failed",
+                                     "error": {"code": error.code, "message": error.reason}})
+        cancelled = sum(outcome["state"] == "cancelled" for outcome in outcomes)
+        unavailable = sum(outcome["state"] == "unavailable" for outcome in outcomes)
+        failed = sum(outcome["state"] == "failed" for outcome in outcomes)
+        return {
+            "user_summary": f"Cancelled {cancelled} waiting uploads; {unavailable} unavailable and {failed} failed.",
+            "cancelled": cancelled, "unavailable": unavailable, "failed": failed, "uploads": outcomes,
+        }
+    if uploads is not None:
+        raise ValueError("INVALID_MODE: uploads requires cancellation")
     if artifacts is not None:
         if operation != "download" or artifact is not None or hold or expected_sha256 is not None:
             raise ValueError("INVALID_MODE: artifacts needs download, with no artifact, hold or expected_sha256")
@@ -9753,6 +10069,10 @@ def op_transfer_artifact(
             "artifacts": handoffs,
             "failed": sum("error" in h for h in handoffs),
         }
+    if operation == "upload" and expected_sha256 is not None and artifact is None:
+        # The digest binds a held upload and nothing else takes one with a digest, so it implies the hold
+        # the way lane `import` does, instead of falling into download recovery's INVALID_MODE.
+        hold = True
     if cloud_cell.cloud_mode_enabled() and not hold:
         # A Cloud cell has the gateway's held-upload receiver and its proved exact-original download: no credential route.
         if operation != "download" or not artifact:
@@ -9772,7 +10092,10 @@ def op_transfer_artifact(
             raise ValueError("INVALID_MODE: held upload requires upload, expected_sha256 and no artifact")
         from . import upload_handoff
 
-        return upload_handoff.prepare_upload(vault_root, lane=lane, expected_sha256=expected_sha256)
+        return upload_handoff.prepare_upload(
+            vault_root, lane=lane, expected_sha256=expected_sha256, import_identity=import_identity,
+            size_bytes=size_bytes, held_only=held_only,
+        )
     if artifact is not None or expected_sha256 is not None:
         if operation != "download" or not artifact:
             raise ValueError("INVALID_MODE: original recovery needs download and artifact")
@@ -9786,6 +10109,13 @@ def op_transfer_artifact(
             f"INVALID_MODE: transfer_artifact lane must be one of {upload_tokens.UPLOAD_LANES}"
         )
     secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
+    if operation == "upload" and secret is None:
+        # An agent that asked without `hold` stopped here; the session-bound hold needs no token.
+        raise ValueError(
+            "UPLOAD_DISABLED: this server has no upload token, so send the file as a held upload: "
+            "call again with hold=true and expected_sha256 set to the file's SHA-256, then run the "
+            "returned send step"
+        )
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
     # Carrying the full principal (its session and purpose) requires private
@@ -9804,10 +10134,18 @@ def op_transfer_artifact(
     )
     if operation == "upload":
         handoff.update(handoff_status="handoff_prepared", committed=False)
+        if lane == "source":
+            # The unheld send is for a person or device that holds the file. It stores at once under the file name,
+            # with no url, identity check or duplicate check; the held send lets save_source carry all of them.
+            handoff["next_action"] = (
+                "If you hold the file, take its SHA-256 and call upload_files again with expected_sha256: that send "
+                "is held, and save_source then takes the document's own title, its source_kind and url. A POST to "
+                "this upload_url stores the file at once under its file name, with no url and no duplicate check."
+            )
     return handoff
 
 
-ProcessMediaOperation = Literal["process", "status", "retry", "reprocess"]
+ProcessMediaOperation = Literal["process", "status", "retry", "reprocess", "replicate"]
 
 
 def op_process_media(
@@ -9817,17 +10155,23 @@ def op_process_media(
     operation: ProcessMediaOperation = "process",
     language: str | None = None,
     multilingual: bool = False,
+    store: str | None = None,
+    diarize: bool | None = None,
 ) -> dict:
-    """Check governed media; retry after remediation; extract again.
+    """Check governed media; retry after remediation; extract again; replicate originals.
 
     Status reads; other operations change extraction state. Extraction normally runs
-    automatically. Reprocess keeps the old text on a prior page.
+    automatically. Reprocess keeps the old text on a prior page. Replicate (owner
+    only) queues an encrypted replica of every original in store `store` and returns
+    the queue counts; a repeat while it runs changes nothing.
 
     Args:
         path: Governed KB media path; omit for bounded all-media work.
         paths: 1-32 unique governed paths, not for status.
         language: Speech language code; omit to detect.
         multilingual: Detect language per window (slower).
+        store: Replicate only: the name of a store the vault declares.
+        diarize: Request or skip speaker labels on selected audio or video. Omit to keep the item's preference.
     """
     from . import due_state as due_state_module
     from . import media_processing
@@ -9837,6 +10181,15 @@ def op_process_media(
     validate_process_media_operation(operation)
     if path is not None and paths is not None:
         raise OpError("MEDIA_PATH_SELECTOR_CONFLICT", "use either path or paths, not both")
+    if diarize is not None:
+        if operation not in {"process", "reprocess"}:
+            raise OpError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to process and reprocess only")
+        if path is None and paths is None:
+            raise OpError("MEDIA_PATH_REQUIRED", "a speaker-label choice requires a media path")
+    if operation == "replicate":
+        return _replicate_media(vault_root, path=path, paths=paths, store=store)
+    if store is not None:
+        raise OpError("STORE_NOT_APPLICABLE", "store applies to replicate only")
     if operation == "reprocess" and path is None and paths is None:
         raise OpError("MEDIA_PATH_REQUIRED", "reprocess needs the path or paths of the media to extract again")
     try:
@@ -9865,11 +10218,34 @@ def op_process_media(
             operation=operation,
             language=language,
             multilingual=multilingual,
+            diarize=diarize,
         )
     # `retry` re-enqueues in the machine-local job store and commits nothing, so
     # the commit gate inside the carrier keeps it silent — that is the contract,
     # not an omission.
     return _carrying_batch_advisories(vault_root, result)
+
+
+def _replicate_media(vault_root: Path, *, path: str | None, paths: list[str] | None, store: str | None) -> dict:
+    """Queue a replica of every original in the declared store `store`, for the owner; return the queue's progress.
+
+    The copy runs in the background worker, which holds the mutation guard only for each short commit, so this call
+    only records the request. A vault restricted audience is refused: a replica store holds every original.
+    """
+    from . import media_replicas, media_store
+    from .cli_ops import OpError
+
+    if path is not None or paths is not None:
+        raise OpError("MEDIA_REPLICATE_SCOPE", "replicate copies every original to the store; it takes no path")
+    if store is None:
+        raise OpError("MEDIA_STORE_REQUIRED", "replicate needs the name of a store the vault declares")
+    if egress_module.owner_only_aggregate(Path(vault_root)) is not None:
+        raise OpError("MEDIA_OWNER_ONLY", "replicate is for the vault owner")
+    try:
+        progress = media_replicas.request(Path(vault_root), store)
+    except media_store.MediaStoreError as error:
+        raise OpError(error.code, str(error)) from error
+    return {"operation": "replicate", **progress}
 
 
 def _process_media(
@@ -9880,6 +10256,7 @@ def _process_media(
     operation: str,
     language: str | None = None,
     multilingual: bool = False,
+    diarize: bool | None = None,
 ) -> dict:
     from . import index_sync, media_jobs
     from .cli_ops import OpError
@@ -9893,6 +10270,16 @@ def _process_media(
             vault_root,
             request_id=active_mutation_request_id(),
             operation=f"process_media_{operation}_commit",
+            holder_kind="command",
+        )
+
+    def _queue_guard():
+        # The hold of a path that only queues a job: the job store is machine-local, so the
+        # commit generation stays put. Planning (hashing, hydration) runs before it, never inside.
+        return manager.projection_guard(
+            vault_root,
+            operation=f"process_media_{operation}_queue",
+            request_id=active_mutation_request_id(),
             holder_kind="command",
         )
 
@@ -9977,30 +10364,27 @@ def _process_media(
                 "remediation": remediation,
             }
 
-        results: list[dict[str, object]] = []
-        for binary, relative in selected_paths:
+        def run_one(binary: Path, relative: str) -> dict[str, object]:
+            """One path's row."""
             try:
                 result = _run_media_operation(
-                    vault_root, binary, operation, language, multilingual, _commit_guard
+                    vault_root, binary, operation, language, multilingual, _commit_guard,
+                    queue_guard=_queue_guard, diarize=diarize,
                 )
                 if result is None:
                     raise OpError("UNSUPPORTED_MEDIA", "media processing did not return a result")
             except media_processing.MediaProcessingError as error:
-                results.append(failure_row(relative, error.code))
-                continue
+                return failure_row(relative, error.code)
             except ValueError as error:
                 if str(error).partition(":")[0] != "WRITE_REFUSED":
                     raise
-                results.append(failure_row(relative, "WRITE_REFUSED"))
-                continue
+                return failure_row(relative, "WRITE_REFUSED")
             except FileNotFoundError:
-                results.append(failure_row(relative, "MEDIA_NOT_FOUND"))
-                continue
+                return failure_row(relative, "MEDIA_NOT_FOUND")
             state = media_jobs.tool_job_state(vault_root, result.state, result.job_id)
             terminal_row = terminal_job_row(relative, state)
             if terminal_row is not None:
-                results.append(terminal_row)
-                continue
+                return terminal_row
             row: dict[str, object] = {
                 "path": relative,
                 "outcome": mutation_terminal_module.MEDIA_OUTCOMES[operation],
@@ -10012,7 +10396,16 @@ def _process_media(
             }
             if result.document_container is not None:
                 row["document_container"] = result.document_container
-            results.append(row)
+            return row
+
+        results: list[dict[str, object]] = []
+        for index, (binary, relative) in enumerate(selected_paths):
+            if index:
+                # Each path re-takes the boundary; a keyed write that arrived
+                # meanwhile gets it first, so a long batch slows but never
+                # starves one.
+                manager.yield_to_waiting_writes(vault_root)
+            results.append(run_one(binary, relative))
         return {
             "operation": operation,
             "paths": [relative for _, relative in selected_paths],
@@ -10048,6 +10441,7 @@ def _process_media(
                     binary,
                     explicit=False,
                     commit_guard=_commit_guard,
+                    enqueue_preview=False,
                 ),
                 propagate_transient_errors=True,
             )
@@ -10065,11 +10459,11 @@ def _process_media(
         binary = vault_root / binary
     binary = Path(os.path.abspath(binary))
     try:
-        binary.relative_to(vault_root / kb_dirname())
+        binary.relative_to(managed_root(vault_root))
     except ValueError as exc:
         raise OpError(
             "MEDIA_PATH_OUTSIDE_KB",
-            f"media path must be inside {kb_dirname()}: {path}",
+            f"media path must be inside {managed_root_rel()}: {path}",
         ) from exc
     from . import document_containers
 
@@ -10078,7 +10472,7 @@ def _process_media(
 
     try:
         result = _run_media_operation(
-            vault_root, binary, operation, language, multilingual, _commit_guard
+            vault_root, binary, operation, language, multilingual, _commit_guard, diarize=diarize,
         )
     except media_processing.MediaProcessingError as exc:
         raise OpError(exc.code, exc.reason) from exc
@@ -10103,18 +10497,25 @@ def _process_media(
 
 
 def _run_media_operation(
-    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard
+    vault_root: Path, binary: Path, operation: str, language, multilingual: bool, commit_guard,
+    *, queue_guard=None, diarize: bool | None = None,
 ):
-    """Run one explicit media operation on one governed binary."""
+    """Run one explicit media operation on one governed binary.
+
+    `queue_guard` (reprocess only) is the hold for queueing that commits no sidecar; see `reconcile_media`.
+    """
     from . import document_containers, media_processing
 
     if document_containers.is_container(binary):
+        if diarize is not None:
+            raise media_processing.MediaProcessingError("DIARIZE_NOT_APPLICABLE", "speaker labels apply to audio and video only")
         if language is not None or multilingual or operation == "reprocess":
             raise media_processing.MediaProcessingError("UNSUPPORTED_MEDIA", "process or retry the container; reprocess individual document payloads without a language option")
         return media_processing.process_container(vault_root, binary, retry=operation == "retry", commit_guard=commit_guard)
-    if operation == "process" and (language is not None or multilingual):
+    if operation == "process" and (language is not None or multilingual or diarize is not None):
         return media_processing.process_declared_media(
-            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+            vault_root, binary, language=language, multilingual=multilingual,
+            commit_guard=commit_guard, diarize=diarize,
         )
     if operation == "process":
         return media_processing.reconcile_media(
@@ -10122,7 +10523,8 @@ def _run_media_operation(
         )
     if operation == "reprocess":
         return media_processing.reprocess_media(
-            vault_root, binary, language=language, multilingual=multilingual, commit_guard=commit_guard
+            vault_root, binary, language=language, multilingual=multilingual,
+            commit_guard=commit_guard, queue_guard=queue_guard, diarize=diarize,
         )
     return media_processing.retry_media(vault_root, binary, commit_guard=commit_guard)
 
@@ -10143,7 +10545,7 @@ def _selected_media_paths(
     values = paths
 
     root = Path(vault_root).resolve()
-    kb_root = root / kb_dirname()
+    kb_root = managed_root(root)
     selected: list[tuple[Path, str]] = []
     seen: set[str] = set()
     for value in values:
@@ -10159,7 +10561,7 @@ def _selected_media_paths(
         except ValueError as error:
             raise OpError(
                 "MEDIA_PATH_OUTSIDE_KB",
-                f"media path must be inside {kb_dirname()}: {value}",
+                f"media path must be inside {managed_root_rel()}: {value}",
             ) from error
         relative = canonical_vault_rel(root, relative)
         if relative in seen:
@@ -10182,21 +10584,25 @@ def _media_remediation(code: str) -> str:
         return "Give the language as the short alphabetic code the speech model uses, or omit it."
     if code == "LANGUAGE_NOT_APPLICABLE":
         return "Omit the language and the multilingual mode, or select audio or video media."
+    if code == "DIARIZE_NOT_APPLICABLE":
+        return "Select audio or video with process or reprocess, or omit the speaker-label choice."
     if code == "TRANSCRIPT_COMPLETE":
-        return "Use the reprocess operation to extract the recording again with the declared language."
+        return "Use reprocess to extract the recording again with the declared preferences."
     if code == "MEDIA_ENGINE_DISABLED":
         return "Enable the extraction engine for this media type, then ask again."
     if code == "MEDIA_BUSY":
         return "Wait for the current processing run to end, then ask again."
     if code == "MEDIA_RUNTIME_UNAVAILABLE":
         return "Restore the media runtime, then ask again."
+    if code == "MEDIA_ORIGINAL_UNVERIFIED":
+        return "Restore the original from a verified copy, as an original fixity pass does, then retry processing."
     return "Inspect the media artifact and retry processing."
 
 
 def op_read_media(
     vault_root: Path,
     path: str | None = None,
-    media: Literal["video", "image"] = "video",
+    media: Literal["video", "image", "preview"] = "video",
     paths: list[str] | None = None,
     max_frames: int = 8,
     start_sec: float | None = None,
@@ -10204,7 +10610,7 @@ def op_read_media(
     max_side: int | Literal["original"] | None = None,
     region: list[float] | None = None,
 ) -> fastmcp_types.ToolResult:
-    """Show stored images or sampled video frames inline (MCP only).
+    """Show images, sampled video frames or a stored preview inline (MCP only).
 
     Args:
         path: Image or video path.
@@ -10214,6 +10620,10 @@ def op_read_media(
         max_side: Long side px or "original".
         region: Crop [x, y, w, h] as fractions, for detail.
     """
+    if media == "preview":
+        if path is None or paths is not None:
+            raise ValueError("MEDIA_PATH_REQUIRED: a preview read takes one path")
+        return _show_media_preview(vault_root, path)
     if media == "image":
         from . import cloud_cell
 
@@ -10233,6 +10643,19 @@ def op_read_media(
         end_sec=end_sec,
         max_side=max_side,
     )
+
+
+def _show_media_preview(vault_root: Path, path: str) -> fastmcp_types.ToolResult:
+    from . import media_previews
+
+    descriptor, jpeg = media_previews.show(vault_root, path)
+    outcome = "Showing the stored preview." if jpeg is not None else "No current preview is available."
+    meta = {"outcome": outcome, "status": "available" if jpeg is not None else "unavailable",
+            "path": descriptor["path"]}
+    content = [fastmcp_types.TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+    if jpeg is not None:
+        content.append(fastmcp_types.Image(data=jpeg, format="jpeg").to_image_content())
+    return fastmcp_types.ToolResult(content=content, structured_content=meta)
 
 
 def _show_images(
@@ -10338,7 +10761,8 @@ def op_review_memory(
     unresolved to authorized governed Source/Evidence; never reconstruct originals.
 
     Args:
-        mode: vocabulary records questions; item/write-advisory-result need ref. No authority:
+        mode: vocabulary records questions; item/write-advisory-result need ref; queued-write
+            lists saves held while Exomem was busy, or reads one by ref. No authority:
             apply through connect_memory accept-relation, adoption_studio
             apply-proposal or triage_memory. Modes: references/governance.md.
         categories: Category filter (attention, activation, audit) or upkeep family.
@@ -10357,7 +10781,7 @@ def op_review_memory(
             vocabulary takes open or all.
         ref: `exomem://review/<id>` for item mode (upkeep refs revalidate one
             item) or `exomem://write-advisory-result/<id>` for
-            write-advisory-result; for a vocabulary relation question, a current
+            write-advisory-result, or `exomem://queued-write/<id>` for queued-write; for a vocabulary relation question, a current
             relation-queue candidate ref alongside its source path.
         family: Vocabulary family for a meaning question; an edge needs
             `relation-type/v1` and the candidate `ref`. Creates only a review
@@ -10474,6 +10898,18 @@ def op_review_memory(
         return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "write-advisory-result":
         return deferred_write_advisory_module.resolve_result(vault_root, ref)
+    if mode == "queued-write":
+        from . import write_intake
+        from .cli_ops import OpError
+
+        if write_intake.principal_record(principal_module.effective_principal()) is None:
+            # Queued saves hold the owner's unpublished arguments: only a caller whose saves may queue reads them.
+            raise OpError(
+                "QUEUED_WRITE_OWNER_ONLY",
+                "queued saves are visible to the vault owner only",
+                "Ask the owner to check the save, or read the page once it is saved.",
+            )
+        return write_intake.read(vault_root, ref=ref, limit=limit)
     if mode == "procedure_approvals":
         return procedure_approval_operation_module.listing(vault_root, limit)
     if mode == held_operation_module.LIST_MODE:
@@ -10528,7 +10964,7 @@ def op_review_memory(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "dispositions, provenance, evolution, compilation, stale, contradiction, "
         "unprocessed-sources, relation-debt, relation-queue, adoption, upkeep, "
-        "plan-progress, procedure_approvals, held, vocabulary, or write-advisory-result"
+        "plan-progress, procedure_approvals, held, vocabulary, write-advisory-result, or queued-write"
     )
 
 
@@ -11372,6 +11808,20 @@ def _validate_vocabulary_binding(
         )
 
 
+def _with_ownership_question(vault_root: Path, previewed: dict[str, Any]) -> dict[str, Any]:
+    """A curation preview beside the one ownership question of its placing steps.
+
+    Added to the reply only: the sealed plan and its fingerprint stay as they were.
+    """
+    from . import ownership_review
+
+    if "actions" not in previewed:
+        # A derived plan previews as its summary: the person named the project it places pages in.
+        return previewed
+    asked = ownership_review.preview_question(vault_root, previewed["actions"])
+    return {**previewed, "ownership_question": asked} if asked else previewed
+
+
 def _bind_connect_arguments(vault_root: Path, **arguments: Any) -> dict[str, Any]:
     """Bind accept-by-id before admission, including the source page's exact version."""
     item_id = arguments.get("item_id")
@@ -12077,6 +12527,8 @@ def op_maintain_memory(
         "fix",
         "reconcile",
         "backfill-ids",
+        "capture-metadata",
+        "convert-originals",
         "structured-files",
         "curation",
         "tag-variants",
@@ -12109,12 +12561,17 @@ def op_maintain_memory(
         "propose-compensation",
         "apply-compensation",
         "revert",
+        "relocate",
     ]
     | None = None,
     run_id: str | None = None,
     plan: dict[str, Any] | None = None,
     refs: list[str] | None = None,
     paths: list[str] | None = None,
+    pages: list[str] | None = None,
+    to_project: str | None = None,
+    folder: str | None = None,
+    from_project: str | None = None,
     review_ref: str | None = None,
     hydration_recheck: int | None = None,
     expected_plan_fingerprint: str | None = None,
@@ -12129,8 +12586,8 @@ def op_maintain_memory(
 ) -> dict:
     """Maintain vault health; several modes write.
 
-    Audit is read-only; fix/backfill-ids default dry-run; reconcile writes.
-    A remote fix, backfill-ids or reconcile runs as a maintenance job and returns a run_id.
+    Audit is read-only; fix/backfill-ids/capture-metadata/convert-originals default dry-run; reconcile writes.
+    A remote fix, backfill-ids, capture-metadata, convert-originals or reconcile runs as a maintenance job and returns a run_id.
     The owner's preview (dry_run=true) is a job: its receipt holds the plan_id. Then repeat
     with dry_run=false, that plan_id and a why to write.
     maintenance-job reads one job's state and receipt (run_id) or lists them; the receipt's
@@ -12142,6 +12599,9 @@ def op_maintain_memory(
     the owner applies its plan_id with `exomem collections cutover` on the host.
     held-resolve settles one held item that mode held of review_memory lists: path, choice keep-mine or
     keep-store, that item's item_version and why.
+    convert-originals moves an existing archive's ordinary originals into shared original storage; owner only.
+    capture-metadata adds capture time, position, camera and size to the sidecars of photos and videos
+    filed before they were recorded; it reads only originals that are on the volume; owner only.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -12149,7 +12609,7 @@ def op_maintain_memory(
     Args:
         mode: Maintenance mode.
         categories: Audit category filter.
-        dry_run: Report without writing. Default true for fix/backfill-ids,
+        dry_run: Report without writing. Default true for fix/backfill-ids/capture-metadata/convert-originals,
             false for reconcile.
         rebuild_embeddings: fix only.
         rebuild_graph: reconcile only; quarantine unavailable derived graph lineage and
@@ -12166,7 +12626,11 @@ def op_maintain_memory(
         plan: Closed agent-authored plan for curation propose.
         refs: Memory refs for curation work-item.
         paths: Vault paths for curation work-item.
-        review_ref: Recurring-identity review ref for a work-item.
+        pages: Page refs or vault paths for curation relocate.
+        to_project: Relocate: the project key the pages move to; omit to rename them to their titles.
+        folder: Relocate: the folder of a project key that the relocation registers.
+        from_project: Relocate: the project key the pages leave, when a page carries several.
+        review_ref: Review ref for a work-item: a recurring-identity candidate, or an item on one page.
         hydration_recheck: Continuation ordinal 1-8; the eighth is closure-only.
         expected_plan_fingerprint: Reviewed plan fingerprint for approval.
         vocabulary_ref: Vocabulary decision for curation apply or resume.
@@ -12227,6 +12691,10 @@ def op_maintain_memory(
             "hydration_recheck": hydration_recheck,
             "expected_plan_fingerprint": expected_plan_fingerprint,
             "why": why,
+            "pages": pages,
+            "to_project": to_project,
+            "folder": folder,
+            "from_project": from_project,
         }
         allowed_by_action = {
             "work-item": {"refs", "paths", "review_ref", "hydration_recheck"},
@@ -12243,6 +12711,7 @@ def op_maintain_memory(
                 "why",
             },
             "revert": {"review_ref", "expected_plan_fingerprint", "why"},
+            "relocate": {"pages", "review_ref", "to_project", "folder", "from_project"},
         }
         allowed = allowed_by_action[curation_action]
         if any(value is not None and name not in allowed for name, value in supplied.items()):
@@ -12264,6 +12733,8 @@ def op_maintain_memory(
                 "why",
             },
             "revert": {"review_ref", "expected_plan_fingerprint", "why"},
+            # Pages or one review_ref; the relocation refuses neither or both.
+            "relocate": set(),
         }
         if any(supplied[name] is None for name in required_by_action[curation_action]):
             raise ValueError(
@@ -12284,7 +12755,8 @@ def op_maintain_memory(
                 return curation_module.propose(vault_root, plan)
             if curation_action == "preview":
                 assert run_id is not None
-                return curation_module.preview(vault_root, run_id=run_id)
+                previewed = curation_module.preview(vault_root, run_id=run_id)
+                return _with_ownership_question(vault_root, previewed)
             if curation_action == "status":
                 assert run_id is not None
                 return curation_module.status(vault_root, run_id=run_id)
@@ -12303,6 +12775,17 @@ def op_maintain_memory(
             if curation_action == "propose-compensation":
                 assert run_id is not None
                 return curation_module.propose_compensation(vault_root, run_id=run_id)
+            if curation_action == "relocate":
+                from . import relocate as relocate_module
+
+                return relocate_module.propose(
+                    vault_root,
+                    pages=pages,
+                    review_ref=review_ref,
+                    to_project=to_project,
+                    folder=folder,
+                    from_project=from_project,
+                )
             if curation_action == "revert":
                 assert None not in (review_ref, expected_plan_fingerprint, why)
                 from . import promotion_revert as promotion_revert_module
@@ -12560,9 +13043,19 @@ def op_maintain_memory(
                 raise
             _apply_batch_deltas(vault_root, list(report.get("updated") or []))
         return _carrying_batch_advisories(vault_root, report)
+    if mode == "capture-metadata":
+        from . import capture_backfill
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
+        return capture_backfill.backfill(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
+    if mode == "convert-originals":
+        from . import original_conversion
+
+        _require_job_plan_arguments(mode, dry_run, plan_id, why)
+        return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )
@@ -13904,7 +14397,9 @@ def op_reclassify_source(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
+    preview_digest: str | None = None,
 ) -> dict:
     """Correct a captured source's classification and relocate it to match.
 
@@ -13925,6 +14420,14 @@ def op_reclassify_source(
 
     Both vocabularies are open, exactly as at capture: name the kind and domain
     you actually mean rather than the closest familiar label.
+
+    `artifact_path` repairs the source's pointer to its raw file, for a source whose
+    file moved. It names an existing file under Sources/ or Evidence/ that fits the
+    size and SHA-256 the source records. Alone it leaves the source where it is; revert
+    restores the earlier pointer.
+
+    A relocation that repoints links in other Source or Evidence pages needs the
+    `preview_digest` of the propose-reclassification preview.
     """
     from . import reclassify_source as reclassify_module
 
@@ -13934,7 +14437,9 @@ def op_reclassify_source(
             path=path,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
+            preview_digest=preview_digest,
         )
     except reclassify_module.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
@@ -13947,6 +14452,8 @@ def op_propose_reclassification(
     path: str,
     source_kind: str | None = None,
     domain: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Report what correcting one source would do, without writing anything.
 
@@ -13963,13 +14470,14 @@ def op_propose_reclassification(
     IS means reading it — a plausible guess presented for approval is how a
     fallback becomes permanent.
     """
-    from . import reclassify_source as reclassify_module
+    from . import reclassification_preview, reclassify_source
 
     try:
-        return reclassify_module.propose(
-            vault_root, path, source_kind=source_kind, domain=domain
-        ).as_dict()
-    except reclassify_module.ReclassifyError as error:
+        return reclassification_preview.report(
+            vault_root, path, source_kind=source_kind, domain=domain,
+            preview_run_id=preview_run_id, cursor=cursor,
+        )
+    except reclassify_source.ReclassifyError as error:
         raise ValueError(f"{error.code}: {error.reason}") from error
 
 
@@ -14012,6 +14520,7 @@ def op_manage_memory_file(
     new_path: str | None = None,
     source_kind: str | None = None,
     domain: str | None = None,
+    artifact_path: str | None = None,
     reason: str | None = None,
     update_wikilinks: bool = True,
     confirm: bool = False,
@@ -14030,23 +14539,28 @@ def op_manage_memory_file(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     promotion_reason: str | None = None,
+    preview_digest: str | None = None,
+    preview_run_id: str | None = None,
+    cursor: str | None = None,
 ) -> dict:
     """Manage files when typed tools do not fit.
 
     Destructive operations need explicit flags.
 
     Args:
-        operation: list, trash-list and propose-reclassification read; create and append
-            read with validate_only; the others write.
+        operation: list, trash-list and propose-reclassification read; create, append
+            and move read with validate_only; the others write.
         path: Target for list/create/append/delete; default trash path for recover.
         allow_curated: Permit operations in curated trees where canonical leaves allow it.
         kind: file or dir, for create.
         source_kind: What a captured artifact IS; reclassify sets it.
         domain: What it is ABOUT; like source_kind.
+        artifact_path: reclassify only: the existing file the source's pointer must name.
         reason: Required for reclassify and revert-reclassification.
         confirm: Required for delete.
         expected_dead_inbound: Links expected to die in the same workflow.
-        validate_only: Validate a Markdown create or append without writing.
+        validate_only: Validate a Markdown create or append, or preview a move, without
+            writing.
         draft_token: The overwrite preview's `draft_token`, replayed unchanged on
             commit.
         semantic_transition_token: The append transition token from validate_only.
@@ -14054,6 +14568,10 @@ def op_manage_memory_file(
         relation_review_hash: Draft or transition hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
         promotion_reason: Required for a move promoting Sources/ to Evidence/.
+        preview_digest: A move or reclassify that repoints Source or Evidence pages passes
+            its preview's `preview_digest`.
+        preview_run_id: Follow a background reclassification preview for the same Source.
+        cursor: Read the next page of that preview's completed reference report.
     """
     creation_review_requested = any(
         value is not None
@@ -14064,7 +14582,7 @@ def op_manage_memory_file(
         )
     )
     append_review_requested = semantic_transition_token is not None
-    shared_review_requested = validate_only or any(
+    shared_review_requested = (validate_only and operation != "move") or any(
         value is not None
         for value in (
             relation_disposition,
@@ -14131,6 +14649,8 @@ def op_manage_memory_file(
             update_wikilinks=update_wikilinks,
             allow_curated=allow_curated,
             promotion_reason=promotion_reason,
+            validate_only=validate_only,
+            preview_digest=preview_digest,
         )
     if operation == "delete":
         return op_delete(
@@ -14149,7 +14669,8 @@ def op_manage_memory_file(
             raise ValueError("INVALID_PATH: reclassify requires `path` naming the captured source")
         if operation == "propose-reclassification":
             return op_propose_reclassification(
-                vault_root, path=target, source_kind=source_kind, domain=domain
+                vault_root, path=target, source_kind=source_kind, domain=domain,
+                preview_run_id=preview_run_id, cursor=cursor,
             )
         if operation == "revert-reclassification":
             return op_revert_reclassification(vault_root, path=target, reason=reason)
@@ -14158,7 +14679,9 @@ def op_manage_memory_file(
             path=target,
             source_kind=source_kind,
             domain=domain,
+            artifact_path=artifact_path,
             reason=reason,
+            preview_digest=preview_digest,
         )
     if operation == "trash-list":
         return op_list_trash(vault_root, date=date)
@@ -14190,6 +14713,7 @@ def op_record_memory(
         "append",
         "bulk_upsert",
         "update",
+        "retract",
         "revise",
         "rebaseline",
         "discard",
@@ -14234,11 +14758,14 @@ def op_record_memory(
     import_request: dict[str, Any] | None = None,
     query: dict[str, Any] | None = None,
     item_id: str | None = None,
+    automatic: bool | None = None,
+    new_collection: dict[str, Any] | None = None,
+    new_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
     Describe/validate/inspect/query/history and import preview/status read.
-    Propose before create. Others write or hold candidates.
+    Create a minimal collection with automatic only under silent capture; else propose it. Others write or hold candidates.
 
     Args:
         collection: Vault-relative manifest path, collection UUID or memory reference.
@@ -14257,12 +14784,15 @@ def op_record_memory(
         hold: False refuses; otherwise hold invalid candidates.
         rows: bulk_upsert: 1-50 {item, body?, source?}; one guarded commit.
             Outcomes: inserted/updated/unchanged/rejected.
-        source: bulk_upsert default preserved Source/Evidence path.
+        source: bulk_upsert preserved Source/Evidence path; required once for the batch or on each row.
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
-        item_id: Update only: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
+        item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
+        automatic: Create only: true for a minimal collection you start under silent proactive_capture; refused with the failed bound named.
+        new_collection: Append only, {"natural_key": [item fields]}: a title that names no collection is created from the row under the automatic bounds, then the row is appended.
+        new_fields: Append or update: names in item/changes the collection does not declare; under silent proactive_capture they are added, typed from the values, then the row is written.
     """
-    return record_memory_module.record_memory(
+    result = record_memory_module.record_memory(
         vault_root,
         action=action,
         collection=collection,
@@ -14303,7 +14833,39 @@ def op_record_memory(
         import_request=import_request,
         query=query,
         item_id=item_id,
+        automatic=automatic,
+        new_collection=new_collection,
+        new_fields=new_fields,
     )
+    # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
+    # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).
+    committed = isinstance(result, dict) and (result.get("outcome") == "committed" or result.get("committed") is True)
+    if action in _record_writes() and committed:
+        _log_record_write(vault_root, collection)
+    return result
+
+
+def _record_writes() -> frozenset[str]:
+    """The record_memory actions whose operation entry declares a write effect, read from the one operation table."""
+    from . import operation_entries
+
+    return frozenset(entry.action for entry in operation_entries.RECORDS.entries if entry.effect == "write")
+
+
+def _log_record_write(vault_root: Path, collection: str | None) -> None:
+    """Log a committed item write under its collection's manifest path, as a page write logs its page. Best effort."""
+    from . import structured_collections
+
+    try:
+        # The write was authorized and committed; naming its manifest for the local log discloses nothing new, so
+        # this lookup issues no disclosure receipt of its own.
+        path = structured_collections.resolve_collection(
+            vault_root, collection, authorize_path=lambda _relative: True,
+        ).path if collection else None
+    except Exception:  # noqa: BLE001 - the log is best effort and never touches the committed write
+        path = None
+    if path:
+        query_log.log_write_call(tool="record_memory", written_path=path, cited_sources=[])
 
 
 def op_query_dataset(
@@ -14357,13 +14919,75 @@ def remember_description(project_keys_hint: str) -> str:
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
 
+def op_inspect_captured_sources(
+    vault_root: Path,
+    system: str,
+    record_id: str | None = None,
+    cursor: str | None = None,
+    limit: Annotated[int, Field(ge=1, le=capture_inventory_module.MAX_PAGE_SIZE)] = capture_inventory_module.MAX_PAGE_SIZE,
+) -> dict:
+    """List canonical captured revisions with complete-publication and exact-index observations.
+
+    Traverse one identity system, optionally one record. Compare every page's generation;
+    repeat traversal when it changes. Pending or incomplete observations never prove absence.
+    """
+    from .capture_inventory import inventory
+
+    return inventory(vault_root, system=system, record_id=record_id, cursor=cursor, limit=limit)
+
+
+def op_inspect_name_drift(
+    vault_root: Path,
+    cursor: str | None = None,
+    limit: Annotated[
+        int, Field(ge=1, le=name_drift_module.MAX_PAGE_SIZE)
+    ] = name_drift_module.DEFAULT_PAGE_SIZE,
+) -> dict:
+    """List pages whose file name no longer follows their title, with the name each would get today.
+
+    A page is listed when a rename-only relocation would rename it now. Returns the total count
+    (unknown when the scan did not finish), then per page its ref, title, current name and
+    planned name. Pages with no usable title, or that this caller cannot rename, are marked and
+    never proposed. Rename a batch with the call in `rename_next_batch`, after the user approves
+    one preview.
+    """
+    return name_drift_module.listing(vault_root, cursor=cursor, limit=limit)
+
+
+def op_inspect_capture_erasure_policy(
+    vault_root: Path,
+    system: Annotated[str, Field(min_length=1)],
+) -> dict:
+    """Read whether current host policy enables erasure for one opaque identity system."""
+    from .source_erasure import inspect_policy
+
+    return inspect_policy(vault_root, system=system)
+
+
+def op_erase_captured_source(
+    vault_root: Path,
+    operation_id: Annotated[str, Field(min_length=1, max_length=128)],
+    source_identity: source_capture.SourceIdentity,
+    expected_source_ref: str,
+    expected_source_hash: str,
+) -> dict:
+    """Advance retirement of one captured Source incarnation and report each component's progress."""
+    from .source_eraser import erase
+
+    return erase(vault_root, operation_id, source_identity, expected_source_ref, expected_source_hash)
+
+
 def op_coordination_status(vault_root: Path) -> dict:
     """Read writer-lease health during outages.
     """
+    from . import write_intake
     from .governance.raw_protection import is_owner
     from .writer_lease import coordination_status
 
     status = coordination_status(vault_root)
+    if write_intake.principal_record(principal_module.effective_principal()) is not None:
+        # Saves held because the boundary was busy; `unknown` when the store cannot be read.
+        status = {**status, "write_intake": write_intake.status(vault_root)}
     boundary = status.get("mutation_boundary")
     # The contention counters name the last lock holder and how often writers
     # collided. Only the owner needs them, so another caller gets the boundary state alone.
@@ -14511,7 +15135,7 @@ def validate_process_media_operation(operation: Any) -> None:
 
         raise OpError(
             "INVALID_MEDIA_OPERATION",
-            "process_media operation must be process, status, retry, or reprocess",
+            "process_media operation must be process, status, retry, reprocess, or replicate",
         )
 
 
@@ -14551,6 +15175,14 @@ def writes_through_superseded_maintenance_leaf(command: Command, kwargs: dict[st
     return _resolved_invocation_selector(command, kwargs, "dry_run") is not True
 
 
+def invocation_writes_outside_writer(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Whether a write skips canonical writer custody because it changes only session-private bytes.
+
+    The lease treats it as a read; read-only cells and the call ledger still treat it as a write.
+    """
+    return command.name == "transfer_artifact" and kwargs.get("operation") == "cancel"
+
+
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
@@ -14559,6 +15191,8 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     Python signature defaults applied only when the selector was truly omitted.
     """
     if command.read_only:
+        return True
+    if invocation_writes_outside_writer(command, kwargs):
         return True
     if command.name == "maintain_memory" and kwargs.get("mode") == "curation":
         from . import curation as curation_module
@@ -14708,6 +15342,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
             "triage_memory",
             "prepare_note",
             "coordination_status",
+            "inspect_name_drift",
         ],
     },
     "connect": {
@@ -14750,7 +15385,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "record": {
         "intent": "Capture, inspect, query, or correct durable observed events and current state.",
         "route": {"tool": "record_memory", "args": {"action": "inspect"}},
-        "safety": "resolve one compatible collection before a mutation; propose rather than silently create a schema",
+        "safety": "resolve one compatible collection before a mutation; create a minimal one only under the served capture disposition",
         "advanced": ["record_memory"],
     },
     "plan": {
@@ -14832,8 +15467,38 @@ _COMMAND_OUTCOME_VERBS: Mapping[str, operation_entries.OutcomeVerb] = MappingPro
 # nosemgrep: ep-word-set -- the registry's own command names, not a customer vocabulary.
 _PAGE_NAMING_COMMANDS = frozenset({
     "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
-    "capture_source", "ask_memory",
+    "capture_source", "ask_memory", "read_memory",
 })
+#: The saves of knowledge that the serving process queues durably when the boundary stays busy
+#: (`Command.busy_intake`, `write_intake`). The keys are command names.
+# nosemgrep: ep-word-set -- the registry's own command names, not a customer vocabulary.
+_BUSY_INTAKE_COMMANDS = frozenset({
+    "remember", "edit_memory", "replace_memory", "observe_memory", "connect_memory",
+    "episode_memory", "capture_source", "preserve_evidence", "record_memory", "plan_memory",
+})
+
+
+def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
+    """Whether the write these JSON `arguments` select may be queued when the boundary is busy.
+
+    A grouped command decides per operation (`OperationEntry.queues_when_busy`); a call that
+    matches no write operation keeps the busy refusal. A capture under a `capture_reservation`
+    passes this check and keeps the busy refusal after it: `writer_lease.replay_origin` gives it
+    no replay identity.
+    """
+    if not command.busy_intake:
+        return False
+    from . import operation_entries
+
+    operations = operation_entries.register_operations(command.name)
+    if operations is None:
+        return True
+    action = None
+    if operations.selector is not None:
+        action = _resolved_invocation_selector(command, dict(arguments), operations.selector)
+    return operations.queues_when_busy(action, arguments)
+
+
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -14843,6 +15508,8 @@ _SPEC: tuple[tuple, ...] = (
     ("served_context", op_served_context, 2, False, False, None, _RC),
     ("configure_memory", op_configure_memory, 1, True, False, None, _MCRC),
     ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
+    ("inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None, _MCRC),
+    ("inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
     ("fetch", op_fetch, 1, False, False, "id", _MCRC),
@@ -14940,6 +15607,34 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"public_title": "Read or change memory settings", "surface": "primary", "actions": (), "first_run_safe": False},
     ),
     (
+        "inspect_captured_sources", op_inspect_captured_sources, 1, False, False, None,
+        _MCRC, ("inspect_captured_sources",),
+        {"public_title": "Inspect captured Source inventory", "surface": "service", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_inventory",)}},
+    ),
+    (
+        "inspect_capture_erasure_policy", op_inspect_capture_erasure_policy, 1, False, False, None,
+        _MCRC, (),
+        {"public_title": "Inspect Source erasure policy", "surface": "service", "actions": (), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure_policy",)}},
+    ),
+    (
+        "erase_captured_source", op_erase_captured_source, 1, True, False, None,
+        _MCRC, (),
+        {"public_title": "Erase a captured Source", "surface": "service", "actions": ("update",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("captured_source_erasure",)}},
+    ),
+    (
+        "inspect_name_drift", op_inspect_name_drift, 1, False, False, None, _MCRC,
+        ("inspect_name_drift",),
+        {
+            "public_title": "Inspect stale file names",
+            "surface": "advanced",
+            "actions": ("review",),
+            "first_run_safe": True,
+        },
+    ),
+    (
         "coordination_status",
         op_coordination_status,
         1,
@@ -14970,7 +15665,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         "query",
         _MCRC,
         ("search", "find"),
-        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True},
+        {"public_title": "Search saved knowledge", "preferred_name": "search_memory", "surface": "primary", "actions": ("ask",), "first_run_safe": True,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("passage_results",)}},
     ),
     (
         "activate_context",
@@ -15067,6 +15763,20 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"public_title": "Supersede a knowledge note", "preferred_name": "supersede_note", "surface": "primary", "actions": ("update",), "first_run_safe": False},
     ),
     (
+        "reserve_source_capture",
+        op_reserve_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Reserve Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_reservation",)}},
+    ),
+    (
+        "settle_source_capture",
+        op_settle_source_capture,
+        1, True, False, None, _MCRC, (),
+        {"public_title": "Close Source capture admission", "surface": "service", "actions": ("save",), "first_run_safe": False,
+         "mcp_meta": {capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("capture_attempt_settlement",)}},
+    ),
+    (
         "capture_source",
         op_capture_source,
         1,
@@ -15080,7 +15790,8 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
             "surface": "primary",
             "actions": ("save",),
             "first_run_safe": False,
-            "mcp_meta": {"openai/fileParams": ("files",)},
+            "mcp_meta": {"openai/fileParams": ("files",),
+                         capabilities_module.SERVICE_CAPABILITIES_META_KEY: ("declared_passages", "capture_attempt_commit")},
         },
     ),
     (
@@ -15147,7 +15858,7 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("transfer_token",),
-        {"public_title": "Prepare a file transfer", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
+        {"public_title": "Transfer files or cancel waiting uploads", "surface": "primary", "actions": ("prove",), "first_run_safe": True},
     ),
     (
         "process_media",
@@ -15624,6 +16335,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 executor=meta.get("executor", "cell"),
                 outcome_verb=_COMMAND_OUTCOME_VERBS.get(name),
                 names_pages=name in _PAGE_NAMING_COMMANDS,
+                busy_intake=name in _BUSY_INTAKE_COMMANDS,
                 prepare_arguments=meta.get("prepare_arguments"),
             )
         )
@@ -15836,6 +16548,7 @@ def _active_bootstrap_descriptor() -> capabilities_module.ActiveSurfaceDescripto
         tier2_enabled=True,
         product_commands=tuple(
             command.public_name for command in product_commands_for("mcp", expose_tier2=True)
+            if command.agent_listed
         ),
         compatibility_commands=tuple(command.name for command in PRODUCT_COMMANDS if command.preferred_name),
     )

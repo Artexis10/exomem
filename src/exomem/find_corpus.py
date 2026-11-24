@@ -20,30 +20,18 @@ import yaml
 
 from . import freshness, privacy_log, request_budget
 from .find_types import ParsedPage
+from .kbdir import managed_root, managed_split
 from .vault import _FM_PATTERN as FRONTMATTER_PATTERN
-from .vault import relative_posix
+from .vault import CORPUS_EXCLUDED_DIR_NAMES, markdown_lf, relative_posix
 
 if TYPE_CHECKING:
     from .vault_store.read import PageMeta, StoredPage
 
 log = logging.getLogger(__name__)
 
-# Operational state is not knowledge: `_Governance` (policy/receipts) and
-# `_Adoption` (durable run objects + run manifests) both name items whose own
-# disclosure decisions may be restrictive, so neither may enter the content
-# corpus or be reachable by recall.
-EXCLUDED_DIR_NAMES = frozenset(
-    {
-        ".graph-coordination",
-        ".trash",
-        "_Adoption",
-        "_Schema",
-        "_Governance",
-        "_attachments",
-        "_archive",
-        "_trash",
-    }
-)
+# The KB corpus walk skips the folders `vault.CORPUS_EXCLUDED_DIR_NAMES` names: operational state
+# and machinery, never knowledge. The vault-wide walk skips those and more (`vault.VAULT_SCAN_SKIP_DIRS`).
+EXCLUDED_DIR_NAMES = CORPUS_EXCLUDED_DIR_NAMES
 EXCLUDED_DIR_PREFIXES = (".exomem-batch-",)
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
@@ -381,9 +369,8 @@ _CUSTODY_SEAM = "frontmatter_cache"
 
 
 def _scope_root(vault_root: Path, scope: str) -> Path:
-    from .kbdir import kb_dirname
 
-    return vault_root / kb_dirname() if scope == "kb" else vault_root
+    return managed_root(vault_root) if scope == "kb" else vault_root
 
 
 def _cache_key_candidates(vault_root: Path, rel: str) -> tuple[Path, ...]:
@@ -492,19 +479,33 @@ class StoreCorpus:
         does.
         """
         stored = {
-            self.vault_root.joinpath(*meta.path.split("/")): (
-                meta.mtime_ns,
-                meta.revision,
-                meta.size,
-            )
-            for meta in self.pages
+            self.vault_root.joinpath(*rel.split("/")): signature
+            for rel, signature in self.stored_signatures().items()
         }
         return lambda path: stored.get(path) or freshness.stat_signature(path)
+
+    def stored_signatures(self) -> dict[str, freshness.FileSignature]:
+        """The change signature of each stored page, by its vault-relative path."""
+        return {meta.path: _stored_signature(meta) for meta in self.pages}
+
+
+def _stored_signature(meta: PageMeta) -> freshness.FileSignature:
+    """A stored page's change signature: its mtime, its page revision and its size."""
+    return (meta.mtime_ns, meta.revision, meta.size)
 
 
 def signature_lookup(paths) -> Callable[[Path], freshness.FileSignature]:
     """The change signature of one page of ``paths``: a file stat, or a stored page's row."""
     return paths.signature_lookup() if isinstance(paths, StoreCorpus) else freshness.stat_signature
+
+
+def stored_signatures(paths) -> dict[str, freshness.FileSignature]:
+    """The stored pages of ``paths`` and their change signatures, by vault-relative path.
+
+    Empty for a file-mode walk, whose pages are all files: a caller that keys a page on its
+    signature asks here first, and falls back to the file's stat for a page that is not listed.
+    """
+    return paths.stored_signatures() if isinstance(paths, StoreCorpus) else {}
 
 
 def store_serves(vault_root: Path) -> bool:
@@ -516,7 +517,13 @@ def store_serves(vault_root: Path) -> bool:
     return mode.store_mode_for_reads(vault_root)
 
 
-def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable[Path]]):
+def corpus_paths(
+    vault_root: Path,
+    scope: str,
+    disk_walk: Callable[..., Iterable[Path]],
+    *,
+    member: Callable[[str], bool] | None = None,
+):
     """The page paths of ``scope`` ("kb" or "vault"): ``disk_walk()`` in file mode, a
     ``StoreCorpus`` in store mode.
 
@@ -524,13 +531,24 @@ def corpus_paths(vault_root: Path, scope: str, disk_walk: Callable[..., Iterable
     a read of the mode records and calls the walk it always called. In store mode the walk also
     takes ``skip=``, the test that drops a stored page's file unstatted (``walk_md``'s ``skip``), so
     a caller passes its keywords on: ``lambda **walk: walk_md(root, **walk)``.
+
+    ``member`` replaces the scope's own test of which stored pages the corpus lists, for a caller
+    whose walk admits pages by another rule: it takes a stored page's vault-relative path. Give it
+    the path form of that walk's own rule, so a stored page is listed as its file would be.
     """
-    from .vault_store import read
+    from .vault_store import ownership, read
 
     if not store_serves(vault_root):
         return disk_walk()
     with read.snapshot(vault_root) as view:
-        members = tuple(meta for meta in view.pages() if read.corpus_member(meta.path, scope))
+        # Only a path the store owns: the walk lists a stored page's file whenever the store does
+        # not own its path, so listing both would count the page twice.
+        members = tuple(
+            meta
+            for meta in view.pages()
+            if (member(meta.path) if member is not None else read.corpus_member(meta.path, scope))
+            and ownership.classify(meta.path) is ownership.Ownership.PAGE
+        )
     return StoreCorpus(
         vault_root=Path(vault_root), revision=view.revision, pages=members, disk=disk_walk
     )
@@ -632,13 +650,12 @@ def kb_walk_member(rel: str) -> bool:
     have no file yet, so it cannot judge a page. That is the gap: this keeps the rule's path tests
     (the reserved registry, the excluded folders, the Markdown suffix, the conflict copy).
     """
-    from .kbdir import kb_dirname
     from .reserved_paths import classify_logical
 
-    prefix = kb_dirname() + "/"
-    if not rel.startswith(prefix):
+    below = managed_split(rel)
+    if below is None:
         return False
-    parts = rel[len(prefix) :].split("/")
+    parts = below.split("/")
     return (
         walk_name_admits(parts[-1], directory=False)
         and all(walk_name_admits(part, directory=True) for part in parts[:-1])
@@ -894,7 +911,7 @@ class PageStat:
 
 def page_stat(path: Path, vault_root: Path) -> PageStat:
     """What a stat of the page at ``path`` gives: the store's row when the store serves that page,
-    else the file's own stat.
+    else the file's own stat. A pooled original uses its bound object's held metadata.
 
     A stored page's file may lag a commit, be damaged or be absent, so a cache key built on its stat
     would key on the wrong bytes. A page that the store serves but lacks raises
@@ -907,8 +924,37 @@ def page_stat(path: Path, vault_root: Path) -> PageStat:
         meta = read.owned_meta(vault_root, rel)
         if meta is not None:
             return PageStat(meta.mtime, meta.mtime_ns, meta.size)
-    found = path.stat()
+    try:
+        found = path.stat()
+    except FileNotFoundError:
+        from . import held_fs, original_pool, originals, reserved_paths
+
+        try:
+            original = originals.original_state(vault_root, path)
+            if original.local_path is None:
+                raise
+            assert original.binary_sha256 is not None and original.binary_size is not None
+            with original_pool.open_object(vault_root, original.binary_sha256, original.binary_size) as source:
+                version = source.version
+                return PageStat(version.mtime_ns / 1e9, version.mtime_ns, version.size)
+        except (ValueError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError) as error:
+            raise OSError("original metadata is unavailable") from error
     return PageStat(found.st_mtime, found.st_mtime_ns, found.st_size)
+
+
+def stored_page_signature(path: Path, vault_root: Path) -> freshness.FileSignature | None:
+    """The store's change signature for the page at ``path``, or None when a file answers for it.
+
+    A page that the store serves but lacks raises ``FileNotFoundError``, as a stat of a missing file
+    does.
+    """
+    rel = stored_relative(path, vault_root)
+    if rel is None:
+        return None
+    from .vault_store import read
+
+    meta = read.owned_meta(vault_root, rel)
+    return None if meta is None else _stored_signature(meta)
 
 
 def page_relative_path(path: Path, vault_root: Path) -> str:
@@ -969,7 +1015,7 @@ def _parse_page_after_checkpoint(
     # Markdown has a logical LF grammar even when editors persist CRLF on
     # Windows. Normalize for parsing while callers that need exact bytes keep
     # using the original `content`/PathGuard.
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = markdown_lf(text)
 
     fm_match = FRONTMATTER_PATTERN.match(text)
     frontmatter_valid = True

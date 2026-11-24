@@ -43,7 +43,7 @@ Some affected requirements live in active changes. Reconcile their wording befor
 
 The implementation extends the existing parser, currency, catalogue, unit admission, response budget and capability rendering. It adds a stance projection, one table with retention and one owner read-out leaf. It adds no model, classifier, open/cite tracker or ranking change.
 
-The stance cap is the vault-settable `budgets.stance_max_chars` (shipped 1600, raised from an initial 800 after the first real profile), subject to remaining counted-prose space. The move reserves 240 characters. These are initial engineering bounds, not measured optima. Serialized structure remains outside `max_chars`, and `serialized_chars` must describe the final response.
+The stance cap is the vault-settable `budgets.stance_max_chars` (shipped 1600, raised from an initial 800 after the first real profile), and is the block's own bound outside `max_chars`. The move reserves 240 characters. These are initial engineering bounds, not measured optima. Serialized structure remains outside `max_chars`, and `serialized_chars` must describe the final response.
 
 Rows and refs stay in tenant state and out of host logs. Recording has bounded best-effort latency and cannot fail the read. Existing surfaced-item ledgers remain until a replacement proves equivalent identity, surface coverage and durability.
 

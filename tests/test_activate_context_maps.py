@@ -33,6 +33,7 @@ from exomem import (
     freshness,
     lexstore,
     project_keys,
+    prominence,
     read_next_action,
     working_set_runtime,
 )
@@ -76,7 +77,7 @@ def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monke
     assert _without_response_id(absent) == _without_response_id(explicit) == _without_response_id(invalid)
     assert _without_response_id(_activate(vault, **options)) == _without_response_id(invalid)
     assert sum("invalid EXOMEM_ACTIVATION_PACKET" in record.message for record in caplog.records) == 1
-    assert absent["map"]["items"] and absent["anchors"] == []
+    assert absent["map"]["items"] and "anchors" not in absent
     # The rollback: the one setting restores the anchors packet.
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "anchors")
     rollback = _activate(vault, **options)
@@ -85,6 +86,16 @@ def test_the_default_mode_is_maps_and_anchors_is_the_rollback(vault: Path, monke
     # The old encoder's exact wire shape remains unchanged when map_generation is omitted.
     expected = '{"conventions_hash":"c","generation":2,"identity":"i","refs":["p"],"roles":["r"],"roles_hash":"h","v":1}'
     assert encode(identity="i", roles_hash="h", conventions_hash="c", generation=2, refs=["p"], roles=["r"]) == base64.urlsafe_b64encode(expected.encode()).decode().rstrip("=")
+
+
+def test_a_served_maps_packet_carries_no_empty_anchors_arrays(vault: Path) -> None:
+    """An agent read the empty anchors arrays of a maps packet as a recall that found nothing."""
+    _seed_structure(vault)
+    _built(vault).close()
+    _activate(vault, turn="What are the Cargo Sled constraints?")  # warm the published recall inputs
+    found = _activate(vault, turn="What are the Cargo Sled constraints?")
+    assert "map" in found and all(key not in found for key in context_views.ANCHORS_MODE_ARRAYS)
+    assert found["turn_slice"]["items"]
 
 
 @pytest.mark.parametrize("mode", ["anchors", "maps"])
@@ -150,7 +161,9 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         packet = _activate(vault, turn="", max_chars=budget, include_timings=True)
         assert packet["abstained"] is False, packet.get("abstention")
         block = packet["map"]
-        rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"]), block["overflow"]]
+        rendered = [block["description"], *(context_views.map_item_line(item) for item in block["items"])]
+        if block.get("overflow"):
+            rendered.append(block["overflow"])
         if description := packet.get("turn_slice", {}).get("description"):
             rendered.append(description)
         used = len("\n".join(rendered)) + len((packet.get("next_action") or {}).get("say", "")) + _capture_chars(packet)
@@ -160,7 +173,8 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         assert packet["budget"]["used_chars"] <= budget
         # A field with nothing to say is absent, not empty or null.
         assert all(item.get(field, "present") not in ([], None) for item in block["items"] for field in ("topics", "lifecycle_class", "state"))
-        assert "Domain maps:" in block["overflow"]
+        if block.get("overflow"):
+            assert "Domain maps:" in block["overflow"]
         decoded = working_set_runtime.decode_continuity(packet["continuity"])
         assert decoded["map_generation"] == block["generation"] == packet["generation"]["map_generation"]
         assert decoded["refs"] == []
@@ -172,6 +186,25 @@ def test_the_map_fits_the_budget(vault: Path, monkeypatch: pytest.MonkeyPatch) -
         with context_views._OWNER_MAPS_LOCK:
             context_views._OWNER_MAPS.clear()
         assert cached["map"] == _activate(vault, turn="", max_chars=budget)["map"]
+
+
+def test_the_first_requests_map_does_not_pay_for_the_capture_rules_text(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first request of a session carries the capture block, whose full-rule text has its own bound.
+
+    A map that shrank with that text would lose items on the turn where recall matters most.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _world(vault, with_w=False)
+    _built(vault).close()
+    served = _activate(vault, turn="", max_chars=6000)
+    monkeypatch.setattr(prominence, "_CAPTURE_RULES", "More guidance. " * 200)
+
+    heavier = _activate(vault, turn="", max_chars=6000)
+
+    assert len(heavier["capture_policy"]["rules"]) > 3 * len(served["capture_policy"]["rules"])
+    assert served["map"]["items"]
+    assert heavier["map"] == served["map"]
+    assert heavier["budget"]["used_chars"] == served["budget"]["used_chars"]
 
 
 def _topic_titles(packet: dict) -> set[str]:
@@ -347,8 +380,8 @@ def test_a_withheld_entry_changes_no_byte_of_the_maps_packet(vault: Path, tmp_pa
     owners, guests = [], []
     for root in (vault, twin):
         _cold()
-        owners.append(_activate(root, max_chars=1000))  # fill the owner cache before a restricted read
-        guests.append(_activate(root, _external(), max_chars=1000))
+        owners.append(_activate(root, max_chars=2000))  # fill the owner cache before a restricted read
+        guests.append(_activate(root, _external(), max_chars=2000))
     assert json.dumps(_without_response_id(guests[0]), sort_keys=True) == json.dumps(_without_response_id(guests[1]), sort_keys=True)
     assert guests[0]["generation"] == guests[1]["generation"]
     assert working_set_runtime.decode_continuity(guests[0]["continuity"]) == working_set_runtime.decode_continuity(guests[1]["continuity"])

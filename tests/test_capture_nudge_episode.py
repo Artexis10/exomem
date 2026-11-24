@@ -1248,6 +1248,35 @@ class TestCaptureReminderLandingGate:
             turn = _codex_turn(tmp_path, shape, "git push", exit_code=1)
         assert _stop(monkeypatch, capsys, turn) is None
 
+    def test_a_file_the_reply_hands_over_fires_with_no_commit(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        """A survey or a hand-over written to a file and described in the reply holds work that no push marks."""
+        write = ("Write", {"file_path": "/work/notes/lease-summary.md", "content": "rent, landlord"}, False)
+        named = _claude_turn(tmp_path, "I wrote the lease details to lease-summary.md.", write)
+        assert _is_capture_reminder(_stop(monkeypatch, capsys, named))
+
+    def test_a_file_the_reply_never_names_stays_silent(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        scratch = ("Write", {"file_path": "/work/src/app.py", "content": "x"}, False)
+        edit = ("Edit", {"file_path": "/work/src/app.py", "old_string": "a", "new_string": "b"}, False)
+        assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, SUBSTANTIVE, scratch)) is None
+        # An edit is working state even when the reply names the file.
+        assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "I updated app.py.", edit, name="edit.jsonl")) is None
+
+    def test_a_failed_write_is_no_hand_over(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        failed = ("Write", {"file_path": "/work/notes/lease-summary.md", "content": "x"}, True)
+        assert _stop(monkeypatch, capsys, _claude_turn(tmp_path, "Saved to lease-summary.md", failed)) is None
+
+    def test_the_file_name_must_stand_as_a_whole_token_in_the_reply(self) -> None:
+        write = {"name": "Write", "input": {"file_path": "notes\\a.md"}, "failed": False}
+        assert hook._handed_over_file([write], "The summary is in a.md.")
+        assert not hook._handed_over_file([write], "The summary is in data.md.")
+        assert not hook._handed_over_file([{**write, "input": {"file_path": "/work/dir/"}}], "Done.")
+
     def test_the_most_aggressive_level_keeps_the_length_gate(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
     ) -> None:

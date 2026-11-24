@@ -11,7 +11,6 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -30,7 +29,7 @@ from test_vault_store_migration import (  # noqa: F401
     OPERATOR_SECRET,
     vault,
 )
-from test_vault_store_write_path import planned, revision, store_rows, tree
+from test_vault_store_write_path import commits_since, planned, revision, store_rows, tree
 
 from exomem import (
     curation,
@@ -51,10 +50,6 @@ from exomem.collection_store import connection
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import most_restrictive_principal, request_scope
 from exomem.vault_store import batch, importer, ownership, projector, read, write
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 # The fixtures of the suites that build this vault, re-exported by assignment: a test that takes one
 # is then no redefinition of an import.
@@ -126,7 +121,7 @@ def test_a_trash_whose_commit_refuses_puts_the_binary_back(served, writer, monke
         delete_file.delete_file(served, path=DIAGRAM, confirm=True)
 
     assert refused.value.code == "STALE_DELETE"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
@@ -392,7 +387,7 @@ def test_a_folder_trash_refuses_a_note_nothing_imported_and_a_page_added_after_i
         delete_directory.delete_directory(served, path=FOLDER, confirm=True, recursive=True)
 
     assert raced.value.code == "PATH_GUARD_CHANGED"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert tree(served) == before, "nothing moved, and no sidecar or temporary stays"
 
 
@@ -491,7 +486,7 @@ def test_a_folder_recovery_refuses_a_page_added_below_its_destination_after_its_
         recover_from_trash.recover_from_trash(served, trash_path=trashed)
 
     assert refused.value.code == "DEST_EXISTS"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert tree(served) == before
 
 

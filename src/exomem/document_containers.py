@@ -91,25 +91,31 @@ def is_container(path: str | Path) -> bool:
 
 
 @contextmanager
-def inspect(stream: BinaryIO) -> Iterator[Inspection]:
+def inspect(stream: BinaryIO, *, vault_root: Path | None = None) -> Iterator[Inspection]:
     """Inspect all members before returning any payload; never interpret signature XML."""
+    from . import media_capacity
+
     position = stream.tell()
     result = Inspection()
+    if vault_root is not None and not media_capacity.managed_allocations(vault_root):
+        vault_root = None
     with ExitStack() as held:
         try:
             with archive_members.open_zip(stream, max_entries=MAX_ENTRIES) as archive:
-                entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES, portable_paths=True)
-                if sum(entry.info.file_size for entry in entries) > MAX_EXPANDED_BYTES:
-                    raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the aggregate byte limit")
+                entries = _container_entries(archive)
                 total = 0
                 mimetype = None
                 for entry in entries:
-                    suffix = PurePosixPath(entry.path).suffix.casefold()
-                    metadata = entry.path == "mimetype" or entry.path.startswith("META-INF/")
-                    supported = not metadata and suffix in _PAYLOAD_SUFFIXES
+                    metadata = _container_metadata(entry.path)
+                    supported = _supported_payload(entry.path)
                     if supported and len(result.members) >= MAX_PAYLOADS:
                         raise archive_members.ArchiveError(archive_members.TOO_LARGE, "the container exceeds the payload count limit")
                     target = held.enter_context(tempfile.TemporaryFile(mode="w+b")) if supported else None
+                    sink = target
+                    if target is not None and vault_root is not None:
+                        sink = media_capacity.MeteredSink(
+                            vault_root, target, device=os.fstat(target.fileno()).st_dev, size=entry.info.file_size,
+                        )
                     digest = hashlib.sha256()
                     size = 0
                     marker = bytearray()
@@ -119,8 +125,8 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
                         if total > MAX_EXPANDED_BYTES:
                             raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the streaming byte limit")
                         digest.update(chunk)
-                        if target is not None:
-                            target.write(chunk)
+                        if sink is not None:
+                            sink.write(chunk)
                         if entry.path == "mimetype" and len(marker) <= len(_MIMETYPE):
                             marker.extend(chunk[:len(_MIMETYPE) + 1])
                     if entry.path == "mimetype":
@@ -150,6 +156,34 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
         if result.state != "inspected":
             held.close()  # Opaque custody must not compete with payload spools after failed or unsupported inspection.
         yield result
+
+
+def _container_metadata(path: str) -> bool:
+    return path == "mimetype" or path.startswith("META-INF/")
+
+
+def _supported_payload(path: str) -> bool:
+    return not _container_metadata(path) and PurePosixPath(path).suffix.casefold() in _PAYLOAD_SUFFIXES
+
+
+def _container_entries(archive):
+    entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES, portable_paths=True)
+    if sum(entry.info.file_size for entry in entries) > MAX_EXPANDED_BYTES:
+        raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the aggregate byte limit")
+    return entries
+
+
+def commit_payload_sizes(stream: BinaryIO) -> tuple[int, ...]:
+    """Read bounded member sizes from the complete container before reserving inspection and publication space."""
+    position = stream.tell()
+    try:
+        with archive_members.open_zip(stream, max_entries=MAX_ENTRIES) as archive:
+            sizes = tuple(entry.info.file_size for entry in _container_entries(archive) if _supported_payload(entry.path))
+        return sizes[:MAX_PAYLOADS]
+    except archive_members.ArchiveError:
+        return ()  # The normal inspection preserves an invalid container without publishing extracted members.
+    finally:
+        stream.seek(position)
 
 
 def in_payload_tree(path: str) -> bool:
@@ -191,6 +225,16 @@ class Plan:
         return {**self.inspection.metadata(), "payloads": list(self.children)}
 
 
+def _require_unclaimed(vault_root: Path, page: str) -> None:
+    """Refuse a member page at a path that a moved member page still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, page)
+    except prior_claims.ReservedPathError as error:
+        raise ValueError(f"CONTAINER_CONFLICT: {error.reason}") from None
+
+
 @contextmanager
 def plan(
     vault_root: Path, *, parent: str, parent_page: str, digest: str, size: int,
@@ -200,7 +244,7 @@ def plan(
     from . import media_types, preserve
     from .governance import raw_protection
 
-    with inspect(stream) as inspection:
+    with inspect(stream, vault_root=vault_root) as inspection:
         result = Plan(inspection, [], [], [])
         tree, scope, category = preserve.artifact_location(parent)
         for member in inspection.members:
@@ -225,11 +269,19 @@ def plan(
             page_path = vault_root / page
             # An evicted member counts as absent here: the container holds its bytes, so recovery rebuilds it from
             # the container stream, with no store download, and keeps working during a store outage.
+            # A pooled member keeps no file at its logical path; its bytes live once in the shared pool, so it needs the
+            # same identity proof as a present file and no second, ordinary copy.
             if existing and binary_path.exists():
                 _require_identity(vault_root, artifact, member.sha256, member.size)
                 result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="content", expected_content_hash=member.sha256))
+            elif existing and originals.pooled(vault_root, artifact) is not None:
+                _require_identity(vault_root, artifact, member.sha256, member.size)
+                result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="absent"))
             else:
-                result.writes.append(PlannedWrite(binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256), create_only=True, expected_hash=MISSING_CONTENT_HASH))
+                result.writes.append(PlannedWrite(
+                    binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256),
+                    create_only=True, expected_hash=MISSING_CONTENT_HASH, media_allocation=True,
+                ))
             if existing and page_path.exists():
                 before = reserved_paths.read_generic_bytes(vault_root, page).data.decode("utf-8")
                 fm = parse_frontmatter(before, strict=True)[0]
@@ -247,6 +299,7 @@ def plan(
                 if previous is None:
                     result.writes.append(PlannedWrite(page_path, annotate(before, "container_member", binding), expected_hash=content_hash(before)))
             else:
+                _require_unclaimed(vault_root, page)
                 result.writes.append(PlannedWrite(page_path, rendered, create_only=True, expected_hash=MISSING_CONTENT_HASH))
             result.children.append(artifact)
         yield result
@@ -279,9 +332,19 @@ def _require_identity(root: Path, path: str, digest: str, size: int, *, artifact
             actual = proof.sha256, proof.size
         except reserved_paths.ReservedPathLeafError:
             stored = originals.original_state(root, path)
-            if stored.state != "evicted" or stored.reference is None:
+            if stored.local_path is not None:
+                # A present pooled original: read the shared object behind the binding check, never assume its digest.
+                from . import media_store
+
+                try:
+                    head = media_store.pooled_head(root, path, stored)
+                except (reserved_paths.ReservedPathLeafError, OSError):
+                    raise ValueError("container original is missing or unsafe") from None
+                actual = head.sha256, head.size
+            elif stored.state != "evicted" or stored.reference is None:
                 raise ValueError("container original is missing or unsafe") from None
-            actual = stored.binary_sha256, stored.binary_size
+            else:
+                actual = stored.binary_sha256, stored.binary_size
     if actual != (digest, size):
         raise ValueError("container original identity does not match its provenance")
     return originals.BinaryBinding(path, actual[0], actual[1])

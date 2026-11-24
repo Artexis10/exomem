@@ -192,6 +192,11 @@ def start_service(root):
     return service
 
 
+#: The lease of an owner that a test kills, fails or lets lapse on purpose, so the test waits out
+#: that lease in seconds.
+SHORT_LEASE_TTL = "3"
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     """A lease-configured shell over the real coordinator, with the migration fence on."""
@@ -207,8 +212,11 @@ def env(tmp_path, monkeypatch):
         "EXOMEM_WRITER_LEASE_VAULT_ID": "migrate", "EXOMEM_WRITER_LEASE_REPLICA_ID": "service",
         "EXOMEM_WRITER_LEASE_TOKEN": "lease", "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-service"),
         "EXOMEM_WRITER_LEASE_PREFERRED": "1",
-        # Short, so that a crash test waits out a dead owner's lease in seconds.
-        "EXOMEM_WRITER_LEASE_TTL": "3",
+        # Long enough that a loaded runner's late renewal does not let a live owner's lease
+        # expire, which fences the owner's own step with WRITER_FENCED. An owner that a test
+        # kills, whose step fails and leaves its lease, or whose lease it lets lapse on purpose
+        # takes SHORT_LEASE_TTL instead.
+        "EXOMEM_WRITER_LEASE_TTL": "10",
     }.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(capability, "RELEASED", MIGRATE)
@@ -518,7 +526,8 @@ def crash_apply(tmp_path, cut, released=MIGRATE):
 
     spawn = multiprocessing.get_context("spawn")
     child = spawn.Process(target=_apply_and_crash, args=(
-        {**os.environ, OPERATOR: "operator"}, tmp_path / "coordinator.sqlite", cut, released))
+        {**os.environ, OPERATOR: "operator", "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
+        tmp_path / "coordinator.sqlite", cut, released))
     child.start()
     child.join(120)
     assert child.exitcode == 73
@@ -574,6 +583,8 @@ def test_a_write_after_a_cutover_stops_before_its_fence_cut_reaches_the_store(en
     root = legacy_vault(env)
     if stop == "refused":
         with monkeypatch.context() as outage:
+            # The refused apply's lease stays.
+            outage.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
             outage.setattr(writer_lease.LeaseCoordinatorClient, "transition_collection_store_fence",
                            lambda *args, **kwargs: (_ for _ in ()).throw(OpError(
                                "WRITER_COORDINATOR_UNAVAILABLE", "coordinator unavailable", "retry")))
@@ -977,7 +988,7 @@ def test_refresh_reproves_ineligible_donors_instead_of_reusing_their_proof(env, 
         elif alteration == "format":
             basis["collections"][LEDGER_ID]["material_version"] = 999
         elif alteration == "material":
-            donor.execute("UPDATE items SET governance_json='[]' WHERE collection_id=?", (LEDGER_ID,))
+            donor.execute("UPDATE item_rows SET governance_json='[]' WHERE collection_id=?", (LEDGER_ID,))
         else:
             donor.execute("UPDATE projection_state SET stat_identity='changed' WHERE collection_id=?", (LEDGER_ID,))
         donor.execute("UPDATE store_meta SET value=? WHERE key='migration_basis'", (json.dumps(basis),))
@@ -1021,7 +1032,7 @@ def test_seal_rejects_changed_staging_without_publishing_or_removing_evidence(en
             inode = path.stat().st_ino
             with closing(sqlite3.connect(path, isolation_level=None)) as stage:
                 if replacement == "body":
-                    stage.execute("UPDATE items SET body='late material change' WHERE collection_id=?", (CID,))
+                    stage.execute("UPDATE item_rows SET body='late material change' WHERE collection_id=?", (CID,))
                 else:
                     stage.execute("UPDATE collections SET legacy_audit_status='ok' WHERE collection_id=?", (CID,))
             assert path.stat().st_ino == inode
@@ -1196,7 +1207,7 @@ def test_seal_keeps_sqlite_writer_exclusion_until_the_committed_version_is_captu
         def external_write(self):
             with closing(connect(path, isolation_level=None, timeout=0)) as external:
                 try:
-                    external.execute("UPDATE items SET body='write after seal commit' WHERE collection_id=?", (CID,))
+                    external.execute("UPDATE item_rows SET body='write after seal commit' WHERE collection_id=?", (CID,))
                 except sqlite3.OperationalError as error:
                     assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
                     blocked.append(True)
@@ -1335,7 +1346,7 @@ def test_installation_rejects_a_replaced_sealed_source_before_moving_the_live_st
         else:
             inode = path.stat().st_ino
             with closing(sqlite3.connect(path, isolation_level=None)) as stage:
-                stage.execute("UPDATE items SET body='post-seal material change' WHERE collection_id=?", (CID,))
+                stage.execute("UPDATE item_rows SET body='post-seal material change' WHERE collection_id=?", (CID,))
             assert path.stat().st_ino == inode
         evidence.append(path)
         return install(session, leaf, check, **kwargs)
@@ -1531,15 +1542,19 @@ def test_an_s1_restore_cut_before_its_fork_finishes_on_the_next_apply(s1, capsys
     assert live_head(root)[1] == head  # restored, not yet continued
     from test_collection_store_s1_gate import _until
 
-    service = Service(root, writer_lease.start_server_lifecycle())
-    try:
-        # Until the fork, takeover refuses the migration's replica, so the restored store commits nothing.
-        _until(lambda: service.manager.status().get("collection_store", {}).get("status") in {
-            "admitted", "sync_pending"}, seconds=30)
-        assert service.manager.status()["collection_store"]["status"] == "sync_pending"
-    finally:
-        with suppress(OpError):
-            service.stop()
+    with pytest.MonkeyPatch.context() as short:
+        # A stop that fails leaves the lease.
+        short.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
+        service = Service(root, writer_lease.start_server_lifecycle())
+        try:
+            # Until the fork, takeover refuses the migration's replica, so the restored store
+            # commits nothing.
+            _until(lambda: service.manager.status().get("collection_store", {}).get("status") in {
+                "admitted", "sync_pending"}, seconds=30)
+            assert service.manager.status()["collection_store"]["status"] == "sync_pending"
+        finally:
+            with suppress(OpError):
+                service.stop()
     wait_out_the_lease()
     capsys.readouterr()
 
@@ -1575,6 +1590,8 @@ def test_a_restored_store_that_served_a_write_before_its_migration_went_live_mig
     edit_by_hand(root)
     if stop == "blocked":
         with monkeypatch.context() as patched:
+            # The blocked apply's lease stays.
+            patched.setenv("EXOMEM_WRITER_LEASE_TTL", SHORT_LEASE_TTL)
             patched.setattr(legacy_import, "_prove_round_trip", refuse_ledger_round_trip(legacy_import._prove_round_trip))
             assert migrate(root, "apply") == 1  # restored, then the new staging's proof blocks
     else:

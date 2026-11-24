@@ -11,20 +11,22 @@ import datetime as dt
 import functools
 import hashlib
 import json
+import logging
 import os
 import re
+import threading
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager, nullcontext
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
-from . import capabilities, held_fs, vault
+from . import capabilities, held_fs, trash_metadata, vault
 from .collection_profiles import PLANNING_PROFILE
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_split
 from .vault import (
     BatchWriteError,
     ContentHashMismatchError,
@@ -33,10 +35,13 @@ from .vault import (
     PathGuardError,
     PlannedWrite,
     batch_atomic_write,
+    in_append_only_tree,
     read_guarded_bytes,
     read_guarded_text,
 )
 from .vault import content_hash as text_content_hash
+
+log = logging.getLogger(__name__)
 
 # nosemgrep: ep-word-set -- maintain_memory defines these closed curation action tokens.
 CURATION_ACTIONS: Final[tuple[str, ...]] = (
@@ -50,8 +55,17 @@ CURATION_ACTIONS: Final[tuple[str, ...]] = (
     "apply-compensation",
     # Reverts one recent promotion in one call (`promotion_revert.py`).
     "revert",
+    # Derives and seals the plan that relocates a set of pages (`relocate.py`).
+    "relocate",
 )
 READ_ONLY_ACTIONS: Final[frozenset[str]] = frozenset({"work-item", "preview", "status"})
+#: The actions that hold the vault mutation boundary themselves, one canonical seam at a time
+#: (`guards_own_boundary`). `relocate` prepares read-only and seals through `seal_proposal`, as
+#: `propose` does. `revert` is absent: it still relies on the command's boundary.
+# nosemgrep: ep-word-set -- members of the closed curation action enum above, decided per action's code.
+_SELF_GUARDED_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"propose", "propose-compensation", "relocate", "apply", "resume", "apply-compensation"}
+)
 # nosemgrep: ep-word-set -- the closed step kinds this module implements, each with its own handler.
 STEP_KINDS: Final[tuple[str, ...]] = (
     "create-note",
@@ -60,11 +74,27 @@ STEP_KINDS: Final[tuple[str, ...]] = (
     "edit",
     "supersede",
     "move",
+    "repoint-links",
     "delete",
     "recover",
     "fold-recap-revisions",
     "fold-duplicate",
 )
+#: The step that rewrites the referrers of a plan's moves once, as its last step.
+REPOINT_STEP_KIND: Final[str] = "repoint-links"
+#: The private inverses of the relocation steps and of a pointer correction. Like the fold
+#: inverses, only a compensation plan that `propose_compensation` derives may carry them: a public
+#: kind that writes caller-given bytes would bypass every leaf.
+UNMOVE_STEP_KIND: Final[str] = "unmove"
+UNREPOINT_STEP_KIND: Final[str] = "unrepoint-links"
+REVERT_POINTER_STEP_KIND: Final[str] = "revert-pointer"
+# nosemgrep: ep-word-set -- the three private inverse step kinds this module defines, a closed set.
+_RELOCATION_INVERSE_KINDS: Final[frozenset[str]] = frozenset(
+    {UNMOVE_STEP_KIND, UNREPOINT_STEP_KIND, REVERT_POINTER_STEP_KIND}
+)
+#: The steps that may bind a page that an earlier step of their plan writes, at that step's exact
+#: sealed after hash (`_prepare_manifest`): each runs only after the step it follows.
+_CHAINED_STEP_KINDS: Final[frozenset[str]] = frozenset({REPOINT_STEP_KIND, *_RELOCATION_INVERSE_KINDS})
 #: The recap fold (add-first-class-duplicate-handling A7): an episode's superseded recap revisions
 #: move into compiled history. It is public, and with its undo it is the only step that retires a
 #: Source: `move`, `delete` and `recover` keep refusing, because the fold trashes a file only after
@@ -130,8 +160,28 @@ RECOVERY_PUBLICATION_NOT_STARTED: Final[str] = "publication_not_started"
 # The compatibility flag `allow_records` admits only the private leaves: the episode leaves here,
 # and `REMOVE_RELATION_STEP_KIND` beside them (it may share a plan with its siblings).
 _EPISODE_STEP_KINDS = COLLECTION_STEP_KINDS | PRESERVATION_STEP_KINDS | {OBSERVE_UNIT_STEP_KIND}
+#: The step kinds whose leaf holds the vault mutation boundary itself and, under it, rechecks the
+#: sealed pre-step state of what it writes (a hash, or a new page's absence), so `_execute_next` runs
+#: their leaf outside every hold of its own. A move and its inverse recheck the source's sealed hash
+#: in `_dispatch_step`'s before-rename stage. A pointer `edit` and any episode-bound step still run
+#: whole under curation's hold.
+# nosemgrep: ep-word-set -- closed protocol set over this module's kinds; each member's leaf does that recheck.
+SELF_GUARDED_STEP_KINDS: Final[frozenset[str]] = frozenset(
+    {"create-note", "edit", OBSERVE_UNIT_STEP_KIND, *COLLECTION_STEP_KINDS, "move", UNMOVE_STEP_KIND}
+)
 MAX_STEPS: Final[int] = 64
 MAX_PLAN_BYTES: Final[int] = 256 * 1024
+#: The most bytes one stored run artifact may hold. The seal refuses a plan above it and every read
+#: of a run artifact refuses one above it, so a plan that seals always loads again.
+MAX_SEALED_BYTES: Final[int] = 4 * MAX_PLAN_BYTES
+#: The step cap of a plan that the server derives (`derived_by`). An agent-written plan keeps
+#: `MAX_STEPS`; a derived plan's size is bounded by `MAX_SEALED_BYTES`.
+MAX_DERIVED_STEPS: Final[int] = 2048
+#: The sealed `derived_by` values: the server action that derived a plan's steps.
+# nosemgrep: ep-word-set -- the closed set of curation actions that derive a plan, not vocabulary.
+DERIVED_BY: Final[frozenset[str]] = frozenset({"relocate"})
+#: The rows of each group that a derived plan's summary shows; its counts cover every row.
+SUMMARY_SAMPLE: Final[int] = 20
 MAX_TITLE_CHARS: Final[int] = 500
 MAX_STEP_ID_CHARS: Final[int] = 80
 MAX_WHY_CHARS: Final[int] = 500
@@ -143,7 +193,7 @@ _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _HEX24 = re.compile(r"^[0-9a-f]{24}$")
 _PLAN_FIELDS = frozenset({"version", "title", "steps", "entity_candidate"})
 _STEP_FIELDS = frozenset({"step_id", "kind", "args"})
-_SEALED_FIELDS = frozenset({"binding_manifest", "registry_ids", "plan_type", "forward_plan_id", "episode_invocation_version"})
+_SEALED_FIELDS = frozenset({"binding_manifest", "registry_ids", "plan_type", "forward_plan_id", "episode_invocation_version", "derived_by", "approval_summary"})
 _ENTITY_CANDIDATE_FIELDS = frozenset(
     {
         "review_ref",
@@ -273,8 +323,10 @@ _SUPERSEDE_FIELDS = frozenset(
         "vocabulary_decision",
     }
 )
+# A move moves bytes and lineage; the plan's `repoint-links` step rewrites links.
+# `project_folders` names the folder of a project key that its `fields` patch registers.
 _MOVE_FIELDS = frozenset(
-    {"old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason"}
+    {"old_path", "new_path", "fields", "project_folders", "allow_curated", "promotion_reason"}
 )
 _DELETE_FIELDS = frozenset(
     {
@@ -301,6 +353,12 @@ _FOLD_DUPLICATE_FIELDS = frozenset({"canonical", "copy", "why"})
 # nosemgrep: ep-word-set -- the unfold steps' one argument name, fixed by their schemas.
 _UNFOLD_FIELDS = frozenset({"fold"})
 _ARG_FIELDS = {
+    # The referring pages one of several repoint steps rewrites (`repoint_links.prepare`).
+    REPOINT_STEP_KIND: frozenset({"referrers"}),
+    # Each inverse carries the sealed material of the step it reverses, under one name.
+    UNMOVE_STEP_KIND: frozenset({"move"}),
+    UNREPOINT_STEP_KIND: frozenset({"repoint"}),
+    REVERT_POINTER_STEP_KIND: frozenset({"pointer"}),
     FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
     UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
     FOLD_DUPLICATE_STEP_KIND: _FOLD_DUPLICATE_FIELDS,
@@ -323,6 +381,10 @@ _ARG_FIELDS = {
     "update-record": _UPDATE_RECORD_FIELDS,
 }
 _REQUIRED_FIELDS = {
+    REPOINT_STEP_KIND: frozenset(),
+    UNMOVE_STEP_KIND: frozenset({"move"}),
+    UNREPOINT_STEP_KIND: frozenset({"repoint"}),
+    REVERT_POINTER_STEP_KIND: frozenset({"pointer"}),
     FOLD_RECAP_STEP_KIND: _FOLD_RECAP_FIELDS,
     UNFOLD_RECAP_STEP_KIND: frozenset({"fold"}),
     FOLD_DUPLICATE_STEP_KIND: _FOLD_DUPLICATE_FIELDS,
@@ -350,6 +412,11 @@ _REQUIRED_FIELDS = {
 class CurationError(ValueError):
     code: str
     reason: str
+    #: The plan step that preparation refused, when preparation names one (`_prepare_manifest`).
+    step_id: str | None = None
+    #: The plan's pages a refusal names when it is narrower than its step: a repoint step's
+    #: refusal names the moved pages, by their old paths, whose referrer it refused.
+    pages: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         return f"{self.code}: {self.reason}"
@@ -357,6 +424,95 @@ class CurationError(ValueError):
 
 def _error(code: str, reason: str) -> CurationError:
     return CurationError(code, reason)
+
+
+#: How long a caller refused by `_run_claim` waits before it retries: one step's short work.
+_RUN_BUSY_RETRY_AFTER_MS: Final[int] = 1000
+
+
+@dataclass
+class CurationRunBusy(CurationError):
+    """Another call is executing the same run, or recorded this call's step as committed first.
+
+    Refused at the run claim, this call wrote nothing. Refused at the settle, the receipt that the
+    other call recorded accounts for the step, and this call's own leaf may have committed.
+    """
+
+    #: Whether this call's leaf committed: true when this call saw its batch commit the witness,
+    #: null when it cannot tell. Not named `committed`: the dispatcher would store the refusal as
+    #: the call's terminal, and a retry with the same key would replay it instead of continuing.
+    leaf_committed: bool | None = False
+
+    def as_public_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.reason,
+            "remediation": "Retry after the other call finishes this run's step; the retry continues from the run's receipts.",
+            "ok": False,
+            "error_code": self.code,
+            "status": "retryable",
+            "committed": self.leaf_committed,
+            "retry_after_ms": _RUN_BUSY_RETRY_AFTER_MS,
+        }
+
+
+_RUN_CLAIMS_LOCK = threading.Lock()
+#: (vault root, run id) -> [owning thread, depth]. A forward run and its compensation share a run id.
+_RUN_CLAIMS: dict[tuple[Path, str], list[int]] = {}
+
+
+@contextmanager
+def _run_claim(vault_root: Path, run_id: str) -> Iterator[None]:
+    """Claim one run for this thread, or refuse at once with `CurationRunBusy`.
+
+    Curation no longer holds the vault boundary across a step, so this claim keeps two callers in
+    this process from executing one run's step at once. It never waits: a caller that holds the
+    vault boundary, such as an episode resume, cannot deadlock on it. The thread that holds the
+    claim joins it again.
+    """
+    key = (Path(vault_root).resolve(), run_id)
+    thread = threading.get_ident()
+    with _RUN_CLAIMS_LOCK:
+        claim = _RUN_CLAIMS.get(key)
+        if claim is not None and claim[0] != thread:
+            raise CurationRunBusy("CURATION_RUN_BUSY", "another call is executing this curation run")
+        if claim is None:
+            claim = _RUN_CLAIMS[key] = [thread, 0]
+        claim[1] += 1
+    try:
+        yield
+    finally:
+        with _RUN_CLAIMS_LOCK:
+            claim[1] -= 1
+            if claim[1] == 0:
+                del _RUN_CLAIMS[key]
+
+
+@contextmanager
+def _step_boundary(vault_root: Path, operation: str) -> Iterator[None]:
+    """Hold the vault mutation boundary for one canonical seam, or join this thread's hold.
+
+    A nested guard re-enters the lock but advances the commit generation again, so a seam
+    reached under an outer hold takes none.
+    """
+    from . import writer_lease
+
+    manager = writer_lease.active_manager()
+    if manager.holds_mutation_boundary(vault_root):
+        yield
+        return
+    with manager.mutation_guard(
+        vault_root,
+        request_id=writer_lease.active_mutation_request_id(),
+        operation=operation,
+        holder_kind="command",
+    ):
+        yield
+
+
+def guards_own_boundary(kwargs: Mapping[str, Any]) -> bool:
+    """Whether these `maintain_memory` arguments run a curation action that holds the boundary itself."""
+    return kwargs.get("mode") == "curation" and kwargs.get("curation_action") in _SELF_GUARDED_ACTIONS
 
 
 RECORDS_STORE_UNSUPPORTED: Final[str] = "CURATION_RECORDS_STORE_UNSUPPORTED"
@@ -378,6 +534,11 @@ def store_request_id(run_identity: str, operation_identity: str) -> str:
     step committed; the later run then meets the moved container hash and refuses as stale.
     """
     return f"{run_identity}/{operation_identity}"
+
+
+def _is_governed_trash(path: str) -> bool:
+    """Whether `path` lies in the managed root's trash folder, compared without regard to case."""
+    return trash_metadata.is_inside_trash(path, key=str.casefold)
 
 
 def _records_store_unsupported(kind: str) -> CurationError:
@@ -444,7 +605,10 @@ def _require_relocation_history_capability(_vault_root: Path) -> NoReturn:
 def _require_plan_relocation_history(
     vault_root: Path, plan: Mapping[str, Any]
 ) -> None:
-    if any(step.get("kind") in {"move", "delete", "recover"} for step in plan["steps"]):
+    # A move records its intent before its rename and recovers without renaming; `delete` and
+    # `recover` still have no such history.
+    # nosemgrep: ep-word-set -- the two step kinds this module defines without relocation history.
+    if any(step.get("kind") in {"delete", "recover"} for step in plan["steps"]):
         _require_relocation_history_capability(vault_root)
 
 
@@ -507,21 +671,8 @@ def _folded_segment(part: str) -> str:
     return unicodedata.normalize("NFKC", part).casefold().strip().rstrip(". ")
 
 
-def normalize_target_path(
-    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, allow_fold: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
-) -> str:
-    """A confined governed path. `allow_records` is the Records leaf's alone:
-    it admits the Records tree, spelled exactly as the Records layer is, and
-    nothing else, so that leaf can neither leave the tree nor open it to any
-    other kind. Every other kind compares folded segments, so a spelling the
-    filesystem folds onto a protected tree is that tree. `allow_fold` is the fold
-    steps' alone: it admits the Sources tree and the trash, and no other protected tree."""
-    if _planning_identity is not None:
-        from . import structured_collections
-
-        if path != structured_collections.plan_ref(*_planning_identity):
-            raise _error("CURATION_TARGET_PROTECTED", "Planning store identity changed")
-        return path
+def _confined_path(path: Any, field: str) -> str:
+    """`path` as a vault-relative POSIX path that names no parent, empty or current segment."""
     raw = _require_string(path, field).replace("\\", "/").strip().lstrip("/")
     if (
         raw.endswith("/")
@@ -529,14 +680,34 @@ def normalize_target_path(
         or any(part in {"", ".", ".."} for part in raw.split("/"))
     ):
         raise _error("INVALID_CURATION_PATH", f"{field} is not a confined vault path")
-    prefix = f"{kb_dirname()}/"
-    if not raw.startswith(prefix):
+    return raw
+
+
+def normalize_target_path(
+    path: Any, *, field: str = "path", allow_trash: bool = False, allow_records: bool = False, allow_fold: bool = False, allow_append_only: bool = False, _planning_tree: bool = False, _planning_identity: tuple[str, str] | None = None, _native_paths: frozenset[str] | None = None
+) -> str:
+    """A confined governed path. `allow_records` is the Records leaf's alone:
+    it admits the Records tree, spelled exactly as the Records layer is, and
+    nothing else, so that leaf can neither leave the tree nor open it to any
+    other kind. Every other kind compares folded segments, so a spelling the
+    filesystem folds onto a protected tree is that tree. `allow_fold` is the fold
+    steps' alone: it admits the Sources tree and the trash, and no other protected tree.
+    `allow_append_only` is a pointer correction's alone: it admits the append-only trees, whose
+    pages then change only through the governed pointer write."""
+    if _planning_identity is not None:
+        from . import structured_collections
+
+        if path != structured_collections.plan_ref(*_planning_identity):
+            raise _error("CURATION_TARGET_PROTECTED", "Planning store identity changed")
+        return path
+    raw = _confined_path(path, field)
+    relative = managed_split(raw)
+    if relative is None:
         raise _error("CURATION_TARGET_PROTECTED", f"{field} must target governed knowledge")
     if _native_paths is not None:
         if raw not in _native_paths:
             raise _error("CURATION_TARGET_PROTECTED", "path is outside the sealed native core")
         return raw
-    relative = raw[len(prefix) :]
     parts = relative.split("/")
     first = _folded_segment(parts[0])
     compact = "/".join(_folded_segment(part) for part in parts).replace("_", "-")
@@ -551,11 +722,13 @@ def normalize_target_path(
         if parts[0] != "Records" or len(parts) < 2:
             raise _error("CURATION_TARGET_PROTECTED", f"{field} must stay inside Records")
         return raw
-    if (first in PROTECTED_TREES and not (allow_fold and first in _FOLD_TREES)) or compact.startswith(
+    if (
+        first in PROTECTED_TREES and not ((allow_fold or allow_append_only) and first in _FOLD_TREES)
+    ) or compact.startswith(
         "workflow-contract/"
     ):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} belongs to another typed owner")
-    if first == "_trash" and not (allow_trash or allow_fold):
+    if first == trash_metadata.TRASH_SUBPATH and not (allow_trash or allow_fold):
         raise _error("CURATION_TARGET_PROTECTED", f"{field} targets trash internals")
     return raw
 
@@ -618,7 +791,14 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         ):
             raise _error("INVALID_CURATION_PLAN", "relation bindings are invalid")
     elif kind == "edit":
-        args["path"] = normalize_target_path(args.get("path"), field="path")
+        raw_operation = args.get("operation")
+        # A frontmatter patch may name an append-only page; proposal admits only a pointer field.
+        args["path"] = normalize_target_path(
+            args.get("path"),
+            field="path",
+            allow_append_only=isinstance(raw_operation, Mapping)
+            and raw_operation.get("kind") == "patch_frontmatter",
+        )
         _require_string(args.get("why"), f"steps[{ordinal}].args.why", max_chars=MAX_WHY_CHARS)
         if not isinstance(args.get("operation"), Mapping):
             raise _error("INVALID_CURATION_PLAN", "edit operation must be a closed object")
@@ -689,9 +869,54 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
             raise _error(
                 "INVALID_CURATION_PLAN", "update-record requires the reviewed expected_item_version"
             )
+    elif kind == REPOINT_STEP_KIND and "referrers" in args:
+        referrers = args["referrers"]
+        if not isinstance(referrers, list) or not referrers:
+            raise _error("INVALID_CURATION_PLAN", "repoint-links referrers must list pages")
+        # Shape only: the step applies the unsplit step's own read and write admission to each page.
+        args["referrers"] = sorted({_confined_path(page, "referrers") for page in referrers})
+        # A name that differs only in case is the same page on a case-blind volume.
+        if len({vault.vault_name_key(page) for page in args["referrers"]}) != len(referrers):
+            raise _error("INVALID_CURATION_PLAN", "repoint-links referrers repeat a page")
     elif kind == "move":
         args["old_path"] = normalize_target_path(args.get("old_path"), field="old_path")
         args["new_path"] = normalize_target_path(args.get("new_path"), field="new_path")
+        if "fields" in args:
+            fields = args["fields"]
+            if not isinstance(fields, Mapping) or not fields or not all(
+                isinstance(name, str) and name for name in fields
+            ):
+                raise _error(
+                    "INVALID_CURATION_PLAN", "move fields must be a non-empty object of fields"
+                )
+            args["fields"] = json.loads(canonical_json(fields))
+        if "project_folders" in args:
+            folders = args["project_folders"]
+            if (
+                "fields" not in args
+                or not isinstance(folders, Mapping)
+                or not folders
+                or not all(
+                    isinstance(key, str) and isinstance(folder, str) and folder.strip()
+                    for key, folder in folders.items()
+                )
+            ):
+                raise _error(
+                    "INVALID_CURATION_PLAN",
+                    "move project_folders must name a folder for each project key its fields patch registers",
+                )
+            from . import project_keys
+
+            for folder in folders.values():
+                try:
+                    project_keys.require_portable_folder(folder)
+                except project_keys.InvalidProjectFolderError as error:
+                    raise _error("INVALID_CURATION_PLAN", str(error)) from error
+            args["project_folders"] = json.loads(canonical_json(folders))
+    elif kind in _RELOCATION_INVERSE_KINDS:
+        (material,) = args.values()
+        if not isinstance(material, Mapping):
+            raise _error("INVALID_CURATION_PLAN", f"{kind} carries its sealed material as an object")
     elif kind == "delete":
         args["path"] = normalize_target_path(args.get("path"), field="path")
         if args.get("confirm") is not True:
@@ -700,7 +925,7 @@ def _validate_args(kind: str, raw: Any, ordinal: int) -> dict[str, Any]:
         trash_path = normalize_target_path(
             args.get("trash_path"), field="trash_path", allow_trash=True
         )
-        if not trash_path.casefold().startswith(f"{kb_dirname().casefold()}/_trash/"):
+        if not _is_governed_trash(trash_path):
             raise _error(
                 "INVALID_CURATION_PLAN", "recover requires an exact governed trash identity"
             )
@@ -828,16 +1053,25 @@ def _validate_entity_candidate_binding(raw: Any) -> dict[str, Any]:
     }
 
 
-def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_inverse: bool = False) -> dict[str, Any]:
+def validate_forward_plan(
+    raw: Any, *, allow_records: bool = False, allow_fold_inverse: bool = False, derived: bool = False
+) -> dict[str, Any]:
     """A closed forward plan. The compatibility flag `allow_records` admits
     the private leaves (the episode leaves and the promotion revert's
     `remove-relation`); only their sealers and sealed plans pass it.
     `allow_fold_inverse` admits the two unfold steps, which only a
-    compensation derivation and a plan it sealed may carry."""
+    compensation derivation and a plan it sealed may carry. `derived` is a
+    server derivation's (`DERIVED_BY`) alone: its step cap is `MAX_DERIVED_STEPS`
+    and its size cap `MAX_SEALED_BYTES`, so an agent cannot write a plan past `MAX_STEPS`."""
+    max_steps, max_bytes = (MAX_DERIVED_STEPS, MAX_SEALED_BYTES) if derived else (MAX_STEPS, MAX_PLAN_BYTES)
     kinds = (
         *STEP_KINDS,
         *((*_EPISODE_STEP_KINDS, REMOVE_RELATION_STEP_KIND) if allow_records else ()),
-        *((UNFOLD_RECAP_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND) if allow_fold_inverse else ()),
+        *(
+            (UNFOLD_RECAP_STEP_KIND, UNFOLD_DUPLICATE_STEP_KIND, *sorted(_RELOCATION_INVERSE_KINDS))
+            if allow_fold_inverse
+            else ()
+        ),
     )
     if not isinstance(raw, Mapping):
         raise _error("INVALID_CURATION_PLAN", "plan must be an object")
@@ -849,8 +1083,8 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_i
     steps = value.get("steps")
     if not isinstance(steps, list) or not steps:
         raise _error("INVALID_CURATION_PLAN", "plan.steps must be a non-empty list")
-    if len(steps) > MAX_STEPS:
-        raise _error("CURATION_PLAN_TOO_LARGE", f"plan has more than {MAX_STEPS} steps")
+    if len(steps) > max_steps:
+        raise _error("CURATION_PLAN_TOO_LARGE", f"plan has more than {max_steps} steps")
     normalized_steps: list[dict[str, Any]] = []
     seen: set[str] = set()
     for ordinal, raw_step in enumerate(steps):
@@ -876,6 +1110,7 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_i
                 "args": _validate_args(kind, step.get("args"), ordinal),
             }
         )
+    _require_repoint_placement(normalized_steps)
     normalized = {"version": 1, "title": title, "steps": normalized_steps}
     if any(step["kind"] in _EPISODE_STEP_KINDS for step in normalized_steps) and (
         len(normalized_steps) != 1 or "entity_candidate" in value
@@ -885,18 +1120,57 @@ def validate_forward_plan(raw: Any, *, allow_records: bool = False, allow_fold_i
         normalized["entity_candidate"] = _validate_entity_candidate_binding(
             value["entity_candidate"]
         )
-    if len(canonical_json_bytes(normalized)) > MAX_PLAN_BYTES:
-        raise _error("CURATION_PLAN_TOO_LARGE", f"canonical plan exceeds {MAX_PLAN_BYTES} bytes")
+    if len(canonical_json_bytes(normalized)) > max_bytes:
+        raise _error("CURATION_PLAN_TOO_LARGE", f"canonical plan exceeds {max_bytes} bytes")
     return normalized
+
+
+def _require_repoint_placement(steps: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse `repoint-links` steps that are not the plan's last steps or follow no `move` step.
+
+    Several repoint steps split the rewrite by referring page: each names its `referrers`, and no
+    page is named twice, so each referrer is rewritten by exactly one step.
+    """
+    kinds = [step["kind"] for step in steps]
+    count = kinds.count(REPOINT_STEP_KIND)
+    if not count:
+        return
+    if any(kind != REPOINT_STEP_KIND for kind in kinds[-count:]) or "move" not in kinds[:-count]:
+        raise _error(
+            "CURATION_STEP_INVALID",
+            "repoint-links steps must be the plan's last steps and follow a move step",
+        )
+    if count == 1:
+        return
+    named: set[str] = set()
+    for step in steps[-count:]:
+        referrers = step["args"].get("referrers")
+        if referrers is None:
+            raise _error(
+                "CURATION_STEP_INVALID", "each of several repoint-links steps names its referrers"
+            )
+        keys = {vault.vault_name_key(page) for page in referrers}
+        if keys & named:
+            raise _error(
+                "CURATION_STEP_INVALID", "two repoint-links steps name the same referrer"
+            )
+        named |= keys
 
 
 def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise _error("CURATION_PLAN_CORRUPT", "stored plan is not an object")
     base = {key: value for key, value in raw.items() if key in _PLAN_FIELDS}
+    derived_by = raw.get("derived_by")
+    if "derived_by" in raw and derived_by not in DERIVED_BY:
+        raise _error("CURATION_PLAN_CORRUPT", "stored plan derivation is invalid")
+    if "approval_summary" in raw and (derived_by is None or not isinstance(raw["approval_summary"], Mapping)):
+        raise _error("CURATION_PLAN_CORRUPT", "stored approval summary is invalid")
     # A stored plan was admitted by `propose`, which alone decides whether a
     # Records leaf may be sealed.
-    normalized = validate_forward_plan(base, allow_records=True, allow_fold_inverse=True)
+    normalized = validate_forward_plan(
+        base, allow_records=True, allow_fold_inverse=True, derived=derived_by is not None
+    )
     _unknown_fields(dict(raw), _PLAN_FIELDS | _SEALED_FIELDS, "stored plan")
     manifest = raw.get("binding_manifest", [])
     registries = raw.get("registry_ids", {})
@@ -922,6 +1196,8 @@ def _validate_sealed_plan(raw: Any) -> dict[str, Any]:
             if isinstance(raw.get("forward_plan_id"), str)
             else {}
         ),
+        **({"derived_by": derived_by} if derived_by is not None else {}),
+        **({"approval_summary": dict(raw["approval_summary"])} if "approval_summary" in raw else {}),
     }
 
 
@@ -999,7 +1275,7 @@ def _schema_rows(vault_root: Path) -> list[dict[str, str]]:
     from . import semantic_language_registry
     from .vault_store import mode
 
-    schema_root = Path(vault_root) / kb_dirname() / "_Schema"
+    schema_root = managed_root(Path(vault_root)) / "_Schema"
     registry = semantic_language_registry.registry_path(vault_root)
     contracts_root = schema_root / "contracts"
     if mode.store_mode_for_reads(Path(vault_root)):
@@ -1107,11 +1383,19 @@ def _guarded_absent(vault_root: Path, path: str) -> bool:
         return False
 
 
-def _read_page(vault_root: Path, raw: str) -> tuple[str, str]:
+def _read_page(
+    vault_root: Path, raw: str, *, resolve: Callable[[str], str] | None = None
+) -> tuple[str, str]:
+    """The page `raw` names, read guarded. `resolve` is a caller's resolver over one identity
+    census for many names (`memory_refs.identifier_resolver_read_only`)."""
     from . import memory_refs
 
     try:
-        path = memory_refs.resolve_identifier_read_only(vault_root, raw)
+        path = (
+            resolve(raw)
+            if resolve is not None
+            else memory_refs.resolve_identifier_read_only(vault_root, raw)
+        )
     except memory_refs.ReferenceError as error:
         raise _error(error.code, error.reason) from error
     path = normalize_target_path(path, field="work_item.path")
@@ -1129,11 +1413,16 @@ _UNRESOLVED_WIKILINK_REASON = "unresolved_identity_recurs"
 _UNRESOLVED_WIKILINK_GRAMMAR = "unresolved-wikilink-v1"
 
 
+#: The one review family whose item carries an entity-candidate binding. Any other review
+#: item names a page, and this lane opens that page for it.
+ENTITY_CANDIDATE_FAMILY = "entity_recurrence"
+
+
 def _entity_candidate_binding(item: Any, *, registry_fallback: str) -> dict[str, Any]:
     reasons = [
         reason
         for reason in list(getattr(item, "reasons", None) or [])
-        if reason.get("category") == "entity_recurrence"
+        if reason.get("category") == ENTITY_CANDIDATE_FAMILY
     ]
     if len(reasons) != 1:
         raise _error(
@@ -1276,6 +1565,62 @@ def _candidate_step_kinds(state: str) -> list[str]:
     }[state]
 
 
+def _pages_of_review_item(vault_root: Path, review_ref: str) -> list[str] | None:
+    """The pages a current review item that is not an entity candidate stands for now, else None.
+
+    A page-level item stands for its page; a vault-wide family's one item stands for the batch
+    its family names (`attention.pages_of_item`). The audience filter of the review surface
+    applies, so a page the caller may not see resolves to None exactly as a ref that names no
+    item does.
+    """
+    from . import attention as attention_module
+
+    batch = attention_module.pages_of_item(vault_root, review_ref)
+    if batch is not None:
+        return batch
+    try:
+        item = attention_module.item_by_ref(vault_root, review_ref)
+    except ValueError:
+        return None
+    if any(reason.get("category") == ENTITY_CANDIDATE_FAMILY for reason in item.reasons):
+        return None
+    return [item.path]
+
+
+def _page_work_item(
+    vault_root: Path, selected: list[str], max_chars_per_page: int
+) -> dict[str, Any]:
+    """The bounded context of these explicitly named pages."""
+    pages: list[dict[str, Any]] = []
+    truncated: list[str] = []
+    seen: set[str] = set()
+    for raw in selected:
+        path, source = _read_page(Path(vault_root), raw)
+        if path in seen:
+            continue
+        seen.add(path)
+        was_truncated = len(source) > max_chars_per_page
+        if was_truncated:
+            truncated.append(path)
+        pages.append(
+            {
+                "path": path,
+                "content": source[:max_chars_per_page],
+                "content_hash": text_content_hash(source),
+                "chars": len(source),
+                "truncated": was_truncated,
+            }
+        )
+    return {
+        "action": "work-item",
+        "mutated": False,
+        "pages": pages,
+        "truncation": {"pages": truncated, "disclosed": bool(truncated)},
+        "registry_ids": registry_identities(Path(vault_root)),
+        "step_schemas": step_schemas(),
+    }
+
+
 def work_item(
     vault_root: Path,
     *,
@@ -1292,7 +1637,7 @@ def work_item(
         if refs or paths:
             raise _error(
                 "CURATION_WORK_ITEM_MIXED",
-                "an entity-candidate work item cannot add unrelated refs or paths",
+                "a review item's work item cannot add unrelated refs or paths",
             )
         if hydration_recheck is not None and (
             type(hydration_recheck) is not int or not 1 <= hydration_recheck <= 8
@@ -1318,8 +1663,21 @@ def work_item(
                 Path(vault_root), str(review_ref)
             )
         except CurationError as error:
-            if hydration_recheck is None or error.code != "CURATION_ENTITY_CANDIDATE_STALE":
+            if error.code != "CURATION_ENTITY_CANDIDATE_STALE":
                 raise
+            if hydration_recheck is None:
+                # Not an entity candidate: a page-level item opens its page, as a ref to
+                # that page does, and a vault-wide item opens the first pages of its batch.
+                # A ref that names no current item keeps the refusal.
+                covered = _pages_of_review_item(Path(vault_root), str(review_ref))
+                if not covered:
+                    raise
+                opened = _page_work_item(
+                    Path(vault_root), covered[:MAX_WORK_ITEM_PAGES], max_chars_per_page
+                )
+                if len(covered) > MAX_WORK_ITEM_PAGES:
+                    opened["unopened_pages"] = len(covered) - MAX_WORK_ITEM_PAGES
+                return opened
             # A continuation is read-only and identity-bound.  When the exact
             # row disappears after the terminal batch receipt, the useful
             # result is bounded closure rather than a misleading stale error.
@@ -1431,34 +1789,7 @@ def work_item(
             "CURATION_WORK_ITEM_TOO_LARGE",
             f"work-item may contain at most {MAX_WORK_ITEM_PAGES} explicit pages",
         )
-    pages: list[dict[str, Any]] = []
-    truncated: list[str] = []
-    seen: set[str] = set()
-    for raw in selected:
-        path, source = _read_page(Path(vault_root), raw)
-        if path in seen:
-            continue
-        seen.add(path)
-        was_truncated = len(source) > max_chars_per_page
-        if was_truncated:
-            truncated.append(path)
-        pages.append(
-            {
-                "path": path,
-                "content": source[:max_chars_per_page],
-                "content_hash": text_content_hash(source),
-                "chars": len(source),
-                "truncated": was_truncated,
-            }
-        )
-    return {
-        "action": "work-item",
-        "mutated": False,
-        "pages": pages,
-        "truncation": {"pages": truncated, "disclosed": bool(truncated)},
-        "registry_ids": registry_identities(Path(vault_root)),
-        "step_schemas": step_schemas(),
-    }
+    return _page_work_item(vault_root, selected, max_chars_per_page)
 
 
 def _read_target(vault_root: Path, path: str) -> tuple[str, str]:
@@ -1574,6 +1905,151 @@ def _preservation_call(vault_root: Path, kind: str, args: Mapping[str, Any], *, 
             return result.as_dict()
 
 
+#: The steps that rename a page: a `move`, and the inverse move that compensates one.
+# nosemgrep: ep-word-set -- the two step kinds this module defines that rename a page.
+_RENAME_STEP_KINDS: Final[frozenset[str]] = frozenset({"move", UNMOVE_STEP_KIND})
+#: The two run phases that leave a step to run; every other phase ends the run.
+# nosemgrep: ep-word-set -- the two run phases this module defines that leave a step to run.
+_OPEN_RUN_PHASES: Final[frozenset[str]] = frozenset({"executing", "compensating"})
+#: The steps that rewrite pages in place to sealed bytes, append-only pages among them.
+# nosemgrep: ep-word-set -- the three step kinds this module defines that rewrite sealed pages.
+_REWRITE_STEP_KINDS: Final[frozenset[str]] = frozenset(
+    {REPOINT_STEP_KIND, UNREPOINT_STEP_KIND, REVERT_POINTER_STEP_KIND}
+)
+
+
+@dataclass
+class _Chain:
+    """What the earlier steps of a plan leave, for the steps that may bind it (`_CHAINED_STEP_KINDS`).
+
+    `pages` holds each page an earlier step leaves at exact bytes, by path, with that step's id
+    and hash; `vacated` holds each path an earlier step removes and no later one writes; `moves`
+    holds the plan's forward moves in order. `inverse_moves` judges the plan's inverse moves
+    against that state (`semantic_writes.ProjectedMoves`), made on the first one.
+    """
+
+    moves: list[tuple[str, str]] = field(default_factory=list)
+    pages: dict[str, tuple[str, str, str]] = field(default_factory=dict)
+    vacated: set[str] = field(default_factory=set)
+    inverse_moves: Any = None
+
+    def text(self, vault_root: Path, path: str) -> str:
+        """The page's text as the earlier steps leave it, else as the vault holds it now."""
+        held = self.pages.get(path)
+        if held is not None:
+            return held[2]
+        source, _hash = _read_target(vault_root, path)
+        return source
+
+    def projection(self) -> dict[str, str | None]:
+        """Each page the earlier steps leave at exact bytes, and None at each path they vacate."""
+        return {
+            **dict.fromkeys(self.vacated),
+            **{path: text for path, (_step, _hash, text) in self.pages.items()},
+        }
+
+
+def _require_lifecycle_settled(vault_root: Path, pages: Mapping[str, str]) -> None:
+    """Refuse a relocation step, at proposal, on a page whose lifecycle record it cannot carry."""
+    from . import semantic_writes
+
+    try:
+        semantic_writes.require_lifecycle_settled(vault_root, pages)
+    except semantic_writes.SemanticWriteError as error:
+        raise _error(error.code, error.reason) from error
+
+
+def _move_call(vault_root: Path, args: Mapping[str, Any]) -> dict[str, Any]:
+    """The move leaf's arguments for a curation `move` step.
+
+    The step moves bytes and lineage. Its `fields` patch rides the move's content transform, so the
+    page changes where it belongs in the same commit; the plan's `repoint-links` step rewrites the
+    links, so the leaf's `update_wikilinks` stays off.
+    """
+    from . import move_file as move_module
+    from . import page_fields
+    from . import set_frontmatter_field as frontmatter
+
+    call: dict[str, Any] = {
+        key: args[key]
+        for key in ("old_path", "new_path", "allow_curated", "promotion_reason")
+        if key in args
+    }
+    call["update_wikilinks"] = False
+    fields = dict(args.get("fields") or {})
+    if not fields:
+        return call
+    pointers = page_fields.pointer_fields(vault_root)
+    refused = sorted(name for name in fields if name not in pointers)
+    if refused:
+        raise _error(
+            "CURATION_STEP_INVALID",
+            f"a move's fields patch sets only pointer fields, and {refused[0]!r} is not one",
+        )
+    destination = str(args["new_path"])
+
+    def patch(text: str) -> str:
+        try:
+            return frontmatter.apply_pointer_patch(vault_root, destination, text, fields)
+        except frontmatter.SetFrontmatterError as error:
+            raise move_module.MoveFileError(code=error.code, reason=error.reason) from error
+
+    try:
+        call["extra_writes"] = frontmatter.pointer_patch_writes(
+            vault_root, fields, folders=args.get("project_folders")
+        )
+    except frontmatter.SetFrontmatterError as error:
+        raise _error(error.code, error.reason) from error
+    call["content_transform"] = patch
+    return call
+
+
+def _unmove_call(material: Mapping[str, Any]) -> dict[str, Any]:
+    """The move leaf's arguments for an inverse move: the sealed line delta alone decides the
+    bytes, so the forward move's lineage entry and `fields` patch go and no entry is added."""
+    from . import duplicate_fold
+    from . import move_file as move_module
+
+    def restore(text: str) -> str:
+        if text_content_hash(text) != material["before_hash"]:
+            raise move_module.MoveFileError(
+                code="SOURCE_CHANGED", reason="the page changed since its inverse move was sealed"
+            )
+        return duplicate_fold._apply(  # noqa: SLF001 - the shared sealed line delta
+            text, material["restore"], forward=False, path=str(material["old_path"])
+        )
+
+    return {
+        "old_path": material["old_path"],
+        "new_path": material["new_path"],
+        "update_wikilinks": False,
+        "allow_curated": bool(material.get("allow_curated", False)),
+        "content_transform": restore,
+        "_exact_content": True,
+    }
+
+
+def _takes_pointer_route(vault_root: Path, args: Mapping[str, Any]) -> bool:
+    """Whether an `edit` step lands through the governed pointer write.
+
+    An append-only page has no other route (proposal admits only a frontmatter patch there). Any
+    other page takes it for a patch of one pointer field that no operation owns, so where a page
+    belongs changes reversibly for every page type, the types that `replace_memory` cannot
+    re-create among them. The field set and the owners come from the page-field registry.
+    """
+    from . import page_fields
+
+    if in_append_only_tree(args["path"]) is not None:
+        return True
+    operation = args.get("operation") or {}
+    field = operation.get("field")
+    return (
+        operation.get("kind") == "patch_frontmatter"
+        and field in page_fields.pointer_fields(vault_root)
+        and field not in page_fields.writers(vault_root)
+    )
+
+
 def _prepare_step(
     vault_root: Path,
     step: Mapping[str, Any],
@@ -1581,8 +2057,14 @@ def _prepare_step(
     *,
     relation_pending: bool = False,
     projection: Any = None,
+    chain: _Chain | None = None,
 ) -> dict[str, Any]:
-    """Run the existing leaf's read-only preparation or exact structural guards."""
+    """Run the existing leaf's read-only preparation or exact structural guards.
+
+    `chain` holds what the plan's earlier steps leave, which a `repoint-links` step and the
+    relocation inverses read. The item's `exact` key maps each page the step leaves at exact
+    bytes to those bytes; `_prepare_manifest` takes it off before sealing.
+    """
     from . import (
         commands,
         relation_queue,
@@ -1610,6 +2092,8 @@ def _prepare_step(
     expected_absent = False
     effect_before: list[dict[str, Any]] = []
     effect_after: list[dict[str, Any]] = []
+    exact: dict[str, str] = {}
+    chain = chain if chain is not None else _Chain()
 
     try:
         if kind in PRESERVATION_STEP_KINDS:
@@ -1654,6 +2138,42 @@ def _prepare_step(
                 prepared["relation_review_hash"] = validation["draft_hash"]
             after_hash = text_content_hash(preflight.source)
             effect_before = [{"path": path, "absent": True}]
+            effect_after = [{"path": path, "content_hash": after_hash}]
+        elif kind == "edit" and _takes_pointer_route(vault_root, args):
+            from . import duplicate_fold
+            from . import set_frontmatter_field as frontmatter
+
+            # A pointer correction (`_takes_pointer_route`): the leaf refuses any field that is not
+            # a registry pointer, or that another operation owns. Its undo reverts the pointer
+            # write's record or the sealed line delta, so no preimage is sealed.
+            path = args["path"]
+            source, before_hash = _read_target(vault_root, path)
+            operation = dict(args["operation"])
+            if operation.get("expected_hash") != before_hash:
+                raise _error("CURATION_BINDING_STALE", f"reviewed hash for {path!r} is stale")
+            try:
+                frontmatter.set_pointer_field(
+                    vault_root,
+                    path=path,
+                    field=operation["field"],
+                    value=operation.get("value"),
+                    why=args["why"],
+                    expected_hash=before_hash,
+                    validate_only=True,
+                )
+            except frontmatter.SetFrontmatterError as error:
+                raise _error(error.code, error.reason) from error
+            after_text = frontmatter.apply_pointer_patch(
+                vault_root, path, source, {operation["field"]: operation.get("value")}
+            )
+            # The pointer write sets no `updated`, so the sealed bytes are exactly the bytes it lands.
+            prepared = {"pointer": True}
+            if in_append_only_tree(path) is None:
+                # A writable page reverts by this line delta, as a repoint's writable rows do.
+                prepared["restore"] = duplicate_fold._delta(source, after_text)  # noqa: SLF001
+            after_hash = text_content_hash(after_text)
+            exact[path] = after_text
+            effect_before = [{"path": path, "content_hash": before_hash}]
             effect_after = [{"path": path, "content_hash": after_hash}]
         elif kind == "edit":
             path = args["path"]
@@ -1916,8 +2436,24 @@ def _prepare_step(
             path, before_hash, after_hash = folded["path"], folded["before_hash"], folded["after_hash"]
             prepared = folded["prepared"]
             effect_before, effect_after = folded["effect_before"], folded["effect_after"]
-        elif kind == "move":
-            validation = move_module.move_file(vault_root, validate_only=True, **args)
+        elif kind in _RENAME_STEP_KINDS:
+            from . import duplicate_fold, semantic_writes
+
+            if kind == "move":
+                call = _move_call(vault_root, args)
+            else:
+                material = dict(args["move"])
+                for key in ("old_path", "new_path"):
+                    material[key] = normalize_target_path(material.get(key), field=f"move.{key}")
+                # The leaf judges the inverse move's policy; its bytes come from the sealed delta,
+                # applied below to the page as the plan's earlier steps leave it, and its contract
+                # is judged from that state too.
+                call = {
+                    **_unmove_call(material),
+                    "content_transform": lambda text: text,
+                    "_caller_judges_contract": True,
+                }
+            validation = move_module.move_file(vault_root, validate_only=True, **call)
             if not isinstance(validation, move_module.MoveFileValidation):
                 raise _error("CURATION_STEP_INVALID", "move leaf did not return a validation")
             if not validation.atomic_supported:
@@ -1926,20 +2462,104 @@ def _prepare_step(
                     "curation move requires one unpaired Markdown page",
                 )
             path = normalize_target_path(validation.result.old_path, field="old_path")
-            preimage, before_hash = _read_target(vault_root, path)
             destination = normalize_target_path(validation.result.new_path, field="new_path")
+            if path not in chain.pages:
+                # An earlier step of the plan carries the record of a page it leaves.
+                _require_lifecycle_settled(vault_root, {path: chain.text(vault_root, path)})
+            if kind == "move":
+                # The undo lands the pre-step bytes from the sealed `restore` delta, so no preimage.
+                source, before_hash = _read_target(vault_root, path)
+                after_text = validation.after_text
+                if after_text is None or after_text == source:
+                    # Recovery tells a rename that ran from one that did not by the destination's
+                    # bytes, so a move must change them: it records lineage in the frontmatter.
+                    raise _error(
+                        "CURATION_ATOMICITY_UNAVAILABLE",
+                        "a curation move records the page's lineage, which needs a frontmatter block",
+                    )
+                prepared = {
+                    "destination": destination,
+                    "rename_after": list(validation.rename_after),
+                    # The inverse move's bytes: the line delta back to the pre-step page.
+                    "restore": duplicate_fold._delta(source, after_text),  # noqa: SLF001
+                }
+            else:
+                current = chain.text(vault_root, path)
+                before_hash = text_content_hash(current)
+                if before_hash != material["before_hash"]:
+                    raise _error("CURATION_BINDING_STALE", f"{path!r} changed since its move")
+                after_text = duplicate_fold._apply(  # noqa: SLF001 - the sealed line delta
+                    current, material["restore"], forward=False, path=path
+                )
+                if text_content_hash(after_text) != material["after_hash"]:
+                    raise _error(
+                        "CURATION_BINDING_STALE", f"{path!r} no longer returns to its pre-step bytes"
+                    )
+                # An undo restores the links before it moves the pages back, so a page that linked
+                # this one names its old path again by then.
+                if chain.inverse_moves is None:
+                    chain.inverse_moves = semantic_writes.ProjectedMoves(vault_root)
+                chain.inverse_moves.refuse_blocked(
+                    old_path=path,
+                    new_path=destination,
+                    source=current,
+                    moved_source=after_text,
+                    projection=chain.projection(),
+                )
+                prepared = {"destination": destination}
             expected_absent = True
-            prepared = {
-                "destination": destination,
-                "files_touched": list(validation.result.files_touched),
-                "rename_after": list(validation.rename_after),
-            }
-            after_hash = before_hash
-            effect_before = [dict(item) for item in validation.before]
-            effect_after = [dict(item) for item in validation.after]
+            after_hash = text_content_hash(after_text)
+            exact[destination] = after_text
+            effect_before = [
+                {"path": path, "content_hash": before_hash},
+                {"path": destination, "absent": True},
+            ]
+            effect_after = [
+                {"path": path, "absent": True},
+                {"path": destination, "content_hash": after_hash},
+            ]
+        elif kind == REPOINT_STEP_KIND:
+            from . import repoint_links
+
+            sealed = repoint_links.prepare(
+                vault_root,
+                chain.moves,
+                {page: text for page, (_s, _h, text) in chain.pages.items()},
+                only=args.get("referrers"),
+            )
+            rows = sealed["pages"]
+            path = str(rows[0]["path"])
+            prepared = sealed
+            after_hash = rows[0]["after_hash"]
+            effect_before = [{"path": row["path"], "content_hash": row["before_hash"]} for row in rows]
+            effect_after = [{"path": row["path"], "content_hash": row["after_hash"]} for row in rows]
+        elif kind in (UNREPOINT_STEP_KIND, REVERT_POINTER_STEP_KIND):
+            from . import repoint_links
+
+            (material,) = args.values()
+            rows = list(material["pages"])
+            for row in rows:
+                normalize_target_path(row.get("path"), field="pages.path", allow_append_only=True)
+            restored = repoint_links.restorations(
+                vault_root, material, lambda page: chain.text(vault_root, page)
+            )
+            _require_lifecycle_settled(
+                vault_root,
+                {
+                    page: current
+                    for page, current, _before, revert in restored
+                    if revert is None and page not in chain.pages
+                },
+            )
+            exact = {page: before for page, _current, before, _revert in restored}
+            path = str(rows[0]["path"])
+            after_hash = rows[0]["before_hash"]
+            effect_before = [{"path": row["path"], "content_hash": row["after_hash"]} for row in rows]
+            effect_after = [{"path": row["path"], "content_hash": row["before_hash"]} for row in rows]
         elif kind == "delete":
             path = args["path"]
-            preimage, before_hash = _read_target(vault_root, path)
+            # The undo recovers the exact trash identity its receipt seals, so no preimage.
+            _source, before_hash = _read_target(vault_root, path)
             validation = delete_module.delete_file(vault_root, validate_only=True, **args)
             if not isinstance(validation, delete_module.DeleteFileValidation):
                 raise _error("CURATION_STEP_INVALID", "delete leaf did not return a validation")
@@ -1949,7 +2569,8 @@ def _prepare_step(
         else:
             assert kind == "recover"
             path = args["trash_path"]
-            preimage, before_hash = _read_target(vault_root, path)
+            # The undo deletes the restored path again, so no preimage.
+            _source, before_hash = _read_target(vault_root, path)
             validation = recover_module.recover_from_trash(
                 vault_root,
                 trash_path=path,
@@ -1996,6 +2617,7 @@ def _prepare_step(
         "effect_before": effect_before,
         "effect_after": effect_after,
         "preimage": preimage,
+        "exact": exact,
     }
 
 
@@ -2003,20 +2625,92 @@ def _prepare_step(
 _CREATED_TITLE_ARGUMENT = {"create-note": "title", "supersede": "title", "create-entity": "name"}
 
 
-def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+#: The step kinds whose preparation leaves state outside their binding item: a duplicate fold's
+#: projection and an inverse move's projected contract. A `Preparation` keeps no such step.
+_UNKEPT_STEP_KINDS: Final[frozenset[str]] = _DUPLICATE_FOLD_KINDS | _RELOCATION_INVERSE_KINDS
+
+
+def _step_digest(step: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json_bytes(step)).hexdigest()
+
+
+@dataclass
+class Preparation:
+    """The steps of a derived plan prepared so far, so that preparing can stop between steps and
+    a later call can go on from them (`prepare_proposal`).
+
+    `steps` holds, for each prepared step in plan order, the step's digest, its binding item and
+    the exact bytes it leaves, which later steps of the plan read. `steps` and `registry_ids`
+    are plain JSON, so a caller can keep them between calls. `this_call` and `slowest` count only
+    the steps this object prepared itself.
+    """
+
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    #: The registry identities the kept steps were prepared under.
+    registry_ids: dict[str, str] = field(default_factory=dict)
+    this_call: int = 0
+    slowest: float = 0.0
+
+    def keep_opening(
+        self, steps: Sequence[Mapping[str, Any]], registry_ids: Mapping[str, str]
+    ) -> None:
+        """Keep only the prepared steps that open `steps` unchanged, under the same registries.
+
+        A step's binding item depends only on the vault, the registries and the steps before
+        it, so a kept step is the one a fresh preparation would make. The seal still checks
+        every binding against the vault.
+        """
+        if any(self.registry_ids.get(name, value) != value for name, value in registry_ids.items()):
+            self.steps.clear()
+        kept = 0
+        # The kept steps may outnumber the new plan's, or fall short of it.
+        for step, done in zip(steps, self.steps, strict=False):
+            if done["digest"] != _step_digest(step) or step["kind"] in _UNKEPT_STEP_KINDS:
+                break
+            kept += 1
+        del self.steps[kept:]
+        self.registry_ids = dict(registry_ids)
+
+
+class PreparationPaused(Exception):
+    """Preparing stopped between steps because its caller's time ran short. The `Preparation`
+    holds every step prepared so far."""
+
+
+def _prepare_manifest(
+    vault_root: Path,
+    steps: Sequence[Mapping[str, Any]],
+    *,
+    preparation: Preparation | None = None,
+    stop: Callable[[float], bool] | None = None,
+) -> list[dict[str, Any]]:
     """Prepare each step with links to the pages the plan's earlier steps create.
 
     A later step may link to a page an earlier step creates, so its links are
-    rendered as they will be once that page exists. Only that rendering is
-    projected; the semantic checks still read the vault as it is. A plan that
-    projection cannot make run as sealed is refused here instead of stopping
-    part-way: a later step bound to a path an earlier step writes, a step that
-    links to a page an earlier step supersedes, and a step that gives a relation
-    disposition while it links to a page an earlier step creates (that link is
-    its relation once the page exists). A step whose leaf validation already blocks
-    is refused too (`_refuse_blocked`). Relocation steps, which remove pages, are
-    refused before any step runs (`_require_plan_relocation_history`).
+    rendered as they will be once that page exists. Only that rendering, and an
+    inverse move's contract, are projected; the other semantic checks still read
+    the vault as it is. A plan that projection cannot make run as sealed is
+    refused here instead of stopping part-way: a later step bound to a path an
+    earlier step writes, a step that links to a page an earlier step supersedes,
+    and a step that gives a relation disposition while it links to a page an
+    earlier step creates (that link is its relation once the page exists). A
+    step whose leaf validation already blocks is refused too
+    (`_refuse_blocked`). Relocation steps, which remove pages, are refused
+    before any step runs (`_require_plan_relocation_history`).
+
+    A step of `_CHAINED_STEP_KINDS` may bind a page that an earlier step leaves at
+    exact bytes (a move's destination, a pointer correction, an inverse's restored
+    page) at that step's sealed after hash. The item's `chained` map names that
+    earlier step for each such path, and `_binding_blockers` checks the path only
+    once that step has committed.
+
+    With a `preparation`, the steps it holds count as prepared, and each step
+    prepared here is added to it. Before each later step, `stop` is asked with the
+    slowest step this call prepared; when it answers true, `PreparationPaused`
+    ends the call. The first step of a call always runs, so every call advances.
     """
+    import time
+
     from . import duplicate_fold
     from . import find as find_module
 
@@ -2028,7 +2722,56 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
     # page reads them through `projection`, which proves each one's whole chain of hashes.
     chained: set[str] = set()
     projection = duplicate_fold.Projection()
+    chain = _Chain()
+
+    def record(step: Mapping[str, Any], item: dict[str, Any], exact: Mapping[str, str]) -> None:
+        """Add a prepared step to the manifest and to what the later steps read."""
+        manifest.append(item)
+        after = {str(entry["path"]) for entry in item["effect_after"]}
+        if step["kind"] == "move":
+            chain.moves.append((str(item["path"]), str(item["postcondition"]["path"])))
+        for path in after:
+            chain.pages.pop(path, None)
+        chain.vacated = (chain.vacated - after) | {
+            str(entry["path"]) for entry in item["effect_after"] if entry.get("absent")
+        }
+        for path, text in exact.items():
+            chain.pages[path] = (str(step["step_id"]), text_content_hash(text), text)
+        if step["kind"] in _DUPLICATE_FOLD_KINDS:
+            # Only the rows a step changes count as written: the canonical original a fold reads stays as sealed.
+            chained.update(duplicate_fold.changed_paths(item))
+            written.update(duplicate_fold.changed_paths(item))
+        else:
+            written.update(after)
+        title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
+        title = step["args"].get(title_argument) if title_argument else None
+        created.extend(
+            (str(entry["path"]), title if isinstance(title, str) else None)
+            for entry in item["effect_before"]
+            if entry.get("absent") is True and entry["path"] in after
+        )
+        if step["kind"] == "supersede":
+            from .vault import parse_frontmatter, resolve_display_title
+
+            # The resolver indexes a page by the title read surfaces show, not only `title:`.
+            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
+            superseded.append(
+                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
+            )
+
+    done = list(preparation.steps) if preparation is not None else []
+    for step, kept in zip(steps, done, strict=False):  # `done` holds a prefix of `steps`
+        record(step, kept["item"], kept["exact"])
     for ordinal, step in enumerate(steps):
+        if ordinal < len(done):
+            continue
+        if (
+            preparation is not None
+            and stop is not None
+            and preparation.this_call
+            and stop(preparation.slowest)
+        ):
+            raise PreparationPaused
         args = step["args"]
         retired = _planned_link_targets(vault_root, args, superseded)
         if retired:
@@ -2048,12 +2791,35 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 f"step {step['step_id']!r} links to {related[0]!r}, which an earlier step "
                 "creates; that link is its relation, so it takes no relation disposition",
             )
-        with find_module.planned_pages(vault_root, created):
-            item = _prepare_step(
-                vault_root, step, ordinal, relation_pending=bool(related), projection=projection
-            )
+        started = time.monotonic()
+        try:
+            with find_module.planned_pages(vault_root, created):
+                item = _prepare_step(
+                    vault_root,
+                    step,
+                    ordinal,
+                    relation_pending=bool(related),
+                    projection=projection,
+                    chain=chain,
+                )
+        except CurationError as error:
+            # A derived plan drops the page whose step its leaf refused and prepares again.
+            error.step_id = error.step_id or str(step["step_id"])
+            raise
+        exact: dict[str, str] = item.pop("exact")
+        if step["kind"] in _CHAINED_STEP_KINDS:
+            follows = {
+                str(row["path"]): chain.pages[str(row["path"])][0]
+                for row in item["effect_before"]
+                if str(row["path"]) in chain.pages
+                and row.get("content_hash") == chain.pages[str(row["path"])][1]
+            }
+            if follows:
+                item["chained"] = follows
         duplicate = step["kind"] in _DUPLICATE_FOLD_KINDS
-        expected_paths = {str(expected["path"]) for expected in _binding_expectations(item)}
+        expected_paths = {
+            str(expected["path"]) for expected in _binding_expectations(item)
+        } - set(item.get("chained") or ())
         conflicts = sorted((expected_paths - chained if duplicate else expected_paths) & written)
         if conflicts:
             raise _error(
@@ -2061,29 +2827,11 @@ def _prepare_manifest(vault_root: Path, steps: Sequence[Mapping[str, Any]]) -> l
                 f"step {step['step_id']!r} is bound to {conflicts[0]!r}, "
                 "which an earlier step of the plan changes",
             )
-        manifest.append(item)
-        after = {str(entry["path"]) for entry in item["effect_after"]}
-        if duplicate:
-            # Only the rows a step changes count as written: the canonical original a fold reads stays as sealed.
-            chained |= duplicate_fold.changed_paths(item)
-            written |= duplicate_fold.changed_paths(item)
-        else:
-            written |= after
-        title_argument = _CREATED_TITLE_ARGUMENT.get(str(step["kind"]))
-        title = args.get(title_argument) if title_argument else None
-        created.extend(
-            (str(entry["path"]), title if isinstance(title, str) else None)
-            for entry in item["effect_before"]
-            if entry.get("absent") is True and entry["path"] in after
-        )
-        if step["kind"] == "supersede":
-            from .vault import parse_frontmatter, resolve_display_title
-
-            # The resolver indexes a page by the title read surfaces show, not only `title:`.
-            fields, body, _raw = parse_frontmatter(str(item["preimage"] or ""))
-            superseded.append(
-                (str(item["path"]), resolve_display_title(fields, body, str(item["path"])))
-            )
+        record(step, item, exact)
+        if preparation is not None:
+            preparation.steps.append({"digest": _step_digest(step), "item": item, "exact": exact})
+            preparation.this_call += 1
+            preparation.slowest = max(preparation.slowest, time.monotonic() - started)
     duplicate_fold.seal_chains(manifest, projection)
     if duplicate_fold.sealed_size(manifest) > duplicate_fold.MANIFEST_BUDGET:
         raise _error(
@@ -2228,6 +2976,10 @@ class PreparedProposal:
     plan: dict[str, Any]
     binding_manifest: list[dict[str, Any]]
     registry_ids: dict[str, str]
+    #: The server action that derived the plan (`DERIVED_BY`), or None for an agent-written plan.
+    derived_by: str | None = None
+    #: The grouped summary a derived plan is approved by, sealed with it for every later preview.
+    summary: dict[str, Any] | None = None
 
 
 def propose(
@@ -2255,43 +3007,68 @@ def seal_proposal(
     it takes no second guard: that boundary already serializes the seal, and a
     nested guard would advance the commit generation a second time.
     """
-    from . import writer_lease
-
     root = Path(vault_root)
     sealed = {
         **prepared.plan,
         "binding_manifest": prepared.binding_manifest,
         "registry_ids": prepared.registry_ids,
     }
-    manager = writer_lease.active_manager()
-    with (
-        nullcontext()
-        if manager.holds_mutation_boundary(root)
-        else manager.mutation_guard(
-            root,
-            request_id=writer_lease.active_mutation_request_id(),
-            operation="curation_propose_commit",
-            holder_kind="command",
-        )
-    ):
+    with _step_boundary(root, "curation_propose_commit"):
         blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
         if blockers:
             raise _error(blockers[0]["code"], blockers[0]["reason"])
-        return CurationStore(root).create_forward(
+        created = CurationStore(root).create_forward(
             prepared.plan,
             binding_manifest=prepared.binding_manifest,
             registry_ids=prepared.registry_ids,
             allow_records=allow_records,
+            derived_by=prepared.derived_by,
+            summary=prepared.summary,
         )
+    warnings = _plan_warnings(prepared.binding_manifest)
+    return {**created, "warnings": warnings} if warnings else created
+
+
+def _plan_warnings(binding_manifest: Iterable[Mapping[str, Any]]) -> list[str]:
+    """What a plan's preparation could not check, shown beside the plan, not only in a binding.
+
+    A repoint step whose catalogue lookup could not answer leaves prose mentions of the old
+    paths unchecked (`repoint_links.prepare`).
+    """
+    from . import path_mentions
+
+    unchecked = any(
+        isinstance(item.get("prepared"), Mapping) and item["prepared"].get("mentions_unchecked")
+        for item in binding_manifest
+    )
+    return [path_mentions.NOT_CHECKED] if unchecked else []
 
 
 def prepare_proposal(
-    vault_root: Path, plan: Mapping[str, Any], *, allow_records: bool = False
+    vault_root: Path,
+    plan: Mapping[str, Any],
+    *,
+    allow_records: bool = False,
+    derived_by: str | None = None,
+    preparation: Preparation | None = None,
+    stop: Callable[[float], bool] | None = None,
 ) -> PreparedProposal:
     """Every check `propose` makes, without sealing anything. Read-only, so a
-    caller preparing several plans can refuse them all before sealing one."""
+    caller preparing several plans can refuse them all before sealing one.
+    `derived_by` names the server action that derived the plan (`DERIVED_BY`).
+
+    A derived plan may prepare in parts: `preparation` keeps the steps that open
+    this plan unchanged and gains each step prepared here, and `stop` may end the
+    call between steps with `PreparationPaused` (`_prepare_manifest`)."""
     root = Path(vault_root)
-    validated = validate_forward_plan(plan, allow_records=allow_records)
+    if derived_by is not None and derived_by not in DERIVED_BY:
+        raise _error("INVALID_CURATION_PLAN", "plan derivation is invalid")
+    if preparation is not None and derived_by is None:
+        # Only the derived steps are known to keep all their preparation state in their items.
+        raise _error("INVALID_CURATION_PLAN", "only a derived plan prepares in parts")
+    validated = validate_forward_plan(
+        plan, allow_records=allow_records, derived=derived_by is not None
+    )
     # Captured before any step is prepared, so a registry change during preparation
     # differs from the seal-time recheck instead of being absorbed into the plan.
     registry_ids = plan_registry_identities(root, validated)
@@ -2301,8 +3078,10 @@ def prepare_proposal(
     _validate_entity_candidate_plan(root, validated)
     from . import vocabulary_gate
 
+    if preparation is not None:
+        preparation.keep_opening(validated["steps"], registry_ids)
     with vocabulary_gate.preparation_context(root):
-        manifest = _prepare_manifest(root, validated["steps"])
+        manifest = _prepare_manifest(root, validated["steps"], preparation=preparation, stop=stop)
     binding = validated.get("entity_candidate")
     if isinstance(binding, Mapping) and binding.get("candidate_state") == "hydration":
         allowed_paths = {
@@ -2329,7 +3108,9 @@ def prepare_proposal(
                     "hydration relation target is outside the reviewed Entity targets",
                 )
     _require_plan_relocation_history(root, validated)
-    return PreparedProposal(plan=validated, binding_manifest=manifest, registry_ids=registry_ids)
+    return PreparedProposal(
+        plan=validated, binding_manifest=manifest, registry_ids=registry_ids, derived_by=derived_by
+    )
 
 
 def _binding_blockers(
@@ -2344,6 +3125,8 @@ def _binding_blockers(
     the list is exactly the one a deleted path gives. An expected absence is
     still decided on disk; a withheld file there is never absent."""
     blockers, store_owned = _records_store_blockers(vault_root, plan, keep)
+    # A path a step binds at an earlier step's exact after hash is that step's to write first.
+    pending_steps = {str(item["step_id"]) for item in plan["binding_manifest"]}
     for name, expected in plan["registry_ids"].items():
         if current_registries.get(name) != expected:
             blockers.append(
@@ -2368,8 +3151,11 @@ def _binding_blockers(
             )
             blockers.extend(judge(vault_root, item))
             continue
+        follows = item.get("chained") or {}
         for expected_item in _binding_expectations(item):
             path = str(expected_item.get("path") or "")
+            if follows.get(path) in pending_steps:
+                continue
             if expected_item.get("absent") is True:
                 if _guarded_absent(vault_root, path):
                     continue
@@ -2513,6 +3299,22 @@ def preview(
             _validate_entity_candidate_plan(root, plan)
         except CurationError as error:
             blockers.insert(0, {"code": error.code, "reason": error.reason})
+    if plan.get("derived_by") is not None:
+        # A derived plan may hold hundreds of steps: its preview is the summary it was approved by.
+        return {
+            "action": "preview",
+            "mutated": False,
+            "run_id": run_id,
+            "plan_id": identity,
+            "plan_fingerprint": fingerprint,
+            "title": plan["title"],
+            # The groups the person approved, with the step counts the plan itself gives.
+            "summary": {**derived_summary(plan), **(plan.get("approval_summary") or {})},
+            "binding_health": "stale" if blockers else "current",
+            # The same list shape as any preview, bounded; the count covers every blocker.
+            "blockers": blockers[:SUMMARY_SAMPLE],
+            "blocker_count": len(blockers),
+        }
     return {
         "action": "preview",
         "mutated": False,
@@ -2524,7 +3326,11 @@ def preview(
         "binding_manifest": plan["binding_manifest"],
         "binding_health": "stale" if blockers else "current",
         "blockers": blockers,
-        "compensation_classes": [compensation_kind(step["kind"]) for step in plan["steps"]],
+        **({"warnings": warnings} if (warnings := _plan_warnings(plan["binding_manifest"])) else {}),
+        "compensation_classes": [
+            compensation_kind(step["kind"], binding)
+            for step, binding in zip(plan["steps"], plan["binding_manifest"], strict=True)
+        ],
         **(
             {"entity_candidate": plan["entity_candidate"]}
             if isinstance(plan.get("entity_candidate"), Mapping)
@@ -2533,14 +3339,66 @@ def preview(
     }
 
 
-def compensation_kind(kind: str) -> str:
+def summary_group(rows: Sequence[Any]) -> dict[str, Any]:
+    """One group of a derived plan's summary: every row counted, the first `SUMMARY_SAMPLE` shown."""
+    return {
+        "count": len(rows),
+        "shown": list(rows[:SUMMARY_SAMPLE]),
+        "truncated": len(rows) > SUMMARY_SAMPLE,
+    }
+
+
+def rewritten_referrers(step: Mapping[str, Any], binding: Mapping[str, Any]) -> int:
+    """The pages whose links a link rewrite, or its inverse, changes; 0 for any other step."""
+    if step["kind"] == REPOINT_STEP_KIND:
+        # A repoint step also binds the pages it leaves as they are: a moved page, a named referrer.
+        return sum(
+            1 for row in binding["prepared"]["pages"] if row["after_hash"] != row["before_hash"]
+        )
+    if step["kind"] == UNREPOINT_STEP_KIND:
+        return len(step["args"]["repoint"]["pages"])
+    return 0
+
+
+def derived_summary(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """A derived plan, or the undo of one, as the counts and samples a person approves."""
+    moves: list[dict[str, str]] = []
+    corrected: list[str] = []
+    referrers = 0
+    by_kind: dict[str, int] = {}
+    for step, binding in zip(plan["steps"], plan["binding_manifest"], strict=True):
+        by_kind[step["kind"]] = by_kind.get(step["kind"], 0) + 1
+        if step["kind"] in {REPOINT_STEP_KIND, UNREPOINT_STEP_KIND}:
+            referrers += rewritten_referrers(step, binding)
+            continue
+        before, after = str(binding["path"]), str(binding["postcondition"]["path"])
+        if before != after:
+            moves.append({"from": before, "to": after})
+        else:
+            corrected.append(before)
+    return {
+        "steps": len(plan["steps"]),
+        "by_kind": by_kind,
+        "moves": summary_group(moves),
+        "corrected_in_place": summary_group(corrected),
+        "referrers_rewritten": referrers,
+    }
+
+
+def compensation_kind(kind: str, binding: Mapping[str, Any] | None = None) -> str:
+    """The step kind that reverses `kind`; `binding` tells a pointer correction from another edit."""
+    if kind == "edit" and (binding or {}).get("prepared", {}).get("pointer") is True:
+        return REVERT_POINTER_STEP_KIND
     return {
         "create-note": "delete",
         "create-entity": "delete",
         "accept-relation": "supersede",
         "edit": "supersede",
         "supersede": "supersede",
-        "move": "move",
+        "move": UNMOVE_STEP_KIND,
+        REPOINT_STEP_KIND: UNREPOINT_STEP_KIND,
+        # An undone relocation is redone by a new reviewed plan, never by undoing the undo.
+        **dict.fromkeys(_RELOCATION_INVERSE_KINDS, "unavailable"),
         "delete": "recover",
         "recover": "delete",
         FOLD_RECAP_STEP_KIND: UNFOLD_RECAP_STEP_KIND,
@@ -2620,6 +3478,10 @@ def _witness_basis(
         "edit": "edit_memory",
         "supersede": "replace_memory",
         "move": "manage_memory_file:move",
+        REPOINT_STEP_KIND: "manage_memory_file:repoint-links",
+        UNMOVE_STEP_KIND: "manage_memory_file:unmove",
+        UNREPOINT_STEP_KIND: "manage_memory_file:unrepoint-links",
+        REVERT_POINTER_STEP_KIND: "edit_memory:revert-pointer",
         "delete": "manage_memory_file:delete",
         "recover": "manage_memory_file:recover",
         FOLD_RECAP_STEP_KIND: "maintain_memory:fold-recap-revisions",
@@ -2708,24 +3570,31 @@ def _finalize_witness_batch(
     prior_hash = binding.get("before_hash")
     if kind == "delete":
         return None
-    if kind == "move":
-        pending = curation_witness.pending_for(vault_root)
-        if pending is None or not pending.ready:
+    if kind in _RENAME_STEP_KINDS or binding.get("prepared", {}).get("pointer") is True:
+        # The batch that lands the page's sealed bytes carries the witness: for a move, the batch
+        # after its rename (or the adopting batch); for a pointer correction, its one write.
+        if destination not in hashes:
             return None
-        expected = binding.get("effect_after")
-        after = []
-        for item in expected if isinstance(expected, list) else []:
-            row = dict(item)
-            path = str(row.get("path") or "")
-            if path in hashes:
-                row = {"path": path, "content_hash": hashes[path]}
-            after.append(row)
-        if not after:
-            after = [
-                {"path": source, "absent": True},
-                {"path": destination, "content_hash": hashes.get(destination) or prior_hash},
-            ]
-    elif kind == "recover":
+        if hashes[destination] != binding["postcondition"]["content_hash"]:
+            raise _error("CURATION_BINDING_STALE", f"{destination!r} no longer lands its sealed bytes")
+        return curation_witness.render_with_after(content, binding["effect_after"])
+    if kind in _REWRITE_STEP_KINDS:
+        # Every page the step changes lands in its one batch; a step that changes none commits
+        # its witness alone once it is ready (`repoint_links._commit`).
+        before = {str(row["path"]): row.get("content_hash") for row in binding["effect_before"]}
+        changed = [
+            row for row in binding["effect_after"] if row["content_hash"] != before.get(row["path"])
+        ]
+        if any(row["path"] in hashes and hashes[row["path"]] != row["content_hash"] for row in changed):
+            raise _error("CURATION_BINDING_STALE", "a page no longer lands its sealed bytes")
+        if not all(row["path"] in hashes for row in changed):
+            return None
+        if not changed:
+            pending = curation_witness.pending_for(vault_root)
+            if pending is None or not pending.ready:
+                return None
+        return curation_witness.render_with_after(content, binding["effect_after"])
+    if kind == "recover":
         pending = curation_witness.pending_for(vault_root)
         if pending is None or not pending.ready:
             return None
@@ -2839,6 +3708,8 @@ def _validate_witness(
                 allow_trash=kind in {"delete", "recover"},
                 allow_fold=kind in FOLD_STEP_KINDS,
                 allow_records=kind in RECORDS_STEP_KINDS,
+                allow_append_only=kind in _REWRITE_STEP_KINDS
+                or binding.get("prepared", {}).get("pointer") is True,
                 _planning_tree=kind in PLANNING_STEP_KINDS,
                 _planning_identity=(binding["prepared"]["collection_id"], binding["prepared"]["item_key"]) if kind in PLANNING_STEP_KINDS and binding["prepared"].get("store") is not None else None,
                 _native_paths=frozenset(item["path"] for item in binding["prepared"]["core"]) if kind in PRESERVATION_STEP_KINDS else None,
@@ -2876,7 +3747,7 @@ def _validate_witness(
             for path, shape in normalized
             if path != source
             and shape == "content"
-            and path.casefold().startswith(f"{kb_dirname().casefold()}/_trash/")
+            and _is_governed_trash(path)
         ]
         required = {(source, "absent"), *((path, "content") for path in trash)}
         if len(trash) != 1:
@@ -3118,7 +3989,17 @@ def _verify_live_postcondition(
     step: Mapping[str, Any] | None = None,
     binding: Mapping[str, Any] | None = None,
     accepted: Mapping[str, frozenset[str]] | None = None,
+    drift: str | None = "CURATION_OUTCOME_UNCERTAIN",
 ) -> None:
+    """Refuse unless each page the witness names holds its sealed postcondition.
+
+    `drift` is the code for a readable page that differs. A step's own recovery cannot tell
+    whose bytes those are, so it reports uncertain. Compensation reads a witness that matched
+    when its step committed, so a difference there is later work and it passes the stale code.
+    None accepts the difference as later work: only a call that saw its own leaf's batch commit
+    passes it (`_execute_step`). An unsafe or unreadable path and a Records receipt that does not
+    corroborate still refuse.
+    """
     if step is not None and step.get("kind") in PRESERVATION_STEP_KINDS:
         from dataclasses import replace
 
@@ -3165,22 +4046,38 @@ def _verify_live_postcondition(
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target path is unsafe"
                 ) from error
-            if not absent:
-                raise _error("CURATION_OUTCOME_UNCERTAIN", "witness says absent but target exists")
+            if not absent and drift is not None:
+                raise _error(drift, f"{relative!r} exists where the step left it absent")
             continue
         expected = item.get("content_hash")
         if expected is not None:
             try:
                 actual = _guarded_digest(vault_root, relative, stale=True)
             except CurationError as error:
+                if error.code == "CURATION_BINDING_STALE":
+                    if drift is None:
+                        continue
+                    raise _error(drift, f"{relative!r} is gone from where the step left it") from error
                 raise _error(
                     "CURATION_OUTCOME_UNCERTAIN", "witness target is unreadable"
                 ) from error
             # A page that a later step of the same plan rewrote again holds one of its chained hashes.
-            if actual != expected and actual not in (accepted or {}).get(relative, ()):
-                raise _error(
-                    "CURATION_OUTCOME_UNCERTAIN", "witness and live postcondition disagree"
-                )
+            if drift is not None and actual != expected and actual not in (accepted or {}).get(relative, ()):
+                raise _error(drift, f"{relative!r} changed after the step wrote it")
+
+
+def _retryable_failure(error: Exception) -> bool:
+    """Whether a step that wrote nothing may run again on `resume`.
+
+    An I/O fault may clear. So may the server's own "not now", such as a busy vault or a
+    warm-up that has not finished: that refusal declares itself retryable and uncommitted, and
+    the step's committed-witness check has already ruled out a write.
+    """
+    from .cli_ops import OpError
+
+    if isinstance(error, OpError):
+        return error.details.get("status") == "retryable" and not error.details.get("committed")
+    return isinstance(error, OSError)
 
 
 def _dispatch_step(
@@ -3189,7 +4086,9 @@ def _dispatch_step(
     binding: Mapping[str, Any],
     runtime_args: Mapping[str, Any] | None = None,
     run: Mapping[str, str] | None = None,
+    before_rename: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
+    """Run the step's leaf. `before_rename` records a move's intent, once, before its rename."""
     from . import commands
 
     kind = str(step["kind"])
@@ -3230,6 +4129,25 @@ def _dispatch_step(
         return commands.op_connect_memory(vault_root, operation="create-entity", **args)
     if kind == "accept-relation":
         return commands.op_connect_memory(vault_root, operation="accept-relation", **args)
+    if kind == "edit" and prepared.get("pointer") is True:
+        from . import set_frontmatter_field as frontmatter
+
+        # A pointer correction sets no `updated:`, so the sealed bytes land as approved; its record
+        # is filed under the step's operation id, where its compensation finds it.
+        assert run is not None
+        try:
+            result = frontmatter.set_pointer_field(
+                vault_root,
+                path=args["path"],
+                field=args["operation"]["field"],
+                value=args["operation"].get("value"),
+                why=args["why"],
+                expected_hash=binding["before_hash"],
+                operation=run["operation"],
+            )
+        except frontmatter.SetFrontmatterError as error:
+            raise _error(error.code, error.reason) from error
+        return {**result.as_dict(), "path": args["path"]}
     if kind == "edit":
         # The sealed transition pins the reviewed `updated:` instant, which the writer refuses once
         # it is a day old, and approval often comes later. The transition is minted now, never from
@@ -3355,8 +4273,41 @@ def _dispatch_step(
                 _history_binding=run,
             )
         return {**result, "path": prepared["destination"]}
-    if kind == "move":
-        return commands.op_manage_memory_file(vault_root, operation="move", **args)
+    if kind in _RENAME_STEP_KINDS:
+        from . import move_file as move_module
+
+        def stage(name: str) -> None:
+            if name == "before-rename":
+                # The sealed source, rechecked under the move's own guard: a `fields` patch sets its
+                # field whatever the page holds, so the moved bytes alone cannot show another write.
+                if _guarded_digest(vault_root, str(binding["path"]), stale=True) != binding["before_hash"]:
+                    raise move_module.MoveFileError(
+                        code="SOURCE_CHANGED", reason="the page changed since its move was sealed"
+                    )
+                _fault_barrier("move-before-intent")
+                if before_rename is not None:
+                    before_rename()
+                _fault_barrier("move-after-intent")
+            else:
+                _fault_barrier(f"move-{name}")
+
+        call = _move_call(vault_root, args) if kind == "move" else _unmove_call(args["move"])
+        try:
+            result = move_module.move_file(vault_root, **call, _stage=stage)
+        except move_module.MoveFileError as error:
+            raise _error(error.code, error.reason) from error
+        return result.as_dict()
+    if kind == REPOINT_STEP_KIND:
+        from . import repoint_links
+
+        assert run is not None
+        return repoint_links.commit(vault_root, prepared, operation=run["operation"])
+    if kind in (UNREPOINT_STEP_KIND, REVERT_POINTER_STEP_KIND):
+        from . import repoint_links
+
+        assert run is not None
+        (material,) = args.values()
+        return repoint_links.restore(vault_root, material, operation=run["operation"])
     if kind == "delete":
         from . import delete_file as delete_module
 
@@ -3410,12 +4361,12 @@ def _runtime_execution_binding(
                 "trash_meta_path": validation.result.trash_meta_path,
             }
         )
-    elif step["kind"] == "move":
+    elif step["kind"] in _RENAME_STEP_KINDS:
         effect.update(
             {
-                "old_path": step["args"]["old_path"],
-                "new_path": step["args"]["new_path"],
-                "path": step["args"]["new_path"],
+                "old_path": str(binding["path"]),
+                "new_path": str(binding["postcondition"]["path"]),
+                "path": str(binding["postcondition"]["path"]),
             }
         )
     elif step["kind"] == "recover":
@@ -3433,31 +4384,112 @@ def _evidence_path(store: CurationStore, run_identity: str, operation_identity: 
     return store.evidence_dir(run_identity) / f"{operation_identity}.json"
 
 
-def _load_rename_preparation(
+#: Where a move whose intent record exists left its page, by the rename-after state it sealed.
+_UNPROVABLE = "unprovable"
+_ADOPT = "adopt"
+_STALE = "stale"
+_UNCERTAIN = "uncertain"
+
+
+def _rename_placement(vault_root: Path, binding: Mapping[str, Any]) -> str:
+    """Where a move whose intent record exists left its page (the move intent requirement).
+
+    The page at its old path with the sealed bytes is a rename that did not run or was renamed
+    back, which no evidence tells apart; the old path empty and the new path holding the sealed
+    bytes is a rename the batch has yet to follow; the old path holding other bytes is later work.
+    """
+    old, new = str(binding["path"]), str(binding["postcondition"]["path"])
+    sealed = binding["before_hash"]
+
+    def held(path: str) -> str | None:
+        if _guarded_absent(vault_root, path):
+            return None
+        try:
+            return _guarded_digest(vault_root, path, stale=True)
+        except CurationError:
+            return ""
+
+    at_old, at_new = held(old), held(new)
+    if at_new is None and at_old == sealed:
+        return _UNPROVABLE
+    if at_old is None and at_new == sealed:
+        return _ADOPT
+    if at_new is None and at_old is not None:
+        return _STALE
+    return _UNCERTAIN
+
+
+def _void_unrenamed(
+    vault_root: Path,
     store: CurationStore,
     run_identity: str,
-    prepared: Mapping[str, Any],
     *,
-    plan_identity: str,
-    ordinal: int,
     step: Mapping[str, Any],
     binding: Mapping[str, Any],
-    compensation: bool,
-) -> dict[str, Any] | None:
-    digest = prepared.get("preparation_digest")
-    if digest is None:
-        return None
-    root = store.vault_root
-    del run_identity, plan_identity, ordinal, step, binding, compensation
-    _require_relocation_history_capability(root)
+    operation_identity: str,
+) -> None:
+    """Void the intent record of a move that raised in this process and left its page in place.
+
+    The raise proves that no rename stands, which no later evidence can prove (`_UNPROVABLE`), so
+    a resume retries the step instead of blocking for good. A stop that kills the process leaves
+    the record, and the resume still refuses.
+    """
+    if step["kind"] not in _RENAME_STEP_KINDS:
+        return
+    try:
+        if store.rename_intent(run_identity, operation_identity) is None:
+            return
+        if _rename_placement(vault_root, binding) == _UNPROVABLE:
+            store.void_rename_intent(run_identity, operation_identity)
+    except (CurationError, OSError):
+        log.warning("could not void the intent record of %s", operation_identity, exc_info=True)
 
 
-def _prepared_placement(vault_root: Path, preparation: Mapping[str, Any]) -> str:
-    del preparation
-    _require_relocation_history_capability(vault_root)
+def _forget_old_path(vault_root: Path, binding: Mapping[str, Any]) -> None:
+    """Drop a committed move's old path from the derived indexes again.
+
+    The move leaf does that after its batch, so a stop between the two leaves the indexes and the
+    graph serving the old path; the removal is idempotent.
+    """
+    from . import index_sync
+
+    try:
+        index_sync.delete_after_remove(vault_root, [str(binding["path"])])
+    except Exception:  # noqa: BLE001 - the move stands; reconcile repairs the indexes
+        log.exception("index delete failed for the recovered move of %s", binding["path"])
 
 
-def _roll_forward_prepared(
+def _record_rename_intent(
+    store: CurationStore,
+    run_identity: str,
+    *,
+    plan_identity: str,
+    step: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    operation_identity: str,
+) -> None:
+    """Publish the intent record of a move about to rename, with its sealed rename-after state."""
+    old, new = str(binding["path"]), str(binding["postcondition"]["path"])
+    store.create_rename_intent(
+        run_identity,
+        {
+            "version": 1,
+            "run_id": run_identity,
+            "plan_id": plan_identity,
+            "operation_id": operation_identity,
+            "step_id": step["step_id"],
+            "old_path": old,
+            "new_path": new,
+            "before_hash": binding["before_hash"],
+            "rename_after": [
+                {"path": old, "absent": True},
+                {"path": new, "content_hash": binding["before_hash"]},
+            ],
+        },
+    )
+
+
+def _adopt_rename(
     vault_root: Path,
     store: CurationStore,
     run_identity: str,
@@ -3467,21 +4499,135 @@ def _roll_forward_prepared(
     step: Mapping[str, Any],
     binding: Mapping[str, Any],
     operation_identity: str,
-    preparation: Mapping[str, Any],
     compensation: bool,
-) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    del (
+) -> dict[str, Any]:
+    """Roll forward a move that a stop cut between its rename and its batch, without renaming.
+
+    The adopting batch lands the sealed destination bytes with the witness, and the move's
+    semantic, catalog, graph and index effects follow (`move_file.adopt_move`).
+    """
+    from . import curation_witness
+    from . import move_file as move_module
+
+    kind = str(step["kind"])
+    args = json.loads(canonical_json(step["args"]))
+    call = _move_call(vault_root, args) if kind == "move" else _unmove_call(args["move"])
+    witness = _witness_payload(
+        run_identity=run_identity,
+        plan_identity=plan_identity,
+        ordinal=ordinal,
+        step=step,
+        operation_identity=operation_identity,
+        binding=binding,
+        parent_compensation_plan_id=plan_identity if compensation else None,
+    )
+    evidence_path = _evidence_path(store, run_identity, operation_identity)
+    with curation_witness.atomic_witness(
+        vault_root,
+        evidence_path,
+        canonical_json(witness),
+        finalize=lambda writes, content: _finalize_witness_batch(
+            vault_root, step, binding, writes, content
+        ),
+    ) as pending:
+        try:
+            move_module.adopt_move(
+                vault_root,
+                old_path=str(binding["path"]),
+                new_path=str(binding["postcondition"]["path"]),
+                source_hash=binding["before_hash"],
+                content_transform=call.get("content_transform"),
+                extra_writes=tuple(call.get("extra_writes") or ()),
+                exact_content=kind != "move",
+            )
+        except move_module.MoveFileError as error:
+            raise _error(error.code, error.reason) from error
+        if not pending.consumed:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "the adopted move did not commit its witness")
+    validated = _validate_witness(
+        store._read_json(evidence_path),
+        run_identity=run_identity,
+        plan_identity=plan_identity,
+        ordinal=ordinal,
+        step=step,
+        operation_identity=operation_identity,
+        binding=binding,
+        parent_compensation_plan_id=plan_identity if compensation else None,
+    )
+    _verify_live_postcondition(vault_root, validated, step=step, binding=binding)
+    _execution, effect, _runtime = _runtime_execution_binding(vault_root, step, binding)
+    receipt = {
+        "version": 1,
+        "attempt": _next_attempt(store, run_identity, step["step_id"]),
+        "ordinal": ordinal,
+        "step_id": step["step_id"],
+        "operation_id": operation_identity,
+        "outcome": "recovered-committed",
+        "result_digest": validated["result_digest"],
+        "effect": effect,
+    }
+    store.create_receipt(run_identity, ordinal, step["step_id"], receipt)
+    final = store.reconstruct(run_identity)
+    store.write_state(run_identity, final)
+    return _compensation_phase(
+        {**final, "mutated": True, "step": {**receipt, "path": effect["path"]}},
+        compensation=compensation,
+    )
+
+
+def _recover_rename(
+    vault_root: Path,
+    store: CurationStore,
+    run_identity: str,
+    *,
+    plan_identity: str,
+    ordinal: int,
+    step: Mapping[str, Any],
+    binding: Mapping[str, Any],
+    operation_identity: str,
+    compensation: bool,
+) -> dict[str, Any]:
+    """Decide a move whose intent record exists from its live placement; never rename."""
+    placement = _rename_placement(vault_root, binding)
+    if placement == _ADOPT:
+        return _adopt_rename(
+            vault_root,
+            store,
+            run_identity,
+            plan_identity=plan_identity,
+            ordinal=ordinal,
+            step=step,
+            binding=binding,
+            operation_identity=operation_identity,
+            compensation=compensation,
+        )
+    if placement == _STALE:
+        _record_failed_attempt(
+            store,
+            run_identity,
+            ordinal=ordinal,
+            step_id=step["step_id"],
+            operation_identity=operation_identity,
+            code="CURATION_BINDING_STALE",
+            retryable=False,
+        )
+        raise _error("CURATION_BINDING_STALE", f"{binding['path']!r} changed after its move began")
+    code, reason = (
+        (
+            "CURATION_RENAME_HISTORY_UNPROVABLE",
+            "the page is at its old path after its move's intent record; re-propose the remaining work",
+        )
+        if placement == _UNPROVABLE
+        else ("CURATION_OUTCOME_UNCERTAIN", "the moved page is at neither or both of its paths")
+    )
+    _record_blocked_state(
         store,
         run_identity,
-        plan_identity,
-        ordinal,
-        step,
-        binding,
-        operation_identity,
-        preparation,
-        compensation,
+        operation_identity=operation_identity,
+        step_id=step["step_id"],
+        code=code,
     )
-    _require_relocation_history_capability(vault_root)
+    raise _error(code, reason)
 
 
 def _committed_step_ids(state: Mapping[str, Any]) -> set[str]:
@@ -3490,13 +4636,19 @@ def _committed_step_ids(state: Mapping[str, Any]) -> set[str]:
 
 def _next_step(
     plan: Mapping[str, Any], state: Mapping[str, Any]
-) -> tuple[int, Mapping[str, Any], Mapping[str, Any]] | None:
+) -> tuple[int, Mapping[str, Any], Mapping[str, Any], bool] | None:
+    """The first uncommitted step, and whether a receipt refused it for good.
+
+    A refused step is still returned: its refusal stands only while the step has no committed
+    witness and, for a move, no rename intent. Another process can record that refusal before the
+    step's leaf commits, and the call that ran the leaf can stop before it records the receipt.
+    Each caller probes that evidence first.
+    """
     committed = _committed_step_ids(state)
     for ordinal, step in enumerate(plan["steps"]):
         if step["step_id"] not in committed:
-            if state.get("failed_step") == step["step_id"] and not state.get("retryable", False):
-                return None
-            return ordinal, step, plan["binding_manifest"][ordinal]
+            refused = state.get("failed_step") == step["step_id"] and not state.get("retryable", False)
+            return ordinal, step, plan["binding_manifest"][ordinal], refused
     return None
 
 
@@ -3523,7 +4675,12 @@ def _blockers_for_uncommitted(
 
 
 def _record_blocked_state(
-    store: CurationStore, run_identity: str, *, operation_identity: str, step_id: str
+    store: CurationStore,
+    run_identity: str,
+    *,
+    operation_identity: str,
+    step_id: str,
+    code: str = "CURATION_OUTCOME_UNCERTAIN",
 ) -> None:
     store.write_state(
         run_identity,
@@ -3531,7 +4688,7 @@ def _record_blocked_state(
             "version": 1,
             "run_id": run_identity,
             "phase": "blocked",
-            "error_code": "CURATION_OUTCOME_UNCERTAIN",
+            "error_code": code,
             "prepared": {"operation_id": operation_identity, "step_id": step_id},
         },
     )
@@ -3690,12 +4847,14 @@ _ACTIVE_EPISODE_INVOCATION: ContextVar[tuple | None] = ContextVar("curation_epis
 
 @contextmanager
 def _episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, run: str, operation: str):
-    invocation = _join_episode_invocation(vault_root, plan, binding, run, operation)
-    token = _ACTIVE_EPISODE_INVOCATION.set((Path(vault_root).resolve(), run, operation, invocation))
-    try:
-        yield invocation
-    finally:
-        _ACTIVE_EPISODE_INVOCATION.reset(token)
+    # The run's claim comes before the journal's attempt mark: a busy run marks no attempt.
+    with _run_claim(Path(vault_root), run):
+        invocation = _join_episode_invocation(vault_root, plan, binding, run, operation)
+        token = _ACTIVE_EPISODE_INVOCATION.set((Path(vault_root).resolve(), run, operation, invocation))
+        try:
+            yield invocation
+        finally:
+            _ACTIVE_EPISODE_INVOCATION.reset(token)
 
 
 def _join_episode_invocation(vault_root: Path, plan: Mapping, binding: Mapping, run: str, operation: str) -> dict | None:
@@ -3905,6 +5064,20 @@ def _record_recovery_proof(vault_root: Path, state: Mapping[str, Any], candidate
     store.write_state(run, store.reconstruct(run))
 
 
+def _guards_itself(step: Mapping[str, Any], binding: Mapping[str, Any]) -> bool:
+    """Whether this step's leaf may run outside curation's hold (`SELF_GUARDED_STEP_KINDS`).
+
+    A pointer correction writes through `set_frontmatter_field`, and an episode-bound step joins
+    the episode's journal, so both keep the whole step under one hold.
+    """
+    prepared = binding.get("prepared", {})
+    return (
+        step["kind"] in SELF_GUARDED_STEP_KINDS
+        and prepared.get("pointer") is not True
+        and not isinstance(prepared.get("episode"), Mapping)
+    )
+
+
 def _execute_next(
     vault_root: Path,
     run_identity: str,
@@ -3913,10 +5086,40 @@ def _execute_next(
     store: CurationStore | None = None,
     compensation: bool = False,
 ) -> dict[str, Any]:
-    from . import curation_witness
+    # `seam` is a scoped step's second short hold: `_execute_step` enters it when its leaf returns
+    # or raises, and it covers the witness check, the postcondition, the receipt and the state.
+    with ExitStack() as seam:
+        return _execute_step(
+            vault_root, run_identity, plan_identity, store=store, compensation=compensation, seam=seam
+        )
+
+
+def _execute_step(
+    vault_root: Path,
+    run_identity: str,
+    plan_identity: str,
+    *,
+    store: CurationStore | None = None,
+    compensation: bool = False,
+    seam: ExitStack,
+) -> dict[str, Any]:
+    from . import curation_witness, writer_lease
+    from .cli_ops import OpError
     from .collection_store.preview import selected_writer
 
     store = store or CurationStore(vault_root)
+    root = Path(vault_root)
+    # Under an outer hold (the episode workflow, the wide-boundary switch, `under_boundary`) the
+    # step runs whole, as before. Otherwise curation holds the boundary only at its own seams.
+    scoped = not writer_lease.active_manager().holds_mutation_boundary(root)
+
+    def under_boundary() -> dict[str, Any]:
+        # A step that is not a clean self-guarded one is decided again under one hold, from fresh reads.
+        with _step_boundary(root, "curation_step"):
+            return _execute_next(
+                vault_root, run_identity, plan_identity, store=store, compensation=compensation
+            )
+
     plan = store.load_plan(run_identity)
     expected_identity, _fingerprint = store.identities(run_identity)
     if plan_identity != expected_identity:
@@ -3927,21 +5130,13 @@ def _execute_next(
         raise _error("CURATION_OUTCOME_UNCERTAIN", "run evidence is invalid")
     next_item = _next_step(plan, reconstructed)
     if next_item is None:
-        failed_step = reconstructed.get("failed_step")
-        if failed_step is not None:
-            # The run stopped on a refusal that committed nothing: a retry hears that refusal
-            # again, never a replay of a run that did not complete.
-            codes = [
-                receipt["error_code"]
-                for receipt in reconstructed["receipts"]
-                if receipt.get("step_id") == failed_step and receipt.get("outcome") == "failed"
-            ]
-            raise _error(codes[-1], f"curation step {failed_step!r} was refused and did not commit")
         return _compensation_phase(
             {**reconstructed, "outcome": "replayed", "mutated": False},
             compensation=compensation,
         )
-    ordinal, step, binding = next_item
+    ordinal, step, binding, refused = next_item
+    if scoped and not _guards_itself(step, binding):
+        return under_boundary()
     operation_identity = operation_id(plan_identity, ordinal, step["step_id"])
     evidence_path = _evidence_path(store, run_identity, operation_identity)
     # A Records step on a collection the store owns commits there; its transaction row is the witness.
@@ -3950,34 +5145,8 @@ def _execute_next(
         if step["kind"] in COLLECTION_STEP_KINDS and not compensation
         else None
     )
-    projection: Mapping[str, Any] = {}
-    if store.state_path(run_identity).exists():
-        raw_projection = store._read_json(store.state_path(run_identity))
-        projection = raw_projection if isinstance(raw_projection, Mapping) else {}
-    prepared_projection = projection.get("prepared")
-    preparation: dict[str, Any] | None = None
-    if (
-        isinstance(prepared_projection, Mapping)
-        and prepared_projection.get("ordinal") == ordinal
-        and prepared_projection.get("step_id") == step["step_id"]
-        and prepared_projection.get("operation_id") == operation_identity
-    ):
-        preparation = _load_rename_preparation(
-            store,
-            run_identity,
-            prepared_projection,
-            plan_identity=plan_identity,
-            ordinal=ordinal,
-            step=step,
-            binding=binding,
-            compensation=compensation,
-        )
     execution_binding = dict(binding)
-    recovered_effect = (
-        dict(preparation.get("effect") or {})
-        if preparation is not None
-        else _effect_projection(str(step["kind"]), {}, execution_binding)
-    )
+    recovered_effect = _effect_projection(str(step["kind"]), {}, execution_binding)
     try:
         committed_witness = _committed_operation_witness(
             store,
@@ -3991,6 +5160,8 @@ def _execute_next(
             compensation=compensation,
         )
     except CurationError:
+        if scoped:
+            return under_boundary()
         _record_blocked_state(
             store,
             run_identity,
@@ -3999,6 +5170,10 @@ def _execute_next(
         )
         raise
     if committed_witness is not None:
+        if scoped:
+            return under_boundary()
+        if step["kind"] in _RENAME_STEP_KINDS:
+            _forget_old_path(vault_root, binding)
         return _recover_committed_witness(
             store,
             run_identity,
@@ -4009,10 +5184,20 @@ def _execute_next(
             effect=recovered_effect,
             compensation=compensation,
         )
-
-    if preparation is not None:
+    if step["kind"] in _RENAME_STEP_KINDS and writer is None:
         try:
-            recovered = _roll_forward_prepared(
+            intent = store.rename_intent(run_identity, operation_identity)
+        except CurationError:
+            if scoped:
+                return under_boundary()
+            _record_blocked_state(
+                store, run_identity, operation_identity=operation_identity, step_id=step["step_id"]
+            )
+            raise
+        if intent is not None:
+            if scoped:
+                return under_boundary()
+            return _recover_rename(
                 vault_root,
                 store,
                 run_identity,
@@ -4021,46 +5206,22 @@ def _execute_next(
                 step=step,
                 binding=binding,
                 operation_identity=operation_identity,
-                preparation=preparation,
                 compensation=compensation,
             )
-        except CurationError:
-            _record_blocked_state(
-                store,
-                run_identity,
-                operation_identity=operation_identity,
-                step_id=step["step_id"],
-            )
-            raise
-        if recovered is not None:
-            witness, recovered_effect = recovered
-            receipt = {
-                "version": 1,
-                "attempt": _next_attempt(store, run_identity, step["step_id"]),
-                "ordinal": ordinal,
-                "step_id": step["step_id"],
-                "operation_id": operation_identity,
-                "outcome": "recovered-committed",
-                "result_digest": witness["result_digest"],
-                "effect": recovered_effect,
-            }
-            store.create_receipt(run_identity, ordinal, step["step_id"], receipt)
-            final = store.reconstruct(run_identity)
-            store.write_state(run_identity, final)
-            return _compensation_phase(
-                {
-                    **final,
-                    "mutated": True,
-                    "step": {
-                        **receipt,
-                        "path": str(recovered_effect.get("path") or witness["after"][0]["path"]),
-                    },
-                },
-                compensation=compensation,
-            )
+    if refused:
+        # The run stopped on a refusal that left neither a witness nor a rename intent: a retry
+        # hears that refusal again, never a replay of a run that did not complete.
+        codes = [
+            receipt["error_code"]
+            for receipt in reconstructed["receipts"]
+            if receipt.get("step_id") == step["step_id"] and receipt.get("outcome") == "failed"
+        ]
+        raise _error(codes[-1], f"curation step {step['step_id']!r} was refused and did not commit")
 
     committed = _committed_step_ids(reconstructed)
     blockers = _blockers_for_uncommitted(vault_root, plan, committed)
+    if blockers and scoped:
+        return under_boundary()
     if blockers:
         blocker = blockers[0]
         if blocker["code"] == RECORDS_STORE_UNSUPPORTED:
@@ -4110,6 +5271,36 @@ def _execute_next(
         binding=binding,
         parent_compensation_plan_id=plan_identity if compensation else None,
     )
+    settle_refusal: BaseException | None = None
+    # The leaf's witness context binds it; it stays None for a store step and before the leaf.
+    pending = None
+
+    def settle() -> None:
+        # A scoped leaf ran outside curation's hold; what settles it runs under one short hold.
+        # When that hold is refused, nothing more is written: the next resume settles the step.
+        nonlocal settle_refusal
+        if not scoped:
+            return
+        try:
+            seam.enter_context(_step_boundary(root, "curation_step_settle"))
+            # The run claim is per process, so another process can record this step while its leaf
+            # runs. A committed receipt settles it: that process's witness kept this leaf's batch
+            # out, or it recovered this leaf's witness. A refusal does not: it can predate this
+            # leaf's commit, so this call settles its own step after it.
+            if any(
+                receipt.get("step_id") == step["step_id"]
+                and receipt.get("outcome") in COMMITTED_OUTCOMES
+                for receipt in store._receipt_records(run_identity)
+            ):
+                raise CurationRunBusy(
+                    "CURATION_RUN_BUSY",
+                    "another call settled this step first",
+                    leaf_committed=True if pending is not None and pending.consumed else None,
+                )
+        except BaseException as refusal:
+            settle_refusal = refusal
+            raise
+
     try:
         with (
             # A store step has no file batch to carry its witness: the store's row is the witness.
@@ -4131,7 +5322,17 @@ def _execute_next(
                 execution_binding,
                 runtime_args=runtime_args,
                 run={"curation_run": run_identity, "operation": operation_identity},
+                before_rename=functools.partial(
+                    _record_rename_intent,
+                    store,
+                    run_identity,
+                    plan_identity=plan_identity,
+                    step=step,
+                    binding=execution_binding,
+                    operation_identity=operation_identity,
+                ),
             )
+            settle()
             if writer is not None:
                 _publish_store_witness(
                     store,
@@ -4158,12 +5359,18 @@ def _execute_next(
             binding=execution_binding,
             parent_compensation_plan_id=plan_identity if compensation else None,
         )
+        # This call saw its leaf's batch commit the witness, so the step committed. A scoped leaf
+        # released the boundary there, and a page that differs now holds a later writer's work. A
+        # witness found any other way proves the step only while its pages match it: a batch whose
+        # rollback could not remove the witness restored the pages without it.
+        proven = scoped and pending is not None and pending.consumed
         _verify_live_postcondition(
             vault_root,
             witness,
             step=step,
             binding=execution_binding,
             accepted=_chained_states(step, execution_binding),
+            drift=None if proven else "CURATION_OUTCOME_UNCERTAIN",
         )
     except DefiniteNoEffect as error:
         if invocation is None or step["kind"] not in PRESERVATION_STEP_KINDS:
@@ -4182,6 +5389,9 @@ def _execute_next(
         store.write_state(run_identity, final)
         return {**final, "mutated": True, "step": receipt}
     except CurationError as error:
+        if error is settle_refusal:
+            raise
+        settle()
         try:
             committed_witness = _committed_operation_witness(
                 store,
@@ -4213,6 +5423,10 @@ def _execute_next(
                 effect=_effect_projection(str(step["kind"]), {}, execution_binding),
                 compensation=compensation,
             )
+        _void_unrenamed(
+            vault_root, store, run_identity, step=step, binding=execution_binding,
+            operation_identity=operation_identity,
+        )
         if error.code == "CURATION_OUTCOME_UNCERTAIN":
             _record_blocked_state(
                 store,
@@ -4232,6 +5446,9 @@ def _execute_next(
         )
         raise
     except Exception as error:
+        if error is settle_refusal:
+            raise
+        settle()
         try:
             committed_witness = _committed_operation_witness(
                 store,
@@ -4263,12 +5480,17 @@ def _execute_next(
                 effect=_effect_projection(str(step["kind"]), {}, execution_binding),
                 compensation=compensation,
             )
+        _void_unrenamed(
+            vault_root, store, run_identity, step=step, binding=execution_binding,
+            operation_identity=operation_identity,
+        )
         stable_code = getattr(error, "code", None)
         if not isinstance(stable_code, str) and ":" in str(error):
             candidate = str(error).split(":", 1)[0]
             stable_code = candidate if re.fullmatch(r"[A-Z][A-Z0-9_]+", candidate) else None
+        retryable = _retryable_failure(error)
         code = stable_code or (
-            "CURATION_RETRYABLE_FAILURE" if isinstance(error, OSError) else "CURATION_STEP_FAILED"
+            "CURATION_RETRYABLE_FAILURE" if retryable else "CURATION_STEP_FAILED"
         )
         _record_failed_attempt(
             store,
@@ -4277,8 +5499,12 @@ def _execute_next(
             step_id=step["step_id"],
             operation_identity=operation_identity,
             code=code,
-            retryable=isinstance(error, OSError),
+            retryable=retryable,
         )
+        if scoped and isinstance(error, OpError) and error.code == "MUTATION_BUSY":
+            # Only a leaf outside curation's hold meets a busy vault at its own guard. The refusal
+            # keeps its protocol shape, so a keyed invoke absorbs it and a caller sees its retry hint.
+            raise
         raise _error(code, str(error)) from error
     _fault_barrier("after-compensation-leaf-witness" if compensation else "after-leaf-witness")
     effect = _effect_projection(str(step["kind"]), leaf_result, execution_binding)
@@ -4312,6 +5538,173 @@ def _execute_next(
     )
 
 
+def _call_budget() -> Any:
+    """This call's deadline: the request's own, or one of the same length at a door that binds none.
+
+    Over MCP the dispatcher binds one budget per request (`request_budget`); REST, the CLI and a
+    direct call get a fresh budget of the same length, as `adoption_run` paces itself.
+    """
+    from . import request_budget
+
+    return request_budget.current() or request_budget.RequestBudget(
+        seconds=request_budget.budget_seconds()
+    )
+
+
+def _stopped(
+    error: Exception, before: Mapping[str, Any], after: Mapping[str, Any], plan: Mapping[str, Any]
+) -> dict[str, Any]:
+    """What a call reports beside its committed steps when a later step stops it.
+
+    `before` is the run after this call's last committed step, whose next step is the one that
+    stopped, and `after` the run now. `committed` says whether the stopped step's own leaf
+    committed: `CurationRunBusy` carries its settle's answer, true or null; otherwise it is false
+    when this call recorded the step as refused, and null when the call cannot tell, as when a
+    settle hold was refused after the leaf ran. The next `resume` settles a null step from its
+    witness.
+    """
+    upcoming = _next_step(plan, before)
+    step_id = None if upcoming is None else str(upcoming[1]["step_id"])
+
+    def refusals(run: Mapping[str, Any]) -> int:
+        return sum(
+            1
+            for receipt in run.get("receipts") or ()
+            if receipt.get("step_id") == step_id and receipt.get("outcome") == "failed"
+        )
+
+    if isinstance(error, CurationRunBusy):
+        committed: bool | None = error.leaf_committed
+    else:
+        committed = False if step_id is not None and refusals(after) > refusals(before) else None
+    return {
+        "code": getattr(error, "code", None),
+        "reason": getattr(error, "reason", None) or getattr(error, "message", None) or str(error),
+        "step": step_id,
+        "committed": committed,
+    }
+
+
+#: The refusals that say only that another writer held the run or the vault for a moment.
+# nosemgrep: ep-word-set -- the two busy codes this module and the mutation lock define.
+_BUSY_CODES: Final[frozenset[str]] = frozenset({"CURATION_RUN_BUSY", "MUTATION_BUSY"})
+
+
+def _stopped_phase(error: Exception, run: Mapping[str, Any]) -> dict[str, Any]:
+    """The run's phase as a call that a refusal stopped after committed steps reports it.
+
+    A busy refusal leaves the run `executing`, and `resume` continues it. Any other refusal is
+    `partial`, or `blocked` when the run's evidence cannot say what the step did: the run's own
+    phase when its receipts already say so, else `partial`, whose `resume` asks the step again.
+    A run that another call finished or blocked keeps that phase.
+    """
+    phase = run.get("phase")
+    # Two phases of this module's run state machine that no later step of the run changes.
+    if phase in {"completed", "blocked"}:
+        return dict(run)
+    if getattr(error, "code", None) in _BUSY_CODES:
+        return {**run, "phase": "executing", "next_action": "resume"}
+    if phase == "partial":
+        return dict(run)
+    return {**run, "phase": "partial", "next_action": "resume"}
+
+
+def _advance(
+    vault_root: Path,
+    run_identity: str,
+    plan_identity: str,
+    *,
+    store: CurationStore,
+    compensation: bool,
+) -> dict[str, Any]:
+    """Run a run's steps until it ends or this call's budget is spent, under the caller's run claim.
+
+    Each step is one `_execute_next`, which takes the vault boundary at that step's own seams, so
+    per-step crash safety, witnesses and receipts are those of a single step. Each step's derived
+    fan-out runs when the step ends, as it would at the end of a call, unless the caller already
+    holds the boundary (the episode workflow, a revert): there every step joins that one hold, and
+    the fan-out runs once at its end, so draining it per step would only lengthen the hold.
+    Between steps the call yields to waiting writers. It stops starting steps once what is left
+    of its budget would not cover its slowest step so far and the delivery reserve, and answers
+    `executing` with its progress; the next `resume` continues. A refusal of the call's first step
+    raises as before. After this call committed steps, every refusal stops the call and is
+    reported beside them (`_stopped`), because those steps are durable; it never raises
+    (`_stopped_phase`).
+    """
+    import time
+
+    from . import request_budget, writer_lease
+    from .cli_ops import OpError
+
+    budget = _call_budget()
+    manager = writer_lease.active_manager()
+    outer_hold = manager.holds_mutation_boundary(vault_root)
+    ran = 0
+    slowest = 0.0
+    stop: Exception | None = None
+    while True:
+        started = time.monotonic()
+        try:
+            # The next step reads the corpus that this step's fan-out tells the registries about.
+            with nullcontext() if outer_hold else writer_lease.fanout_per_commit():
+                result = _execute_next(
+                    vault_root, run_identity, plan_identity, store=store, compensation=compensation
+                )
+        except (CurationError, OpError) as error:
+            # A refusal, or a busy vault at a self-guarded leaf's own guard or a step's settle hold.
+            if ran == 0:
+                raise
+            stop = error
+            break
+        slowest = max(slowest, time.monotonic() - started)
+        if not result.get("mutated"):
+            break
+        ran += 1
+        if result.get("phase") not in _OPEN_RUN_PHASES:
+            break
+        reserve = slowest + request_budget.DELIVERY_RESERVE_SECONDS
+        if not budget.can_afford(reserve):
+            break
+        manager.yield_to_waiting_writes(
+            vault_root, max_wait=max(0.0, min(30.0, budget.remaining() - reserve))
+        )
+        if not budget.can_afford(reserve):
+            break
+    plan = store.load_plan(run_identity)
+    if ran and result.get("phase") not in _OPEN_RUN_PHASES and any(
+        step.get("kind") in _RENAME_STEP_KINDS for step in plan["steps"]
+    ):
+        # The run renamed pages and ended, so the vault-wide name-drift row counts a set that
+        # changed.
+        from . import due_state
+
+        due_state.schedule_name_drift_refresh(vault_root)
+    if stop is not None:
+        # The stopped step's receipt, if any, changed the run's phase; the steps before it stay committed.
+        run = store.reconstruct(run_identity)
+        result = {
+            **_compensation_phase(_stopped_phase(stop, run), compensation=compensation),
+            "mutated": True,
+            "stopped": _stopped(stop, result, run, plan),
+        }
+    progress = {
+        "steps": len(plan["steps"]),
+        "committed": len(result.get("committed_steps") or ()),
+        "this_call": ran,
+    }
+    if plan.get("derived_by") is not None:
+        # A derived run may hold hundreds of steps: the answer carries counts, and `status` the rest.
+        # The two keys are the run's per-step lists that `_execute_next` answers with.
+        result = {
+            key: value for key, value in result.items() if key not in {"receipts", "committed_steps"}
+        }
+        if isinstance(result.get("step"), Mapping):
+            result["step"] = {
+                key: value for key, value in result["step"].items() if key != "leaf_result"
+            }
+    return {**result, "progress": progress}
+
+
 def apply(
     vault_root: Path,
     *,
@@ -4321,47 +5714,45 @@ def apply(
     why: str,
 ) -> dict[str, Any]:
     root = Path(vault_root)
-    store = CurationStore(root)
-    plan = store.load_plan(run_id)
-    current_id, current_fingerprint = store.identities(run_id)
-    if plan_id != current_id or expected_plan_fingerprint != current_fingerprint:
-        raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "apply identity does not match stored plan")
-    _require_string(why, "approval.why", max_chars=MAX_WHY_CHARS)
-    _require_plan_relocation_history(root, plan)
-    blockers = _blockers_for_uncommitted(root, plan, set())
-    if blockers:
-        raise _error(blockers[0]["code"], blockers[0]["reason"])
-    store.create_approval(
-        run_id,
-        plan_id=plan_id,
-        fingerprint=expected_plan_fingerprint,
-        why=why,
-    )
-    return _execute_next(root, run_id, plan_id)
+    with _run_claim(root, run_id):
+        store = CurationStore(root)
+        # The approval lands only on the exact plan whose bindings still hold, decided under one hold.
+        with _step_boundary(root, "curation_approve"):
+            plan = store.load_plan(run_id)
+            current_id, current_fingerprint = store.identities(run_id)
+            if plan_id != current_id or expected_plan_fingerprint != current_fingerprint:
+                raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "apply identity does not match stored plan")
+            _require_string(why, "approval.why", max_chars=MAX_WHY_CHARS)
+            _require_plan_relocation_history(root, plan)
+            blockers = _blockers_for_uncommitted(root, plan, set())
+            if blockers:
+                raise _error(blockers[0]["code"], blockers[0]["reason"])
+            store.create_approval(
+                run_id,
+                plan_id=plan_id,
+                fingerprint=expected_plan_fingerprint,
+                why=why,
+            )
+        return _advance(root, run_id, plan_id, store=store, compensation=False)
 
 
 def resume(vault_root: Path, *, run_id: str, plan_id: str) -> dict[str, Any]:
     root = Path(vault_root)
-    store = CurationStore(root)
-    forward_identity, _ = store.identities(run_id)
-    compensation = plan_id != forward_identity
-    active_store: CurationStore = (
-        CompensationStore(root, run_id, plan_id) if compensation else store
-    )
-    _require_plan_relocation_history(root, active_store.load_plan(run_id))
-    if not active_store.approval_path(run_id).exists():
-        raise _error("CURATION_APPROVAL_REQUIRED", "resume requires an approved immutable plan")
-    approval = active_store.validated_approval(run_id, required=True)
-    assert approval is not None
-    if approval.get("plan_id") != plan_id:
-        raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "resume cannot switch plans")
-    return _execute_next(
-        root,
-        run_id,
-        plan_id,
-        store=active_store,
-        compensation=compensation,
-    )
+    with _run_claim(root, run_id):
+        store = CurationStore(root)
+        forward_identity, _ = store.identities(run_id)
+        compensation = plan_id != forward_identity
+        active_store: CurationStore = (
+            CompensationStore(root, run_id, plan_id) if compensation else store
+        )
+        _require_plan_relocation_history(root, active_store.load_plan(run_id))
+        if not active_store.approval_path(run_id).exists():
+            raise _error("CURATION_APPROVAL_REQUIRED", "resume requires an approved immutable plan")
+        approval = active_store.validated_approval(run_id, required=True)
+        assert approval is not None
+        if approval.get("plan_id") != plan_id:
+            raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "resume cannot switch plans")
+        return _advance(root, run_id, plan_id, store=active_store, compensation=compensation)
 
 
 def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
@@ -4407,20 +5798,25 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             "action": "status",
             "mutated": False,
             "phase": "blocked",
-            "error_code": "CURATION_OUTCOME_UNCERTAIN",
+            "error_code": str(projection.get("error_code") or "CURATION_OUTCOME_UNCERTAIN"),
             "recovery": "blocked",
         }
-    if reconstructed["phase"] in {"completed", "partial", "failed", "blocked"}:
-        result = {
+    settled = _compensation_phase(
+        {
             **reconstructed,
             "action": "status",
             "mutated": False,
             "recovery": "blocked" if reconstructed["phase"] == "blocked" else None,
-        }
-        return _compensation_phase(result, compensation=compensation)
+        },
+        compensation=compensation,
+    )
     next_item = _next_step(plan, reconstructed)
+    refused = next_item is not None and next_item[3]
+    # nosemgrep: ep-word-membership -- the closed run phases this module defines, each decided by its own branch.
+    if reconstructed["phase"] in {"completed", "partial", "failed", "blocked"} and not refused:
+        return settled
     if next_item is not None:
-        ordinal, step, binding = next_item
+        ordinal, step, binding, _refused = next_item
         operation_identity = operation_id(identity, ordinal, step["step_id"])
         try:
             committed_witness = _validated_operation_witness(
@@ -4451,8 +5847,11 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 "phase": "executing",
                 "recovery": "receipt-required",
                 "active_step": step["step_id"],
+                "next_action": "resume",
             }
             return _compensation_phase(result, compensation=compensation)
+    if refused:
+        return settled
     prepared = projection.get("prepared")
     if isinstance(prepared, Mapping):
         ordinal = prepared.get("ordinal")
@@ -4460,46 +5859,30 @@ def status(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             step = plan["steps"][ordinal]
             binding = plan["binding_manifest"][ordinal]
             operation_identity = operation_id(identity, ordinal, step["step_id"])
-            preparation: dict[str, Any] | None = None
-            try:
-                preparation = _load_rename_preparation(
-                    store,
-                    run_id,
-                    prepared,
-                    plan_identity=identity,
-                    ordinal=ordinal,
-                    step=step,
-                    binding=binding,
-                    compensation=compensation,
-                )
-            except CurationError as error:
-                return {
-                    **reconstructed,
-                    "action": "status",
-                    "mutated": False,
-                    "phase": "blocked",
-                    "error_code": error.code,
-                    "recovery": "blocked",
-                }
-            if preparation is not None:
-                placement = _prepared_placement(root, preparation)
-                recovery = {
-                    "prior": "retry-uncommitted",
-                    "target": "witness-required",
-                    "rename-transition": "roll-forward-required",
-                    "ambiguous": "blocked",
-                }[placement]
-                if recovery == "blocked":
+            recovery = "retry-uncommitted"
+            if step["kind"] in _RENAME_STEP_KINDS:
+                # A move past its intent record resumes by its placement (`_recover_rename`).
+                try:
+                    intent = store.rename_intent(run_id, operation_identity)
+                    placement = _rename_placement(root, binding) if intent is not None else None
+                    blocked_code = (
+                        "CURATION_RENAME_HISTORY_UNPROVABLE"
+                        if placement == _UNPROVABLE
+                        else "CURATION_OUTCOME_UNCERTAIN"
+                    )
+                except CurationError as error:
+                    placement, blocked_code = _UNCERTAIN, error.code
+                if placement == _ADOPT:
+                    recovery = "roll-forward-required"
+                elif placement in (_UNPROVABLE, _UNCERTAIN):
                     return {
                         **reconstructed,
                         "action": "status",
                         "mutated": False,
                         "phase": "blocked",
-                        "error_code": "CURATION_OUTCOME_UNCERTAIN",
+                        "error_code": blocked_code,
                         "recovery": "blocked",
                     }
-            else:
-                recovery = "retry-uncommitted"
             result = {
                 **reconstructed,
                 "action": "status",
@@ -4541,7 +5924,7 @@ class CurationStore:
 
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)
-        self.root = self.vault_root / kb_dirname() / "_Governance" / "curation" / "runs"
+        self.root = managed_root(self.vault_root) / "_Governance" / "curation" / "runs"
 
     def _assert_safe(self, target: Path) -> None:
         try:
@@ -4667,7 +6050,7 @@ class CurationStore:
                                 "CURATION_ARTIFACT_CORRUPT",
                                 "curation artifact has no retained descriptor",
                             )
-                        if os.fstat(descriptor).st_size > MAX_PLAN_BYTES * 4:
+                        if os.fstat(descriptor).st_size > MAX_SEALED_BYTES:
                             raise _error(
                                 "CURATION_ARTIFACT_CORRUPT",
                                 "curation artifact is not a bounded file",
@@ -4676,7 +6059,7 @@ class CurationStore:
                         if not read.ok:
                             self._held_error(read.error)
                         raw = read.require()
-                        if len(raw) > MAX_PLAN_BYTES * 4:
+                        if len(raw) > MAX_SEALED_BYTES:
                             raise _error(
                                 "CURATION_ARTIFACT_CORRUPT",
                                 "curation artifact is not a bounded file",
@@ -4695,18 +6078,29 @@ class CurationStore:
         a plan seal and a receipt for a committed leaf mark the command committed."""
         self._assert_safe(path)
         content = canonical_json(value)
-        try:
-            batch_atomic_write(
-                [PlannedWrite(path=path, content=content, create_only=create_only)],
-                vault_root=self.vault_root,
-                commit_point=commit_point,
-            )
-        except (BatchWriteError, OSError, ValueError) as error:
-            code = "CURATION_PLAN_COLLISION" if create_only else "CURATION_STORE_WRITE_FAILED"
-            raise _error(code, "curation artifact write was refused") from error
+        # Each run artifact is its own seam: it holds the boundary for this one-file batch alone.
+        with _step_boundary(self.vault_root, "curation_store_write"):
+            try:
+                batch_atomic_write(
+                    [PlannedWrite(path=path, content=content, create_only=create_only)],
+                    vault_root=self.vault_root,
+                    commit_point=commit_point,
+                )
+            except (BatchWriteError, OSError, ValueError) as error:
+                code = "CURATION_PLAN_COLLISION" if create_only else "CURATION_STORE_WRITE_FAILED"
+                raise _error(code, "curation artifact write was refused") from error
 
     def _create_plan_at(self, path: Path, plan: Mapping[str, Any]) -> None:
         _require_plan_relocation_history(self.vault_root, plan)
+        size = len(canonical_json_bytes(plan))
+        if size > MAX_SEALED_BYTES:
+            # Refused before anything is written: a plan above the read bound would seal and then
+            # never load again.
+            raise _error(
+                "CURATION_PLAN_TOO_LARGE",
+                f"the sealed plan would hold {size} bytes, above the {MAX_SEALED_BYTES}-byte "
+                "limit; relocate fewer pages per plan",
+            )
         identity = plan_id(plan)
         base = {
             key: value
@@ -4756,13 +6150,23 @@ class CurationStore:
         registry_ids: Mapping[str, str],
         today: dt.date | None = None,
         allow_records: bool = False,
+        derived_by: str | None = None,
+        summary: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        validated = validate_forward_plan(plan, allow_records=allow_records)
+        if derived_by is not None and derived_by not in DERIVED_BY:
+            raise _error("INVALID_CURATION_PLAN", "plan derivation is invalid")
+        if summary is not None and derived_by is None:
+            raise _error("INVALID_CURATION_PLAN", "only a derived plan seals its summary")
+        validated = validate_forward_plan(
+            plan, allow_records=allow_records, derived=derived_by is not None
+        )
         _require_plan_relocation_history(self.vault_root, validated)
         sealed = {
             **validated,
             "binding_manifest": json.loads(canonical_json(list(binding_manifest))),
             "registry_ids": dict(registry_ids),
+            **({"derived_by": derived_by} if derived_by is not None else {}),
+            **({"approval_summary": json.loads(canonical_json(summary))} if summary is not None else {}),
         }
         if any(isinstance(prepared := item.get("prepared"), Mapping) and isinstance(prepared.get("episode"), Mapping) for item in sealed["binding_manifest"]):
             # This fixed reader version prevents old executors from bypassing journal correlation.
@@ -4784,9 +6188,7 @@ class CurationStore:
             "phase": "proposed",
             "active_step": None,
         }
-        if not self.state_path(run_identity).exists():
-            self._write_json(self.state_path(run_identity), projection, create_only=True)
-        return {**projection, "plan": sealed}
+        return {**_sealed_run(self, run_identity, projection), "plan": sealed}
 
     def load_plan(self, run_identity: str) -> dict[str, Any]:
         plan = _validate_sealed_plan(self._read_json(self.plan_path(run_identity)))
@@ -4902,6 +6304,51 @@ class CurationStore:
             raise _error("CURATION_OUTCOME_UNCERTAIN", "a competing witness exists")
         self._write_json(path, dict(evidence), create_only=True)
         return path
+
+    def rename_intent_path(self, run_identity: str, operation_identity: str) -> Path:
+        if not _HEX64.fullmatch(operation_identity):
+            raise _error("INVALID_OPERATION_ID", "intent operation id is invalid")
+        return self.prepared_dir(run_identity) / f"{operation_identity}.json"
+
+    def create_rename_intent(self, run_identity: str, intent: Mapping[str, Any]) -> None:
+        """Publish and flush a move's intent record, create-only, before its rename.
+
+        It is the step's own bookkeeping, so it is written outside the step's witness seam and
+        marks nothing committed.
+        """
+        from . import curation_witness
+
+        path = self.rename_intent_path(run_identity, str(intent["operation_id"]))
+        self._assert_safe(path)
+        try:
+            with curation_witness.suspended():
+                batch_atomic_write(
+                    [PlannedWrite(path=path, content=canonical_json(intent), create_only=True)],
+                    vault_root=self.vault_root,
+                    post_commit_fanout=False,
+                    commit_point=False,
+                )
+        except (BatchWriteError, OSError, ValueError) as error:
+            raise _error(
+                "CURATION_OUTCOME_UNCERTAIN", "the move's intent record could not be published"
+            ) from error
+
+    def void_rename_intent(self, run_identity: str, operation_identity: str) -> None:
+        """Remove a move's intent record once its rename is known not to stand (`_void_unrenamed`)."""
+        path = self.rename_intent_path(run_identity, operation_identity)
+        self._assert_safe(path)
+        path.unlink(missing_ok=True)
+
+    def rename_intent(self, run_identity: str, operation_identity: str) -> dict[str, Any] | None:
+        """The move's intent record, or None when the step never reached its rename."""
+        path = self.rename_intent_path(run_identity, operation_identity)
+        self._assert_safe(path)
+        if not path.exists():
+            return None
+        intent = self._read_json(path)
+        if not isinstance(intent, dict) or intent.get("operation_id") != operation_identity:
+            raise _error("CURATION_OUTCOME_UNCERTAIN", "the move's intent record is invalid")
+        return intent
 
     def create_publication_record(self, run_identity: str, intent: Mapping[str, Any]) -> Path:
         """Create one native attempt's publication record in its intent form; it lives as long as the run."""
@@ -5110,7 +6557,8 @@ class CurationStore:
         if len(ordered_committed) == len(steps):
             phase = "completed"
             next_action = None
-        elif failed:
+        elif failed_step is not None:
+            # A failed attempt that a later retry committed no longer holds the run back.
             phase = "partial" if committed else "failed"
             next_action = "resume" if retryable else ("propose-compensation" if committed else None)
         elif approval is None:
@@ -5150,6 +6598,32 @@ class CurationStore:
             "receipts": receipts,
             "next_action": None,
         }
+
+
+def _sealed_run(
+    store: CurationStore, run_identity: str, projection: dict[str, Any]
+) -> dict[str, Any]:
+    """The run a sealed plan names: new and proposed, or the one that plan already has.
+
+    A plan's identity names its run, so sealing the same plan again finds that run, which may
+    have started, failed or finished since. It answers in the run's own phase and next action.
+    """
+    if not store.state_path(run_identity).exists():
+        store._write_json(store.state_path(run_identity), projection, create_only=True)
+        return projection
+    state = store.reconstruct(run_identity)
+    if state["phase"] == "proposed":
+        return projection
+    return {
+        **projection,
+        **{
+            key: state[key]
+            for key in (
+                "phase", "committed_steps", "failed_step", "retryable", "error_code", "next_action"
+            )
+            if key in state
+        },
+    }
 
 
 class CompensationStore(CurationStore):
@@ -5259,9 +6733,20 @@ def _compensation_args(
     forward_step: Mapping[str, Any],
     binding: Mapping[str, Any],
     receipt: Mapping[str, Any],
-) -> tuple[str, dict[str, Any]]:
+    operation_identity: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """The inverse step of one committed forward step, or None when it changed nothing to undo.
+
+    `operation_identity` is the forward step's operation id, under which its pointer writes
+    were recorded.
+    """
     kind = str(forward_step["kind"])
-    inverse = compensation_kind(kind)
+    inverse = compensation_kind(kind, binding)
+    if inverse == "unavailable":
+        raise _error(
+            "CURATION_COMPENSATION_UNAVAILABLE",
+            "an undone relocation is redone by a new reviewed plan",
+        )
     if kind in RECORDS_STEP_KINDS:
         raise _error(
             "CURATION_COMPENSATION_UNAVAILABLE",
@@ -5293,12 +6778,41 @@ def _compensation_args(
             )
         return inverse, {"trash_path": trash_path, "restore_path": binding["path"]}
     if kind == "move":
-        args = forward_step["args"]
+        # The inverse renames the page back and lands its sealed pre-step bytes, so its lineage
+        # entry and `fields` patch go with no new entry.
         return inverse, {
-            "old_path": args["new_path"],
-            "new_path": args["old_path"],
-            "update_wikilinks": args.get("update_wikilinks", True),
-            "allow_curated": args.get("allow_curated", False),
+            "move": {
+                "old_path": binding["postcondition"]["path"],
+                "new_path": binding["path"],
+                "before_hash": binding["postcondition"]["content_hash"],
+                "after_hash": binding["before_hash"],
+                "restore": binding["prepared"]["restore"],
+                "allow_curated": bool(forward_step["args"].get("allow_curated", False)),
+            }
+        }
+    if kind == REPOINT_STEP_KIND:
+        changed = [
+            row for row in binding["prepared"]["pages"] if row["after_hash"] != row["before_hash"]
+        ]
+        if not changed:
+            return None
+        return inverse, {"repoint": {"operation": operation_identity, "pages": changed}}
+    if inverse == REVERT_POINTER_STEP_KIND:
+        restore = binding["prepared"].get("restore")
+        return inverse, {
+            "pointer": {
+                "operation": operation_identity,
+                "pages": [
+                    {
+                        "path": binding["path"],
+                        "before_hash": binding["before_hash"],
+                        "after_hash": binding["postcondition"]["content_hash"],
+                        # A writable page reverses its sealed line delta; an append-only page
+                        # reverts through the pointer write's record (`repoint_links.restorations`).
+                        **({"restore": restore} if restore is not None else {"append_only": True}),
+                    }
+                ],
+            }
         }
     if kind == "recover":
         path = effect.get("restored_path") or binding.get("prepared", {}).get("destination")
@@ -5323,8 +6837,37 @@ def _compensation_args(
     )
 
 
+def _later_states(
+    plan: Mapping[str, Any], committed: Collection[str], ordinal: int
+) -> dict[str, frozenset[str]]:
+    """The hashes that later committed steps, chained to a page, leave it at (`_prepare_manifest`)."""
+    states: dict[str, set[str]] = {}
+    for later in range(ordinal + 1, len(plan["steps"])):
+        binding = plan["binding_manifest"][later]
+        if plan["steps"][later]["step_id"] not in committed or not binding.get("chained"):
+            continue
+        for row in binding["effect_after"]:
+            if row["path"] in binding["chained"] and row.get("content_hash"):
+                states.setdefault(str(row["path"]), set()).add(str(row["content_hash"]))
+    return {path: frozenset(hashes) for path, hashes in states.items()}
+
+
 def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
-    root = Path(vault_root)
+    """Derive and seal the plan that undoes a forward run's committed steps.
+
+    Like a forward proposal, it prepares without the vault mutation boundary (the dispatcher
+    narrows it to the writer fence), then takes the boundary to seal. The seal refuses a plan
+    whose forward run committed another step, or whose bound pages or registries changed, since
+    preparation. Under an outer boundary it takes no second guard (`seal_proposal`).
+
+    It holds the run's claim throughout: a forward step that is between its leaf's commit and its
+    receipt would otherwise be missing from the undo.
+    """
+    with _run_claim(Path(vault_root), run_id):
+        return _propose_compensation(Path(vault_root), run_id=run_id)
+
+
+def _propose_compensation(root: Path, *, run_id: str) -> dict[str, Any]:
     forward_store = CurationStore(root)
     forward_plan = forward_store.load_plan(run_id)
     forward_identity, _forward_fingerprint = forward_store.identities(run_id)
@@ -5366,8 +6909,19 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
             raise _error(
                 "CURATION_OUTCOME_UNCERTAIN", "forward receipt no longer matches its witness"
             )
-        _verify_live_postcondition(root, witness, accepted=_chained_states(forward_step, binding))
-        inverse, args = _compensation_args(forward_step, binding, receipt)
+        _verify_live_postcondition(
+            root,
+            witness,
+            accepted={
+                **_later_states(forward_plan, committed, ordinal),
+                **(_chained_states(forward_step, binding) or {}),
+            },
+            drift="CURATION_BINDING_STALE",
+        )
+        derived = _compensation_args(forward_step, binding, receipt, operation_identity)
+        if derived is None:
+            continue
+        inverse, args = derived
         steps.append(
             {
                 "step_id": f"comp-{len(steps):03d}-{forward_step['step_id']}",
@@ -5375,6 +6929,7 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
                 "args": args,
             }
         )
+    derived_by = forward_plan.get("derived_by")
     plan = validate_forward_plan(
         {
             "version": 1,
@@ -5383,6 +6938,8 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         },
         # Only this derivation may carry the private inverse of a fold.
         allow_fold_inverse=True,
+        # The undo of a derived plan has one inverse step per committed forward step.
+        derived=derived_by is not None,
     )
     manifest = _prepare_manifest(root, plan["steps"])
     _require_plan_relocation_history(root, plan)
@@ -5393,10 +6950,10 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         "forward_plan_id": forward_identity,
         "binding_manifest": manifest,
         "registry_ids": registries,
+        **({"derived_by": derived_by} if derived_by is not None else {}),
     }
     identity = plan_id(sealed)
     store = CompensationStore(root, run_id, identity)
-    store._create_plan_at(store.plan_path(run_id), sealed)
     fingerprint = plan_fingerprint(
         {
             key: value
@@ -5415,9 +6972,21 @@ def propose_compensation(vault_root: Path, *, run_id: str) -> dict[str, Any]:
         "phase": "proposed",
         "active_step": None,
     }
-    if not store.state_path(run_id).exists():
-        store._write_json(store.state_path(run_id), projection, create_only=True)
-    return {**projection, "plan": sealed}
+    with _step_boundary(root, "curation_compensation_propose_commit"):
+        if _committed_step_ids(forward_store.reconstruct(run_id)) != committed:
+            raise _error(
+                "CURATION_BINDING_STALE",
+                "the forward run committed another step while its undo was prepared; propose again",
+            )
+        blockers = _binding_blockers(root, sealed, plan_registry_identities(root, sealed))
+        if blockers:
+            raise _error(blockers[0]["code"], blockers[0]["reason"])
+        store._create_plan_at(store.plan_path(run_id), sealed)
+        run = _sealed_run(store, run_id, projection)
+    if derived_by is not None:
+        # The undo of a derived run is as large as the run: the person approves its summary.
+        return {**run, "summary": derived_summary(sealed)}
+    return {**run, "plan": sealed}
 
 
 def apply_compensation(
@@ -5429,30 +6998,27 @@ def apply_compensation(
     why: str,
 ) -> dict[str, Any]:
     root = Path(vault_root)
-    store = CompensationStore(root, run_id, plan_id)
-    plan = store.load_plan(run_id)
-    identity, fingerprint = store.identities(run_id)
-    if identity != plan_id or fingerprint != expected_plan_fingerprint:
-        raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "compensation approval identity is stale")
-    _require_string(why, "approval.why", max_chars=MAX_WHY_CHARS)
-    _require_plan_relocation_history(root, plan)
-    blockers = _blockers_for_uncommitted(root, plan, set())
-    if blockers:
-        raise _error(blockers[0]["code"], blockers[0]["reason"])
-    store.create_approval(
-        run_id,
-        plan_id=plan_id,
-        fingerprint=expected_plan_fingerprint,
-        why=why,
-        compensation_plan_id=plan_id,
-    )
-    return _execute_next(
-        root,
-        run_id,
-        plan_id,
-        store=store,
-        compensation=True,
-    )
+    with _run_claim(root, run_id):
+        store = CompensationStore(root, run_id, plan_id)
+        # As in `apply`: the approval lands only on the exact plan whose bindings hold, under one hold.
+        with _step_boundary(root, "curation_approve"):
+            plan = store.load_plan(run_id)
+            identity, fingerprint = store.identities(run_id)
+            if identity != plan_id or fingerprint != expected_plan_fingerprint:
+                raise _error("CURATION_PLAN_IDENTITY_MISMATCH", "compensation approval identity is stale")
+            _require_string(why, "approval.why", max_chars=MAX_WHY_CHARS)
+            _require_plan_relocation_history(root, plan)
+            blockers = _blockers_for_uncommitted(root, plan, set())
+            if blockers:
+                raise _error(blockers[0]["code"], blockers[0]["reason"])
+            store.create_approval(
+                run_id,
+                plan_id=plan_id,
+                fingerprint=expected_plan_fingerprint,
+                why=why,
+                compensation_plan_id=plan_id,
+            )
+        return _advance(root, run_id, plan_id, store=store, compensation=True)
 
 
 __all__ = [
@@ -5460,6 +7026,7 @@ __all__ = [
     "READ_ONLY_ACTIONS",
     "STEP_KINDS",
     "MAX_PLAN_BYTES",
+    "MAX_SEALED_BYTES",
     "CurationError",
     "CurationStore",
     "canonical_json",

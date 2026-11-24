@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..kbdir import managed_join, managed_split
 from .registry import Snapshot
 
 #: Graph edge origins an author wrote, as opposed to structure the indexer adds.
@@ -192,7 +193,6 @@ def relations(vault_root: Path, snapshot: Snapshot) -> Usage:
 
 def homes(vault_root: Path, snapshot: Snapshot) -> Usage:
     """Pages within each registered home, from one current graph snapshot."""
-    from ..kbdir import kb_prefix
 
     source = "graph file pages in home folders"
 
@@ -203,7 +203,7 @@ def homes(vault_root: Path, snapshot: Snapshot) -> Usage:
         pages = sorted(str(path) for (path,) in rows)
         holders: dict[str, tuple[str, ...]] = {}
         for key, entry in snapshot.entries.items():
-            folder = f"{kb_prefix()}{entry.attributes['folder']}/".casefold()
+            folder = f"{managed_join('')}{entry.attributes['folder']}/".casefold()
             holders[key] = tuple(path for path in pages if path.casefold().startswith(folder))
         return Usage(
             True,
@@ -269,7 +269,6 @@ def domain_references(vault_root: Path, snapshot: Snapshot) -> Usage:
 
     def read() -> Usage:
         from .. import homes, semantic_contract, source_taxonomy
-        from ..kbdir import kb_prefix
         from . import contract, instances, registry
 
         root = Path(vault_root)
@@ -294,7 +293,7 @@ def domain_references(vault_root: Path, snapshot: Snapshot) -> Usage:
                     paths.setdefault(key, set()).add(path)
 
             for page in corpus.pages.values():
-                if not page.path.startswith(kb_prefix()):
+                if managed_split(page.path) is None:
                     continue
                 record(page.frontmatter.get("domain"), page.path)
                 topics = page.frontmatter.get("topics") or ()
@@ -308,6 +307,8 @@ def domain_references(vault_root: Path, snapshot: Snapshot) -> Usage:
             domain_path = domain_spec.overlay(root).relative_to(root).as_posix()
             for entry in snapshot.entries.values():
                 record(entry.replaced_by, domain_path)
+                # A parent stays registered while a child names it: removing it would orphan the child's chain.
+                record(entry.parent, domain_path)
         except Exception:  # noqa: BLE001 - incomplete reference proof cannot establish non-use
             return _unavailable("domain_reference_census_unavailable", source)
         holders = {key: tuple(sorted(values)) for key, values in paths.items()}

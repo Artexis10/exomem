@@ -348,6 +348,36 @@ def test_the_drain_yields_to_requests_and_never_under_a_boundary(
     assert held_while_yielding == []
 
 
+def test_a_turn_ends_for_a_request_in_flight_as_it_does_for_a_waiting_writer(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A unit under the boundary cannot yield. The turn ends after its slice, so the
+    drain yields outside the boundary, whenever a request runs beside the unit."""
+    manager = _short_timeout_manager(vault, monkeypatch)
+    monkeypatch.setattr(foreground_priority, "MAX_BULK_WORK_SECONDS", 0.0)
+    turn = derived_drain._Turn(manager._mutation_coordinator_for(vault))
+    request_running = threading.Event()
+    request_done = threading.Event()
+
+    def request() -> None:
+        with foreground_priority.foreground():
+            request_running.set()
+            request_done.wait(timeout=30)
+
+    reader = threading.Thread(target=request, daemon=True)
+    try:
+        spent_while_quiet = turn.spent()
+        reader.start()
+        assert request_running.wait(timeout=5)
+        spent_beside_a_request = turn.spent()
+    finally:
+        request_done.set()
+        reader.join(timeout=5)
+        manager.close()
+
+    assert (spent_while_quiet, spent_beside_a_request) == (False, True)
+
+
 def test_a_replaced_or_altered_receipt_store_is_probed_again(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

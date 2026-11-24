@@ -51,7 +51,7 @@ from . import structured_collections as collections
 from . import vault as vault_module
 from .collection_store.preview import canonical_read
 from .governance import egress
-from .kbdir import kb_dirname
+from .kbdir import managed_join
 
 ENTRY_VERSION = 1
 PAGE_DEFAULT = 20
@@ -87,7 +87,7 @@ def history_dir(collection_id: str, item_key: str) -> str:
 
 def history_root() -> str:
     """The vault-relative tree every row's kept corrections live under."""
-    return f"{kb_dirname()}/_Collections/history"
+    return managed_join("_Collections/history")
 
 
 def plan_entry(
@@ -173,7 +173,8 @@ def _revision(text: str | None, version: str) -> dict[str, Any]:
         entry = json.loads(text) if text is not None else None
     except json.JSONDecodeError:
         entry = None
-    if not isinstance(entry, dict) or entry.get("version") != ENTRY_VERSION:
+    # Version two adds exact dependency bindings without changing the released history payload.
+    if not isinstance(entry, dict) or entry.get("version") not in (ENTRY_VERSION, 2):
         # Kept but unreadable: say so rather than drop it from the count.
         return {"version": version, "status": "unreadable"}
     return {

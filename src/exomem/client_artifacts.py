@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from urllib.parse import urljoin, urlsplit
 
-from . import duplicates, evidence_reuse
+from . import duplicates, evidence_reuse, memory_refs, source_result_attribution
 from .cli_ops import OpError
 from .mutation_terminal import as_reused
 from .preserve import (
@@ -33,6 +33,8 @@ from .preserve import (
     DuplicateArtifact,
     PreserveError,
     destination_segment_refusal,
+    diarize_pin,
+    disclose_retained_speaker_choice,
     preserve_stream,
     validate_raw_capture,
 )
@@ -170,6 +172,7 @@ class StagedArtifact:
     #: The claimed hold behind a local client's held upload, so a command that
     #: stores nothing can put it back.
     held: object | None = None
+    diarize: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -196,6 +199,7 @@ class AdoptionReceiptSnapshot:
 
     receipt: dict[str, object]
     page_guard: PathGuard
+    source_ref: str | None = None
 
 
 def remaining_retrieval_timeout(
@@ -491,19 +495,23 @@ def stage_artifact(
     A local client's held upload (`exomem-held:`) is claimed from machine-local
     state instead; it never reaches the network code below.
     """
+    from .cloud_cell import cloud_mode_enabled
     from .held_uploads import is_held_reference
 
+    diarize = file.get("diarize")
+    if diarize is not None and not isinstance(diarize, bool):
+        raise SafeFetchError("INVALID_FILE", "diarize must be true or false")
     if is_held_reference(file.get("download_url")):
-        return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
-    from .cloud_cell import cloud_mode_enabled
-
-    if cloud_mode_enabled():
+        artifact = _redeem_held(file, budget, vault_root=vault_root, lane=lane)
+    elif cloud_mode_enabled():
         from .cloud_artifact_transport import stage_cloud_artifact
 
-        return stage_cloud_artifact(
+        artifact = stage_cloud_artifact(
             file, budget, index=index, lane=lane, batch_deadline=batch_deadline
         )
-    return stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    else:
+        artifact = stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    return artifact if diarize is None else replace(artifact, diarize=diarize)
 
 
 def stage_direct_artifact(
@@ -843,6 +851,14 @@ def _unless_written(result: dict) -> dict:
     A call that wrote nothing reports `mutated: false` and is never marked committed, so the reply states the outcome
     and carries no durable-write text.
     """
+    # Only Source-bound rows contribute; Evidence and calls outside a capture frame remain unchanged.
+    if source_result_attribution.active():
+        for row in result.get("files") or ():
+            refs = source_result_attribution.recipe(row).sources
+            state = row.get("state", row.get("outcome"))
+            summary = result.get("summary")
+            if refs and isinstance(summary, dict) and state in summary:
+                source_result_attribution.bind(summary, refs, paths=((state,),), action="count")
     reused = False
     for row in result.get("files") or ():
         if row.get("outcome") == "stored":
@@ -869,7 +885,7 @@ def _finish_adoption(outcomes: list[dict[str, object] | None]) -> dict:
     })
 
 
-def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
+def _media_commit_guard(manager, vault_root: Path, operation: str):  # noqa: ANN001, ANN202
     """The per-file media boundary, as a guard `reconcile_media` opens itself.
 
     Built the way `commands._process_media` builds its own, and for the same
@@ -884,11 +900,38 @@ def _media_commit_guard(manager, vault_root: Path):  # noqa: ANN001, ANN202
         return manager.mutation_guard(
             vault_root,
             request_id=active_mutation_request_id(),
-            operation="preserve_artifacts_media",
+            operation=operation,
             holder_kind="command",
         )
 
     return guard
+
+
+def _schedule_media(  # noqa: ANN001
+    manager, vault_root: Path, stored: str | None, warnings: list[str], *, kept: str, operation: str
+) -> None:
+    """Queue media processing for a file this call just committed, so its page gets the document's text.
+
+    Run after the commit, under its own per-file guard named `operation`. Waiting for the file watcher instead
+    left a corrected Source unprocessed when its one event was missed and the bounded sweep had not reached it.
+    A failure only warns, naming what stays recoverable (`kept`): the committed file stays authoritative, and
+    the watcher and sweep still retry it.
+    """
+    if not stored:
+        return
+    try:
+        from . import media_processing
+
+        if media_processing.classify_media(vault_root / stored) is not None:
+            media_processing.reconcile_media(
+                vault_root,
+                vault_root / stored,
+                explicit=False,
+                commit_guard=_media_commit_guard(manager, vault_root, operation),
+                defer_fanout_to_terminal=True,
+            )
+    except Exception:  # noqa: BLE001 - the committed original remains authoritative and recoverable
+        warnings.append(f"media reconciliation failed; {kept} remains recoverable")
 
 
 def _destination(vault_root: Path, *parts: str) -> str:
@@ -1048,14 +1091,36 @@ def _validate_receipt(
 def _verify_canonical_artifact(
     vault_root: Path, receipt: Mapping[str, object]
 ) -> None:
+    from . import held_fs, media_store, originals, reserved_paths
+
+    stored_path = str(receipt["stored_path"])
     try:
-        content, _guard = read_bounded_guarded_bytes(
-            vault_root,
-            str(receipt["stored_path"]),
-            limit=int(receipt["size"]),
-            expected_hash=str(receipt["hash"]),
-        )
-    except (FileNotFoundError, OSError, PathGuardError, ValueError) as error:
+        try:
+            content, _guard = read_bounded_guarded_bytes(
+                vault_root,
+                stored_path,
+                limit=int(receipt["size"]),
+                expected_hash=str(receipt["hash"]),
+            )
+        except (FileNotFoundError, PathGuardError):
+            # A shared original keeps no file at its path; its filing binds the object that holds the bytes.
+            # `pooled` answers only where no file holds the path, so a file that differs still fails below.
+            filing = originals.pooled(vault_root, stored_path)
+            if filing is None:
+                raise
+            head = media_store.pooled_head(vault_root, stored_path, filing)
+            if (head.size, head.sha256) != (receipt["size"], receipt["hash"]):
+                raise ValueError("stored adoption artifact differs from its receipt") from None
+            return
+    except (
+        FileNotFoundError,
+        OSError,
+        PathGuardError,
+        ValueError,
+        media_store.MediaStoreError,
+        held_fs.HeldFsError,
+        reserved_paths.ReservedPathLeafError,
+    ) as error:
         raise _receipt_error(
             "ADOPTION_REPLAY_UNVERIFIABLE",
             "stored adoption artifact could not be reverified",
@@ -1098,7 +1163,9 @@ def _find_adoption_receipt(
         if not isinstance(value, Mapping) or value.get("key_digest") != key_digest:
             continue
         receipt = _validate_receipt(value, page_path=page, vault_root=vault_root)
-        matches.append(AdoptionReceiptSnapshot(receipt, page_guard))
+        identity = memory_refs.normalize_id(frontmatter.get(memory_refs.ID_FIELD))
+        source_ref = memory_refs.memory_ref(identity) if identity is not None else None
+        matches.append(AdoptionReceiptSnapshot(receipt, page_guard, source_ref))
     if len(matches) > 1:
         raise _receipt_error("ADOPTION_KEY_REUSED", "adoption key has multiple stored receipts")
     return matches[0] if matches else None
@@ -1192,15 +1259,17 @@ def _earlier_source(
 def _with_unavailable_warning(payload: Mapping[str, object], available: bool, subject: str) -> dict[str, object]:
     """`payload` with the duplicate-check warning when the index could not answer, so the row says the check did not run."""
     if available:
-        return dict(payload)
-    return {**payload, "warnings": [*(payload.get("warnings") or ()), duplicates.unavailable_warning(subject)]}
+        return source_result_attribution.carry(payload, dict(payload))
+    return source_result_attribution.carry(payload, {
+        **payload, "warnings": [*(payload.get("warnings") or ()), duplicates.unavailable_warning(subject)],
+    })
 
 
 def _already_stored_outcome(
     artifact: StagedArtifact, duplicate: DuplicateArtifact, *, lane: str
 ) -> dict[str, object]:
     """The hand-over's answer when its exact bytes are already stored: the earlier copy, nothing written."""
-    return {
+    out = {
         "file_id": artifact.file_id,
         **duplicate.receipt(
             size=artifact.size, content_type=_effective_content_type(artifact, lane=lane)
@@ -1208,11 +1277,15 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
+    disclose_retained_speaker_choice(out, artifact.diarize)
+    return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
 def _validate_staged_adoption(
     artifact: StagedArtifact, envelope: AdoptionEnvelope
 ) -> None:
+    if artifact.held is not None and (artifact.held.record or {}).get("import_key") is not None:
+        raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Save this held Source without adoption.")
     if (
         artifact.file_id != envelope.selected_file_id
         or not artifact.filename.strip()
@@ -1256,8 +1329,10 @@ def _assert_replay_identity(
         ) from error
 
 
-def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
-    return {
+def _replayed_outcome(
+    receipt: Mapping[str, object], *, diarize: bool | None, source_refs: tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    out = {
         "file_id": receipt["selected_file_id"],
         "outcome": "replayed",
         "stored_path": receipt["stored_path"],
@@ -1271,6 +1346,8 @@ def _replayed_outcome(receipt: Mapping[str, object]) -> dict[str, object]:
         "warnings": [],
         "adoption": dict(receipt),
     }
+    disclose_retained_speaker_choice(out, diarize)
+    return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
 def _stored_outcome(
@@ -1304,6 +1381,7 @@ def _stored_outcome(
                 "ref": payload.get("ref"),
             }
         )
+        source_result_attribution.bind(outcome, (payload.get("ref"),))
     return outcome
 
 
@@ -1391,7 +1469,9 @@ def _capture_source_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            outcomes[selected_index] = _replayed_outcome(
+                receipt.receipt, diarize=artifact.diarize, source_refs=(receipt.source_ref,)
+            )
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1426,6 +1506,7 @@ def _capture_source_adoption(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=artifact.diarize,
                             ),
                             adoption_seed=envelope.seed(
                                 lane="source", destination=destination
@@ -1434,7 +1515,9 @@ def _capture_source_adoption(
                         )
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt)
+                outcomes[selected_index] = _replayed_outcome(
+                    raced.receipt, diarize=artifact.diarize, source_refs=(raced.source_ref,)
+                )
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
@@ -1538,7 +1621,7 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1581,10 +1664,11 @@ def _preserve_evidence_adoption(
                                 ),
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize)
                 return _finish_adoption(outcomes)
 
             if _wrote(duplicate):
@@ -1597,21 +1681,10 @@ def _preserve_evidence_adoption(
             receipt_payload = payload.get("adoption")
             if not isinstance(receipt_payload, Mapping):
                 raise RuntimeError("canonical artifact writer omitted its adoption receipt")
-            try:
-                from . import media_processing
-
-                if media_processing.classify_media(
-                    vault_root / str(receipt_payload["stored_path"])
-                ) is not None:
-                    media_processing.reconcile_media(
-                        vault_root,
-                        vault_root / str(receipt_payload["stored_path"]),
-                        explicit=False,
-                        commit_guard=_media_commit_guard(manager, vault_root),
-                        defer_fanout_to_terminal=True,
-                    )
-            except Exception:  # noqa: BLE001 - committed custody remains authoritative
-                warnings.append("media reconciliation failed; evidence remains recoverable")
+            _schedule_media(
+                manager, vault_root, str(receipt_payload["stored_path"]), warnings,
+                kept="evidence", operation="preserve_artifacts_media",
+            )
             payload = dict(payload)
             payload["warnings"] = warnings
             outcomes[selected_index] = _stored_outcome(
@@ -1633,6 +1706,7 @@ def capture_source_artifacts(
     title: str,
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
+    import_key: str | None = None,
     **source_fields: object,
 ) -> dict:
     """Stage remote files first, then capture each as a Source under a guard.
@@ -1643,8 +1717,6 @@ def capture_source_artifacts(
     are committed and what describes them. The lane is the command's, never the
     transport's: nothing here reads a MIME type or an extension to decide it.
     """
-    from . import add as add_module
-
     if adoption is not None:
         return _capture_source_adoption(
             vault_root,
@@ -1671,7 +1743,6 @@ def capture_source_artifacts(
     batch_deadline = _monotonic() + _BATCH_DEADLINE_SECONDS
     staged: dict[int, StagedArtifact] = {}
     outcomes: list[dict | None] = [None] * len(files)
-    resolution: dict | None = None
     for index, file in enumerate(files):
         if not isinstance(file, Mapping):
             outcomes[index] = _failed("", SafeFetchError("INVALID_FILE", "file handle is invalid"))
@@ -1688,11 +1759,45 @@ def capture_source_artifacts(
             file_id = str(file.get("file_id") or "") if isinstance(file, Mapping) else ""
             outcomes[index] = _failed(file_id, error)
 
+    return _commit_staged_sources(
+        vault_root, source_schema=source_schema, title=title, staged=staged, outcomes=outcomes,
+        source_fields=source_fields, import_key=import_key,
+    )
+
+
+def _commit_staged_sources(
+    vault_root: Path,
+    *,
+    source_schema: object,
+    title: str,
+    staged: Mapping[int, StagedArtifact],
+    outcomes: list[dict | None],
+    source_fields: Mapping[str, object],
+    import_key: str | None = None,
+    correction_speech_original: Path | None = None,
+) -> dict:
+    """Capture each staged file as a Source under the mutation guard, releasing the staged bytes.
+
+    A correction names its predecessor, so it never meets an earlier Source that holds the same bytes.
+    """
+    from . import add as add_module
+    from . import (
+        document_containers,
+        document_identity,
+        media_jobs,
+        source_capture,
+        source_corrections,
+        source_imports,
+    )
+
+    resolution: dict | None = None
     manager = active_manager()
     refusals: list[OpError] = []
+    wrote_import_receipt = False
     try:
         for index, artifact in staged.items():
             body_started = False
+            key = import_key
             try:
                 if (
                     not artifact.file_id
@@ -1705,18 +1810,75 @@ def capture_source_artifacts(
                 # page. A batch would otherwise land several pages under one
                 # name and rely on uniquify to tell them apart.
                 item_title = title if len(staged) == 1 else f"{title} — {artifact.filename}"
+                # Read before the guard, so a slow or hostile PDF never holds the mutation boundary.
+                claimed_url = source_fields.get("url")
+                identity = (
+                    document_identity.inspect(artifact.path, claimed_url if isinstance(claimed_url, str) else None)
+                    if document_identity.is_pdf(artifact.filename) else None
+                )
+                held_key = (artifact.held.record or {}).get("import_key") if artifact.held is not None else None
+                if held_key is not None and (
+                    len(outcomes) != 1 or source_fields.get("correction") is not None
+                    or import_key is not None and import_key != held_key
+                ):
+                    raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Use the held Source's import ID in a single-file capture.")
+                key = import_key or held_key
+                if key is not None:
+                    safe_name = add_module.source_artifact_name(artifact.filename)
+                    if document_containers.is_container(safe_name):
+                        raise SafeFetchError(
+                            "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
+                        )
+                import_capture = (
+                    source_imports.ImportCapture.bind(vault_root, key, artifact, title=item_title, source_fields=source_fields)
+                    if key is not None else None
+                )
                 with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
                 ):
                     body_started = True
+                    resumed = None
+                    if import_capture is not None:
+                        previous, repaired, resumed = import_capture.lookup(vault_root, artifact)
+                        if repaired:
+                            wrote_import_receipt = True
+                            mark_active_mutation_committed()
+                        if previous is not None:
+                            duplicate = DuplicateArtifact(
+                                artifact.sha256, previous.payload.artifact_path, previous.path, previous.ref,
+                            )
+                            outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
+                            if repaired:
+                                warnings = list(outcomes[index].get("warnings", []))
+                                _schedule_media(
+                                    manager, vault_root, duplicate.path, warnings,
+                                    kept="the original", operation="capture_source_media",
+                                )
+                                if warnings:
+                                    outcomes[index]["warnings"] = warnings
+                                import_capture.finish(vault_root)
+                            continue
                     # Looked up and committed under this one acquisition, so two identical hand-overs
                     # cannot both find nothing.
-                    duplicate, available = _earlier_source(
-                        vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
-                    )
+                    if source_fields.get("correction") is not None or resumed is not None:
+                        duplicate, available = None, True
+                    else:
+                        duplicate, available = _earlier_source(
+                            vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
+                        )
                     if duplicate is None:
+                        diarize = artifact.diarize
+                        if (
+                            correction_speech_original is not None
+                            and media_jobs.job_store_path(vault_root).is_file()
+                        ):
+                            # A request can update the queue while we copy the original.
+                            store = media_jobs.MediaJobStore(vault_root, create=False)
+                            pending = store.get_by_binary(correction_speech_original, readonly=True)
+                            if pending is not None and pending.do_ocr and pending.diarize is not None:
+                                diarize = pending.diarize
                         result = add_module.add(
                             vault_root,
                             source_schema,
@@ -1726,25 +1888,44 @@ def capture_source_artifacts(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=diarize,
                             ),
+                            identity_check=identity.frontmatter() if identity is not None else None,
+                            import_capture=import_capture,
+                            _import_resume=resumed,
                             **source_fields,
                         )
+                    elif import_capture is not None:
+                        admitted = duplicates.named_duplicate(
+                            vault_root, duplicate.sidecar_path, sha256=artifact.sha256,
+                            lane=duplicates.SOURCES, protected=import_capture.protected, keeps_original=True,
+                        )
+                        if admitted is None or admitted.ref != duplicate.ref:
+                            raise SafeFetchError("IMPORT_RECEIPT_UNAVAILABLE", "The duplicate Source could not be verified.")
+                        import_capture.commit_duplicate(vault_root, admitted)
+                        wrote_import_receipt = True
+                        mark_active_mutation_committed()
                 if _wrote(duplicate):
                     mark_active_mutation_committed()
                 if duplicate is not None:
                     outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
                     continue
                 payload = _with_unavailable_warning(result.as_dict(), available, "this file")
+                if payload.get("artifact_path"):
+                    warnings = list(payload.get("warnings") or [])
+                    _schedule_media(
+                        manager, vault_root, str(payload["artifact_path"]), warnings,
+                        kept="the original", operation="capture_source_media",
+                    )
+                    payload = {**payload, "warnings": warnings}
                 # Every file shares one domain request; the first commit's
                 # record is the one that chose the destination.
                 resolution = resolution or payload.get("vocabulary_resolution")
-                # `stored_path` and `media_id` are required by the bounded
-                # artifact-receipt projection a compact terminal applies; a row
-                # missing either is replaced wholesale with
-                # INVALID_ARTIFACT_RECEIPT. That projection also drops any key
-                # outside its allowlist, so `page` and `ref` survive only in a
-                # full terminal — which costs nothing, because citation resolves
-                # from the artifact path and the page is `<stored_path>.md`.
+                # A compact terminal reads `stored_path`, `media_id` and the other
+                # receipt fields through a bounded projection. A committed row
+                # whose field does not read keeps its state, loses that field and
+                # names it in `unverified_fields`; it never becomes a failure.
+                # The projection keeps `path`, `page` and `ref` beside them.
                 stored_path = payload.get("artifact_path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,
@@ -1762,8 +1943,20 @@ def capture_source_artifacts(
                 }
                 if isinstance(payload.get("document_container"), Mapping):
                     outcomes[index]["document_container"] = dict(payload["document_container"])
+                if identity is not None:
+                    outcomes[index]["identity"] = identity.reply()
+                    # Stored with the row, so a replayed reply offers the same next step.
+                    outcomes[index]["correctable"] = source_corrections.can_record(vault_root, payload["ref"])
+                source_result_attribution.bind(outcomes[index], (result.ref,))
+                if import_capture is not None:
+                    import_capture.finish(vault_root)
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
+            except source_capture.SourceCaptureError as error:
+                if key is None:
+                    raise
+                code, _, reason = str(error).partition(":")
+                outcomes[index] = _failed(artifact.file_id, SafeFetchError(code, reason.strip()))
             except add_module.AddError as error:
                 outcomes[index] = _failed(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
@@ -1791,7 +1984,100 @@ def capture_source_artifacts(
         out["summary"]["already_stored"] = already_stored
     if resolution is not None:
         out["vocabulary_resolution"] = resolution
-    return _unless_written(out)
+    if source_fields.get("custody_only") is True:
+        # The resolved mark (a correction carries its predecessor's): the outcome line says so.
+        out["custody_only"] = True
+    return out if wrote_import_receipt else _unless_written(out)
+
+
+def capture_source_correction(
+    vault_root: Path,
+    *,
+    source_schema: object,
+    title: str,
+    correction: Mapping[str, object],
+    **source_fields: object,
+) -> dict:
+    """Correct a binary Source's metadata with no new upload: its stored original becomes the successor's.
+
+    A field the call sets wins, and every field it omits (kind, url, domain, projects, tags, document form
+    and the reason for capture) carries over from the predecessor, so a call that names only what was wrong
+    keeps the rest. The predecessor's original is copied under a held handle and hashed as it is copied. A copy
+    whose SHA-256 differs from the one the predecessor recorded is refused with `SOURCE_ORIGINAL_CHANGED` and
+    nothing is written. The successor then commits through the ordinary capture, so every correction guard
+    applies: the historical page hash, one successor per predecessor, canonical identity, authority and egress.
+    """
+    from . import add as add_module
+    from . import media_engines, media_store, media_types, reserved_paths, source_capture, source_corrections
+    from .governance import raw_protection as raw_guard
+
+    plan = source_corrections.prepare_correction(vault_root, correction)
+    metadata, _body, _front = parse_frontmatter(plan.old_source)
+    carried = add_module.correction_carry(plan.old_source)
+    source_fields = {**source_fields, **{name: value for name, value in carried.items() if source_fields.get(name) is None}}
+    if source_fields.get("source_type") is None:
+        raise add_module.kind_required(vault_root, supplied=None)
+    recorded, stored, filename = (metadata.get(name) for name in ("binary_sha256", "evidence_file", "original_filename"))
+    if (
+        not all(isinstance(value, str) and value for value in (recorded, stored, filename))
+        # The page is vault data: an original outside its own folder is some other file's bytes.
+        or PurePosixPath(stored).parent != PurePosixPath(plan.old_path).parent
+    ):
+        raise ValueError(
+            "SOURCE_CORRECTION_CONTENT_REQUIRED: this Source holds no stored original to reuse; "
+            "correct it with content, or send the corrected file"
+        )
+    expected = source_fields.get("expected_sha256")
+    if expected is not None and expected != recorded:
+        raise source_capture.SourceCaptureError(
+            "SOURCE_HASH_MISMATCH: expected_sha256 differs from the stored original this correction reuses"
+        )
+    descriptor, name = tempfile.mkstemp(prefix="exomem-correction-", suffix=Path(str(filename)).suffix)
+    staged_path = Path(name)
+    digest = hashlib.sha256()
+    try:
+        # The storage-aware reader: in shared original storage no file holds the logical path, and the
+        # bytes come from the pool object its filing binds. The SHA-256 check below still decides reuse.
+        with os.fdopen(descriptor, "wb") as copy, media_store.open_original(vault_root, stored) as original:
+            size = 0
+            while chunk := original.stream.read(1 << 20):
+                digest.update(chunk)
+                copy.write(chunk)
+                size += len(chunk)
+    except (OSError, reserved_paths.ReservedPathLeafError, media_store.MediaStoreError):
+        staged_path.unlink(missing_ok=True)
+        raise ValueError(
+            "SOURCE_ORIGINAL_CHANGED: the stored original of this Source cannot be read; "
+            "correct it with the corrected file instead"
+        ) from None
+    if digest.hexdigest() != recorded:
+        staged_path.unlink(missing_ok=True)
+        raise ValueError(
+            "SOURCE_ORIGINAL_CHANGED: the stored original no longer matches the SHA-256 this Source recorded; "
+            "correct it with the corrected file instead"
+        )
+    ingested = metadata.get("ingested_into")
+    staged = StagedArtifact(
+        "stored-original", staged_path, size, digest.hexdigest(),
+        str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
+        diarize=diarize_pin(plan.old_source),
+    )
+    original_path = vault_root.resolve() / stored
+    speech_original = (
+        original_path if media_types.media_type_for(original_path) in media_engines.SPEECH_KINDS else None
+    )
+    return _commit_staged_sources(
+        vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
+        correction_speech_original=speech_original,
+        source_fields={
+            **source_fields,
+            # The plan read above, so `add` commits it without scanning every canonical Source again.
+            "correction": plan,
+            # A successor is never less protected than its predecessor.
+            "raw_protection": bool(source_fields.get("raw_protection")) or raw_guard.marked(plan.old_path),
+            "ingested_into": [str(entry) for entry in ingested] if isinstance(ingested, list) else [],
+        },
+    )
 
 
 def preserve_artifacts(
@@ -1872,6 +2158,8 @@ def preserve_artifacts(
             if archive is not None:
                 from .held_uploads import is_held_reference
 
+                if file.get("diarize") is not None:
+                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice")
                 if not is_held_reference(file["download_url"]):
                     # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
                     # a fetched attachment had neither, so only a held upload can be kept as members.
@@ -1946,6 +2234,7 @@ def preserve_artifacts(
                                 max_bytes=budget.max_file_bytes,
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -1963,6 +2252,7 @@ def preserve_artifacts(
                         "file_id": artifact.file_id,
                         **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
+                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize)
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",
@@ -1973,19 +2263,10 @@ def preserve_artifacts(
                 warnings = list(payload.get("warnings") or [])
                 if not held.available:
                     warnings.append(duplicates.unavailable_warning("this file"))
-                try:
-                    from . import media_processing
-
-                    if media_processing.classify_media(vault_root / payload["path"]) is not None:
-                        media_processing.reconcile_media(
-                            vault_root,
-                            vault_root / payload["path"],
-                            explicit=False,
-                            commit_guard=_media_commit_guard(manager, vault_root),
-                            defer_fanout_to_terminal=True,
-                        )
-                except Exception:  # noqa: BLE001 - the original bytes are durable and recoverable
-                    warnings.append("media reconciliation failed; evidence remains recoverable")
+                _schedule_media(
+                    manager, vault_root, payload.get("path") or payload.get("stored_path"), warnings,
+                    kept="evidence", operation="preserve_artifacts_media",
+                )
                 stored_path = payload.get("stored_path") or payload.get("path")
                 outcomes[index] = {
                     "file_id": artifact.file_id,

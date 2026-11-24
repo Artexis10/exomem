@@ -798,6 +798,15 @@ legacy Cloud image; additive queue metadata remains compatible and custody stays
 on disk. Do not delete derived state or drain beside the running service. A
 rollback does not close an unresolved preference-preservation incident.
 
+Before an image-pin rollback, check the cell's Knowledge Base for
+`_Originals/format.json`. A cell that holds the file uses shared original
+storage, and an image from before the release that adds shared storage refuses
+it. A cell created on that release or later turns shared storage on at its first
+start. Do not pin such a cell to an older image: fix forward. If an older image
+refuses a cell without the file, fix forward too. "Shared original
+storage: downgrading below this release" in `docs/release.md` gives the way back
+for an archive that must move to an older release.
+
 ## Qualified shared-worker placement and admission
 
 Shared placement is disabled by default (`cellctl.sharedWorker.mode: "off"`).
@@ -897,3 +906,9 @@ The planned 0.116-to-0.114 rehearsal crosses collection schema 10 to schema 8.
 Readiness and manifest compatibility IDs do not prove those routes work.
 Never restore the older S0 backup over post-upgrade writes. Do not add a downmigration or another product endpoint.
 A successful refusal/recovery test proves safe handling of incompatibility; it does not prove successful historical rollback.
+
+A cell created on the release that starts new archives in shared original storage, or a later one, turns that storage on at its first start.
+An image without shared storage refuses such a cell at startup; record that refusal as the step 5 outcome.
+To recover the cell, roll forward to its creating release or a later one.
+To move its data to an older image instead, make a compatibility export, as "Downgrade to a release without shared storage" in `docs/deployment.md` describes.
+A cell created before that release keeps ordinary storage through every upgrade, because only its owner's conversion changes it.

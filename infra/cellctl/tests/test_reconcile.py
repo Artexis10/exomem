@@ -19,7 +19,7 @@ from cellctl import alerts, db, reconcile
 from cellctl.capacity import CapacityObservation, LocalCapacityObservation
 from cellctl.exports import ExportJob
 from cellctl.imports import StagedObjects
-from cellctl.manifests import STORAGE_CLASS, namespace_name
+from cellctl.manifests import STORAGE_CLASS, ResourceSettings, namespace_name
 from cellctl.reconcile import _augment_deletion_observation
 from cellctl.secrets import wrap_secret
 from cellctl.state import CellRow, ClusterObservation, RolloutRow
@@ -73,6 +73,9 @@ class FakeClusterGateway:
         self.readiness: dict[str, bytes] = {}
         self.histories: dict[str, bytes] = {}
         self.history_reads: list[str] = []
+        # Server-side apply's field ownership of each StatefulSet's annotations, by namespace:
+        # the keys a patch (an Update entry) owns, which an apply that omits them keeps.
+        self.patch_owned: dict[str, set[str]] = {}
 
     def observe(self, cell_id: str, namespace: str) -> ClusterObservation:
         return self.observations.get(cell_id, ClusterObservation())
@@ -89,6 +92,15 @@ class FakeClusterGateway:
     def apply_all(self, manifests: list[dict]) -> None:
         for manifest in manifests:
             key = (manifest["metadata"].get("namespace", ""), manifest["kind"], manifest["metadata"]["name"])
+            if manifest["kind"] == "StatefulSet":
+                # An applied value that differs is forced away from the patch; an omitted key the patch owns stays.
+                live = self.applied.get(key, {}).get("metadata", {}).get("annotations", {})
+                applied = manifest["metadata"].get("annotations", {})
+                owned = self.patch_owned.setdefault(key[0], set())
+                owned -= {name for name in owned if name in applied and applied[name] != live.get(name)}
+                kept = {name: live[name] for name in owned if name not in applied and name in live}
+                if kept:
+                    manifest = {**manifest, "metadata": {**manifest["metadata"], "annotations": {**applied, **kept}}}
             self.applied[key] = manifest
             if manifest["kind"] == "StatefulSet":
                 self.events.append(("apply_statefulset", key[0], manifest["spec"]["replicas"]))
@@ -170,17 +182,21 @@ class FakeClusterGateway:
         return {cell: body for cell, body in self.histories.items() if cell in addresses}
 
     def patch_statefulset_annotations(self, namespace: str, annotations: dict[str, str | None]) -> None:
-        # The live object: a merge patch sets or removes these keys, whichever manager wrote them.
+        # The live object: a patch sets or removes these keys, whichever manager wrote them.
         self.events.append(("patch_annotations", namespace, dict(annotations)))
         statefulset = self.applied.get((namespace, "StatefulSet", "cell"))
         if statefulset is None:
             return
         live = statefulset["metadata"]["annotations"]
+        owned = self.patch_owned.setdefault(namespace, set())
         for key, value in annotations.items():
             if value is None:
                 live.pop(key, None)
-            else:
+                owned.discard(key)
+            elif live.get(key) != value:
+                # An update owns the fields whose value it changed.
                 live[key] = value
+                owned.add(key)
 
     def read_secret_value(self, namespace: str, name: str, key: str) -> str:
         return "https://receiver.example/alerts/token"
@@ -1084,6 +1100,7 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         ROW_GENERATION_ANNOTATION,
         TARGET_APPLIED_ANNOTATION,
         UPGRADE_PHASE_ANNOTATION,
+        UPGRADE_START_ANNOTATION_KEYS,
         UPGRADE_TARGET_ANNOTATION,
         UPGRADE_WINDOW_ANNOTATION,
         UPGRADE_WINDOW_AT_ANNOTATION,
@@ -1165,6 +1182,9 @@ def _observed_from_applied(cluster: FakeClusterGateway, cell_id: str, **override
         statefulset_upgrade_window=annotations.get(UPGRADE_WINDOW_ANNOTATION),
         statefulset_upgrade_window_at=annotations.get(UPGRADE_WINDOW_AT_ANNOTATION),
         statefulset_candidate_since=_parse_timestamp(annotations.get(CANDIDATE_SINCE_ANNOTATION)),
+        # As ClusterClient.observe() reads managedFields: the hold keys the fake's patch owns.
+        statefulset_patched_hold=frozenset(cluster.patch_owned.get(namespace_name(cell_id), ()))
+        & UPGRADE_START_ANNOTATION_KEYS,
         pod_exists=running,
         pod_uses_volume=running,
         pod_ready=running,
@@ -3022,6 +3042,16 @@ def test_dedicated_selection_changes_only_the_selected_render_digest() -> None:
     selected = dataclasses.replace(_cluster_config(), dedicated_cell_ids=(row.cell_id,))
     assert reconcile._compute_render_digest(row, other, _secrets_config()) == baseline
     assert reconcile._compute_render_digest(row, selected, _secrets_config()) != baseline
+
+
+def test_a_changed_passage_matrix_budget_moves_the_render_digest() -> None:
+    # The digest decides which cells roll; a budget it ignored would never reach a running cell.
+    row = CellRow(cell_id="aaaaaaaaaaaaaaaa", tenant_id=tenant_uuid("a"), storage_gib=10,
+                  rollout_priority=1, desired_state="running", desired_image=None, generation=1)
+    larger = dataclasses.replace(_cluster_config(), resources=ResourceSettings(passage_matrix_budget="1Gi"))
+    assert reconcile._compute_render_digest(row, larger, _secrets_config()) != (
+        reconcile._compute_render_digest(row, _cluster_config(), _secrets_config())
+    )
 
 
 async def test_reserved_node_publishes_zero_general_slots_with_real_attachment_count(cell_db: CellDatabase) -> None:

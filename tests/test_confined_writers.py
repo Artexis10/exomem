@@ -27,7 +27,7 @@ from test_connector_boundary import (
 
 from granted_writer import grant_writer
 
-from exomem import commands, find, lexstore, state_migration, writer_lease
+from exomem import commands, delete_file, find, lexstore, pointer_write, recover_from_trash, state_migration, writer_lease
 from exomem import schema as schema_module
 from exomem.governance import connector_boundary, egress, membership, policy, principal
 
@@ -1104,10 +1104,11 @@ def test_a_move_skips_the_linkers_the_writer_may_not_write_and_names_only_the_re
     find.clear_cache()
     lexstore.ensure_fresh(vault)
 
-    def move(name: str) -> Any:
+    def move(name: str, **preview: Any) -> Any:
         return _call(vault, writer, "manage_memory_file", operation="move",
-                     old_path=f"{NOTES_INBOX}/{name}.md", new_path=f"{NOTES_INBOX}/Archive/{name}.md")
+                     old_path=f"{NOTES_INBOX}/{name}.md", new_path=f"{NOTES_INBOX}/Archive/{name}.md", **preview)
 
+    previews = {name: move(name, validate_only=True) for name in ("moved-a", "moved-b", "moved-c")}
     with_visible, with_hidden, with_none = move("moved-a"), move("moved-b"), move("moved-c")
 
     assert all("__error__" not in answer for answer in (with_visible, with_hidden, with_none)), (
@@ -1119,3 +1120,150 @@ def test_a_move_skips_the_linkers_the_writer_may_not_write_and_names_only_the_re
 
     assert shape(with_hidden, "moved-b") == shape(with_none, "moved-c")
     assert (visible.read_bytes(), hidden.read_bytes()) == (visible_before, hidden_before)
+    # A preview names the same pages, and its digest binds no repoint of a withheld page.
+    assert previews["moved-a"]["referrers"] == [
+        {"path": "Knowledge Base/Notes/visible-linker.md", "outcome": "unchanged: keeps the old path"}]
+    digests = {name: previews[name].pop("preview_digest") for name in ("moved-b", "moved-c")}
+    assert shape(previews["moved-b"], "moved-b") == shape(previews["moved-c"], "moved-c")
+    assert digests["moved-b"] == pointer_write.preview_digest(
+        {f"{NOTES_INBOX}/moved-b.md": f"{NOTES_INBOX}/Archive/moved-b.md"}, ())
+
+
+def _trash(vault: Path, page: str) -> tuple[str, str]:
+    """The owner trashes `page`; return where its entry and its placement sidecar now lie."""
+    with principal.request_scope(principal.owner_principal(surface="cli")):
+        trashed = delete_file.delete_file(vault, path=page, confirm=True)
+    return trashed.trash_path, trashed.trash_meta_path
+
+
+def _recover_refusal(vault: Path, who, **kwargs: Any) -> dict[str, str]:
+    """The `RecoverError` that a recovery raises for `who`, as the code and reason a client is told."""
+    with principal.request_scope(who):
+        with pytest.raises(recover_from_trash.RecoverError) as refused:
+            recover_from_trash.recover_from_trash(vault, **kwargs)
+    return refused.value.as_dict()
+
+
+@pytest.mark.parametrize("validate_only", [False, True])
+def test_a_writer_with_no_writable_scope_cannot_recover_a_trashed_page_it_reads(confined, vault, validate_only):
+    """A recovery publishes by rename, outside the batch target check: it must still be admitted as a move."""
+    _, authenticate = confined
+    entry, sidecar = _trash(vault, SHARED_PAGE)
+    before = {path: (vault / path).read_bytes() for path in (entry, sidecar)}
+
+    answer = _recover_refusal(vault, _writers(authenticate)["unbound-non-owner"], trash_path=entry,
+                              validate_only=validate_only)
+
+    assert answer == {"code": "WRITE_REFUSED", "reason": "target is unavailable"}
+    assert {path: (vault / path).read_bytes() for path in before} == before
+    assert not (vault / SHARED_PAGE).exists()
+
+
+def test_a_writer_cannot_tell_a_withheld_trash_entry_from_an_absent_one(confined, vault):
+    """The refusal comes from scope sets alone, so naming an entry that exists reveals nothing over naming one that does not."""
+    _, authenticate = confined
+    entry, _ = _trash(vault, PRIVATE)
+    absent = entry.replace("private.md", "absent.md")
+    assert not (vault / absent).exists()
+    who = _writers(authenticate)["unbound-non-owner"]
+
+    assert _recover_refusal(vault, who, trash_path=entry) == _recover_refusal(vault, who, trash_path=absent)
+
+
+def test_a_writer_cannot_tell_a_withheld_page_outside_the_trash_from_an_absent_one(confined, vault):
+    """A recovery that checks a path's existence before its confinement answers differently for a page that exists."""
+    _, authenticate = confined
+    who = _writers(authenticate)["unbound-non-owner"]
+
+    assert _recover_refusal(vault, who, trash_path=PRIVATE) == _recover_refusal(
+        vault, who, trash_path="Knowledge Base/Notes/absent.md")
+
+
+@pytest.fixture
+def inbox_by_label(unarmed, vault):
+    """`confined`, with the inbox scope also selecting a project label.
+
+    A page that carries the label has the inbox scope in the trash as it has it in the inbox, so the
+    writer's scopes admit its trash entry and its inbox path alike.
+    """
+    (vault / "Knowledge Base/_Governance/scopes/inbox.yaml").write_text(
+        f"governance_version: 1\nid: {INBOX}\nprojects: [inbox-matter]\n"
+        f"paths: {json.dumps(['Capture/**', *INBOX_GLOBS])}\n", encoding="utf-8")
+    authority = state_migration.assert_offline_migration_authority(source="isolated confined writer stop window")
+    state_migration.arm_connector_boundary_offline(vault, authority=authority)
+    return unarmed
+
+
+LABELLED_PAGE = "Knowledge Base/Capture/labelled.md"
+LABELLED_TEXT = "---\nproject: inbox-matter\n---\nLabelled text.\n"
+
+
+def _writer_trashes_a_labelled_inbox_page(vault: Path, writer) -> Path:
+    """The writer creates and deletes a page that carries the inbox label; return its trash entry."""
+    created = _call(vault, writer, "manage_memory_file", operation="create", path=LABELLED_PAGE, content=LABELLED_TEXT)
+    deleted = _call(vault, writer, "manage_memory_file", operation="delete", path=LABELLED_PAGE, confirm=True)
+    assert "__error__" not in created and "__error__" not in deleted, (created, deleted)
+    (entry,) = (vault / "Knowledge Base/_trash").rglob("*labelled.md")
+    return entry
+
+
+def test_a_writer_recovers_a_trashed_inbox_page_when_its_scopes_admit_the_entry_and_the_inbox(inbox_by_label, vault):
+    """The admission refuses what the writer may not write and nothing else."""
+    _, authenticate = inbox_by_label
+    writer = authenticate("writer")
+    entry = _writer_trashes_a_labelled_inbox_page(vault, writer)
+
+    recovered = _call(vault, writer, "manage_memory_file", operation="recover",
+                      trash_path=entry.relative_to(vault).as_posix())
+
+    assert "__error__" not in recovered, recovered
+    assert recovered["path"] == LABELLED_PAGE, recovered
+    assert (vault / LABELLED_PAGE).read_text(encoding="utf-8") == LABELLED_TEXT
+    assert not entry.exists()
+
+
+def test_a_writer_cannot_recover_a_page_it_may_read_from_the_trash_to_a_path_outside_its_inbox(inbox_by_label, vault):
+    """The entry is admitted, as the case above shows, so the refusal here is the restore path's: a move's
+    destination is judged as a creation, and a writer may create only in its inbox."""
+    _, authenticate = inbox_by_label
+    writer = authenticate("writer")
+    entry = _writer_trashes_a_labelled_inbox_page(vault, writer)
+    entry_path = entry.relative_to(vault).as_posix()
+    outside = "Knowledge Base/Notes/labelled.md"
+    before = entry.read_bytes()
+
+    answer = _call(vault, writer, "manage_memory_file", operation="recover", trash_path=entry_path, restore_path=outside)
+
+    assert _refused(answer), answer
+    assert entry.read_bytes() == before
+    assert not (vault / outside).exists()
+
+
+def test_an_unrestricted_caller_cannot_restore_a_protected_page_into_the_capture_folder(confined, vault):
+    """A capture page keeps its path's membership for every writer, the owner included; a recovery
+    restores nothing there that a batch write would refuse."""
+    _, authenticate = confined
+    entry, sidecar = _trash(vault, PRIVATE)
+    before = {path: (vault / path).read_bytes() for path in (entry, sidecar)}
+    capture = "Knowledge Base/Capture/private.md"
+
+    answer = _call(vault, _writers(authenticate)["administration"], "manage_memory_file",
+                   operation="recover", trash_path=entry, restore_path=capture)
+
+    assert _refused(answer), answer
+    assert {path: (vault / path).read_bytes() for path in before} == before
+    assert not (vault / capture).exists()
+
+
+@pytest.mark.parametrize("kind", ["administration", "unfenced-connector"])
+def test_an_unrestricted_caller_recovers_a_governed_trashed_page_as_before(confined, vault, kind):
+    """The owner is not confined: its recovery restores the page and retires the sidecar."""
+    _, authenticate = confined
+    original = (vault / SHARED_PAGE).read_bytes()
+    entry, sidecar = _trash(vault, SHARED_PAGE)
+
+    answer = _call(vault, _writers(authenticate)[kind], "manage_memory_file", operation="recover", trash_path=entry)
+
+    assert answer["path"] == SHARED_PAGE, answer
+    assert (vault / SHARED_PAGE).read_bytes() == original
+    assert not (vault / entry).exists() and not (vault / sidecar).exists()

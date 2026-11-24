@@ -17,7 +17,7 @@ from uuid import UUID
 import yaml
 from yaml.constructor import ConstructorError
 
-from .kbdir import kb_dirname
+from .kbdir import managed_root
 from .vault import (
     PathGuard,
     PathGuardError,
@@ -343,11 +343,11 @@ def _builtin_decision_projection() -> dict[str, Any]:
 
 
 def contract_directory(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "contracts" / FAMILY
+    return managed_root(Path(vault_root)) / "_Schema" / "contracts" / FAMILY
 
 
 def migration_marker_path(vault_root: Path) -> Path:
-    return Path(vault_root) / kb_dirname() / "_Schema" / "workflow-contract-migration.yaml"
+    return managed_root(Path(vault_root)) / "_Schema" / "workflow-contract-migration.yaml"
 
 
 def ensure_migration_marker(vault_root: Path, *, review_required: bool = False) -> dict[str, Any]:
@@ -418,7 +418,7 @@ def _marker_text(review_required: bool) -> str:
 def _managed_scaffold_sentinel_exists(vault_root: Path) -> bool:
     root = Path(vault_root)
     sentinels = (
-        root / kb_dirname() / "_Schema" / "SKILL.md",
+        managed_root(root) / "_Schema" / "SKILL.md",
         shipped_schema_target(root) / "SKILL.md",
     )
     for sentinel in sentinels:
@@ -678,9 +678,9 @@ def prepare_contract_save(
             raise WorkflowContractError("WORKFLOW_CONTRACT_PATH_CONFLICT", "identity already exists")
         filename = sanitize_title_filename(contract.title, max_length=100) or contract.key
         path = root / f"{filename}.md"
-        if any(
-            candidate.name.casefold() == path.name.casefold() for candidate in root.glob("*.md")
-        ):
+        stored = _stored_listing(vault_root, root)
+        names = stored[0] if stored is not None else [item.name for item in root.glob("*.md")]
+        if any(name.casefold() == path.name.casefold() for name in names):
             raise WorkflowContractError("WORKFLOW_CONTRACT_PATH_CONFLICT", "title path exists")
         try:
             guard = _absent_guard(vault_root, path)
@@ -721,6 +721,30 @@ def _absent_guard(vault_root: Path, path: Path) -> PathGuard:
     return PathGuard.capture(
         Path(vault_root), path.relative_to(vault_root).as_posix(), leaf_policy="absent"
     )
+
+
+def _stored_listing(vault_root: Path, folder: Path) -> tuple[dict[str, int], list[str]] | None:
+    """The files of ``folder`` by name with their stored sizes, and its sub-folders, as a store-mode
+    vault's store holds them; None when the disk answers.
+
+    Saved contracts are `_Schema` pages, so the store holds one at its commit and its file follows.
+    """
+    from .vault_store import mode, ownership, read
+
+    root = Path(vault_root)
+    relative = folder.relative_to(root).as_posix()
+    if not (ownership.owns_folder(relative) and mode.store_mode_for_reads(root)):
+        return None
+    prefix = f"{relative}/"
+    with read.snapshot(root) as view:
+        children = list(view.children(relative))
+        sized = view.page_metas([prefix + c.name for c in children if not c.is_dir])
+    files = {
+        c.name: sized[prefix + c.name].size
+        for c in children
+        if not c.is_dir and c.name.endswith(".md")
+    }
+    return files, sorted((c.name for c in children if c.is_dir), key=str.casefold)
 
 
 def inspect_contract(vault_root: Path, name: str) -> dict[str, Any]:
@@ -826,6 +850,16 @@ def _unsupported_family_findings(vault_root: Path) -> list[dict[str, str]]:
             )
     except PathGuardError:
         return [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe family directory"}]
+    stored = _stored_listing(vault_root, root)
+    if stored is not None:
+        return [
+            {
+                "code": "WORKFLOW_CONTRACT_UNSUPPORTED_FAMILY",
+                "path": (root / name).relative_to(vault_root).as_posix(),
+            }
+            for name in stored[1]
+            if name != FAMILY
+        ][:32]
     if not root.is_dir():
         return []
     findings: list[dict[str, str]] = []
@@ -967,19 +1001,23 @@ def _scan(
             [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe contract directory"}],
             False,
         )
-    if not root.exists():
-        return [], [], False
-    if not root.is_dir():
-        return (
-            [],
-            [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe contract directory"}],
-            False,
-        )
-    candidates = [
-        path
-        for path in sorted(root.glob("*.md"), key=lambda value: value.name.casefold())
-        if path.is_file() or path.is_symlink()
-    ]
+    stored = _stored_listing(vault_root, root)
+    if stored is not None:
+        candidates = [root / name for name in sorted(stored[0], key=str.casefold)]
+    else:
+        if not root.exists():
+            return [], [], False
+        if not root.is_dir():
+            return (
+                [],
+                [{"code": "WORKFLOW_CONTRACT_INVALID", "detail": "unsafe contract directory"}],
+                False,
+            )
+        candidates = [
+            path
+            for path in sorted(root.glob("*.md"), key=lambda value: value.name.casefold())
+            if path.is_file() or path.is_symlink()
+        ]
     visible_paths = _released_paths(vault_root, candidates) if released_only else set(candidates)
     contracts: list[tuple[WorkflowContract, Path, str]] = []
     findings: list[dict[str, str]] = []
@@ -991,7 +1029,8 @@ def _scan(
         scanned += 1
         try:
             relative = path.relative_to(vault_root).as_posix()
-            if path.lstat().st_size + scanned_bytes > MAX_SCAN_BYTES:
+            size = path.lstat().st_size if stored is None else stored[0][path.name]
+            if size + scanned_bytes > MAX_SCAN_BYTES:
                 return (
                     [],
                     [{"code": "WORKFLOW_CONTRACT_SCAN_LIMIT", "detail": "scan bound exceeded"}],

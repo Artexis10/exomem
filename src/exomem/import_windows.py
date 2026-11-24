@@ -278,6 +278,8 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
 
 def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[str, int] | None) -> dict:
     """Every figure of the window budget; D12 fixes each formula."""
+    from .cloud_cell import store_identity
+
     volume, threshold = _read(lambda: _volume(root)), _read(lambda: _growth_threshold(config))
     limits, idle = _read(lambda: _limits(config)), _read(lambda: _eviction_idle(config))
     bounds = _read(lambda: _bounds(config, root))
@@ -308,7 +310,8 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         return max(0, min(largest(), reachable() + pinned))
 
     budget, reach = _figure(window_budget), _figure(reachable)
-    allowance = _allowance(root, config, may_count=series is not None)
+    schedules_series = store_identity()["kind"] != "personal"
+    allowance = _allowance(root, config, may_count=series is not None and schedules_series)
     section: dict = {
         "window_budget": budget,
         "reachable_budget": reach,
@@ -321,7 +324,7 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         "drain": _drain(unfiled, occupancy, idle),
     }
     if series is not None:
-        section["demand"] = _demand(root, series, budget, reach)
+        section["demand"] = _demand(root, series, budget, reach, supported=schedules_series)
     return section
 
 
@@ -389,10 +392,12 @@ def _drain(unfiled: _Reading, occupancy: _Reading, idle: _Reading) -> dict:
     return drain
 
 
-def _demand(root: Path, series: tuple[str, int], budget: dict, reachable: dict) -> dict:
+def _demand(root: Path, series: tuple[str, int], budget: dict, reachable: dict, *, supported: bool) -> dict:
     """Record the series' demand with the budgets read here; the request never supplies one."""
     series_id, window_bytes = series
     outcome: dict = {"series_id": series_id, "bytes": window_bytes, "recorded": False}
+    if not supported:
+        return {**outcome, "reason": "personal eviction follows the configured disk pressure target"}
     if "bytes" not in budget or "bytes" not in reachable:
         return {**outcome, "reason": "the window budget or the reachable budget is unknown"}
     try:
@@ -460,10 +465,11 @@ def _retained_section(root: Path, config: dict) -> dict:
         census = drained = {"unknown": str(error)}
     else:
         complete = (None if record is None or record.evicted is None else
-                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at})
+                    {"evicted": record.evicted, "bytes": record.evicted_bytes, "captured_at": record.captured_at,
+                     "unit": record.unit})
         if record is not None and record.attempt_failed:
             # The latest attempt could not count; the last complete figures stay as history, never as the answer.
-            census = {"unknown": "the latest census could not count the evicted originals", "attempted_at": record.attempted_at}
+            census = {"unknown": "the latest census could not count physical originals", "attempted_at": record.attempted_at}
             if record.blocked_by:
                 census["blocked_by"] = list(record.blocked_by)  # The owner's own originals, for the owner to find.
             if complete is not None:
@@ -473,7 +479,7 @@ def _retained_section(root: Path, config: dict) -> dict:
         drained = record is not None and record.latched
         waiting = None if record is None else record.waiting
     try:
-        above = {"count": media_store.evicted_above_capacity(root, config)}
+        above = {"count": media_store.evicted_above_capacity(root, config), "unit": media_store.DRAIN_UNIT}
     except media_store.MediaStoreError as error:
         above = {"unknown": str(error)}
     return {"shortfall": _figure(shortfall), "census": census, "drained": drained, "drain_waiting": waiting,

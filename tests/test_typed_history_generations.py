@@ -13,21 +13,104 @@ from test_collection_store_writer import store as store
 
 from exomem.collection_store import (
     connection,
+    edit_back,
     governance,
     history,
     index_migrations,
     schema,
+    snapshot,
+    source_dependencies,
     tables,
     typed_storage,
+    views,
     writer,
 )
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
 
+def before_retractable_rows(patch):
+    """Let the maintained writer seed a store from before schema 19, whose ``items`` is the one table of rows.
+
+    The writer names ``item_rows``. The seeding session renames the table to it, and every file the session
+    leaves, the store itself and each snapshot of it, gets its old name back. The upgrade then opens the
+    shape a release before schema 19 wrote.
+    """
+    ensure_schema, close = schema.ensure_schema, connection.WriterConnection.close
+    backup_fill, collection_fill = snapshot._backup_fill, snapshot._collection_fill
+
+    def renamed(raw):
+        return raw.execute("SELECT 1 FROM sqlite_master WHERE name='item_rows'").fetchone() is not None
+
+    def rename_to_the_writers_name(raw):
+        raw.execute("ALTER TABLE items RENAME TO item_rows")
+        columns = ", ".join(row[1] for row in raw.execute("PRAGMA table_info(item_rows)"))
+        raw.execute("ALTER TABLE item_rows ADD COLUMN retracted_txn INTEGER")
+        raw.execute(f"CREATE VIEW items AS SELECT {columns} FROM item_rows WHERE retracted_txn IS NULL")
+
+    def give_the_old_name_back(raw):
+        if renamed(raw):
+            raw.execute("DROP VIEW items")
+            raw.execute("ALTER TABLE item_rows DROP COLUMN retracted_txn")
+            raw.execute("ALTER TABLE item_rows RENAME TO items")
+
+    def seeding_schema(conn):
+        version = ensure_schema(conn)
+        raw = conn.connection.driver_connection
+        if version < 19 and not renamed(raw):
+            rename_to_the_writers_name(raw)
+        return version
+
+    def closing_store(self):
+        if not self._closed:
+            give_the_old_name_back(self.connection)
+        close(self)
+
+    def copying(fill_for):
+        def filled(*args, **kwargs):
+            fill = fill_for(*args, **kwargs)
+
+            def copy(destination, *checks):
+                fill(destination, *checks)
+                give_the_old_name_back(destination)
+
+            return copy
+
+        return filled
+
+    patch.setattr(schema, "ensure_schema", seeding_schema)
+    patch.setattr(connection.WriterConnection, "close", closing_store)
+    patch.setattr(snapshot, "_backup_fill", copying(backup_fill))
+    patch.setattr(snapshot, "_collection_fill", copying(collection_fill))
+
+
+def before_source_dependencies(patch):
+    """Make the maintained writer seed v1 events, as every release before schema 18 wrote them."""
+    before_retractable_rows(patch)  # a store from before schema 18 is also from before schema 19
+    # A store before schema 18 has no event_version column and no version-Source association table.
+    columns = tuple(column.name for column in tables.txns.c if column.name != "event_version")
+    patch.setattr(tables, "INSERT_TXN", text(
+        f"INSERT INTO txns({','.join(columns)}) VALUES({','.join(':' + name for name in columns)})"))
+    current_txn = writer.CollectionWriter._txn
+
+    def historical_txn(self, *args, **kwargs):
+        kwargs.pop("_source_inputs", None)
+        return current_txn(self, *args, **kwargs)
+
+    patch.setattr(writer.CollectionWriter, "_txn", historical_txn)
+
+    def historical_dependencies(current, prepared, _arguments):
+        identity = views.store_identity(current.connection)
+        return source_dependencies.DependencyPlan("historical-seed", identity["store_id"], identity["instance_id"],
+            prepared.manifest.collection_id, (), edit_back.NativeInputs((), True))
+
+    patch.setattr(source_dependencies, "_bulk_plan", historical_dependencies)
+
+
 def previous_release(patch):
     """Seed the historical schema-10 identity and payload wire through the maintained writer."""
     patch.setattr(schema, "SCHEMA_VERSION", 10)
+    before_source_dependencies(patch)
 
     def historical_watermark(conn, cid, **_options):
         # This producer predates the canonical verifier; only the current reader verifies after upgrade.
@@ -93,7 +176,13 @@ def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(histori
         assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         for name, rows in before.items():
             after = conn.execute(f"SELECT * FROM {name}").fetchall()
-            assert [row[:6] for row in after] == rows if name == "version_identity" else after == rows
+            if name == "version_identity":
+                assert [row[:6] for row in after] == rows
+            elif name == "txns":
+                assert [row[:-1] for row in after] == rows
+                assert all(row[-1] == 1 for row in after)
+            else:
+                assert after == rows
         assert conn.execute("SELECT encoding,payload_generation FROM version_identity ORDER BY row_version").fetchall() == [
             ("json-v1", None), ("typed-v1", layout.generation)]
         writer = CollectionWriter(root, handle)
@@ -171,7 +260,7 @@ def test_retired_layout_still_decodes_its_versions_after_new_generation_and_reop
             ("DELETE FROM typed_encoding_mappings", ()),
             ("INSERT OR REPLACE INTO typed_encoding_mappings SELECT * FROM typed_encoding_mappings", ()),
             ("UPDATE typed_encoding_mappings SET state='ready' WHERE generation=?", (first.generation,)),
-            ("UPDATE items SET collection_id=?", ("00000000-0000-4000-8000-000000000001",)),
+            ("UPDATE item_rows SET collection_id=?", ("00000000-0000-4000-8000-000000000001",)),
         ):
             with pytest.raises(sqlite3.IntegrityError), reopened.transaction() as tx:
                 tx.execute(statement, parameters)

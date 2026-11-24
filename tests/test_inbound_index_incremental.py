@@ -100,6 +100,33 @@ def test_patch_is_noop_when_index_not_yet_built(vault: Path) -> None:
     assert root not in vault_module._INBOUND_INDEX
 
 
+def test_cached_inbound_overflow_only_reports_current_eligible_buckets(vault: Path) -> None:
+    target = "Knowledge Base/Notes/bounded-target.md"
+    homonym = "Knowledge Base/Reference/bounded-target.md"
+    linker = "Knowledge Base/Notes/bounded-linker.md"
+    for rel in (target, homonym):
+        (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+        (vault / rel).write_text("# Bounded\n", encoding="utf-8")
+    (vault / linker).write_text(
+        "[[Knowledge Base/Notes/bounded-target]]\n[[Notes/bounded-target]]\n"
+        "[[bounded-target]] [[bounded-target]] [[bounded-target]]\n",
+        encoding="utf-8",
+    )
+    _seed_registry(vault)
+    assert vault_module.prime_inbound_index(vault, eager=True)
+
+    exact = vault_module.cached_inbound_wikilinks(vault, target, candidate_limit=2)
+    assert exact is not None and [link.path for link in exact] == [linker, linker]
+    with pytest.raises(vault_module.InboundCandidatesExceeded):
+        vault_module.cached_inbound_wikilinks(vault, target, candidate_limit=1)
+    assert vault_module.cached_inbound_wikilinks(
+        vault, target, read_hashes={target: None}, candidate_limit=1,
+    ) is None
+
+    freshness.mark_external_pending(vault, paths=[vault / linker])
+    assert vault_module.cached_inbound_wikilinks(vault, target, candidate_limit=1) is None
+
+
 def test_patch_noop_under_kill_switch_then_self_heals(
     vault: Path, monkeypatch
 ) -> None:

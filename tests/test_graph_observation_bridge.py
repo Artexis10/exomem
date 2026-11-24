@@ -342,3 +342,54 @@ def test_a_target_advance_during_the_release_decision_invalidates_admission(
 
     assert not bridge.admissible(root, publication, visible)
     assert advanced
+
+
+def test_deferred_proof_never_stalls_the_releasing_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The after-release proof gets one try: a contender holding the boundary
+    does not keep the writer's release inside it."""
+    import time
+
+    root, index, _metadata, publication = _baseline(tmp_path)
+    _commit(root, SOURCE)
+    coordinator = index._mutation_coordinator
+    deferred = []
+
+    def capture(_self, _key, work):
+        deferred.append(work)
+        return True
+
+    monkeypatch.setattr(
+        type(coordinator), "defer_optional_after_release", capture
+    )
+    with coordinator.hold():
+        assert index_sync.publish_corpus_delta(root, changed=[root / SOURCE], populate_on_miss=False)
+    assert deferred
+
+    contender_held = threading.Event()
+    release_contender = threading.Event()
+
+    def hold_boundary():
+        with coordinator.hold():
+            contender_held.set()
+            release_contender.wait(10)
+
+    contender = threading.Thread(target=hold_boundary)
+    contender.start()
+    assert contender_held.wait(5)
+
+    started = time.monotonic()
+    for work in deferred:
+        work()
+    elapsed = time.monotonic() - started
+    release_contender.set()
+    contender.join(timeout=5)
+    assert elapsed < 1.0
+    assert not contender.is_alive()
+    assert not bridge.admissible(root, publication, lambda _rel: False)
+
+    # The missed proof completes on a later read once the boundary is free.
+    with bridge.read_boundary(root, operation="test_read"):
+        pass
+    assert bridge.admissible(root, publication, lambda _rel: False)

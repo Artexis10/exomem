@@ -12,12 +12,14 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
+from _identity_pdf import make_pdf
 from test_media_processing import _handle_stat
 
 from exomem import (
     asr_runtime,
     cuda_containment,
     deferred_index,
+    embedding_index,
     embeddings,
     epistemic_graph,
     extract,
@@ -25,9 +27,11 @@ from exomem import (
     graph_sync,
     image_codecs,
     index_sync,
+    media_brakes,
     media_jobs,
     media_processing,
     media_worker,
+    mutation_lock,
     preserve,
     resource_status,
     runtime_resources,
@@ -66,6 +70,10 @@ class _RecordingMutationManager:
     def projection_guard(self, vault, **metadata):
         with self.mutation_guard(vault, **metadata, holder_kind="background"):
             yield
+
+    def yield_to_waiting_writes(self, vault, **kwargs) -> float:
+        assert vault == self.vault
+        return 0.0
 
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
@@ -221,7 +229,7 @@ def test_a_page_stored_pending_records_the_hints_the_parent_publishes_with_its_r
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_args, **_kwargs: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     page, info = _parsed_frontmatter(sidecar), _handle_stat(binary)
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
@@ -394,7 +402,7 @@ def test_parent_publishes_handed_result_and_requeues_only_remaining_stages(
         lambda *_args, **kwargs: publication_intents.extend(kwargs["publication_intents"]) or True,
     )
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "published by parent" in sidecar.read_text(encoding="utf-8")
     assert publication_intents
@@ -429,7 +437,7 @@ def test_parent_represents_binary_stale_result_as_pending_fresh_claim(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     body = sidecar.read_text(encoding="utf-8")
     assert "processing_state: pending" in body
@@ -466,7 +474,7 @@ def test_parent_requeues_changed_binary_after_failure_result(
     worker = media_worker.MediaWorker(vault, execution_mode="process")
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", lambda *_a, **_k: True)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -502,7 +510,7 @@ def test_parent_keeps_ocr_enqueued_during_deferred_result_completion(
         return True
 
     monkeypatch.setattr(worker, "_complete_deferred_graph_completion", complete_then_enqueue)
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert "first transcript" in sidecar.read_text(encoding="utf-8")
     assert store.pending_result_count() == 0
@@ -544,8 +552,8 @@ def test_parent_retires_failed_result_after_foreign_sidecar_change(
     else:
         sidecar.write_bytes(foreign_bytes)
 
-    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_result(
-        store.pending_results()[0]
+    media_worker.MediaWorker(vault, execution_mode="process")._publish_parent_results(
+        store.pending_results()[:1]
     )
 
     assert store.pending_result_count() == 0
@@ -776,7 +784,7 @@ def test_parent_recovers_prepared_target_without_replacing_sidecar(
     )
     monkeypatch.setattr(media_worker, "post_commit_batch_fanout", fanout_under_parent_scope)
 
-    worker._publish_parent_result(store.pending_results()[0])
+    worker._publish_parent_results(store.pending_results()[:1])
 
     assert sidecar.read_text(encoding="utf-8") == target
     assert recovered == [True]
@@ -869,13 +877,10 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 
     assert manager.events.index("extract") < manager.events.index("guard-enter")
     assert manager.events.index("guard-enter") < manager.events.index("sidecar-commit")
+    # The graph epoch is published inside the commit's own hold; a second take could be refused.
     assert manager.guard_metadata == [
         {
             "operation": "background_media_extraction_commit",
-            "holder_kind": "background",
-        },
-        {
-            "operation": "background_media_graph_completion",
             "holder_kind": "background",
         },
     ]
@@ -886,7 +891,7 @@ def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
 def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failure-state media commits own the same guarded deferred-token postlude."""
+    """Failure-state media commits publish the graph epoch inside their own hold, then fan out after it."""
     result = _preserve_media_stub(vault, filename="guarded-failure.mp3")
     manager = _RecordingMutationManager(vault)
     fanout_depths: list[int] = []
@@ -921,7 +926,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
 
     def read_postlude_artifact(path, *args, **kwargs):  # noqa: ANN001
         if (
-            len(manager.guard_metadata) >= 2
+            token is not None
             and not checkpoint_published
             and Path(path) in {floor_path, checkpoint_path}
         ):
@@ -932,7 +937,7 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_published, checkpoint_replaced
         original_publish_hook(destination)
-        if destination == checkpoint_path and len(manager.guard_metadata) >= 2:
+        if destination == checkpoint_path and token is not None:
             assert manager.depth > 0
             checkpoint_replaced = True
             checkpoint_published = True
@@ -975,8 +980,8 @@ def test_processing_failure_sidecar_fans_out_after_commit_guard_release(
         "operation": "background_media_failure_commit",
         "holder_kind": "background",
     }
-    assert len(manager.guard_metadata) == 2
-    assert all(metadata["holder_kind"] == "background" for metadata in manager.guard_metadata)
+    # One hold: a second take for the epoch could be refused, which left the floor ahead of its checkpoint.
+    assert len(manager.guard_metadata) == 1
     assert token is not None
     assert postlude_reads == ["floor", "predecessor"]
     assert checkpoint_replaced
@@ -1034,10 +1039,10 @@ def test_media_canonical_commits_request_deferred_graph_completion(
     ]
 
 
-def test_media_deferred_postlude_reenters_the_mutation_coordinator(
+def test_media_deferred_epoch_is_published_inside_the_commit_hold(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The deferred token crosses the guard; its checkpoint work must re-enter it."""
+    """The deferred token's floor and checkpoint are written before the commit's hold is released."""
     result = _preserve_media_stub(vault, filename="postlude-guard.m4a")
     sidecar = vault / result.sidecar_path
     manager = _RecordingMutationManager(vault)
@@ -1045,10 +1050,19 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     checkpoint = graph_sync.checkpoint_path(vault)
     original_read_artifact = graph_sync._read_bounded_bytes
     original_publish_hook = vault_module._after_batch_destination_published
+    original_batch = preserve.batch_atomic_write
+    committed = False
     postlude_reads: list[str] = []
     checkpoint_replaced = False
     fanout_depths: list[int] = []
 
+    def mark_committed(*args, **kwargs):  # noqa: ANN002, ANN003
+        nonlocal committed
+        result = original_batch(*args, **kwargs)
+        committed = committed or bool(kwargs.get("defer_graph_completion"))
+        return result
+
+    monkeypatch.setattr(preserve, "batch_atomic_write", mark_committed)
     monkeypatch.setattr(
         extract,
         "extract_text",
@@ -1059,7 +1073,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     monkeypatch.setattr(media_worker, "get_manager", lambda: manager)
 
     def read_artifact_inside_postlude(path, *args, **kwargs):  # noqa: ANN001
-        if len(manager.guard_metadata) >= 2 and Path(path) in {floor, checkpoint}:
+        if committed and Path(path) in {floor, checkpoint}:
             assert manager.depth > 0
             postlude_reads.append("floor" if Path(path) == floor else "predecessor")
         return original_read_artifact(path, *args, **kwargs)
@@ -1067,7 +1081,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
     def observe_checkpoint_inside_postlude(destination: Path) -> None:
         nonlocal checkpoint_replaced
         original_publish_hook(destination)
-        if destination == checkpoint and len(manager.guard_metadata) >= 2:
+        if destination == checkpoint and committed:
             assert manager.depth > 0
             checkpoint_replaced = True
 
@@ -1098,8 +1112,7 @@ def test_media_deferred_postlude_reenters_the_mutation_coordinator(
         "operation": "background_media_extraction_commit",
         "holder_kind": "background",
     }
-    assert len(manager.guard_metadata) == 2
-    assert all(metadata["holder_kind"] == "background" for metadata in manager.guard_metadata)
+    assert len(manager.guard_metadata) == 1
     assert postlude_reads == ["floor", "predecessor"]
     assert checkpoint_replaced
     assert fanout_depths == [0]
@@ -2170,125 +2183,127 @@ def test_an_image_clip_commit_leaves_the_commit_generation_alone(
     assert writer_lease.read_commit_generation(vault) == before
 
 
-def test_scene_artifacts_and_reembed_publish_under_guard(
-    vault, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
-    result = preserve.preserve_bytes(
-        vault,
-        scope="Rental",
-        category="video",
-        filename="guarded.mp4",
-        data=b"video",
-        text="scene",
-    )
-    manager = _RecordingMutationManager(vault)
-    worker = media_worker.MediaWorker(vault, execution_mode="inline")
-    frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
-    pairs = [(object(), object())]
-    published_samples = []
+def _stub_text_encoder(monkeypatch: pytest.MonkeyPatch, *, on_encode) -> None:
+    """Real embedding store and publication path, with a stub model whose every encode calls `on_encode`."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "numpy")
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
 
-    def embed_scenes_outside(_path):
-        assert manager.depth == 0
-        manager.events.append("scene-embed")
-        return frames, pairs
+    def encode(texts, *, is_query=False):
+        on_encode()
+        vectors = np.ones((len(texts), embedding_index.VECTOR_DIM), dtype=np.float32)
+        return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
-    def clip_commit_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("clip-commit")
+    monkeypatch.setattr(embeddings, "embed_texts", encode)
 
-    def scene_commit_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("scene-commit")
-        published_samples.extend(_kwargs["parent_clip_samples"])
-        return []
 
-    def reembed_inside(*_args, **_kwargs):
-        assert manager.depth > 0
-        manager.events.append("reembed-derived")
-
-    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
-    monkeypatch.setattr(media_worker.scene_frames, "scene_frames_enabled", lambda: True)
-    monkeypatch.setattr(embeddings, "embed_video_scenes", embed_scenes_outside)
-    monkeypatch.setattr(worker._clip_index, "upsert_frames", clip_commit_inside)
-    monkeypatch.setattr(media_worker.scene_frames, "write_scene_frames", scene_commit_inside)
-    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_inside)
-
-    clip_job = media_worker._Job(
+def _reembed_job(vault, result) -> media_worker._Job:
+    return media_worker._Job(
         binary_path=vault / result.path,
         sidecar_path=vault / result.sidecar_path,
         media_type="video",
         do_ocr=False,
-        do_clip=True,
-    )
-    worker._process(clip_job)
-    worker._process(
-        media_worker._Job(
-            binary_path=clip_job.binary_path,
-            sidecar_path=clip_job.sidecar_path,
-            media_type="video",
-            do_ocr=False,
-            do_clip=False,
-            do_reembed=True,
-        )
-    )
-
-    assert manager.events.index("scene-embed") < manager.events.index("guard-enter")
-    assert "clip-commit" in manager.events
-    assert "scene-commit" in manager.events
-    assert "reembed-derived" in manager.events
-    assert len(published_samples) == 1
-    assert published_samples[0].frame_timestamp_ms == 1_000
-    assert published_samples[0].vector == tuple(float(value) for value in frames[0][1])
-    assert {
-        "operation": "background_media_clip_commit",
-        "holder_kind": "background",
-    } in manager.guard_metadata
-    assert {
-        "operation": "background_media_scene_frame_commit",
-        "holder_kind": "background",
-    } in manager.guard_metadata
-    assert manager.depth == 0
-
-
-def test_reembed_publishes_under_canonical_mutation_guard(
-    vault, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    result = _preserve_media_stub(vault, filename="reembed-lease-race.mp3")
-
-    guard_metadata: list[dict[str, str]] = []
-
-    class _RecordingManager:
-        @contextmanager
-        def mutation_guard(self, _vault, **_metadata):
-            guard_metadata.append(_metadata)
-            yield
-
-    monkeypatch.setattr(media_worker, "get_manager", lambda: _RecordingManager())
-    reembedded: list[Path] = []
-    monkeypatch.setattr(
-        media_worker.index_sync,
-        "upsert_after_write",
-        lambda _vault, paths: reembedded.extend(paths),
-    )
-    worker = media_worker.MediaWorker(vault, execution_mode="inline")
-    job = media_worker._Job(
-        binary_path=vault / result.path,
-        sidecar_path=vault / result.sidecar_path,
-        media_type="audio",
-        do_ocr=False,
+        do_clip=False,
         do_reembed=True,
     )
 
-    worker._process(job)
 
-    assert reembedded == [job.sidecar_path]
-    assert guard_metadata == [
-        {
-            "operation": "background_media_reembed_commit",
-            "holder_kind": "background",
-        }
-    ]
+def test_reembed_of_a_sidecar_edited_while_it_encodes_publishes_no_rows(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The re-embed holds no vault boundary, so the store's own check must refuse the stale bytes."""
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="edited.mp4", data=b"video",
+        text="a spoken passage about the harbour",
+    )
+    sidecar = vault / result.sidecar_path
+    edits: list[int] = []
+
+    def edit_sidecar() -> None:
+        if not edits:
+            edits.append(1)
+            sidecar.write_text(
+                sidecar.read_text(encoding="utf-8") + "\nA later paragraph changes the page.\n",
+                encoding="utf-8",
+            )
+
+    _stub_text_encoder(monkeypatch, on_encode=edit_sidecar)
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(_reembed_job(vault, result))
+
+    assert edits
+    assert embeddings.get_embedding_index(vault).file_mtimes({result.sidecar_path}) == {}
+
+
+def test_reembed_of_a_sidecar_withheld_while_it_encodes_publishes_no_rows(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recall exclusion that lands during encoding must withhold the text from the embedding store."""
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="withheld.mp4", data=b"video",
+        text="a spoken passage about the harbour",
+    )
+    excluded: list[int] = []
+
+    def exclude_rental_evidence() -> None:
+        if not excluded:
+            excluded.append(1)
+            (vault / "Knowledge Base" / "_access.yaml").write_text(
+                "excluded:\n  - Evidence/Rental\n", encoding="utf-8"
+            )
+
+    _stub_text_encoder(monkeypatch, on_encode=exclude_rental_evidence)
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(_reembed_job(vault, result))
+
+    assert excluded
+    assert embeddings.get_embedding_index(vault).file_mtimes({result.sidecar_path}) == {}
+
+
+def test_scene_frames_are_findable_after_commit_and_index_with_no_boundary_held(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from test_scene_frames import _FakeImg, _scene
+
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    result = preserve.preserve_bytes(
+        vault, scope="Rental", category="video", filename="scenes.mp4", data=b"video", text="scene"
+    )
+    held_while_encoding: list[object] = []
+
+    def note_boundary() -> None:
+        snapshot = mutation_lock.active_mutation_snapshot()
+        if snapshot["state"] == "held" and str(snapshot["operation"]).startswith("background_media"):
+            held_while_encoding.append(snapshot["operation"])
+
+    _stub_text_encoder(monkeypatch, on_encode=note_boundary)
+    scene = _scene(12.0)
+    monkeypatch.setattr(
+        embeddings,
+        "embed_video_scenes",
+        lambda _path: (
+            [(scene.rep_ts, np.ones(embeddings.CLIP_DIM, dtype=np.float32))],
+            [(scene, _FakeImg())],
+        ),
+    )
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="video",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    frames = sorted((vault / result.path).parent.glob("scenes.mp4.frames/*.md"))
+    assert len(frames) == 1
+    frame_rel = frames[0].relative_to(vault).as_posix()
+    assert embeddings.get_embedding_index(vault).file_mtimes({frame_rel})
+    assert held_while_encoding == []
 
 
 def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(
@@ -2566,6 +2581,77 @@ def test_worker_persists_speaker_verification_metadata(
     body = (vault / result.sidecar_path).read_text(encoding="utf-8")
     assert f"speaker_verification: {verification}" in body
     assert f"[{label}]: hello" in body
+
+
+@pytest.mark.parametrize("requested", [False, True])
+def test_recovered_speech_request_keeps_its_diarization_choice(
+    vault: Path, requested: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    saved = _preserve_media_stub(vault, filename="speech.m4a")
+    binary = vault / saved.path
+    sidecar = vault / saved.sidecar_path
+    calls: list[bool] = []
+
+    def transcribe(_path, *, media_type, diarize, **_options):
+        calls.append(diarize)
+        return extract.ExtractResult(
+            text="[0:00] recorded speech", media_type=media_type, engine="test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    request = media_processing.process_declared_media(vault, binary, diarize=requested)
+    original = media_jobs.MediaJobStore(vault).claim_next()
+    assert original is not None and original.id == request.job_id
+
+    reopened = media_jobs.MediaJobStore(vault)
+    assert reopened.recover_interrupted() == 1
+    recovered = reopened.claim_next()
+    assert recovered is not None and recovered.id == request.job_id
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker._process(recovered)
+    worker._drain_parent_results()
+
+    assert calls == [requested]
+    published = _parsed_frontmatter(sidecar)
+    assert published["diarize_requested"] is requested
+    assert published["speaker_verification"] == ("unavailable" if requested else "not-requested")
+    assert b"[0:00] recorded speech" in sidecar.read_bytes()
+    assert binary.read_bytes() == b"FAKEBYTES"
+
+
+@pytest.mark.parametrize("awaiting_dependency", [False, True])
+def test_a_disabled_speech_engine_retains_the_accepted_choice(vault, monkeypatch, awaiting_dependency) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "speech")
+    saved = _preserve_media_stub(vault, filename="recording.wav")
+    binary = vault / saved.path
+    media_processing.process_declared_media(vault, binary, diarize=False)
+    store = media_jobs.MediaJobStore(vault)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    if awaiting_dependency:
+        claimed = store.claim_next()
+        store.mark(
+            claimed, media_jobs.BLOCKED, "speech dependency unavailable",
+            blocked_reason=media_jobs.ENGINE_UNAVAILABLE, blocked_context="faster_whisper",
+        )
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "ocr")
+    monkeypatch.setattr(extract, "get_transcriber", lambda: pytest.fail("speech is disabled"))
+
+    if awaiting_dependency:
+        worker._converge_engines([store.get_by_binary(binary)])
+    else:
+        assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+        worker._drain_parent_results()
+
+    waiting = store.get_by_binary(binary)
+    expected_reason = media_jobs.ENGINE_UNAVAILABLE if awaiting_dependency else media_jobs.ENGINE_DISABLED
+    assert waiting.blocked_reason == expected_reason
+    assert waiting.diarize is False
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "speech")
+    monkeypatch.setattr(media_worker, "_module_findable", lambda _: True)
+    monkeypatch.setattr(media_worker.media_engines, "stage_available", lambda _: True)
+    worker._converge_engines([waiting])
+    assert store.claim_next().diarize is False
 
 
 def test_worker_does_not_downgrade_human_verified_speaker_state(
@@ -3698,6 +3784,59 @@ def test_supervisor_backs_off_while_children_keep_dying_by_a_signal(vault, monke
     assert (crashes["signal"], crashes["count"], crashes["head_job"]) == ("SIGSEGV", len(launches), result.path)
 
 
+@pytest.mark.parametrize(
+    ("filename", "media_type", "ends_over_budget"),
+    [("lease.pdf", "pdf", True), ("clip.m4a", "audio", False)],
+    ids=["pdf-abort-is-a-memory-stop", "audio-abort-stays-a-crash"],
+)
+def test_a_pdf_child_aborted_under_its_data_limit_ends_the_job_over_budget(
+    vault, monkeypatch: pytest.MonkeyPatch, filename: str, media_type: str, ends_over_budget: bool
+) -> None:
+    # PDFium aborts the process when its own allocation fails; every other engine raises MemoryError.
+    # Read as a crash, a hostile PDF would restart a child for ever at the head of the queue.
+    _cloud_brakes(monkeypatch, {"anon": 1 << 30, "pressure": 0.0})
+    monkeypatch.setattr(media_worker, "_probe_writer_authority", lambda: None)
+    result = _preserve_media_stub(vault, filename=filename)
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.enqueue(binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path, media_type=media_type)
+    now = [1000.0]
+    launches: list[float] = []
+
+    class _AbortedChild:
+        returncode = -6  # SIGABRT
+
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+
+        def poll(self):
+            return self.returncode
+
+    def launch():
+        launches.append(now[0])
+        worker._store.claim_next()  # the child had taken the job when it died
+        return _AbortedChild(2_147_483_000)  # every child reuses one pid, as a busy host does
+
+    monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
+    monkeypatch.setattr(worker, "_launch_child", launch)
+
+    def poll(_timeout):
+        if worker._child is None:
+            now[0] += 5
+            if now[0] >= 1100.0:
+                worker._stop_event.set()
+        return False
+
+    monkeypatch.setattr(worker._wake, "wait", poll)
+    worker._supervise()
+
+    [row] = media_jobs.status(vault)["jobs"]
+    if ends_over_budget:
+        assert (row["state"], row["next_action"]) == (media_jobs.BLOCKED, media_jobs.OVER_BUDGET_ACTION)
+        assert len(launches) == media_brakes.settings().stop_limit
+    else:
+        assert media_jobs.status(vault)["child_crashes"]["signal"] == "SIGABRT"
+
+
 def test_child_blocks_ambiguous_sidecar_boundary_without_writing_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4799,16 +4938,16 @@ def test_living_child_parent_notices_results_and_retries_retained_publication(
         return work
 
     monkeypatch.setattr(store, "has_parent_work", has_parent_work)
-    original_publish = parent._publish_parent_result
+    original_publish = parent._publish_batch
 
-    def publish(packet):
+    def publish(batch):
         published.append(now[0])
         if len(published) == 1:
             raise OSError("publication temporarily unavailable")
-        original_publish(packet)
+        original_publish(batch)
         parent._stop_event.set()
 
-    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+    monkeypatch.setattr(parent, "_publish_batch", publish)
 
     def wait(seconds):
         now[0] += seconds
@@ -4886,14 +5025,14 @@ def test_supervisor_retries_store_refusal_and_processes_later_enqueue(
         return _LivingChild()
 
     monkeypatch.setattr(worker, "_launch_child", launch)
-    original_publish = worker._publish_parent_result
+    original_publish = worker._publish_batch
 
-    def publish(packet):
-        original_publish(packet)
-        publications.append(packet.job.attempts)
+    def publish(batch):
+        original_publish(batch)
+        publications.extend(result.job.attempts for result in batch)
         worker._stop_event.set()
 
-    monkeypatch.setattr(worker, "_publish_parent_result", publish)
+    monkeypatch.setattr(worker, "_publish_batch", publish)
     worker._supervise()
 
     assert launches == [media_worker._FOLLOWER_RECHECK_SECONDS]
@@ -4978,14 +5117,14 @@ def test_living_child_parent_rechecks_external_blocked_sidecar_edits(
     published = []
     monkeypatch.setattr(media_worker, "_clock", lambda: now[0])
     parent._child = _LivingChild()
-    original_publish = parent._publish_parent_result
+    original_publish = parent._publish_batch
 
-    def publish(packet):
-        original_publish(packet)
+    def publish(batch):
+        original_publish(batch)
         published.append(now[0])
         parent._stop_event.set()
 
-    monkeypatch.setattr(parent, "_publish_parent_result", publish)
+    monkeypatch.setattr(parent, "_publish_batch", publish)
 
     def wait(seconds):
         now[0] += seconds
@@ -5568,7 +5707,7 @@ def test_supervisor_start_requeues_work_whose_engine_appeared(
     store.mark(
         claimed,
         media_jobs.BLOCKED,
-        "ExtractionUnavailable: pymupdf not installed",
+        "ExtractionUnavailable: pypdfium2 not installed",
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
     installed = {"pdf": False}
@@ -5819,7 +5958,7 @@ def test_supervisor_start_drops_work_whose_engine_is_switched_off(
     store.mark(
         claimed,
         media_jobs.BLOCKED,
-        "ExtractionUnavailable: pymupdf not installed",
+        "ExtractionUnavailable: pypdfium2 not installed",
         blocked_reason=media_jobs.ENGINE_UNAVAILABLE,
     )
 
@@ -5846,13 +5985,13 @@ def test_a_sidecar_blocked_by_the_previous_release_shows_pending_once_its_engine
     )
     claimed = store.claim_next()
     assert claimed is not None
-    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pymupdf not installed")
+    store.mark(claimed, media_jobs.BLOCKED, "ExtractionUnavailable: pypdfium2 not installed")
     preserve.update_sidecar_processing_failure(
         vault,
         sidecar,
         state=media_jobs.BLOCKED,
         attempts=1,
-        error="ExtractionUnavailable: pymupdf not installed",
+        error="ExtractionUnavailable: pypdfium2 not installed",
         retryable=True,
         next_action="install the required media dependency, then retry",
     )
@@ -6114,16 +6253,20 @@ def test_memory_blocked_work_returns_soon_after_pressure_clears(vault, monkeypat
     assert returned, "the backed-off retry ignored that pressure had cleared"
 
 
-def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    fitz = pytest.importorskip("fitz")
+def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("pypdfium2")
     monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents")
     monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
     monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
-    document = fitz.open()
-    document.new_page()
     result = preserve.preserve_bytes(
-        vault, scope="Rental", category="documents", filename="scan.pdf", data=document.tobytes()
+        vault,
+        scope="Rental",
+        category="documents",
+        filename="scan.pdf",
+        data=make_pdf(tmp_path / "scan.pdf", [""]).read_bytes(),
     )
     sidecar = vault / result.sidecar_path
     store = media_jobs.MediaJobStore(vault)
@@ -6146,3 +6289,39 @@ def test_a_scanned_pdf_waits_for_ocr_and_is_read_once_ocr_is_on(vault, monkeypat
         assert _wait_until(lambda: store.next_pending() is not None)
     finally:
         worker.stop()
+
+
+def test_a_pdf_whose_scanned_page_cannot_be_rendered_fails_and_is_not_stored_without_the_page(
+    vault, tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdfium = pytest.importorskip("pypdfium2")
+    monkeypatch.setenv("EXOMEM_MEDIA_ENGINES", "documents,ocr")
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(media_worker, "_writer_authority_available", lambda: True)
+    # A text page, then a scanned page: the render fails on the second, after the first was read.
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Rental",
+        category="documents",
+        filename="lease.pdf",
+        data=make_pdf(tmp_path / "lease.pdf", ["The lease starts on the first of March.", ""]).read_bytes(),
+    )
+    sidecar = vault / result.sidecar_path
+
+    def refuse(_page, *_args, **_kwargs):
+        # The renderer's own errors cannot be told apart from a resource running out.
+        raise pdfium.PdfiumError("Failed to fill bitmap rectangle.")
+
+    monkeypatch.setattr(pdfium.PdfPage, "render", refuse)
+    media_jobs.MediaJobStore(vault).enqueue(
+        media_jobs.MediaJob(binary_path=vault / result.path, sidecar_path=sidecar, media_type="pdf")
+    )
+
+    media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.05)
+    media_worker.MediaWorker(vault, execution_mode="process")._drain_parent_results()
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.FAILED
+    assert "PdfiumError" in job["error"]
+    assert "The lease starts" not in sidecar.read_text(encoding="utf-8")

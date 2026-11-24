@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from _identity_pdf import make_pdf
 from test_media_store import selected_store as selected_store
 
 from exomem import document_containers, preserve
@@ -156,12 +157,8 @@ def test_public_upload_processes_complete_docx_and_pdf_and_downloads_exact_bytes
     from exomem.governance.principal import owner_principal, request_scope
     from exomem.vault import parse_frontmatter
 
-    pymupdf = pytest.importorskip("pymupdf")
-    document = pymupdf.open()
-    page = document.new_page()
-    page.insert_text((72, 72), "Quartz appendix confirms the harbour inspection.")
-    pdf = document.tobytes()
-    document.close()
+    pytest.importorskip("pypdfium2")  # the media worker reads the PDF back
+    pdf = make_pdf(vault.parent / "appendix.pdf", ["Quartz appendix confirms the harbour inspection."]).read_bytes()
     words = "\n\n".join(f"Paragraph {n}: the dock inspection records durable neutral findings." for n in range(9000))
     docx = _docx(words + "\n\nZirconiumtail confirms the final appendix survived.")
     data = container_bytes([("contract.docx", docx), ("appendix.pdf", pdf), ("META-INF/signatures.xml", b"malformed")])
@@ -689,7 +686,9 @@ def test_descriptor_exhaustion_keeps_exact_opaque_original(vault, tmp_path, requ
     previous = resource.getrlimit(resource.RLIMIT_NOFILE)
     descriptor_count = len(list(Path("/proc/self/fd").iterdir()))
     try:
-        resource.setrlimit(resource.RLIMIT_NOFILE, (min(previous[0], descriptor_count + 32), previous[1]))
+        # 64 payloads exhaust 40 spare descriptors; the original's publish needs 33 at its peak, because
+        # it retains the temporary and the replaced destination until cleanup.
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(previous[0], descriptor_count + 40), previous[1]))
         result = _capture(vault, data)
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, previous)

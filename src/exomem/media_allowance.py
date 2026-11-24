@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import sqlite3
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from itertools import islice
+from pathlib import Path
 
 from . import held_fs, originals, reserved_paths, runtime_resources, trash_metadata
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root_rel
 from .vault import parse_frontmatter
 
 # These refusal codes belong to the closed media protocol, not a content vocabulary.
@@ -44,29 +47,76 @@ def blocked_fields(blockers: tuple[Blocker, ...]) -> dict:
     return {"blocked_by": [{"path": item.path, "reason": item.reason} for item in blockers]}
 
 
-@dataclass(frozen=True, slots=True)
+_VersionKey = tuple[str, str, str]
+_LiveVersion = tuple[_VersionKey, str]
+
+
+@dataclass(slots=True)
 class ReferenceUsage:
-    versions: dict[tuple[str, str, str], tuple[originals.BinaryBinding, originals.StoredObject]] | None
+    versions: dict[_VersionKey, tuple[originals.BinaryBinding, originals.StoredObject]] | None
     observed_at: str
     live_paths: dict[tuple[str, str, str], str] = field(default_factory=dict)
     # Why the census is unknown, when notes explain it: the first few by path.
     blockers: tuple[Blocker, ...] = ()
+    _used_bytes: int | None = field(init=False, repr=False, compare=False)
+    # Only groups with several versions need an ordered index that can remove failed entries cheaply.
+    _reuse: dict[tuple[str, int, str], _LiveVersion | OrderedDict[_VersionKey, str]] = field(
+        init=False, default_factory=dict, repr=False, compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        self._used_bytes = None
+        if self.versions is None:
+            return
+        self._used_bytes = sum(binary.size for binary, _reference in self.versions.values())
+        for version, path in self.live_paths.items():
+            binary, reference = self.versions[version]
+            self._index_reuse(binary, reference, version, path)
+
+    def _index_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject,
+                     version: _VersionKey, path: str) -> None:
+        key = (binary.sha256, binary.size, reference.key_version)
+        matches = self._reuse.get(key)
+        if matches is None:
+            self._reuse[key] = version, path
+        elif isinstance(matches, tuple):
+            self._reuse[key] = OrderedDict((matches, (version, path)))
+        else:
+            matches[version] = path
 
     @property
     def used_bytes(self) -> int | None:
-        if self.versions is None:
-            return None
-        return sum(binary.size for binary, _reference in self.versions.values())
+        return self._used_bytes
 
-    def charged(
-        self, binary: originals.BinaryBinding, reference: originals.StoredObject,
-    ) -> ReferenceUsage:
-        """This census plus a version that a writer is about to bind; an unknown census stays unknown."""
+    def charge(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
+        """Add a version to this active batch's census before binding it."""
         key = _key(reference)
-        if self.versions is None or key in self.versions:
-            return self
-        return ReferenceUsage({**self.versions, key: (binary, reference)}, self.observed_at,
-                              {**self.live_paths, key: binary.path})
+        if self.versions is None or self._used_bytes is None or key in self.versions:
+            return
+        self.versions[key] = binary, reference
+        self.live_paths[key] = binary.path
+        self._used_bytes += binary.size
+        self._index_reuse(binary, reference, key, binary.path)
+
+    def reuse_candidates(self, binary: originals.BinaryBinding, key_version: str, *, limit: int
+                         ) -> list[tuple[Path, originals.StoredObject]]:
+        if self.versions is None:
+            return []
+        matches = self._reuse.get((binary.sha256, binary.size, key_version))
+        if matches is None:
+            return []
+        entries = (matches,) if isinstance(matches, tuple) else matches.items()
+        return [(Path(path), self.versions[key][1]) for key, path in islice(entries, limit)]
+
+    def skip_reuse(self, binary: originals.BinaryBinding, reference: originals.StoredObject) -> None:
+        """Keep a failed version in the allowance while this census stops offering it for reuse."""
+        group = (binary.sha256, binary.size, reference.key_version)
+        matches = self._reuse.get(group)
+        if isinstance(matches, tuple):
+            if matches[0] == _key(reference):
+                del self._reuse[group]
+        elif matches is not None:
+            matches.pop(_key(reference), None)
 
 
 def _key(reference: originals.StoredObject) -> tuple[str, str, str]:
@@ -130,97 +180,62 @@ def admission(
     return decide(usage.used_bytes, projected, allowance_bytes, usage.observed_at)
 
 
-def _binding(
-    fields: dict[str, object], path: str, store: originals.StoreBinding,
-    metadata: dict[str, str], vault: Path, placements: dict[str, dict[str, object]],
-    placement_versions: dict[str, held_fs.FileVersion],
-) -> tuple[originals.BinaryBinding, originals.StoredObject] | None:
-    try:
-        return originals.referenced_binding(fields, sidecar_path=path, store=store)
-    except ValueError:
-        if not PurePosixPath(path).is_relative_to(PurePosixPath(kb_dirname()) / trash_metadata.TRASH_SUBPATH):
-            raise
-    from .relation_review import parse_exact_json_object
-
-    current = PurePosixPath(path)
-    # A canonical companion is adjacent to its binary; directory entries use their ancestor root.
-    candidates = (current, current.with_suffix(""), *current.parents)
-    for root in candidates:
-        key = root.as_posix()
-        metadata_path = metadata.get(key)
-        if metadata_path is None:
-            continue
-        if key not in placements:
-            with reserved_paths.open_generic_binary(vault, metadata_path) as source:
-                size = source.version.size
-                with runtime_resources.parser_preparation(size) as preparation:
-                    preparation.reserve_source(size)
-                    raw = source.stream.read(size + 1)
-                    if len(raw) != size:
-                        raise ValueError("Trash metadata changed during read")
-                    text = raw.decode("utf-8")
-                    preparation.reserve_parser(text, json_bytes=len(raw))
-                    parsed = parse_exact_json_object(text)
-                    # Only the fixed placement field survives the parser reservation.
-                    placement = {"original_path": parsed.get("original_path")}
-                    trash_metadata.original_path(placement, trash_root=key, current_path=path)
-                    source.require_current()
-                    placement_versions[metadata_path] = source.version
-                    placements[key] = placement
-                    del parsed, text, raw
-        try:
-            meta = placements[key]
-            historical = trash_metadata.original_path(meta, trash_root=root.as_posix(), current_path=path)
-            return originals.referenced_binding(fields, sidecar_path=historical, store=store)
-        except (ValueError, UnicodeError):
-            continue
-    raise ValueError("stored Trash reference has no trustworthy placement")
-
-
 def bound_references(
     vault: Path, store: originals.StoreBinding, *, unreadable: Callable[[str, Exception], None] | None = None,
-) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject]]:
-    """Every reference to `store` under the Knowledge Base, as the companion's path and what it binds.
+) -> Iterator[tuple[str, originals.BinaryBinding, originals.StoredObject, bool]]:
+    """Every reference to `store` under the Knowledge Base: the companion's path, what it binds, and if displaced.
 
     The caller holds the consistency guard around the whole iteration, and takes any read failure as an
     unknown census: a failed read never ends the walk early and reads as complete. A caller that passes
     `unreadable` is told of each note that fails on its own: a header that the tree cannot read, decode or
     prepare within the note's own budget, or one that does not parse or bind. The walk then goes on to the next note, and that caller must treat
     the census as unknown once told. Without it, the first such note raises.
+
+    A page that binds a reference away from its original's companion path, as a confined move leaves
+    one, counts only when the media ledger records that exact version at the original's path; those pages
+    come after the walk, from one batched ledger read, with True last. Such a page holds no original
+    beside it: its original stays at `binary.path`, and several pages may name the same one.
     """
-    metadata: dict[str, str] = {}
-    placements: dict[str, dict[str, object]] = {}
-    placement_versions: dict[str, held_fs.FileVersion] = {}
+    placements = trash_metadata.PlacementCensus(vault)
+    displaced: list[tuple[str, originals.DisplacedReference]] = []
 
     def select(candidates: list[tuple[str, str]]):
         for relative, kind in candidates:
             if kind != "file":
                 continue
-            # Markdown and Trash metadata extensions belong to the fixed vault format.
-            if (PurePosixPath(relative).is_relative_to(trash_metadata.TRASH_SUBPATH)
-                    and relative.endswith(trash_metadata.METADATA_SUFFIX)):
-                metadata[f"{kb_dirname()}/{relative[:-len(trash_metadata.METADATA_SUFFIX)]}"] = f"{kb_dirname()}/{relative}"
             if relative.lower().endswith(".md"):
                 yield relative
 
     def header_failed(relative: str, error: Exception) -> None:
         assert unreadable is not None
-        unreadable(f"{kb_dirname()}/{relative}", error)
+        unreadable(managed_join(relative), error)
 
     with reserved_paths.open_generic_tree(
-        vault, kb_dirname(), select=select, require_complete=True,
+        vault, managed_root_rel(), select=select, require_complete=True,
         markdown_header_limit=runtime_resources.SEMANTIC_SOURCE_MAX_BYTES,
         markdown_header_failed=None if unreadable is None else header_failed,
     ) as entries:
         for entry in entries:
-            path = f"{kb_dirname()}/{entry.relative_path}"
+            path = managed_join(entry.relative_path)
             try:
                 if entry.markdown is None:
                     raise ValueError("companion header was not read")
-                bound = _binding(
-                    parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0],
-                    path, store, metadata, vault, placements, placement_versions,
-                )
+                fields = parse_frontmatter(entry.markdown.decode("utf-8"), custody=True)[0]
+                bound = None
+                if "stored_object" in fields:
+                    reference = originals.stored_reference(fields["stored_object"])
+                    if reference is None:
+                        raise ValueError("stored reference is malformed")
+                    if reference.store == store.store:
+                        # A live page's `DisplacedReference` comes here, and so does a Trash page that sat
+                        # away from its companion path before its deletion: the ledger confirms both below.
+                        binary = placements.resolve(path, fields)
+                        if binary is None:
+                            raise ValueError("stored reference has no valid binary binding")
+                        bound = binary, reference
+            except originals.DisplacedReference as error:
+                displaced.append((path, error))
+                continue
             except ValueError as error:  # This note's YAML or binding. The tree reports a header it cannot read; a walk or I/O failure is no ValueError.
                 if unreadable is None:
                     raise
@@ -229,12 +244,22 @@ def bound_references(
             finally:
                 del entry
             if bound is not None:
-                yield path, bound[0], bound[1]
-    for metadata_path, version in placement_versions.items():
-        with reserved_paths.open_generic_binary(vault, metadata_path) as source:
-            if source.version != version:
-                raise ValueError("Trash placement changed during the census")
-            source.require_current()
+                yield path, bound[0], bound[1], False
+    if displaced:
+        from . import media_store
+
+        try:
+            recorded = media_store.recorded_versions(vault, [(item.binary, item.reference) for _path, item in displaced])
+        except sqlite3.Error as error:
+            raise OSError("the media ledger that confirms a moved page's reference cannot be read") from error
+        for (path, item), confirmed in zip(displaced, recorded, strict=True):
+            if confirmed:
+                yield path, item.binary, item.reference, True
+            elif unreadable is None:
+                raise item
+            else:
+                unreadable(path, item)
+    placements.require_current()
 
 
 # What a failed read of the Knowledge Base tree can raise; the census that hit one is unknown.
@@ -264,7 +289,7 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
         if store is None:
             raise ValueError("no selected media store")
         with get_manager().consistency_guard(vault, operation="media_reference_usage", holder_kind="background"):
-            for path, binary, reference in bound_references(vault, store, unreadable=blocked_by):
+            for path, binary, reference, displaced in bound_references(vault, store, unreadable=blocked_by):
                 key = _key(reference)
                 if key in versions:
                     try:
@@ -273,7 +298,8 @@ def reference_usage(vault_root: Path) -> ReferenceUsage:
                         blocked_by(path, error)
                         continue
                 versions[key] = (binary, reference)
-                if not trash_metadata.is_trash_path(path):
+                # A displaced page's original reads missing at its path, so it is no candidate for reuse.
+                if not displaced and not trash_metadata.is_trash_path(path):
                     live_paths.setdefault(key, binary.path)
     except UNREADABLE:  # The walk itself failed, so any note named so far is not the whole reason: name none.
         return ReferenceUsage(None, datetime.now(UTC).isoformat())

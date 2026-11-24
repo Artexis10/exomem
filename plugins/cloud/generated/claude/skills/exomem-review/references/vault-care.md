@@ -169,7 +169,7 @@ Audit is read-only. `fix` and `backfill-ids` rewrite content (wikilinks, frontma
 
 ### Remote maintenance jobs
 
-A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
+A remote `fix`, `backfill-ids`, `capture-metadata`, `reconcile` or `convert-originals` runs as a background job, preview and write alike, not as one call. Only the vault owner can start, read or cancel one, and one job runs per vault.
 
 1. Preview with `inspect_memory`, `dry_run=true`. The owner gets a `run_id` and `preview: true` at once: a preview of a large vault outlasts one request, so it runs as a read-only job. When it is `completed`, its receipt's `result` carries the `plan_id`. A caller other than the owner, and the local CLI, get the report in one call.
 2. Start with `manage_memory`: the same mode and flags, `dry_run=false`, that `plan_id` and a one-line `why`. It returns a `run_id` at once. Without both it returns `MAINTENANCE_PLAN_REQUIRED` and starts nothing.
@@ -179,13 +179,35 @@ A remote `fix`, `backfill-ids` or `reconcile` runs as a background job, preview 
 
 If the vault changed after the preview, the job returns `STALE_MAINTENANCE_PLAN`, writes nothing and gives a fresh `plan_id`: preview again. Another start while a job runs returns `MAINTENANCE_JOB_ACTIVE`, and its `retry` reads the running job by its `run_id`. `fix` and `backfill-ids` write in short chunks that let other writes through. `reconcile` holds writes only in short holds, one per phase that writes, and other writes go through between them. A `MUTATION_BUSY` refusal during one of its holds names the job's `run_id`. Applying `collections-store-export` is host work: run it with the service stopped.
 
+### convert-originals
+
+An archive created before shared original storage keeps each original as an ordinary file at its own path. `convert-originals` stores the bytes of each original once in the shared store and then removes the ordinary file. The original keeps its path, and its page keeps every byte, with its references and grants. Only the owner can run it, and it dry-runs by default.
+
+The preview counts `would_convert`, `already_shared` and `store_bound`, which counts originals whose only copy is a stored version. It lists each `unreadable` original with a reason, and conversion leaves it unchanged. The write adds `converted`, `skipped_changed` (the original or its page changed after the inventory) and `kept_pinned` (a reader or a media job held the file).
+
+A run that stops leaves every original readable. Run the conversion again to finish an interrupted run or the skipped originals. `ORIGINAL_POOL_LIFECYCLE_REQUIRED` means that the service's launcher cannot serve shared storage yet: the operator must update the launcher first.
+
+### capture-metadata
+
+A photo or video filed before capture metadata was recorded has a page without the capture fields (`capture_time`, `capture_date`, `capture_lat`, `capture_lon`, `camera_make`, `camera_model`, `pixel_width`, `pixel_height`). `capture-metadata` reads each original that has bytes on the volume and adds the fields its file states. It replaces only that block of the page: the extracted text, the preserved notes and every other field stay as written. Only the owner can run it, and it dry-runs by default.
+
+The preview counts `would_update`, `already_current`, `no_capture_metadata` (the file states nothing) and `skipped`, with each reason's count, and it lists up to 200 skipped pages. A page is skipped when its original has `bytes not on the volume` (the job never fetches one back), when it holds unmarked preserved notes (`AMBIGUOUS_SIDECAR_BOUNDARY`), or when this host has no decoder for the original's kind. The write adds `updated` and `skipped_changed` (the page changed after the preview). Run it again after the bytes of a skipped original return.
+
 ### structured-files
 
 Previews one Planning or Records collection's manifest-declared human filenames and managed readable bodies, including governed inbound-link rewrites. Preview is read-only; apply needs the exact `plan_id` and `source_snapshot` and `why`, and commits atomically. Durable identity and mutable state stay in frontmatter, not filenames.
 
 ### curation
 
-The governed multi-step mode. The agent authors a closed typed plan from explicit context. Exomem validates and fingerprints it, records one exact-plan approval (`expected_plan_fingerprint`), and executes at most one content step per apply or resume. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
+The governed multi-step mode. The agent authors a closed typed plan from explicit context, or `relocate` derives one. Exomem validates and fingerprints it and records one exact-plan approval (`expected_plan_fingerprint`). Each apply or resume then runs the plan's steps, one write hold per step, until the run ends or the request's time is spent. Other writes land between steps. A request that stops early answers `executing` with `progress` (steps, committed, this call), and `resume` continues the same approval. A refusal after committed steps answers `stopped` beside the progress instead of an error. Follow `next_action`: `resume` after a busy vault or run, otherwise the run's `partial` or `blocked` answer. `work-item`, `preview` and `status` are read-only. Proposal, execution and separately reviewed compensation use the shared mutation terminal.
+
+`relocate` moves a set of pages into one project, renames them to their titles, or both, in one reviewed plan. Pass `pages` (refs or vault paths) or one `review_ref`, and `to_project` to change project. `from_project` names the key to replace when a page carries several; `folder` names where the notes of a new key live. Exomem derives every step:
+
+- a move, or an in-place field edit, of each page;
+- an edit of the project fields of each Source that a moved page cites;
+- closing `repoint-links` steps that rewrite links to the old paths, a few referring pages per step.
+
+A cited Source gains the new key. It loses the old key only when no page outside the set still cites it under that key. A page without a typed folder, such as an entity, stays in its own folder: it takes its title-named path there and changes its fields. The reply is a grouped summary with counts and samples, never the whole plan: show it as the preview, then approve its fingerprint with `apply`. A proposal that runs short of the request's time answers `preparing` with `progress` (steps, prepared, this call). Make the same `relocate` call again, as `next_action` says, until it seals; each call keeps the steps the earlier ones prepared. A `review_ref` batch is sized to what one plan holds, and the pages left for later are counted under `deferred_to_next_batch`. A page the lane cannot change is listed under `refused` with its code, and the other pages still seal. `propose-compensation` undoes the whole run as one plan; a project key that the run registered stays registered.
 
 Page steps cannot target raw Sources or Evidence, Planning, Records, workflow contracts, schema/admin state, or trash internals. `move`, `delete` and `supersede` keep refusing Sources and Evidence. Two fold steps are the only way the lane retires one of their pages, and each moves bytes to the trash only after it re-checks that identical bytes are held elsewhere:
 

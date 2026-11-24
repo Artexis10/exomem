@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import (
+    capabilities,
     entity_candidates,
     indexes,
     markdown_relations,
@@ -42,21 +43,25 @@ from .entity_types import (
     EntityTypeRegistry,
     load_entity_types,
 )
-from .kbdir import kb_prefix
+from .kbdir import managed_join, managed_relative
 from .vault import (
     InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
     canonical_vault_rel,
     escape_wikilinks_for_log,
+    filename_adjusted_warning,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     render_wikilink_target,
     resolve_filename_slug,
+    sibling_name_variants,
     split_wikilink_target,
+    unique_path,
     writer_link_visibility,
     yaml_flow_list,
     yaml_scalar,
@@ -250,9 +255,36 @@ def _entity_exists_reason(vault_root: Path, rel_entity: str) -> str:
             "create-only via `link`; use `replace` to supersede."
         )
     return (
-        f"{rel_entity!r} already exists. Entities are create-only via `link`; "
+        f"{_occupant_name(vault_root, rel_entity)} already exists. Entities are create-only via `link`; "
         "use `replace` to supersede."
     )
+
+
+def _refuse_reserved(vault_root: Path, rel_entity: str, *, newest: bool) -> None:
+    """Refuse an entity path that a live page's lineage still claims (`prior_claims`)."""
+    from . import prior_claims
+
+    try:
+        prior_claims.require_unreserved(vault_root, rel_entity, newest=newest)
+    except prior_claims.ReservedPathError as error:
+        code = "ENTITY_EXISTS" if error.code == "FILE_EXISTS" else error.code
+        # The caller sent the name; another name is the remedy, not a missing field.
+        raise LinkError(code, [], error.reason) from None
+
+
+def _occupant_name(vault_root: Path, rel_entity: str) -> str:
+    """How the refusal names the page that holds the name: by title for an agent on the public tool shape.
+
+    That shape names pages by title everywhere else, so a storage path would be the one place that
+    leaks it. Another caller, and a page whose title cannot be read, keep the path.
+    """
+    if capabilities.shows_links_by_title():
+        from . import page_names
+
+        found = page_names.read_identity(vault_root, rel_entity)
+        if found is not None:
+            return repr(found.title)
+    return repr(rel_entity)
 
 
 # ---------------- validation ----------------
@@ -289,21 +321,6 @@ def _validate(
     if missing:
         return _Err(code="INVALID_LINK", missing=missing, reason="; ".join(reasons))
     return None
-
-
-# ---------------- name + path sanitization ----------------
-
-
-_INVALID_NAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-
-def _sanitize_name(name: str) -> str:
-    """Strip filesystem-reserved chars from an entity name while preserving
-    Title Case and spaces (which Obsidian filenames allow on Windows)."""
-    cleaned = _INVALID_NAME_CHARS.sub("", name.strip())
-    # Collapse repeated whitespace
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned or "Unnamed"
 
 
 # ---------------- render ----------------
@@ -619,7 +636,7 @@ def _activity_summary(
     domain: str | None,
     project: str | None,
 ) -> str:
-    path_part = rel_entity_no_ext.replace(kb_prefix(), "")
+    path_part = managed_relative(rel_entity_no_ext)
     modifier_parts: list[str] = [entity_type]
     if entity_type == "concept" and domain:
         modifier_parts.append(domain)
@@ -663,7 +680,7 @@ def _prepend_log_entry(
     text: str, *, date_iso: str, rel_path: str, body: str
 ) -> str:
     """Insert `## [<date>] link | <kb-relative-path>` after the `---` separator."""
-    title = rel_path.replace(kb_prefix(), "", 1)
+    title = managed_relative(rel_path)
     new_entry = f"## [{date_iso}] link | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     if new_entry in text:
         return text
@@ -756,22 +773,25 @@ def link(
         )
     requested_type = entity_type
     entity_type = definition.id
-    slug_warnings: list[str] = []
-    filename_slug: str | None = None
-    if slug is not None:
-        try:
-            filename_slug, slug_warnings = resolve_filename_slug(name, slug)
-        except InvalidSlugError as error:
-            raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
+    try:
+        # The vault's one naming path: an entity is named like any compiled note.
+        filename_slug, slug_warnings = resolve_filename_slug(name, slug, vault_root=vault_root)
+    except InvalidSlugError as error:
+        raise LinkError("INVALID_SLUG", ["slug"], str(error)) from error
     folder = kb_root(vault_root) / "Entities" / definition.folder
-    entity_path = folder / f"{filename_slug or _sanitize_name(name)}.md"
     from .governance import connector_boundary
 
-    prospective_path = entity_path.relative_to(vault_root).as_posix()
-    connector_boundary.require_create(vault_root, prospective_path)
-    rel_entity = canonical_vault_rel(vault_root, prospective_path)
-    if instances.page_scope(vault_root, rel_entity, authored) != selected_scope:
-        raise LinkError("REGISTRY_UNAVAILABLE", [], "destination uses a different registry instance")
+    def place(path: Path) -> str:
+        """The destination's checked vault-relative path: the boundary admits it and it is in this registry."""
+        prospective_path = path.relative_to(vault_root).as_posix()
+        connector_boundary.require_create(vault_root, prospective_path)
+        placed = canonical_vault_rel(vault_root, prospective_path)
+        if instances.page_scope(vault_root, placed, authored) != selected_scope:
+            raise LinkError("REGISTRY_UNAVAILABLE", [], "destination uses a different registry instance")
+        return placed
+
+    entity_path = folder / f"{filename_slug}.md"
+    rel_entity = place(entity_path)
     origin_block = None
     if isinstance(summary, str):
         try:
@@ -789,6 +809,7 @@ def link(
     declared_facets = _validated_facets(registry, definition, facets)
     from . import find as find_module
     from . import project_keys as project_keys_module
+    from . import title_occupancy
 
     try:
         key_plan = project_keys_module.plan_project_keys(
@@ -888,11 +909,31 @@ def link(
             [{"alias": name, "path": path} for name, found in claimed.items() for path in found],
             fingerprint,
         )
-    if entity_path.exists():
-        reason = _entity_exists_reason(vault_root, rel_entity)
+    # Windows and default macOS hold `Ada Lovelace.md` and `ada lovelace.md` as one file, so a
+    # name that differs only by case or Unicode form is taken, not free.
+    occupant = (
+        entity_path.name
+        if entity_path.exists()
+        else next(iter(sibling_name_variants(folder, entity_path.name)), None)
+    )
+    if occupant is not None:
+        reason = _entity_exists_reason(
+            vault_root,
+            canonical_vault_rel(vault_root, (folder / occupant).relative_to(vault_root).as_posix()),
+        )
         if accepted_decision is not None:
             reason += " A distinct identity needs its own `slug`."
         raise LinkError("ENTITY_EXISTS", ["name"], reason)
+    _refuse_reserved(vault_root, rel_entity, newest=not validate_only)
+    # The writer snapshot that this write builds for its links also answers which titles are taken. It
+    # is acquired here, after every refusal above, so a refused write pays nothing new.
+    resolver = find_module.writer_resolver_snapshot(vault_root)
+    title_check = title_occupancy.TitleCheck(vault_root, slug, resolver=lambda: resolver)
+    if title_check.held(entity_path.stem):
+        # The name is free as a file but is another page's title: taking it would move every bare link
+        # to that title here. The refusal above stays for a file that exists; this only numbers the name.
+        entity_path = unique_path(folder, entity_path.stem, vault_root=vault_root, title_held=title_check.held)
+        rel_entity = place(entity_path)
     type_resolution = vocabulary_resolution.entity_type_record(
         requested_type,
         definition,
@@ -900,7 +941,6 @@ def link(
         destination=rel_entity.rsplit("/", 2)[-2],
     )
     rel_entity_no_ext = rel_entity.removesuffix(".md")
-    resolver = find_module.writer_resolver_snapshot(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=display_name)
     connections_norm, connection_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver,
@@ -1015,8 +1055,12 @@ def link(
         )
     except semantic_writes.SemanticWriteError as error:
         raise LinkError(error.code, list(error.missing), error.reason) from error
+    adjusted = filename_adjusted_warning(
+        name, slug, planned=filename_slug, final=entity_path.stem, vault_root=vault_root
+    )
     warnings = (
         list(slug_warnings)
+        + ([adjusted] if adjusted else [])
         + list(connection_warnings)
         + list(summary_warnings)
         + list(why_warnings)
@@ -1033,8 +1077,11 @@ def link(
         project=project,
     )
     top_index = kb / "index.md"
-    if not top_index.is_file():
-        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+    # A store-mode top index is a stored page that may have no file yet, so the store answers first.
+    from .vault_store import read as store_read
+
+    if not store_read.holds_file(vault_root, relative_posix(top_index, vault_root)):
+        warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     elif connector_boundary.effect_admission(vault_root)(top_index):
         top_text, top_guard = read_guarded_text(vault_root, top_index)
         new_top, _ = indexes._prepend_recent_activity(
@@ -1085,7 +1132,7 @@ def link(
             memory_refs.memory_ref(identity),
             warnings,
             preflight.as_dict(),
-            slug=filename_slug or "",
+            slug=filename_slug if slug is not None else "",
             identity_decision=accepted_decision,
             vocabulary_resolution=type_resolution,
         )
@@ -1102,7 +1149,7 @@ def link(
         memory_refs.memory_ref(identity),
         warnings,
         committed.as_dict(),
-        slug=filename_slug or "",
+        slug=filename_slug if slug is not None else "",
         identity_decision=accepted_decision,
         vocabulary_resolution=type_resolution,
     )

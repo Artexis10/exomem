@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3095,6 +3096,7 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "status": True,
             "retry": False,
             "reprocess": False,
+            "replicate": False,
         },
         ("observe_memory", "operation"): {
             "add": False,
@@ -3107,6 +3109,9 @@ def test_every_mixed_selector_uses_one_complete_receipt_registry() -> None:
             "fix": True,
             "reconcile": False,
             "backfill-ids": True,
+            # Preview unless `dry_run=false`, like fix and backfill-ids; only the owner runs either.
+            "capture-metadata": True,
+            "convert-originals": True,
             # A job read is a structure read; its cancel flags a job and is a write.
             "maintenance-job": True,
             "maintenance-job-cancel": False,
@@ -3153,7 +3158,7 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "list": "structure",
         "create": "validation",
         "append": "validation",
-        "move": "mutation",
+        "move": "validation",
         "delete": "mutation",
         "trash-list": "structure",
         "recover": "mutation",
@@ -3171,6 +3176,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
     assert not commands.invocation_is_read_only(
         manage, {"operation": "create", "validate_only": False}
     )
+    assert commands.invocation_is_read_only(manage, {"operation": "move", "validate_only": True})
+    assert not commands.invocation_is_read_only(manage, {"operation": "move"})
 
     assert registry[("schema_memory", "operation")] == {
         "infer": "save-conditional",
@@ -3241,6 +3248,8 @@ def test_conditional_mixed_selectors_are_in_the_same_registry() -> None:
         "apply-compensation": False,
         # A revert removes edges and trashes a page, so it is a write like apply.
         "revert": False,
+        # A relocation seals a run in the curation store, as propose does.
+        "relocate": False,
     }
 
     # A Records import's mode decides: preview and status read, start and cancel write.
@@ -5473,3 +5482,418 @@ def test_nested_artifact_references_share_one_lifecycle_capture_per_pass(vault, 
     assert RESTRICTED_PATH not in str(after)
     assert egress.WITHHELD_REFERENCE in str(after)
     assert len(captures) == 1
+
+
+def _held_row(vault: Path, rel: str, raw: bytes, who: RequestPrincipal):
+    """The record a completed preview job holds for a simple governed row."""
+    from exomem import maintenance_jobs
+    from exomem.governance import connector_boundary, lifecycle
+
+    compiled = policy.load(vault)
+    scopes = connector_boundary._membership_sets(vault, rel, compiled, content=raw, who=who)
+    info = os.stat(vault / rel)
+    return maintenance_jobs.HeldEvidence(
+        path=rel,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size=len(raw),
+        witness=(info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns),
+        scopes=scopes,
+        identity=egress._frozen_release_identity(egress._release_admission_identity(
+            vault, compiled, who, egress._declared_purpose(vault, who, None),
+            egress._grants_hash(compiled), lifecycle.tombstoned_paths(vault),
+        )),
+    )
+
+
+def _byte_read_spies(monkeypatch: pytest.MonkeyPatch, rel: str) -> list[str]:
+    """Spies on the three byte-read seams the terminal gate uses for one path."""
+    from exomem import reserved_paths
+
+    reads: list[str] = []
+    page_bytes, receipt_bytes, generic_bytes = (
+        egress._page_bytes, egress._receipt_bytes, reserved_paths.read_generic_bytes,
+    )
+    _open_spies(monkeypatch, rel, reads)
+
+    def spy_page(root: Path, path: str) -> bytes:
+        data = page_bytes(root, path)
+        if path == rel:
+            reads.append("page")
+        return data
+
+    def spy_receipt(root: Path, path: str):
+        data = receipt_bytes(root, path)
+        if path == rel:
+            reads.append("receipt")
+        return data
+
+    def spy_generic(root: Path, path, *args, **kwargs):
+        if str(path) == rel:
+            reads.append("generic")
+        return generic_bytes(root, path, *args, **kwargs)
+
+    monkeypatch.setattr(egress, "_page_bytes", spy_page)
+    monkeypatch.setattr(egress, "_receipt_bytes", spy_receipt)
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", spy_generic)
+    return reads
+
+
+def _open_spies(monkeypatch: pytest.MonkeyPatch, rel: str, reads: list[str]) -> None:
+    """Record any open of `rel`'s absolute path through the ordinary file APIs."""
+    import builtins
+    import io
+
+    marker = str(Path(rel)) + "/"
+    real_open, real_io_open, real_os_open = builtins.open, io.open, os.open
+    read_bytes, read_text = Path.read_bytes, Path.read_text
+
+    def hit(*args) -> bool:
+        target = str(args[0]) if args and not isinstance(args[0], int) else ""
+        return rel in target or target.startswith(marker)
+
+    def spy_open(*args, **kwargs):
+        if hit(*args):
+            reads.append("open")
+        return real_open(*args, **kwargs)
+
+    def spy_io_open(*args, **kwargs):
+        if hit(*args):
+            reads.append("io.open")
+        return real_io_open(*args, **kwargs)
+
+    def spy_os_open(*args, **kwargs):
+        if hit(*args):
+            reads.append("os.open")
+        return real_os_open(*args, **kwargs)
+
+    def spy_read_bytes(self: Path, *args, **kwargs):
+        if rel in str(self):
+            reads.append("read_bytes")
+        return read_bytes(self, *args, **kwargs)
+
+    def spy_read_text(self: Path, *args, **kwargs):
+        if rel in str(self):
+            reads.append("read_text")
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(io, "open", spy_io_open)
+    monkeypatch.setattr(os, "open", spy_os_open)
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+
+
+def test_terminal_gate_serves_a_held_report_row_without_reproving_bytes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Held release evidence replaces the whole byte re-read for a simple row.
+
+    A completed report's evidence carries the row's hash, size, scopes and release identity; when
+    the stat witness and the recomputed identity still match, the terminal gate needs no bytes at
+    all — not for the decision, the receipt hash, or the connector ceiling.
+    """
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/large-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * (2 * 1024 * 1024) + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    reads = _byte_read_spies(monkeypatch, rel)
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with (
+            egress.disclosure_boundary(vault, "list_directory") as collector,
+            egress.exact_report_paths(retained.exact_paths),
+            egress.held_report_evidence(retained.held_evidence),
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+            egress.emit_boundary_receipt(collector)
+
+    assert out == result
+    assert reads == []
+    digest = hashlib.sha256(raw).hexdigest()
+    outcome = next(item.value for item in collector.outcomes if item.value.get("content_hash") == digest)
+    assert outcome["size"] == len(raw)
+    retained.require_complete_projection(out)
+
+
+def test_a_changed_between_job_and_release_row_gets_no_fast_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-size in-place edit with restored mtime still misses the witness (ino/ctime)."""
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/held-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    reads = _byte_read_spies(monkeypatch, rel)
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        mtime = target.stat().st_mtime_ns
+        target.write_bytes(b"\xff" * len(raw))
+        os.utime(target, ns=(mtime, mtime))
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+
+    # Witness mismatch sends the row down the full path; the changed page withholds itself.
+    assert reads
+    assert out["entries"] == []
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(out)
+
+
+def test_a_policy_change_between_job_and_release_takes_the_full_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A different policy fingerprint changes the release identity — no fast path."""
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/held-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    reads = _byte_read_spies(monkeypatch, rel)
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        write_rule(vault, ceiling=egress.LEVEL_NONE)
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+
+    assert reads
+    assert out["entries"] == []
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(out)
+
+
+def test_a_connector_ceiling_denying_a_held_scope_withholds_the_row(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Held scopes replay against the live ceiling, so a tightened connector still wins."""
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/held-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        denied_all = SimpleNamespace(denied_scopes=lambda who: frozenset().union(*held.scopes))
+        monkeypatch.setattr(
+            egress.connector_boundary, "snapshot", lambda root, *a, **k: denied_all,
+        )
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+
+    assert out["entries"] == []
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(out)
+
+
+def test_a_row_tombstoned_after_the_job_takes_no_fast_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import reclassification_preview
+    from exomem.governance import lifecycle
+
+    rel = "Knowledge Base/Notes/Patterns/held-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        monkeypatch.setattr(
+            lifecycle, "is_tombstoned", lambda root, value: value == rel,
+        )
+        monkeypatch.setattr(
+            lifecycle, "tombstoned_paths", lambda root: frozenset({rel}),
+        )
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+
+    assert out["entries"] == []
+    from exomem.cli_ops import OpError
+
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(out)
+
+
+def test_held_evidence_never_applies_on_native_windows(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stat-witness contract is POSIX; a simulated Windows takes the full path."""
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/held-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    raw = target.read_bytes()
+
+    reads = _byte_read_spies(monkeypatch, rel)
+    monkeypatch.setattr(egress.receipts, "_is_windows", lambda: True)
+    with request_scope(_external()):
+        from exomem.governance.principal import effective_principal
+
+        held = _held_row(vault, rel, raw, effective_principal())
+        result = {"entries": [{"path": rel}]}
+        retained = reclassification_preview.RetainedReport(result, rel, held_evidence={rel: held})
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", result, vault)
+
+    assert out == result
+    assert reads
+
+
+def test_terminal_gate_turns_an_unreadable_governed_referrer_stale(vault: Path) -> None:
+    """When the re-read cannot complete, the withheld row fails the whole page."""
+    from exomem import reclassification_preview
+    from exomem.cli_ops import OpError
+
+    rel = "Knowledge Base/Notes/Patterns/unreadable-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    target.chmod(0o000)
+
+    result = {"entries": [{"path": rel}]}
+    retained = reclassification_preview.RetainedReport(result, rel)
+    try:
+        with request_scope(_external()), egress.exact_report_paths(retained.exact_paths):
+            out = egress.postfilter("list_directory", result, vault)
+    finally:
+        target.chmod(0o600)
+
+    assert out["entries"] == []
+    with pytest.raises(OpError, match="RECLASSIFICATION_PREVIEW_STALE"):
+        retained.require_complete_projection(out)
+
+
+def test_a_row_without_held_evidence_takes_the_full_path(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-simple row (e.g. a container member) holds no evidence and reads bytes."""
+    from exomem import reclassification_preview
+
+    rel = "Knowledge Base/Notes/Patterns/member-referrer.md"
+    target = vault / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Referrer\n" + "a" * 4096 + "\n", encoding="utf-8")
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+
+    reads = _byte_read_spies(monkeypatch, rel)
+    result = {"entries": [{"path": rel}]}
+    retained = reclassification_preview.RetainedReport(result, rel, held_evidence={})
+    with request_scope(_external()), egress.exact_report_paths(retained.exact_paths), \
+            egress.held_report_evidence(retained.held_evidence):
+        out = egress.postfilter("list_directory", result, vault)
+
+    assert out == result
+    assert reads
+    retained.require_complete_projection(out)
+
+
+def test_held_evidence_scales_a_large_report_without_byte_reads(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten 2 MiB governed referrers: no reads at release, each page inside the request budget."""
+    import time as time_module
+
+    from exomem import reclassification_preview
+    from exomem.governance.principal import effective_principal
+
+    write_scope(vault)
+    write_rule(vault, ceiling=egress.LEVEL_FULL)
+    entries = []
+    held_evidence = {}
+    with request_scope(_external()):
+        who = effective_principal()
+        for index in range(10):
+            rel = f"Knowledge Base/Notes/Patterns/large-{index}.md"
+            target = vault / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"# Referrer {index}\n" + "a" * (2 * 1024 * 1024) + "\n", encoding="utf-8")
+            raw = target.read_bytes()
+            entries.append({"path": rel})
+            held_evidence[rel] = _held_row(vault, rel, raw, who)
+
+        source = entries[0]["path"]
+        retained = reclassification_preview.RetainedReport(
+            {"entries": entries}, source, held_evidence=held_evidence,
+        )
+        reads: list[str] = []
+        _open_spies(monkeypatch, "large-", reads)
+        page_bytes = egress._page_bytes
+        monkeypatch.setattr(egress, "_page_bytes", lambda root, path: (
+            reads.append(path), page_bytes(root, path))[1])
+        started = time_module.monotonic()
+        with egress.exact_report_paths(retained.exact_paths), egress.held_report_evidence(
+            retained.held_evidence,
+        ):
+            out = egress.postfilter("list_directory", {"entries": entries}, vault)
+        elapsed = time_module.monotonic() - started
+
+    assert out == {"entries": entries}
+    assert reads == []
+    retained.require_complete_projection(out)
+    # The route's disclosure budget is tens of seconds; the held path is a stat per row.
+    assert elapsed < 30, f"held release took {elapsed:.2f}s for 10 rows"

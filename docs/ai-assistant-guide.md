@@ -61,11 +61,12 @@ Capture raw material separately when provenance matters.
 Capture a stable preference, recurring routine, historical baseline, or durable
 affiliation only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Put a facet or affiliation on a
-uniquely resolved Entity; otherwise write one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative claims stay quiet; this never authorizes creating an Entity,
-collection, or schema. A concise observation or narrow Entity facet follows
+uniquely resolved Entity; otherwise write one concise compiled observation. A
+recurring named item or measurement goes to a Records row: reuse a matching
+collection by natural key, else create a minimal one. Fleeting preferences, one-off
+activity, incidental associations, and trivial metrics get no note; eligibility alone
+never creates an Entity, collection, or schema. A concise observation, narrow Entity
+facet or minimal Records collection follows
 `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
 confirmed `restructure_execution`.
@@ -229,8 +230,9 @@ receipt and only into one existing compatible Records collection. The delivery
 envelope maps the caller-authored link, reported-reference, and verification
 fields; it creates no schema and sets no item values. Reported remote identity
 is unverified unless matching platform proof establishes remote byte equality.
-Missing schema may yield a `structural_suggestions` proposal, but creation or
-change remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+A missing collection is created under the bounded Records rule, as one minimal
+collection under `proactive_capture`; any other creation, and any schema change,
+remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Compile evidence
 
@@ -304,6 +306,20 @@ whole, dismiss the item through `decide_review_item` with a reason that starts
 plan through the curation lane and ask the user to confirm the exact plan. A hub
 by design carries a breadth tag. The same items sit in due-state as a backlog.
 
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its current project and that question is unanswered. A page is asked when it is
+created in a project, when its project key or title changes, and when the daily
+rotation reaches it. The field carries the review item's `ref`, `fingerprint` and `id`,
+and one `question` that holds the ownership test and the call that keeps the page where
+it is. The runtime decides when to ask and never judges the page or moves it. To keep
+the page where it is, dismiss the item through `decide_review_item` with a reason that
+starts `intentional:` and names the project goal the page serves; it stays quiet until
+the page's project key, home folder or title changes. If you cannot tell, dismiss with a
+reason that starts `deferred:`, or make no call. To move or split the page, tell the
+user and propose the change through the curation lane, after the user confirms the
+exact plan. A response carries at most one `structure_suggestion`, and the ownership
+one comes first.
+
 Use `response_detail="full"` when an agent
 needs the previous leaf diagnostics nested under `diagnostics`.
 `response_detail="legacy"` returns the old raw result for temporary
@@ -374,7 +390,7 @@ Without a loaded skill, call read_instructions(profile="compact") once per sessi
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation; Records only for a compatible existing measurement. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative claims stay quiet. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
 ```
 
 ## Codex CLI
@@ -494,7 +510,7 @@ Claude Code skill. To set one up:
 3. If the client has no loaded Exomem skill, add the instruction block above after it.
 
 ```text
-Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again.
+Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
 ```
 
 The agent then recalls what Exomem holds before a task and saves what it learns.

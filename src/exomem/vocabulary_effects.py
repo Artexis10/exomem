@@ -18,12 +18,12 @@ from typing import Any
 import yaml
 
 from . import entity_types, memory_refs, relation_registry, semantic_contract, vault
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_root
 from .semantic_contract import _derive_relation_facts
 from .vocabulary import contract, instances
 from .vocabulary import registry as vocabulary_registry
 
-_SCHEMA_PREFIX = f"{kb_dirname()}/_Schema/"
+_SCHEMA_PREFIX = managed_join("_Schema/")
 _ALLOWED_ACTIONS = frozenset({"entity.create", "entity_type.add", "relation_type.add", "edge.add"})
 MAX_IMAGE_BYTES = 1024 * 1024
 
@@ -286,7 +286,7 @@ def _registry_effects(
 def _entity_path_is_canonical(path: str, definition: entity_types.EntityTypeDefinition) -> bool:
     parsed = PurePosixPath(path)
     return (
-        parsed.parent.as_posix() == f"{kb_dirname()}/Entities/{definition.folder}"
+        parsed.parent.as_posix() == managed_join(f"Entities/{definition.folder}")
         and parsed.suffix == ".md"
         and bool(parsed.stem)
     )
@@ -364,7 +364,7 @@ def classify_additive_effects(
     active = tuple(image for image in active if image.path not in derived_paths)
     transitions = registry_transitions if registry_transitions is not None else {}
     states = page_states if page_states is not None else {}
-    project_keys_path = (root / kb_dirname() / "_Schema" / "project-keys.yaml").relative_to(root).as_posix()
+    project_keys_path = (managed_root(root) / "_Schema" / "project-keys.yaml").relative_to(root).as_posix()
     schema_paths = {project_keys_path}
     registry_images = []
     for image in active:

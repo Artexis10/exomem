@@ -24,8 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from sqlite3 import Connection
 
-from .. import access, registry_history, vault
-from ..kbdir import kb_dirname
+from .. import access, lexstore, registry_history, vault
+from ..kbdir import managed_join
 from . import derive, mode
 
 #: The ``store_meta`` keys: the revision of the last commit that changed an overlay source, the
@@ -41,8 +41,11 @@ PASS = "vault_store_registry_pass"
 OWNER_SCHEMA = "vault_store_owner_schema"
 # Inbound rows were complete at v1; later owners must not invalidate that readiness proof.
 LINK_ROWS_VERSION = 1
-# v3 rederives payload hashes that older builds omitted from legacy Evidence pages.
-OWNER_SCHEMA_VERSION = 3
+#: The generation of the owners' derivation. Version 3 rederives payload hashes that older builds omitted
+#: from legacy Evidence pages. Version 4 derives the prior-path rows of every page's lineage. A lexical schema
+#: bump needs no number here: it leaves the store's lexical catalogue behind this build's, and ``read`` and
+#: ``owner_schema_behind`` count that as behind too.
+OWNER_SCHEMA_VERSION = 4
 KEYS = (OVERLAY_REVISION, REGISTRY_REVISION, PASS, OWNER_SCHEMA)
 
 #: The states that status reports: the closed set of this module's own states. ``unknown`` is
@@ -93,7 +96,7 @@ def is_overlay_source(
     """
     from ..governance import policy as governance_policy
 
-    schema_folder = f"{kb_dirname()}/{vault.SCHEMA_OVERLAY_DIRNAME}/"
+    schema_folder = managed_join(f"{vault.SCHEMA_OVERLAY_DIRNAME}/")
     history = f"{registry_history.history_dir(root, '').relative_to(root).as_posix()}/"
     access_policy = access.access_config_path(root).relative_to(root).as_posix()
     if rel == access_policy:
@@ -126,11 +129,15 @@ def configured_overlays(root: Path) -> frozenset[str] | None:
     return frozenset(instances.storage(spec, binding)[0] for spec in specs for binding in bindings)
 
 
-def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
-    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+def changes_overlay(root: Path, paths: Iterable[str]) -> bool:
+    """Whether a change of ``paths`` changes an overlay source (`is_overlay_source`)."""
     overlays = functools.cache(lambda: configured_overlays(root))
-    if any(is_overlay_source(root, rel, overlays=overlays) for rel in paths):
-        _set(tx, OVERLAY_REVISION, str(revision))
+    return any(is_overlay_source(root, rel, overlays=overlays) for rel in paths)
+
+
+def record_overlay_change(tx: Connection, revision: int) -> None:
+    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+    _set(tx, OVERLAY_REVISION, str(revision))
 
 
 def record_derived_from_files(tx: Connection, revision: int) -> None:
@@ -164,7 +171,7 @@ def read(conn: Connection) -> Registry:
     reflected = _revision(meta.get(REGISTRY_REVISION))
     # No overlay change on record is a revision of 0: every reflected revision is at or past it.
     changed = 0 if OVERLAY_REVISION not in meta else _revision(meta[OVERLAY_REVISION])
-    behind = _owners_behind(meta.get(OWNER_SCHEMA))
+    behind = _owners_behind(meta.get(OWNER_SCHEMA)) or not lexstore.catalogue_schema_current(conn)
     if reflected is None or changed is None or behind:
         # One pass over every page to the head settles it, and until then it is unknown.
         head = conn.execute("SELECT revision FROM store_mode WHERE id = 1").fetchone()
@@ -190,9 +197,17 @@ def recorded_revisions(conn: Connection) -> dict[str, str | None]:
 def owner_schema_behind(conn: Connection, *, required_version: int | None = None) -> bool:
     """Whether the store's owner objects are older than this build's, so some of the rows that this
     build reads may not exist yet. The pass creates the objects in its first batch and fills them
-    batch by batch, so only the version that its last batch records says the rows are whole."""
+    batch by batch, so only the version that its last batch records says the rows are whole.
+
+    A store whose lexical catalogue is not this build's is behind too, whatever version it records: the
+    stamp and the page shape must both be current (``lexstore.catalogue_schema_current``, the readers'
+    own test), or the lexical readers answer nothing. A caller that names ``required_version`` asks about the
+    rows of that version only, which a lexical schema does not change.
+    """
     row = conn.execute("SELECT value FROM store_meta WHERE key = ?", (OWNER_SCHEMA,)).fetchone()
-    return _owners_behind(None if row is None else row[0], required_version=required_version)
+    if _owners_behind(None if row is None else row[0], required_version=required_version):
+        return True
+    return required_version is None and not lexstore.catalogue_schema_current(conn)
 
 
 def _owners_behind(value: str | None, *, required_version: int | None = None) -> bool:
@@ -204,8 +219,8 @@ def _owners_behind(value: str | None, *, required_version: int | None = None) ->
 def pending(conn: Connection, root: Path) -> str:
     """Whether a batch is owed: ``idle``, ``waiting`` for the projector, or ``ready`` to run.
 
-    It reads only, so the store thread asks it on a plain read and takes the vault's mutation
-    boundary for a batch that can run, never for a tick with nothing to do.
+    It reads only, so the store thread asks it on a plain read and opens its writer for a batch
+    that can run, never for a tick with nothing to do. No batch takes the vault's mutation boundary.
     """
     return _due(conn, root)[0]
 
@@ -266,10 +281,12 @@ def settle(root: Path, writer) -> str:
                 # Every page reflects the overlay at ``target``, so it replaces the damaged record.
                 _set(tx, OVERLAY_REVISION, str(target))
             if registry.owner_schema_behind:
+                # The pass has derived every page under this generation, so the lexical stamp may say so.
+                lexstore.stamp_catalogue_schema(tx)
                 _set(tx, OWNER_SCHEMA, str(OWNER_SCHEMA_VERSION))
             tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
             return DONE
-        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], "owner_schema": OWNER_SCHEMA_VERSION}))
+        _set(tx, PASS, json.dumps({"target": target, "after": paths[-1], **_generation()}))
         return ADVANCED
 
 
@@ -287,8 +304,8 @@ def _create_owner_objects(tx: Connection, root: Path) -> None:
     tx.executemany(
         "INSERT OR IGNORE INTO store_mode_objects(name, type) VALUES (?, ?)", list(created.items())
     )
-    if "page_admission" in created:
-        # Earlier batches wrote no page facts, so an older cursor cannot skip those pages.
+    if "page_admission" in created or "prior_paths" in created:
+        # Earlier batches wrote no page facts or prior paths, so an older cursor cannot skip those pages.
         tx.execute("DELETE FROM store_meta WHERE key = ?", (PASS,))
     if "inbound_links" in created:
         held = frozenset(row[0] for row in tx.execute("SELECT path FROM store_pages"))
@@ -317,12 +334,19 @@ def _resume(tx: Connection, target: int, state: str) -> tuple[int, str]:
         try:
             recorded = json.loads(row[0])
             pinned = int(recorded["target"])
-            # Only this derivation version can attest pages before a saved cursor.
-            if recorded.get("owner_schema") == OWNER_SCHEMA_VERSION and (pinned == target or state == mode.UNKNOWN):
+            # Only this derivation generation can attest pages before a saved cursor.
+            if all(recorded.get(key) == value for key, value in _generation().items()) and (
+                pinned == target or state == mode.UNKNOWN
+            ):
                 return pinned, str(recorded["after"])
         except (ValueError, KeyError, TypeError):
             pass  # an unreadable cursor starts the pass over: it costs time, never correctness
     return target, ""
+
+
+def _generation() -> dict[str, int]:
+    """What a pass derives under: the owners' version and the lexical schema its rows and stamp follow."""
+    return {"owner_schema": OWNER_SCHEMA_VERSION, "lexical_schema": lexstore.SCHEMA_VERSION}
 
 
 def _revision(value: str | None) -> int | None:

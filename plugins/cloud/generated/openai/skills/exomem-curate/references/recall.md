@@ -101,7 +101,8 @@ retain categorical baseline selection without supplemental task matching.
 Use focused `search_memory` for a remaining question. Use `deep=true` when a bounded
 evidence pack helps compare sources. Read a selected source when its qualifications
 or complete contents matter. A directory requires `read_page(page=<parent page>)`
-without `part="units"`. A unit read is not the whole page or directory.
+without `part="units"`. A unit read is not the whole page or directory. Read a
+listed connection when its reason bears on the answer.
 
 Before recommending an older action, reconcile newer supported outcomes about that
 action. Keep event time separate from the page's edit time. Treat an unresolved
@@ -139,6 +140,28 @@ context, pass that reference or category/kind filters to
 `inspect_memory(operation="connections.graph_context")`. Compact categories do not imply
 typed edges: traversal follows authored relations only.
 
+## Topic brief (`read_page(part="brief")`)
+
+Use when the user wants the whole compiled body of one subject: what its notes conclude,
+which Sources they cite and what stays open. Pass a page of the subject, or free text, as
+`page`. A page fixes the subject. Free text resolves to the best compiled-note hit and lists
+other hits as `related`; read one of them to switch subject.
+
+The brief takes every compiled note one link from the subject page, in either direction, and
+at most five compiled notes one link further, those nearest the subject page first.
+`ranked_by` is `recency` when the service cannot measure nearness to the subject page, for
+example when the page has no stored vectors; the newest notes are then kept. With
+`similarity`, notes the service cannot score yet follow the scored ones, newest first. It serves three sections:
+`conclusions`, `sources` and `open_questions`. Each
+item carries its `ref`, `path` and `updated`. A cut shows in `missing` with a count and the
+reason `cap`; it is never silent. A superseded or closed unit is left out and counted on its
+note under `omitted`.
+
+`changed_since` compares the brief with the last one you read to its end: `first_read`,
+`new`, `changed`, `removed` and `new_units`. A brief that spans several pages moves that
+mark only when its last page is served. Write the prose from the brief yourself; the server
+makes no summary. A brief takes no `part="units"`, `options`, or unit reference.
+
 ## Context activation packets (`recall_context`)
 
 Use for initial context when the live engagement policy from `read_instructions` warrants
@@ -161,6 +184,19 @@ material beyond the packet. A map is not a claim that its items fit the turn.
 Read an anchor's profile through its `profile` ref.
 The retrieve hook shows the index once per generation. Later turns with the
 same generation show a pointer to the map; a changed generation shows it again.
+
+### Recorded positions
+
+A maps packet may also carry `positions` as its first field. The block holds the
+person's own recorded positions, found on the pages its task context serves and
+on the pages those leads link to. Its `about` passage comes first. Each item
+gives the position's text, its date when it has one, its page title and its unit
+ref. When the turn bears on a recorded position, follow the block's `about`.
+Read an `overflow_refs` entry with `read_page` when the turn needs it. `omitted`
+counts the positions the block cannot name. The block is chosen for each turn,
+so an empty block means that no position was in reach and an `unavailable` block
+means that none could be served this turn. Neither says that the person holds
+none.
 
 An unresolved packet can mean an unidentified subject or missing facts about a
 known subject. Use the turn and relevant held context to distinguish them. For an

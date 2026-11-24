@@ -326,10 +326,13 @@ def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() ->
     assert "`restructure_execution`" in text
     assert "preview the immutable plan once" in text
     assert "one explicit confirmation for that exact plan fingerprint" in text
-    assert "resume automatically one step per request" in text
+    assert "resume automatically through" in text
+    assert 'manage_memory(operation="curation.relocate"' in text
     assert 'propose_compensation")` (CLI `curation_action="propose-compensation"`) is `structural_suggestions`' in text
     assert "does not need a fresh confirmation" in text
-    assert "stop on `partial` or `blocked`" in text
+    # A run that stops for another writer keeps `next_action: resume`; the skill follows the reply.
+    assert "Follow the reply's `next_action`" in text
+    assert "`next_action` is not `resume`, stop" in text
     assert "standing approval" in text
 
 
@@ -419,8 +422,9 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
         text = " ".join(path.read_text(encoding="utf-8").split())
         assert "without waiting for a magic verb" in text
         assert "exactly one compatible existing collection" in text
-        assert "propose a concise collection" in text
-        assert "must not silently create" in text
+        # The creation rule follows the served capture disposition, bounded by the server.
+        assert "`new_collection`" in text and "AUTOMATIC_CREATION_REFUSED" in text
+        assert "must not silently create" not in text
 
     for path in operation_copies:
         text = " ".join(path.read_text(encoding="utf-8").split())

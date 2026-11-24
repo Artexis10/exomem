@@ -777,6 +777,27 @@ def test_preserve_with_description_writes_sidecar(vault: Path) -> None:
     assert "type: source" in text
 
 
+def test_a_binary_sidecar_records_that_nobody_chose_its_kind(vault: Path) -> None:
+    """A sidecar written with no agent classifying it must not use the retired `other` kind.
+
+    The retired catch-all reads as a deliberate choice; `unclassified` is the kind that
+    says classification is still owed, and the one a later reclassify clears.
+    """
+    result = preserve_module.preserve(
+        vault,
+        scope="Project Alpha",
+        category="court-docs",
+        filename="2026-05-01-summons.pdf",
+        content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
+        description="Civil summons received via courier.",
+        today=TODAY,
+    )
+
+    frontmatter = vault_module.parse_frontmatter(_read(vault / result.sidecar_path), strict=True)[0]
+
+    assert frontmatter["source_type"] == "unclassified"
+
+
 def test_preserve_md_artifact_uses_notes_sidecar(vault: Path) -> None:
     """Regression for the .md.md double-extension bug fixed in 35f07db.
 
@@ -832,6 +853,32 @@ def test_preserve_refuses_when_artifact_exists(vault: Path) -> None:
             today=TODAY,
         )
     assert exc.value.code == "ARTIFACT_EXISTS"
+
+
+def test_preserve_refuses_a_destination_that_a_pooled_filing_holds(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches a destination check that reads only the file: a pooled filing has none at its path, so the capture
+    passes it, spools and hashes the whole stream, and then fails COMPANION_EXISTS, which a client sees as a 400
+    where the same capture over an ordinary file is the 409 ARTIFACT_EXISTS. A curation step gets the same stop."""
+    from exomem import artifact_lifecycle, original_pool, originals
+    from exomem.vault import DefiniteNoEffect
+
+    monkeypatch.setattr(artifact_lifecycle, "_supported", frozenset(artifact_lifecycle.LIFECYCLE_IDS))
+    original_pool.enable(vault)
+    kept = preserve_module.preserve_bytes(vault, scope="Rental", category="photos", filename="dupe.png",
+                                          data=b"\x89PNG\r\n\x1a\nfirst", today=TODAY)
+    assert not (vault / kept.path).exists()
+    assert originals.pooled(vault, kept.path) is not None
+
+    with pytest.raises(preserve_module.PreserveError) as exc:
+        preserve_module.preserve(vault, scope="Rental", category="photos", filename="dupe.png",
+                                 content="second", today=TODAY)
+    assert exc.value.code == "ARTIFACT_EXISTS"
+
+    allocation = {"captured": "2026-05-25T09:00:00Z", "artifact": kept.path, "destination": kept.sidecar_path}
+    with pytest.raises(DefiniteNoEffect) as stopped:
+        preserve_module.preserve(vault, scope="Rental", category="photos", filename="dupe.png",
+                                 content="second", today=TODAY, _allocation=allocation)
+    assert stopped.value.reason == DefiniteNoEffect.DESTINATION_EXISTS
 
 
 def test_preserve_refuses_both_content_modes(vault: Path) -> None:

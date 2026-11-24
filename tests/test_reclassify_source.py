@@ -16,13 +16,17 @@ Every fixture here is synthetic.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
+import threading
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 import yaml
 
 from exomem import add as add_module
+from exomem import lexstore
 from exomem import reclassify_source as rc
 from exomem import schema as schema_module
 from exomem import source_taxonomy as st
@@ -52,6 +56,1017 @@ def _body(vault: Path, rel: str) -> str:
 
     _, body, _ = parse_frontmatter((vault / rel).read_text(encoding="utf-8"))
     return body
+
+
+def test_served_preview_after_move_waits_for_one_quiet_watcher_build(
+    vault: Path, source_schema: schema_module.SourceSchema, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+    from test_collection_store_s1_gate import _until
+
+    from exomem import file_watcher, find, freshness, move_file, readiness, request_budget, server
+    from exomem import vault as vault_module
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    captured = _capture(vault, source_schema, title="Harbor measurements")
+    note = f"{KB}/Notes/move-me.md"
+    destination = f"{KB}/Notes/moved.md"
+    (vault / note).write_text(f"# Measurements\n\n[[{captured.path}]]\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+    mcp = server.build_server(require_auth=False)
+    mcp._exomem_local_runtime_activation.fallback_seconds = 60
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.02)
+    assert watcher.start()
+    started, release = threading.Event(), threading.Event()
+    builders: list[str] = []
+    original_build = vault_module._build_inbound_index
+
+    def paused_build(root: Path):
+        builders.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(15)
+        return original_build(root)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            async def call(tool: str, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            moved = await call(
+                "manage_memory_file", operation="move", old_path=note, new_path=destination,
+            )
+            assert moved.get("paths") == [note, destination], moved
+            assert vault_module.inbound_recovery_available(vault)
+            assert not readiness.is_warming()
+            assert freshness.generation(vault, "vault") is not None
+            await asyncio.to_thread(_until, lambda: not freshness.external_pending(vault))
+            # Withdraw the cache after the move, as an idle quiet-mode service may.
+            vault_module.evict_inbound_index(vault)
+            monkeypatch.setattr(vault_module, "_build_inbound_index", paused_build)
+            preview = {
+                "operation": "propose-reclassification", "path": captured.path,
+                "source_kind": "dataset-export",
+            }
+            try:
+                cold = await call("manage_memory_file", **preview)
+                assert cold["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert cold["error"]["retry"]["after_s"] > 0
+                assert "references" not in cold and "preview_digest" not in cold
+                assert await asyncio.to_thread(started.wait, 5)
+                overlap, records = await asyncio.gather(
+                    call("manage_memory_file", **preview),
+                    call("query_records", collection="Meter readings", limit=1),
+                )
+                assert overlap["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                assert records.get("rows"), records
+            finally:
+                release.set()
+            assert await asyncio.to_thread(find.await_recall_resolver_warm)
+            await asyncio.to_thread(_until, lambda: lexstore.search_current_published_substrings(
+                vault, [captured.path.removeprefix(f"{KB}/").lower()]
+            ).readiness.complete)
+            async with asyncio.timeout(5):
+                while True:
+                    warm = await call("manage_memory_file", **preview)
+                    if warm.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                        break
+                    await asyncio.sleep(0.05)
+            assert warm.get("references") == 2, warm
+            assert warm["referrers"]["rewritten"] == [destination, f"{KB}/Sources/index.md"]
+            assert warm["preview_digest"]
+
+            admission_started, release_admission = threading.Event(), threading.Event()
+            check_owner = rc.managed_preview_stop
+
+            def hold_owner_check(*args, **kwargs):
+                admission_started.set()
+                assert release_admission.wait(8)
+                return check_owner(*args, **kwargs)
+
+            with monkeypatch.context() as admission_patch:
+                admission_patch.setattr(rc, "managed_preview_stop", hold_owner_check)
+                waiting = asyncio.create_task(call("manage_memory_file", **preview))
+                try:
+                    assert await asyncio.to_thread(admission_started.wait, 2)
+                    records = await call("query_records", collection="Meter readings", limit=1)
+                    assert records.get("rows"), records
+                    assert not waiting.done()
+                finally:
+                    release_admission.set()
+                resumed = await waiting
+                if "error" in resumed:
+                    assert resumed["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+                    assert "preview_digest" not in resumed
+                else:
+                    assert resumed.get("preview_digest") == warm["preview_digest"]
+
+            expired = threading.Event()
+            plan = move_file.iter_inbound_rewrites
+
+            class Budget(request_budget.RequestBudget):
+                def remaining(self):
+                    return 0.0 if expired.is_set() else super().remaining()
+
+            def expire_during_planning(*args, **kwargs):
+                expired.set()
+                return plan(*args, **kwargs)
+
+            monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+            monkeypatch.setattr(move_file, "iter_inbound_rewrites", expire_during_planning)
+            timed_out = await call("manage_memory_file", **preview)
+            assert timed_out["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING"
+            assert "references" not in timed_out and "preview_digest" not in timed_out
+
+    try:
+        assert watcher.wait_until_seeded(10)
+        lexstore.ensure_fresh(vault)
+        watcher.arm_optional_recovery()
+        asyncio.run(exercise())
+        assert builders == ["exomem-inbound-index-warm"]
+    finally:
+        release.set()
+        watcher.stop()
+
+
+def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
+    vault, source_schema, monkeypatch,
+):
+    from dataclasses import replace
+
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+    from test_governance_bridges import _bridge_text
+
+    from exomem import (
+        file_watcher,
+        freshness,
+        graph_sync,
+        maintenance_jobs,
+        reclassification_preview,
+        server,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance import egress, lifecycle, receipts
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 3)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    paths = {f"{KB}/Notes/measurement-{index}.md" for index in range(6)}
+    title_link = f"[[{Path(source).stem}]]"
+    for path in paths:
+        extra = f" Also see {title_link}." if path == min(paths) else ""
+        (vault / path).write_text(f"See [[{source}]].{extra}\n", encoding="utf-8")
+    evidence = f"{KB}/Evidence/field-log.md"
+    (vault / evidence).parent.mkdir(parents=True, exist_ok=True)
+    (vault / evidence).write_text(f"# Field log\n\nSee [[{source}]].\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    from exomem import find
+
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    mcp = server.build_server(require_auth=False)
+    started, resume = threading.Event(), threading.Event()
+    build = reclassification_preview._build
+
+    def pause_build(*args, **kwargs):
+        started.set()
+        assert resume.wait(10)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(reclassification_preview, "_build", pause_build)
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            async def call(tool, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
+
+            async def preview(**extra):
+                return await call(
+                    "manage_memory_file", operation="propose-reclassification", **args, **extra
+                )
+
+            async def ready(run_id, *, allow_stale=False):
+                async with asyncio.timeout(12):
+                    while True:
+                        status = await preview(preview_run_id=run_id)
+                        if (status.get("state") != "running"
+                                and status.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            break
+                        assert "preview_digest" not in status and "result" not in status
+                        await asyncio.sleep(0.1)
+                if (allow_stale and status.get("error", {}).get("code")
+                        == "RECLASSIFICATION_PREVIEW_STALE"):
+                    return None
+                assert status.get("state") == "completed", status
+                return status
+
+            async def fresh_report():
+                async with asyncio.timeout(12):
+                    while True:
+                        job = await preview()
+                        if job.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                            assert job.get("run_id"), job
+                            report = await ready(job["run_id"], allow_stale=True)
+                            if report is not None:
+                                return report
+                        await asyncio.sleep(0.05)
+
+            queued = await preview()
+            assert queued["state"] == "running" and "preview_digest" not in queued, queued
+            run_id = queued["run_id"]
+            assert await asyncio.to_thread(started.wait, 5)
+            try:
+                assert (await preview())["run_id"] == run_id
+                assert (await call("query_records", collection="Meter readings", limit=1))["rows"]
+            finally:
+                resume.set()
+
+            terminal = await ready(run_id)
+            digest = terminal["result"]["preview_digest"]
+            assert terminal["result"]["path"] == source
+            cursor = terminal["next_cursor"]
+            capture_admission = reclassification_preview.retained_report_identity
+
+            def foreign_receipt(*args):
+                admission = capture_admission(*args)
+                assert admission is not None
+                return replace(admission, authority=replace(admission.authority, key="foreign"))
+
+            with monkeypatch.context() as changed_admission:
+                changed_admission.setattr(
+                    reclassification_preview, "retained_report_identity", foreign_receipt,
+                )
+                refused = await preview(preview_run_id=run_id, cursor=cursor)
+            assert refused["error"]["code"] == "NOT_FOUND", refused
+            assert "entries" not in refused and "next_cursor" not in refused
+
+            postfilter = egress._postfilter
+
+            def withhold_one_entry(*args, **kwargs):
+                result = postfilter(*args, **kwargs)
+                if isinstance(result, dict) and result.get("entries"):
+                    return {**result, "entries": result["entries"][1:]}
+                return result
+
+            with monkeypatch.context() as release:
+                release.setattr(egress, "_postfilter", withhold_one_entry)
+                withheld = await preview(preview_run_id=run_id, cursor=cursor)
+            assert withheld["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", withheld
+            assert "entries" not in withheld and "next_cursor" not in withheld
+
+            seen = set()
+            while cursor is not None:
+                page = await preview(preview_run_id=run_id, cursor=cursor)
+                assert page["snapshot_current"]
+                seen.update((entry["kind"], entry["path"]) for entry in page["entries"])
+                cursor = page["next_cursor"]
+            assert {("rewritten", path) for path in paths}.issubset(seen)
+            assert ("pointer_repointed", evidence) in seen
+
+            unrelated = vault / KB / "Notes" / "unrelated.md"
+            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[unrelated])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
+            )
+            stale = await preview(preview_run_id=run_id)
+            assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
+            assert "result" not in stale
+
+            governance = vault / KB / "_Governance"
+            scope = governance / "scopes" / "field-log.yaml"
+            rule = governance / "rules" / "field-log.yaml"
+            scope.parent.mkdir(parents=True, exist_ok=True)
+            rule.parent.mkdir(parents=True, exist_ok=True)
+            scope.write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+                'paths: ["Notes/measurement-0.md"]\n',
+                encoding="utf-8",
+            )
+            rule.write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+                'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\nceiling: 0\n',
+                encoding="utf-8",
+            )
+            policy_changed = await preview(preview_run_id=run_id)
+            assert policy_changed["error"]["code"] == "NOT_FOUND", policy_changed
+            assert "result" not in policy_changed and "next_cursor" not in policy_changed
+            restricted = await preview()
+            assert restricted["error"]["code"] == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", restricted
+            assert "references" not in restricted and "run_id" not in restricted
+            erased = sorted(paths)[0]
+            rule.write_text(
+                rule.read_text().replace("audience: owner", "audience: principal:report-reader")
+            )
+            bridge = vault / KB / "Notes" / Path(source).name
+            bridge.write_text(_bridge_text(sources=f"  - '{title_link}'\n",
+                                           relations=f"- derived_from {title_link}\n"),
+                                       encoding="utf-8")
+            bridge_rel = bridge.relative_to(vault).as_posix()
+            assert egress.release_level_for(vault, bridge_rel) == 0
+            freshness.on_files_changed(vault, changed=[bridge])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[bridge_rel], deleted_rels=[])
+            lexstore.ensure_fresh(vault)
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            governed = await fresh_report()
+            assert governed["result"]["references"] == terminal["result"]["references"], governed
+            bridge.unlink()
+            deletion = await call(
+                "manage_memory_file", operation="delete", path=erased, confirm=True
+            )
+            assert (vault / erased).exists() is False, deletion
+            assert lifecycle.is_tombstoned(vault, erased)
+            rule.unlink()
+            scope.unlink()
+            freshness.on_files_changed(vault, deleted=[vault / erased, bridge])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[], deleted_rels=[erased, bridge_rel]
+            )
+            async with asyncio.timeout(12):
+                while True:
+                    after_erasure = await preview(preview_run_id=run_id)
+                    if (after_erasure.get("error", {}).get("code")
+                            != "RECLASSIFICATION_PREVIEW_WARMING"):
+                        break
+                    for leaked in ("result", "references", "entries", "next_cursor"):
+                        assert leaked not in after_erasure, after_erasure
+                    await asyncio.sleep(0.1)
+            assert after_erasure["error"]["code"] == "NOT_FOUND", after_erasure
+            assert "result" not in after_erasure and "next_cursor" not in after_erasure
+
+            changed = sorted(paths)[-1]
+            changed_path = vault / changed
+            changed_path.write_text(f"See [[{source}]] and [[{source}]].\n", encoding="utf-8")
+            erased_path = vault / erased
+            restored_bytes = f"Sync copied the old link back: [[{source}]].\n"
+            erased_path.write_text(restored_bytes, encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[changed_path, erased_path])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[changed, erased], deleted_rels=[]
+            )
+            lexstore.ensure_fresh(vault)
+            refused = await call("manage_memory_file", operation="reclassify", **args,
+                                 reason="Correct the Source kind", preview_digest=digest)
+            assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
+            assert (vault / source).is_file() and source in (vault / evidence).read_text()
+
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            refreshed = await fresh_report()
+            receipt = next(receipts._events_root(vault).glob("*/*.jsonl"))
+            emit_receipt = egress.emit_boundary_receipt
+            untampered = None
+
+            def damage_receipt_after_disclosure(*args):
+                nonlocal untampered
+                emit_receipt(*args)
+                if untampered is None:
+                    with receipts._receipt_lock(vault):
+                        receipt.write_bytes(b"{}\n" + receipt.read_bytes())
+                        untampered = True
+
+            with monkeypatch.context() as damage:
+                damage.setattr(egress, "emit_boundary_receipt", damage_receipt_after_disclosure)
+                try:
+                    rejected = await preview(preview_run_id=refreshed["run_id"])
+                finally:
+                    if untampered is not None:
+                        with receipts._receipt_lock(vault):
+                            damaged = receipt.read_bytes()
+                            assert damaged.startswith(b"{}\n"), damaged[:120]
+                            receipt.write_bytes(damaged[len(b"{}\n"):])
+            assert untampered is not None and rejected.get("is_error"), rejected
+            assert "result" not in rejected and "entries" not in rejected
+            prepare_epoch = graph_sync.prepare_rename_epoch
+            prior_graph = graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)
+            late = vault / KB / "Notes" / "late-referrer.md"
+
+            def add_a_referrer_after_the_graph_floor(*args, **kwargs):
+                epoch = prepare_epoch(*args, **kwargs)
+                assert epoch is not None
+                late.write_text(f"See `{source}`.\n", encoding="utf-8")
+                freshness.on_files_changed(vault, changed=[late])
+                return epoch
+
+            with monkeypatch.context() as edit:
+                edit.setattr(
+                    graph_sync, "prepare_rename_epoch", add_a_referrer_after_the_graph_floor
+                )
+                refused = await call(
+                    "manage_memory_file", operation="reclassify", **args,
+                    reason="Correct Source kind",
+                                     preview_digest=refreshed["result"]["preview_digest"])
+            assert refused["error"]["code"] == "RECLASSIFICATION_PREVIEW_STALE", refused
+            assert (vault / source).is_file() and source in (vault / evidence).read_text()
+            assert (graph_sync.read_floor(vault), graph_sync.read_checkpoint(vault)) == prior_graph
+
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[late.relative_to(vault).as_posix()],
+                deleted_rels=[]
+            )
+            lexstore.ensure_fresh(vault)
+            find.evict_resolver_caches(vault)
+            find.shared_resolver(vault)
+            refreshed = await fresh_report()
+            corrected = await call("manage_memory_file", operation="reclassify", **args,
+                                   reason="Correct the Source kind",
+                                   preview_digest=refreshed["result"]["preview_digest"])
+            destination = refreshed["result"]["destination"]
+            assert corrected.get("path") == destination, corrected
+            assert (vault / destination).is_file()
+            assert (
+                f"[[{destination.removesuffix('.md')}]]"
+                in (vault / evidence).read_text()
+            )
+            assert lifecycle.is_tombstoned(vault, erased)
+            assert erased_path.read_text() == restored_bytes
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        resume.set()
+        stop.set()
+        maintenance_jobs.stop_all(vault)
+
+
+def test_governed_paging_survives_long_receipt_history_and_concurrent_appends(
+    vault, source_schema, monkeypatch,
+):
+    """A long rotated receipt history under live appends must not stall governed paging.
+
+    Lifecycle reads prove the tombstone set for every preview admission and page release. A
+    history spanning many closed parts, still growing while the route runs, used to race the
+    reader's optimistic pass; the bounded locked retry keeps the pages live, and a tampered
+    closed part still withholds every report fact.
+    """
+    from _public_call import public_call
+    from fastmcp import Client
+    from record_fixtures import copy_dataset_fixture
+    from test_agent_tool_surface import _call
+
+    from exomem import freshness, maintenance_jobs, reclassification_preview, server
+    from exomem import vault as vault_module
+    from exomem.governance import lifecycle, receipts
+
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 3)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 3)
+    monkeypatch.setattr(receipts, "_RECEIPT_PART_BYTES", 64 * 1024)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    paths = sorted(f"{KB}/Notes/measurement-{index}.md" for index in range(12))
+    for path in paths:
+        (vault / path).write_text(f"See [[{source}]].\n", encoding="utf-8")
+    unrelated = f"{KB}/Notes/unrelated.md"
+    (vault / unrelated).write_text("# An unrelated observation\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    from exomem import find
+
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(
+        __import__("exomem.file_watcher", fromlist=["x"]),
+        "observing_inbound_recovery_stop", lambda _: stop,
+    )
+    mcp = server.build_server(require_auth=False)
+
+    # A long rotated history: at least 8 closed numbered parts of disclosure receipts.
+    fat = {"outcomes": [{"ref": f"Notes/pad-{index}", "size": index} for index in range(16)]}
+    for _attempt in range(4000):
+        parts = sorted(receipts._events_root(vault).glob("*/*.jsonl"))
+        if len(parts) >= 9 and sum(part.stat().st_size for part in parts) > 8 * 64 * 1024:
+            break
+        receipts.append_event(vault, event_type="disclosure", payload=fat)
+    else:
+        raise AssertionError("receipt history did not rotate into 9 parts")
+    history_bytes = sum(part.stat().st_size for part in parts)
+
+    appended = [0]
+    import os
+    import time as time_module
+
+    appending = threading.Event()
+
+    def keep_appending() -> None:
+        while not appending.is_set():
+            try:
+                receipts.append_event(vault, event_type="disclosure", payload={"outcomes": []})
+            except receipts.ReceiptError:
+                pass
+            appended[0] += 1
+            time_module.sleep(0.002)
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            async def call(tool, **arguments):
+                return await _call(client, *public_call(tool, arguments))
+
+            args = {"path": source.removeprefix(f"{KB}/"), "source_kind": "dataset-export"}
+
+            async def preview(**extra):
+                return await call(
+                    "manage_memory_file", operation="propose-reclassification", **args, **extra
+                )
+
+            # One real governed delete: a critical intent and a tombstone in the history.
+            governance = vault / KB / "_Governance"
+            (governance / "scopes").mkdir(parents=True, exist_ok=True)
+            (governance / "rules").mkdir(parents=True, exist_ok=True)
+            (governance / "scopes" / "unrelated.yaml").write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n'
+                'paths: ["Notes/unrelated.md"]\n',
+                encoding="utf-8",
+            )
+            (governance / "rules" / "unrelated.yaml").write_text(
+                'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+                'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\naudience: owner\nceiling: 0\n',
+                encoding="utf-8",
+            )
+            deletion = await call(
+                "manage_memory_file", operation="delete", path=unrelated, confirm=True
+            )
+            assert not deletion.get("is_error"), deletion
+            async with asyncio.timeout(10):
+                while not lifecycle.is_tombstoned(vault, unrelated):
+                    await asyncio.sleep(0.05)
+            (governance / "rules" / "unrelated.yaml").unlink()
+            (governance / "scopes" / "unrelated.yaml").unlink()
+
+            latencies: list[float] = []
+
+            async def page(**extra):
+                async with asyncio.timeout(12):
+                    started = time_module.monotonic()
+                    while True:
+                        status = await preview(**extra)
+                        if (status.get("state") != "running"
+                                and status.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            latencies.append(time_module.monotonic() - started)
+                            return status
+                        for leaked in ("result", "references", "entries", "next_cursor"):
+                            assert leaked not in status, status
+                        await asyncio.sleep(0.05)
+
+            async with asyncio.timeout(12):
+                while True:
+                    queued = await preview()
+                    if queued.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                        break
+                    for leaked in ("result", "references", "entries", "next_cursor", "run_id"):
+                        assert leaked not in queued, queued
+                    await asyncio.sleep(0.05)
+            assert queued.get("state") == "running", queued
+            terminal = await page(preview_run_id=queued["run_id"])
+            assert (terminal["state"] == "completed"
+                    and terminal["result"]["preview_digest"]), terminal
+            assert terminal["result"]["path"] == source
+
+            cursor = first_cursor = terminal["next_cursor"]
+            seen: set[str] = set()
+            appends_at_paging_start = appended[0]
+            while cursor is not None:
+                current = await page(preview_run_id=queued["run_id"], cursor=cursor)
+                assert current["snapshot_current"]
+                seen.update(entry["path"] for entry in current["entries"])
+                cursor = current["next_cursor"]
+            assert set(paths).issubset(seen), seen
+            appends_during_paging = appended[0] - appends_at_paging_start
+
+            # A same-size in-place edit of a closed part, mtime restored: withheld facts, not bytes.
+            parts = sorted(receipts._events_root(vault).glob("*/*.jsonl"))
+            assert len(parts) >= 9, parts
+            closed_part = parts[0]
+            original = closed_part.read_bytes()
+            mtime = closed_part.stat().st_mtime_ns
+            index = original.index(b'"hash"') + 9
+            replacement = b"0" if original[index:index + 1] != b"0" else b"1"
+            with receipts._receipt_lock(vault):
+                closed_part.write_bytes(original[:index] + replacement + original[index + 1:])
+                os.utime(closed_part, ns=(mtime, mtime))
+            try:
+                refused = await preview(preview_run_id=queued["run_id"], cursor=first_cursor)
+                assert refused.get("error") or refused.get("is_error"), refused
+                for leaked in ("result", "references", "entries", "next_cursor", "preview_digest"):
+                    assert leaked not in refused, refused
+            finally:
+                with receipts._receipt_lock(vault):
+                    closed_part.write_bytes(original)
+                    os.utime(closed_part, ns=(mtime, mtime))
+
+            print(f"\nPARTS={len(parts)} HISTORY={history_bytes}B "
+                  f"PAGE_MS median={sorted(latencies)[len(latencies) // 2] * 1000:.0f} "
+                  f"max={max(latencies) * 1000:.0f} APPENDS_DURING_PAGING={appends_during_paging}")
+
+    appender = threading.Thread(target=keep_appending, name="receipt-appender", daemon=True)
+    try:
+        appender.start()
+        asyncio.run(exercise())
+    finally:
+        appending.set()
+        stop.set()
+        appender.join(10)
+        maintenance_jobs.stop_all(vault)
+
+
+@pytest.mark.parametrize("hold_at", [
+    "after-verification", "after-planning", "policy-release", "receipt-release", "session-closed",
+])
+def test_rest_preview_retries_while_verified_session_authority_is_busy(
+    vault, source_schema, monkeypatch, hold_at,
+):
+    import time
+    from contextlib import closing
+
+    from test_authorization_session_wire_reconnect import _configure_v4_authority
+    from test_rest_authorization_session import _client, _headers
+
+    from exomem import file_watcher, freshness, request_budget, writer_lease
+    from exomem import vault as vault_module
+    from exomem.governance import (
+        authorization_custody,
+        authorization_request,
+        authorization_session_lifecycle,
+        egress,
+        principal,
+        receipts,
+        store,
+    )
+
+    source = _capture(vault, source_schema, title="Field measurements").path
+    _configure_v4_authority(vault, vault.parent / "custody", monkeypatch)
+    if hold_at == "receipt-release":
+        (vault / KB / "Notes" / "field-log.md").write_text(f"See [[{source}]].\n", encoding="utf-8")
+    for scope, root in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    client = _client(vault, monkeypatch)
+    who = principal.resolve_rest_principal(None)
+    now = int(time.time())
+    with closing(store.open_authorization_session_connection(vault)) as connection:
+        credential = authorization_session_lifecycle.open_session(
+            connection, custody=authorization_custody.load_authorization_custody(vault, now=now),
+            principal_id=who.audience_id, issuer_family=who.issuer_family, now=now, ttl_seconds=600,
+        )
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    body = {
+        "operation": "propose-reclassification", "path": source,
+        "source_kind": "dataset-export",
+    }
+    headers = _headers(credential.bearer)
+
+    if hold_at == "session-closed":
+        emit = egress.emit_boundary_receipt
+
+        def close_after_receipt(*args, **kwargs):
+            emit(*args, **kwargs)
+            closed_at = int(time.time())
+            with closing(store.open_authorization_session_connection(vault)) as connection:
+                authorization_session_lifecycle.close_verified_session(
+                    connection,
+                    custody=authorization_custody.load_authorization_custody(vault, now=closed_at),
+                    context=credential.context, now=closed_at,
+                )
+
+        monkeypatch.setattr(egress, "emit_boundary_receipt", close_after_receipt)
+        terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
+        assert "preview_digest" not in terminal and "references" not in terminal
+        retry = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert retry["error"]["code"] == "AUTHORIZATION_SESSION_UNAVAILABLE"
+        return
+
+    locked, release = threading.Event(), threading.Event()
+
+    def hold_authority():
+        lock = (
+            receipts._receipt_lock(vault) if hold_at == "receipt-release"
+            else writer_lease.active_manager().reserved_identity_guard(
+                vault, domains=("governance-store",), exclusive=False, advance_generation=False,
+            )
+        )
+        with lock:
+            locked.set()
+            assert release.wait(10)
+
+    holder = threading.Thread(target=hold_authority, daemon=True)
+
+    if hold_at == "after-verification":
+        target, name = authorization_request, "verify_authorization_context"
+    elif hold_at == "policy-release":
+        target, name = egress, "_postfilter"
+    elif hold_at == "receipt-release":
+        target, name = egress, "emit_boundary_receipt"
+    else:
+        target, name = rc, "_propose"
+    operation = getattr(target, name)
+
+    def start_holder():
+        if holder.ident is None:
+            holder.start()
+            assert locked.wait(3)
+
+    hold_before = hold_at in ("policy-release", "receipt-release")
+
+    def interleave_hold(*args, **kwargs):
+        if hold_before:
+            start_holder()
+        result = operation(*args, **kwargs)
+        if not hold_before:
+            start_holder()
+        return result
+
+    # Keep a real governance or receipt lock held through the response.
+    monkeypatch.setattr(target, name, interleave_hold)
+    monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
+    try:
+        started = time.monotonic()
+        terminal = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+        assert terminal["error"]["code"] == "RECLASSIFICATION_PREVIEW_WARMING", terminal
+        assert "references" not in terminal and "preview_digest" not in terminal
+        assert locked.is_set() and holder.is_alive()
+        # Allow wire and scheduler overhead without accepting the default identity-lock wait.
+        assert time.monotonic() - started < 3.5
+    finally:
+        release.set()
+        if holder.ident is not None:
+            holder.join(3)
+    preview = client.post("/api/manage_memory_file", headers=headers, json=body).json()
+    assert preview["success"] and preview["data"]["preview_digest"], preview
+
+
+@pytest.mark.parametrize("fault", [
+    "release", "render", "cold-resolver", "uncertified-resolver",
+    "removed-link", "changed-source", "catalogue-link",
+    "catalogue-candidates", "catalogue-unavailable",
+    "catalogue-unsupported", "catalogue-unsupported-overflow",
+    "inbound-freshness-lock", "unreadable-container",
+])
+def test_served_preview_retries_when_its_planning_or_release_proof_fails(
+    vault, source_schema, monkeypatch, fault
+):
+    from _public_call import public_call
+    from fastmcp import Client
+    from fastmcp.tools import FunctionTool
+    from test_agent_tool_surface import _call
+
+    from exomem import (
+        document_containers,
+        file_watcher,
+        find,
+        freshness,
+        move_file,
+        path_mentions,
+        reclassification_preview,
+        request_budget,
+        server,
+    )
+    from exomem import vault as vault_module
+    from exomem.governance import egress
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    monkeypatch.setattr(server, "load_dotenv", lambda *args, **kwargs: None)
+    source = _capture(vault, source_schema, title="Field measurements").path
+    resolver_fault = fault in ("cold-resolver", "uncertified-resolver")
+    referrer = (
+        f"{KB}/Evidence/field-log.md" if resolver_fault or fault == "catalogue-link"
+        else f"{KB}/Notes/field-log.md"
+    )
+    (vault / referrer).parent.mkdir(parents=True, exist_ok=True)
+    link = f"[[{source.removesuffix('.md')}]]"
+    original_reference = {
+        "catalogue-link": f"See `{source}`.",
+        "catalogue-candidates": "The field log identifies the samples.",
+    }.get(fault, link)
+    (vault / referrer).write_text(f"# Field log\n\n{original_reference}\n", encoding="utf-8")
+    for scope, root in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path)) for path in vault_module.walk_vault_md(root)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    if fault in ("catalogue-link", "catalogue-candidates", "catalogue-unavailable"):
+        lookup = path_mentions.find_pages(vault, [source])
+        assert lookup.complete
+        assert lookup.pages == ((referrer,) if fault == "catalogue-link" else ())
+        find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    mcp = server.build_server(require_auth=False)
+    expired = threading.Event()
+    release_freshness = threading.Event()
+    holder = None
+
+    class Budget(request_budget.RequestBudget):
+        def remaining(self):
+            return 0.0 if expired.is_set() else super().remaining()
+
+    monkeypatch.setattr(request_budget, "RequestBudget", Budget)
+    if fault in ("release", "render"):
+        target, name = (
+            (egress, "postfilter") if fault == "release"
+            else (FunctionTool, "convert_result")
+        )
+        convert = getattr(target, name)
+
+        def expire(*args, **kwargs):
+            expired.set()
+            return convert(*args, **kwargs)
+
+        monkeypatch.setattr(target, name, expire)
+    elif fault in ("removed-link", "changed-source", "catalogue-link"):
+        plan = move_file.iter_inbound_rewrites
+
+        def edit_during_planning(*args, **kwargs):
+            # Hold watcher delivery back, so the planner sees the edit before the cache does.
+            changed = source if fault == "changed-source" else referrer
+            body = link if fault == "catalogue-link" else "# Edited while planning"
+            (vault / changed).write_text(f"{body}\n", encoding="utf-8")
+            return plan(*args, **kwargs)
+
+        monkeypatch.setattr(move_file, "iter_inbound_rewrites", edit_during_planning)
+    elif fault == "catalogue-unavailable":
+        # Current inbound links cannot prove that the catalogue checked prose references.
+        monkeypatch.setattr(
+            path_mentions, "find_pages",
+            lambda *a, **kw: path_mentions.Lookup((), False),
+        )
+    elif fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):
+        monkeypatch.setattr(lexstore, "_usable", lambda: False)
+        if fault == "catalogue-unsupported-overflow":
+            monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 0)
+    elif fault == "unreadable-container":
+        parent_for_path = document_containers.parent_for_path
+
+        def unreadable_parent(root, path, **kwargs):
+            if path == referrer:
+                raise OSError("referrer custody could not be read")
+            return parent_for_path(root, path, **kwargs)
+
+        monkeypatch.setattr(document_containers, "parent_for_path", unreadable_parent)
+    elif fault == "inbound-freshness-lock":
+        lookup_inbound = vault_module.cached_inbound_wikilinks
+        held = threading.Event()
+
+        def hold_freshness():
+            with freshness._lock:
+                held.set()
+                release_freshness.wait(8)
+
+        holder = threading.Thread(target=hold_freshness, daemon=True)
+
+        def borrow_while_freshness_held(*args, **kwargs):
+            holder.start()
+            assert held.wait(2)
+            return lookup_inbound(*args, **kwargs)
+
+        monkeypatch.setattr(vault_module, "cached_inbound_wikilinks", borrow_while_freshness_held)
+    elif fault == "catalogue-candidates":
+        find_pages = path_mentions.find_pages
+
+        def publish_prose_edit_after_lookup(*args, **kwargs):
+            lookup = find_pages(*args, **kwargs)
+            assert lookup.complete and not lookup.pages
+            page = vault / referrer
+            page.write_text(f"See `{source}`.\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[page])
+            vault_module.on_inbound_files_changed(vault, changed_rels=[referrer], deleted_rels=[])
+            return lookup
+
+        monkeypatch.setattr(path_mentions, "find_pages", publish_prose_edit_after_lookup)
+
+    async def exercise() -> None:
+        async with Client(mcp, timeout=5) as client:
+            if fault == "cold-resolver":
+                find._RESOLVER_CACHE.pop(vault, None)
+            elif fault == "uncertified-resolver":
+                find.shared_resolver(vault)
+                find._RESOLVER_CHECKPOINTS.pop(vault, None)
+            call = public_call("manage_memory_file", {
+                "operation": "propose-reclassification", "path": source,
+                "source_kind": "dataset-export",
+            })
+            retry = await _call(client, *call)
+            if fault == "catalogue-unsupported-overflow":
+                run_id = retry["run_id"]
+                status = public_call("manage_memory_file", {
+                    "operation": "propose-reclassification", "path": source,
+                    "source_kind": "dataset-export", "preview_run_id": run_id,
+                })
+                async with asyncio.timeout(5):
+                    while True:
+                        retry = await _call(client, *status)
+                        if (retry.get("state") != "running"
+                                and retry.get("error", {}).get("code")
+                                != "RECLASSIFICATION_PREVIEW_WARMING"):
+                            break
+                        await asyncio.sleep(0.1)
+            error = retry.get("error", {})
+            if fault in ("catalogue-unsupported", "catalogue-unsupported-overflow"):
+                assert error.get("code") == "RECLASSIFICATION_PREVIEW_UNAVAILABLE", retry
+                assert "retry" not in error
+            else:
+                assert error.get("code") == "RECLASSIFICATION_PREVIEW_WARMING", retry
+            assert "references" not in retry and "preview_digest" not in retry
+            if fault == "render":
+                assert retry["error"]["retry"]["tool"] == "inspect_memory"
+            if resolver_fault:
+                assert await asyncio.to_thread(find.await_recall_resolver_warm)
+                preview = await _call(client, *call)
+                assert preview["referrers"]["pointer_repointed"] == [referrer]
+                assert preview["preview_digest"]
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        stop.set()
+        release_freshness.set()
+        if holder is not None and holder.ident is not None:
+            holder.join(2)
+
+
+@pytest.mark.parametrize("gap", ["external-pending", "new-seed", "handover"])
+def test_a_live_watcher_recovers_preview_without_a_foreground_walk(
+    vault, source_schema, monkeypatch, gap
+):
+    from exomem import file_watcher, find, freshness
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import owner_principal, request_scope
+
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM")
+    source = _capture(vault, source_schema, title="Stream flow measurements").path
+    entries = [
+        (str(path), freshness.stat_signature(path))
+        for path in vault_module.walk_vault_md(vault)
+    ]
+    freshness.seed(vault, "vault", entries)
+    stop = threading.Event()
+    monkeypatch.setattr(
+        file_watcher, "observing_inbound_recovery_stop",
+        lambda _: None if stop.is_set() else stop,
+    )
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    if gap == "external-pending":
+        freshness.mark_external_pending(vault)
+    elif gap == "new-seed":
+        freshness.seed(vault, "vault", entries)
+    else:
+        lookup = vault_module.cached_inbound_wikilinks
+
+        def stop_during_lookup(*args, **kwargs):
+            inbound = lookup(*args, **kwargs)
+            stop.set()
+            return inbound
+
+        monkeypatch.setattr(vault_module, "cached_inbound_wikilinks", stop_during_lookup)
+
+    builds = []
+    original_build = vault_module._build_inbound_index
+
+    def counted_build(root, **kwargs):
+        builds.append(threading.current_thread().name)
+        return original_build(root, **kwargs)
+
+    monkeypatch.setattr(vault_module, "_build_inbound_index", counted_build)
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(OpError) as retry:
+        rc.propose(vault, source, source_kind="dataset-export")
+    assert retry.value.code == "RECLASSIFICATION_PREVIEW_WARMING"
+    assert find.await_recall_resolver_warm()
+    assert builds == (["exomem-inbound-index-warm"] if gap == "new-seed" else [])
 
 
 # ---------------------------------------------------------------------------
@@ -310,9 +1325,11 @@ def test_the_correction_records_its_reason_and_previous_path(
     )
     after = _front(vault, result.new_path)
     assert str(after["reclassified"]) == TODAY.isoformat()
-    assert after["reclassified_from"] == [
-        {"path": captured.path, "kind": "unclassified", "domain": "travel"}
+    # The entry names the correction's operation, never the pages it repointed.
+    assert after["moved_from"] == [
+        {"path": captured.path, "kind": "unclassified", "domain": "travel", "operation": ANY}
     ]
+    assert "reclassified_from" not in after
     assert after["reclassified_reason"] == "it is a written investigation"
 
 
@@ -327,7 +1344,7 @@ def test_a_correction_that_does_not_relocate_records_no_previous_path(
         vault, path=captured.path, source_kind="invoice-receipt",
         reason="confirmed on review", today=TODAY,
     )
-    assert "reclassified_from" not in _front(vault, result.new_path)
+    assert "moved_from" not in _front(vault, result.new_path)
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +1658,7 @@ def test_a_correction_into_known_vocabulary_stays_quiet(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     captured = _capture(vault, source_schema, title="Hedgerow notes", domain="media")
+    lexstore.ensure_fresh(vault)
 
     result = rc.reclassify(
         vault,
@@ -785,7 +1803,7 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
         command, vault, operation="reclassify", path=first["path"],
         source_kind="research-report", reason="the table is an appendix of a survey",
     )
-    history = _front(vault, second["path"])["reclassified_from"]
+    history = _front(vault, second["path"])["moved_from"]
     note_after_moves = note.read_text(encoding="utf-8")
     back_once = writer_lease.invoke_command(
         command, vault, operation="revert-reclassification", path=second["path"],
@@ -799,12 +1817,13 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
     assert preview["destination"] == first["path"]
     assert preview["referrers"] == {
         "rewritten": [f"{KB}/Notes/Insights/tide-note.md"],
+        "pointer_repointed": [],
         "append_only_unchanged": {"basename": [f"{KB}/Evidence/Harbor/tide-proof.md"]},
     }
     assert preview["refusals"] == []
     assert history == [
-        {"path": source, "kind": "other", "domain": None},
-        {"path": first["path"], "kind": "dataset-export", "domain": "travel"},
+        {"path": source, "kind": "other", "domain": None, "operation": ANY},
+        {"path": first["path"], "kind": "dataset-export", "domain": "travel", "operation": ANY},
     ]
     assert second["path"].removesuffix(".md") in note_after_moves
     assert back_once["path"] == first["path"]
@@ -817,6 +1836,8 @@ def test_a_legacy_source_is_previewed_moved_twice_and_reverted_through_the_opera
     # Only the correction record remains; every original byte is kept in place.
     for line in original.split("---\n", 2)[1].splitlines():
         assert line in front_lines
+    # Each revert removed the entry it restored, so no entry names a path the source left.
+    assert "moved_from" not in _front(vault, source)
     assert "reclassified_from" not in _front(vault, source)
     released = commands.op_get(vault, path=source, frontmatter_only=True)
     journal = released["frontmatter"]["classification_history"]
@@ -863,6 +1884,8 @@ def test_an_evidence_path_link_refuses_the_move_and_nothing_changes(vault: Path)
 
 
 def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Path) -> None:
+    """A move that rewrites a legacy `reclassified_from` value instead of keeping its bytes, or a
+    revert that guesses the classification a path-only entry left out."""
     source = _legacy_source(vault)
     page = vault / source
     legacy_path = f"{KB}/Sources/Unclassified/2026-01-02-tide-table.md"
@@ -883,13 +1906,15 @@ def test_a_legacy_previous_path_is_kept_but_never_reverted_by_guessing(vault: Pa
         vault, path=source, source_kind="dataset", domain="travel",
         reason="a table of measurements", today=TODAY,
     )
-    assert _front(vault, moved.new_path)["reclassified_from"] == [
-        {"path": legacy_path},
-        {"path": source, "kind": "other", "domain": None},
+    legacy_line = f"reclassified_from: {legacy_path}\n"
+    assert legacy_line in (vault / moved.new_path).read_text(encoding="utf-8")
+    assert _front(vault, moved.new_path)["moved_from"] == [
+        {"path": source, "kind": "other", "domain": None, "operation": ANY},
     ]
     reverted = rc.revert(vault, path=moved.new_path, reason="undo", today=TODAY)
     assert reverted.new_path == source
-    assert _front(vault, source)["reclassified_from"] == [{"path": legacy_path}]
+    assert legacy_line in page.read_text(encoding="utf-8")
+    assert "moved_from" not in _front(vault, source)
 
 
 def test_a_revert_refuses_a_previous_location_another_page_now_occupies(
@@ -1072,3 +2097,261 @@ def test_an_edit_after_preflight_survives_the_failed_relocation(
     assert injected
     assert page.read_text() == edited
     assert "classification_history" not in _front(vault, source)
+
+
+def test_a_reclassified_source_is_followed_by_prose_paths_in_notes_but_not_in_evidence(
+    vault: Path,
+) -> None:
+    """A page that cites the source by vault path in prose must follow it, or say it stayed.
+
+    The Note is rewritable and has to name the new location; the Evidence page is immutable, so
+    it keeps its bytes, the move still goes ahead, and the preview names it as left unchanged.
+    """
+    source = _legacy_source(vault)
+    evidence = _write(
+        vault,
+        f"{KB}/Evidence/Harbor/tide-proof.md",
+        f"---\ntype: evidence\n---\n\nThe table is kept at `{source}`.\n",
+    )
+    evidence_bytes = evidence.read_bytes()
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nThe table: `{source}`.\n"
+        f"Read again from {source} on Monday.\n",
+    )
+    lexstore.ensure_fresh(vault)
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert preview.append_only_unchanged == {
+        rc.MENTION_FORM: (f"{KB}/Evidence/Harbor/tide-proof.md",)
+    }
+    assert preview.rewritten == (f"{KB}/Notes/Insights/tide-note.md",)
+    assert note.read_text(encoding="utf-8").count(result.new_path) == 2
+    assert result.path_mentions_updated == 2
+    assert any("append-only" in warning for warning in result.warnings)
+    assert evidence.read_bytes() == evidence_bytes
+
+
+def test_a_reclassification_says_so_when_it_could_not_check_path_mentions(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A catalogue that cannot answer must read as "not checked" in the preview and the result,
+    never as "no page cites the source"."""
+    # Hold the background repair back, so the catalogue stays behind for the whole correction.
+    monkeypatch.setattr(lexstore, "_schedule_repair", lambda *_a, **_k: True)
+    source = _legacy_source(vault)
+    note = _write(
+        vault,
+        f"{KB}/Notes/Insights/tide-note.md",
+        f"---\ntype: insight\nstatus: draft\n---\n\n# Tide note\n\nAt `{source}`.\n",
+    )
+
+    preview = rc.propose(vault, source, source_kind="dataset", domain="travel")
+    result = rc.reclassify(
+        vault, path=source, source_kind="dataset", domain="travel", reason="a table of readings"
+    )
+
+    assert any("path mentions were not checked" in warning for warning in preview.warnings)
+    assert any("path mentions were not checked" in warning for warning in result.warnings)
+    assert f"`{source}`" in note.read_text(encoding="utf-8")
+
+
+def _governed_held_page(vault: Path) -> str:
+    """One scope over one note, denied to nobody here: a minimally governed vault."""
+    rel = f"{KB}/Notes/held.md"
+    governance = vault / KB / "_Governance"
+    (governance / "scopes").mkdir(parents=True, exist_ok=True)
+    (governance / "rules").mkdir(parents=True, exist_ok=True)
+    (governance / "scopes" / "held.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\npaths: ["Notes/held.md"]\n',
+        encoding="utf-8",
+    )
+    (governance / "rules" / "held.yaml").write_text(
+        'governance_version: 1\nid: 01ARZ3NDEKTSV4RRFFQ69G5FB0\n'
+        'scope_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"]\n'
+        'audience: principal:report-reader\nceiling: 0\n',
+        encoding="utf-8",
+    )
+    (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text("See [[somewhere]].\n", encoding="utf-8")
+    return rel
+
+
+def test_held_evidence_records_simple_witnessed_rows_only(vault, monkeypatch):
+    import hashlib
+    import json
+    import os
+
+    from exomem import document_containers
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+    from exomem.vault import read_guarded_text
+
+    rel = _governed_held_page(vault)
+    member = f"{KB}/Notes/member.md"
+    (vault / member).write_text("See [[somewhere]].\n", encoding="utf-8")
+    monkeypatch.setattr(
+        document_containers,
+        "parent_binding_for_path",
+        lambda root, path, **kwargs: object() if path == member else None,
+    )
+    sink = rc._HeldSink()
+    who = owner_principal()
+    with request_scope(who), invocation_scope():
+        rc._witnessed_read(read_guarded_text, sink, vault, (vault / rel).resolve())
+        rc._witnessed_read(read_guarded_text, sink, vault, (vault / member).resolve())
+    assert member not in sink
+    record = sink[rel]
+    raw = (vault / rel).read_bytes()
+    assert record["path"] == rel
+    assert record["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert record["size"] == len(raw)
+    assert tuple(record["witness"]) == rc._stat_witness(os.stat(vault / rel))
+    assert record["scopes"] == [["01ARZ3NDEKTSV4RRFFQ69G5FAV"]]
+    assert json.loads(record["identity"])[0] == "release"
+
+
+def test_held_evidence_keeps_no_page_text(vault):
+    import json
+
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+    from exomem.vault import read_guarded_text
+
+    _governed_held_page(vault)
+    sentinels = ("first-page-sentinel-text", "second-page-sentinel-text")
+    pages = []
+    for index, sentinel in enumerate(sentinels):
+        page = vault / f"{KB}/Notes/sentinel-{index}.md"
+        page.write_text(f"See [[somewhere]]. {sentinel}\n", encoding="utf-8")
+        pages.append(page)
+    sink = rc._HeldSink()
+    who = owner_principal()
+    with request_scope(who), invocation_scope():
+        for page in pages:
+            rc._witnessed_read(read_guarded_text, sink, vault, page.resolve())
+    # Records hold scalars only: every page's text dies with its read frame.
+    wire = json.dumps(sink)
+    for sentinel in sentinels:
+        assert sentinel not in wire
+
+
+def test_a_file_changed_between_its_two_witness_stats_leaves_no_held_evidence(vault):
+    from exomem.vault import read_guarded_text
+
+    rel = f"{KB}/Notes/shifting.md"
+    (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+    (vault / rel).write_text("first\n", encoding="utf-8")
+
+    def reader(root, page):
+        text, guard = read_guarded_text(root, page)
+        page.write_text("rewritten between the two stats\n", encoding="utf-8")
+        return text, guard
+
+    sink = rc._HeldSink()
+    rc._witnessed_read(reader, sink, vault, (vault / rel).resolve())
+    assert sink == {}
+
+
+def test_completed_paged_report_stores_held_evidence_only_privately(
+    vault, source_schema, monkeypatch
+):
+    import hashlib
+    import json
+    import os
+    import time
+
+    from record_fixtures import copy_dataset_fixture
+
+    from exomem import (
+        file_watcher,
+        find,
+        freshness,
+        maintenance_jobs,
+        reclassification_preview,
+        request_budget,
+    )
+    from exomem import vault as vault_module
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import invocation_scope, owner_principal, request_scope
+
+    monkeypatch.setattr(reclassification_preview, "_INLINE_CANDIDATES", 1)
+    monkeypatch.setattr(maintenance_jobs, "_SOURCE_PREVIEW_PAGE_ROWS", 2)
+    source = _capture(vault, source_schema, title="Held rows").path
+    held_rel = _governed_held_page(vault)
+    other_rel = f"{KB}/Notes/other.md"
+    for rel in (held_rel, other_rel):
+        (vault / rel).write_text(f"See [[{source}]].\n", encoding="utf-8")
+    copy_dataset_fixture(vault)
+    for scope, directory in (("vault", vault), ("kb", vault / KB)):
+        freshness.seed(vault, scope, (
+            (str(path), freshness.stat_signature(path))
+            for path in vault_module.walk_vault_md(directory)
+        ))
+    assert vault_module.prime_inbound_index(vault, eager=True)
+    lexstore.ensure_fresh(vault)
+    find.shared_resolver(vault)
+    stop = threading.Event()
+    monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: stop)
+    who = owner_principal(surface="mcp")
+    check = request_budget.ReadCheckpoint(
+        request_budget.RequestBudget(seconds=60), bound_disclosure=True,
+    )
+    path_arg = source.removeprefix(f"{KB}/")
+
+    def call_report(**extra):
+        admission = reclassification_preview.retained_report_identity(vault, who)
+        with (
+            request_scope(who), invocation_scope(), request_budget.checking(check),
+            reclassification_preview.retained_report_admission(admission),
+        ):
+            return reclassification_preview.report(
+                vault, path_arg, source_kind="dataset-export", domain=None, **extra,
+            )
+
+    job = call_report()
+    run_id = job["run_id"]
+    deadline = time.monotonic() + 45
+    while True:
+        try:
+            summary = call_report(preview_run_id=run_id)
+        except OpError as error:
+            assert error.code == "RECLASSIFICATION_PREVIEW_WARMING", error.code
+            summary = {"state": "running"}
+        if summary.get("state") != "running":
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    assert summary.get("state") == "completed", summary
+
+    released_pages = [dict(summary)]
+    held_paths: set[str] = set(summary.held_evidence)
+    seen_paths: set[str] = set()
+    cursor = summary.get("next_cursor")
+    while cursor is not None:
+        page = call_report(preview_run_id=run_id, cursor=cursor)
+        assert isinstance(page, reclassification_preview.RetainedReport)
+        released_pages.append(dict(page))
+        page_paths = {entry["path"] for entry in page["entries"]}
+        seen_paths |= page_paths
+        assert set(page.held_evidence) <= (page_paths | {source})
+        held_paths |= set(page.held_evidence)
+        cursor = page["next_cursor"]
+    assert {held_rel, other_rel} <= seen_paths
+    assert {held_rel, other_rel, source} <= held_paths
+
+    wire = json.dumps(released_pages, ensure_ascii=False)
+    evidence = maintenance_jobs.source_preview_held_evidence(
+        vault, run_id, {held_rel, other_rel, source},
+    )
+    for rel in (held_rel, other_rel, source):
+        record = evidence[rel]
+        raw = (vault / rel).read_bytes()
+        assert record.sha256 == hashlib.sha256(raw).hexdigest()
+        assert record.size == len(raw)
+        assert record.witness == rc._stat_witness(os.stat(vault / rel))
+        assert record.sha256 not in wire
+    assert evidence[held_rel].scopes == (frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"}),)

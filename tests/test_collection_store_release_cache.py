@@ -135,20 +135,20 @@ def test_failed_commit_cannot_authorize_different_content_at_the_reused_row_vers
     writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
                           capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
     before = tuple(store.connection.iterdump())
-    precommit = store._precommit
+    precommit = type(store)._precommit
 
-    def fail_commit(manifest):
-        precommit(manifest)
-        store.connection.execute("PRAGMA defer_foreign_keys=ON")
-        store.connection.execute("INSERT INTO item_sources VALUES(-1,1,0,'missing')")
+    def fail_commit(current, manifest):
+        precommit(current, manifest)
+        current.connection.execute("PRAGMA defer_foreign_keys=ON")
+        current.connection.execute("INSERT INTO item_sources VALUES(-1,1,0,'missing')")
 
     arguments = dict(item_key=KEY, expected_container_hash=first["after_container_hash"],
                      expected_item_version=first["after_item_hash"], why="correct")
-    monkeypatch.setattr(store, "_precommit", fail_commit)
+    monkeypatch.setattr(type(store), "_precommit", fail_commit)
     with request_scope(writer), pytest.raises(sqlite3.IntegrityError):
         store.update_record(CID, changes={"count": 2}, **arguments)
     assert tuple(store.connection.iterdump()) == before
-    monkeypatch.setattr(store, "_precommit", precommit)
+    monkeypatch.setattr(type(store), "_precommit", precommit)
     with request_scope(writer), pytest.raises(collections.CollectionError, match="COLLECTION_NOT_FOUND"):
         store.update_record(CID, changes={"tags": ["secret"]}, **arguments)
     assert tuple(store.connection.iterdump()) == before
@@ -194,13 +194,14 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, tmp_path,
     write_rule(store.root, ceiling=0)
     writer = grant_writer(store.root, tmp_path, monkeypatch, writable_paths=["Records/**"],
                           capture_paths=["Knowledge Base/Records"], protected=[SCOPE_ID])("external")
-    original = store._precommit if before_authorization else store.handle.release_cache.prepare
+    original = type(store)._precommit if before_authorization else store.handle.release_cache.prepare
 
-    def interleave(manifest=None):
-        store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
-                                 ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
+    def interleave(current=None, manifest=None):
+        conn = current.connection if current is not None else store.connection
+        conn.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
+                     ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
         if before_authorization:
-            original(manifest)
+            original(current, manifest)
         else:
             original()
 
@@ -211,7 +212,7 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, tmp_path,
         assert query()["total_matched"] == 2
         before = tuple(store.connection.iterdump())
         if before_authorization:
-            monkeypatch.setattr(store, "_precommit", interleave)
+            monkeypatch.setattr(type(store), "_precommit", interleave)
         else:
             monkeypatch.setattr(store.handle.release_cache, "prepare", interleave)
         arguments = dict(changes={"count": 2}, item_key=KEY, why="correct",
@@ -252,7 +253,7 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
         assert KEY not in rendered()
         store.connection.execute("BEGIN")
         try:
-            store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+            store.connection.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                                      ('{"classes":[],"projects":[],"tags":[]}', KEY))
             assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
             assert KEY in rendered()
@@ -354,6 +355,75 @@ def test_warm_canonical_release_never_reuses_session_authority(store, monkeypatc
                 assert store.inspect_collection(CID)["coverage"]["committed"] == 0
 
 
+def test_postcommit_advisory_does_not_reuse_a_revoked_session_grant(store, tmp_path, monkeypatch):
+    """An advisory cannot disclose ancillary content after its session grant is revoked at commit."""
+    import hashlib
+    from dataclasses import replace
+
+    from test_collection_store_governance import _record_writer, redeem, session
+
+    from exomem import due_state, records
+    from exomem.collection_store.preview import bound_writer
+    from exomem.governance import egress, membership, policy
+    from exomem.governance import store as authority_store
+    from exomem.governance.decisions import decide
+
+    create(store)
+    source = "Knowledge Base/Notes/private.md"
+    page = store.root / source
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: insight\n---\nPrivate observation\n")
+    bound = _record_writer(store, tmp_path, monkeypatch, deny_protected=False)
+    who = replace(session(store, monkeypatch, paths="Notes/**"), purpose="support")
+    who = replace(who, client_binding=bound.client_binding,
+                  origin_session=replace(bound.origin_session, audience=who.audience_id))
+    current = policy.load(store.root)
+    decision = decide(membership.evaluate_path_only(store.root, source, current).require_classified(),
+                      audience=who.audience_id, purpose="support", policy=current,
+                      active_grants=current.grants)
+    ref = "exomem://memory/33333333-3333-4333-8333-333333333333"
+    due_state.save(store.root, {
+        "version": due_state.SCHEMA_VERSION,
+        "claims": {manifest_path(): {"complete": True, "manifest_hash":
+                    store.connection.execute("SELECT manifest_hash FROM collection_manifests").fetchone()[0]}},
+        "categories": {"unreflected_observations": {manifest_path(): {"open": [{
+            "component": {"family": "unreflected_observations", "kind": "backfill",
+                          "collection": manifest_path(), "collection_id": CID,
+                          "claims_signal": "sample-claims", "pages": [{"path": source, "ref": ref}]},
+            "due_since": "2026-01-01",
+        }]}}},
+    })
+    visible = []
+    carrier = records._due_state_carrier
+
+    def advisory(root, manifest, **arguments):
+        conn = authority_store.open_authorization_session_connection(root)
+        try:
+            conn.execute("UPDATE governance_session_grants SET status='revoked'")
+            conn.commit()
+        finally:
+            conn.close()
+        visible.extend(bound_writer(root).inspect_collection(CID)["coverage"]["unreflected_refs"])
+        return carrier(root, manifest, **arguments)
+
+    with request_scope(who), preview_store(store.root, store.handle):
+        token = egress._mint_escalation_quietly(
+            store.root, rel_path=source, who=who, purpose="support", decision=decision,
+            requested_level=6, org_ceiling=egress._applicable_org_ceiling(current, decision),
+            expected_content_hash=hashlib.sha256(page.read_bytes()).hexdigest(),
+        )
+        assert isinstance(token, str)
+        redeem(store, who, token)
+        assert store.inspect_collection(CID)["coverage"]["unreflected_refs"] == [ref]
+        monkeypatch.setattr(records, "_due_state_carrier", advisory)
+        result = record_memory(store.root, "append", collection=CID, item={"title": "New observation"},
+                               item_key=KEY, why="capture")
+    assert result["outcome"] == "committed"
+    assert visible == []
+    assert ref not in str(result)
+    assert store.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
+
+
 def _create_filename_collection(store):
     text = manifest_text().replace("natural_key: [title]", "natural_key: [title, count]")
     text = text.replace("storage:\n", "item_filename:\n  version: 1\n  fields: [title]\nstorage:\n")
@@ -421,7 +491,7 @@ def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
     before["observed_values"]["title"]["values"][0]["value"] = "Caller mutation"
     assert store.inspect_collection(CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
     # Trusted SQL is deliberately unexplained, even though its version/hash did not move.
-    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
+    store.connection.execute("UPDATE item_rows SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
     current = store.inspect_collection(CID)
     assert current["observed_values"]["title"]["values"][0]["value"] == "Changed"
     cache = store.handle.release_cache.inspections
@@ -532,18 +602,18 @@ def test_failed_filename_commit_does_not_reserve_the_candidate_path(store, monke
     _create_filename_collection(store)
     store.append_record(CID, item={"title": "Seed", "count": 0}, why="seed")
     before = tuple(store.connection.iterdump())
-    precommit = store._precommit
+    precommit = type(store)._precommit
 
-    def fail_commit(manifest):
-        precommit(manifest)
-        store.connection.execute("PRAGMA defer_foreign_keys=ON")
-        store.connection.execute("INSERT INTO item_sources VALUES(-1,1,0,'missing')")
+    def fail_commit(current, manifest):
+        precommit(current, manifest)
+        current.connection.execute("PRAGMA defer_foreign_keys=ON")
+        current.connection.execute("INSERT INTO item_sources VALUES(-1,1,0,'missing')")
 
-    monkeypatch.setattr(store, "_precommit", fail_commit)
+    monkeypatch.setattr(type(store), "_precommit", fail_commit)
     with pytest.raises(sqlite3.IntegrityError):
         store.append_record(CID, item={"title": "Reserved", "count": 1}, item_key=KEY, why="capture")
     assert tuple(store.connection.iterdump()) == before
-    monkeypatch.setattr(store, "_precommit", precommit)
+    monkeypatch.setattr(type(store), "_precommit", precommit)
     with preview_store(store.root, store.handle):
         result = record_memory(store.root, "append", collection=CID, item={"title": "Reserved", "count": 2},
                                item_key=OTHER, why="capture")
@@ -557,17 +627,17 @@ def test_unknown_sql_rebuilds_portable_filename_occupancy_with_duplicate_keys(st
     store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="capture")
     source = "Knowledge Base/Records/Work/Items"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
     # Updating one unchanged path must retain the other portable-equivalent occupant.
     guards = store.inspect_collection(CID)["lifecycle_guards"]
     store.update_record(CID, item_key=KEY, changes={"count": 10},
                         expected_container_hash=guards["expected_container_hash"],
                         expected_item_version=first["after_item_hash"], why="correct")
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
     remaining = store.append_record(CID, item={"title": "Strasse", "count": 3}, why="capture")
     assert remaining["affected_paths"][0] != f"{source}/Strasse.md"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
     freed = store.append_record(CID, item={"title": "Strasse", "count": 4}, why="capture")
     assert freed["affected_paths"] == [f"{source}/Strasse.md"]

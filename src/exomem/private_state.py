@@ -11,6 +11,8 @@ import json
 import os
 import stat
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -41,23 +43,40 @@ def remove(*paths: Path) -> None:
             pass
 
 
-def write_record(store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False) -> None:
-    """Write `<stem>.json` whole through a temp named `<stem>.*<temp_suffix>`, which the store's sweep owns.
-
-    A `durable` record reaches the disk before the rename that publishes it. The store's folder entry is
-    the caller's to flush, once for a batch of records, with `sync_directory`.
-    """
+@contextmanager
+def stage_record(
+    store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False,
+) -> Iterator[Path]:
+    """Keep a whole record under a temporary name until the caller publishes it."""
     descriptor, raw = tempfile.mkstemp(prefix=f"{stem}.", suffix=temp_suffix, dir=store)
+    temporary = Path(raw)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as sink:
             json.dump(record, sink)
             if durable:
                 sink.flush()
                 os.fsync(sink.fileno())
-        os.replace(raw, store / f"{stem}.json")
-    except BaseException:
-        remove(Path(raw))
-        raise
+        yield temporary
+    finally:
+        remove(temporary)
+
+
+def write_record(
+    store: Path, stem: str, record: dict, *, temp_suffix: str, durable: bool = False,
+    create_only: bool = False,
+) -> None:
+    """Write `<stem>.json` whole through a temp named `<stem>.*<temp_suffix>`, which the store's sweep owns.
+
+    A `durable` record reaches the disk before the rename that publishes it. The store's folder entry is
+    the caller's to flush, once for a batch of records, with `sync_directory`. A `create_only` record is
+    published by a hard link, so it never replaces one already there (`FileExistsError`).
+    """
+    with stage_record(store, stem, record, temp_suffix=temp_suffix, durable=durable) as temporary:
+        path = store / f"{stem}.json"
+        if create_only:
+            os.link(temporary, path)
+        else:
+            os.replace(temporary, path)
 
 
 def sync_directory(store: Path) -> None:

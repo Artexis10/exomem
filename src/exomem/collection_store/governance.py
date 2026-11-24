@@ -37,6 +37,7 @@ from ..governance.decisions import Decision, decide
 from ..governance.principal import RequestPrincipal, effective_principal
 from ..planning_values import PlanningValues
 from . import tokens, types
+from .summary import SUMMARY
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
@@ -48,6 +49,9 @@ CONNECTOR_LIMITED = "COLLECTION_CONNECTOR_LIMITED"
 #: that a write accepts (`visible_snapshot`).
 UNLIMITED_WRITE_ROUTES = ("from the owner's CLI or a stdio connection, or from a client whose entry in the host's "
                           "connector boundary configuration denies it no scope")
+_PROJECTION_RELEASE_ERRORS = (
+    collections.CollectionError, membership.MembershipUnresolved, ValueError, TypeError, KeyError, sqlite3.Error,
+)
 
 
 def _json(value: Any) -> str:
@@ -95,6 +99,21 @@ def held_metadata(schema: collections.ItemSchema, candidate: Mapping[str, Any], 
         for name in candidate.get("delete_fields", ()):
             attempted.pop(name, None)
     return row_metadata(schema, attempted, metadata)
+
+
+def reprojected(captured: str, metadata: str) -> str:
+    """``captured`` metadata under a revised manifest: its own tags and classes, the manifest's projects.
+
+    A revise gives this to material it does not validate again, so its release follows the new projects.
+    """
+    preserved = _metadata(captured)
+    preserved["projects"] = _metadata(metadata)["projects"]
+    return _json(preserved)
+
+
+def projects_changed(before: str, after: str) -> bool:
+    """Whether two manifest metadata values name different projects."""
+    return _metadata(before)["projects"] != _metadata(after)["projects"]
 
 
 def _pass_release_limit(error: collections.CollectionError) -> None:
@@ -533,8 +552,12 @@ def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
                   view_path=None, row_key=None, include_held=True, batch_size=128,
-                  query_order=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata; a row key selects no manifest or held candidate."""
+                  query_order=False, retained=False) -> Iterator[CanonicalSubject]:
+    """Stream canonical metadata; a row key selects no manifest or held candidate.
+
+    ``retained`` also yields a retracted row, which only a reader that judges that row's history or holds
+    may ask for; every other caller sees the current rows of the ``items`` view.
+    """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
     if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
@@ -560,7 +583,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     item_order = "item_key" if query_order else "row_id"
     with closing(conn.execute(
         "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-        "FROM items WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
+        "FROM " + ("item_rows" if retained else "items") + " WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
@@ -611,16 +634,21 @@ def held_shows_every_row(candidate_json: str) -> bool:
 
 
 def held_targets(conn: sqlite3.Connection, hold: CanonicalSubject) -> tuple[CanonicalSubject, ...]:
-    """The existing items a hold would change or show: its one item, every row for a whole log view,
-    or none when it proposes a new item."""
+    """The items a hold would change or show: its one item, every row for a whole log view,
+    or none when it proposes a new item.
+
+    A retracted row stays a target: the held values were written against it, so its release still bounds them.
+    """
     row = conn.execute("SELECT candidate_json FROM held_candidates WHERE collection_id=? AND held_id=?",
                        (hold.collection_id, hold.row_id)).fetchone()
     key = None if row is None else held_item_key(row[0])
     if key is not None:
-        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key), 1))
+        return tuple(islice(iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id, row_key=key,
+                                          retained=True), 1))
     if row is not None and held_shows_every_row(row[0]):
         return tuple(subject for subject in iter_subjects(conn, hold.collection_id, hold.basis.logical_vault_id,
-                                                          include_held=False) if subject.basis.domain == "row")
+                                                          include_held=False, retained=True)
+                     if subject.basis.domain == "row")
     return ()
 
 
@@ -669,16 +697,24 @@ class ReleaseCache:
         self.contracts = OrderedDict()
         self.memberships = OrderedDict()
         self.decisions = OrderedDict()
-        #: (view path, sha256 of its bytes) -> the store stamp at which those bytes were proven equal to the
-        #: render of the committed rows. A render is a function of the store alone, so the proof holds only
-        #: at that exact stamp: this connection's writes, another connection's commit and a schema change
-        #: each move it.
+        #: (view path, sha256 of its bytes) -> (store stamp, release inputs) at which those bytes were proven
+        #: equal to the render of the committed rows. A render is a function of the store, and a history
+        #: page's also of its release's file-held inputs (`history.release_inputs`; None for other kinds), so
+        #: the proof holds only at that exact pair: this connection's writes, another connection's commit, a
+        #: schema change and a changed policy, access file or tombstone each move it.
         self.render_proofs = OrderedDict()
+        #: (path, sha256 of its bytes or None, the operation's release inputs) -> (projection decision,
+        #: the data and schema versions when it was made). A decision reads the store, those bytes and
+        #: those inputs alone, so it holds until the store may have changed: every write of this connection
+        #: except a collection-free one (`begin`) drops them all, and a commit of another connection moves
+        #: the versions it holds, even one that a rollback's restamp hides from `check` (`finish`).
+        self.projections = OrderedDict()
         self.pending = None
         self.replacements = {}
         self.observed = self._stamp()
         self.accounted = conn.total_changes
         self.unmanaged = False
+        self.free = False
 
     def _stamp(self):
         return (self.conn.total_changes, self.conn.execute("PRAGMA data_version").fetchone()[0],
@@ -686,6 +722,10 @@ class ReleaseCache:
 
     def check(self):
         if self.pending is not None:
+            if self.free and not self.pending:
+                # Every change of a collection-free transaction so far is taken as the vault store's own
+                # (`begin`), so `finish`'s accounting guard trips only on a change made after `prepare`.
+                self.accounted = self.conn.total_changes
             stamp = self._stamp()
             if stamp[0] != self.accounted or stamp[1:] != self.observed[1:] or self.unmanaged:
                 self.unmanaged = True
@@ -707,6 +747,7 @@ class ReleaseCache:
         self.memberships.clear()
         self.decisions.clear()
         self.render_proofs.clear()
+        self.projections.clear()
         self.replacements.clear()
         self.observed = self._stamp()
 
@@ -784,10 +825,20 @@ class ReleaseCache:
     def queued_history_sweep(self):
         return self.history_sweep_next if self.history_sweep_staged else self.history_sweep
 
-    def begin(self):
+    def begin(self, *, collection_free=False):
+        """Open a transaction's accounting; ``collection_free`` explains each change it makes.
+
+        A collection-free transaction writes only the vault store's own tables (its pages, manifest,
+        queues and holds), never a row that a collection's release reads. So the cached releases and
+        kept projection decisions hold across it, and a collection read inside it may use them. The
+        flag is trusted: `check` and `prepare` take every change of such a transaction as explained, so
+        a raw write to a collection table inside one goes unseen. Only a writer statement (`account`)
+        or mutation (`touch`) restores the ordinary accounting and drops the kept decisions at `finish`.
+        """
         self.check()
         self.pending = {}
         self.unmanaged = False
+        self.free = collection_free
         self.replacements = {}
         self.accounted = self.conn.total_changes
         self.prepared = {}
@@ -797,6 +848,12 @@ class ReleaseCache:
 
     def account(self, changes):
         if self.pending is not None:
+            if changes and self.free:
+                # A writer statement changed a collection table: what came before it was the vault store's
+                # own (`begin`), and from here the ordinary accounting holds, so `finish` drops the kept
+                # decisions even when the statement's caller skipped `touch`.
+                self.accounted = self.conn.total_changes - changes
+                self.free = False
             self.accounted += changes
 
     def touch(self, cid, identity=None):
@@ -815,6 +872,10 @@ class ReleaseCache:
 
     def finish(self, committed):
         changed = self.conn.total_changes != self.observed[0]
+        free = (committed and self.free and not self.pending and not self.unmanaged
+                and self.conn.total_changes == self.accounted)
+        if (changed or self.unmanaged) and not free:
+            self.projections.clear()
         if committed and not self.unmanaged and self.conn.total_changes == self.accounted:
             for cid, identities in self.pending.items():
                 state = self.replacements.get(cid) or self.states.get(cid)
@@ -875,6 +936,7 @@ class ReleaseCache:
         self.prepared = {}
         self.observed = self.prepared_stamp if committed else self._stamp()
         self.unmanaged = False
+        self.free = False
 
     @staticmethod
     def _remember(cache, key, value, maximum):
@@ -1000,6 +1062,8 @@ class OperationAuthorization:
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
+        # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
+        self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
         self.undecided = 0
         self.grants_loaded = False
@@ -1048,8 +1112,11 @@ class OperationAuthorization:
             self.refuse()
         return manifest
 
-    def field_rows(self, cid, rows, snapshot):
-        """Read only admitted columns; public versions describe their released values."""
+    def field_rows(self, cid, rows, snapshot, *, check=lambda: None):
+        """Read only admitted columns; public versions describe their released values.
+
+        ``check`` runs between batches of rows and raises to stop the read.
+        """
         from io import BytesIO
 
         from ..query_engine.selected_values import read_selected_tree
@@ -1057,10 +1124,12 @@ class OperationAuthorization:
 
         plan = self.field_plan(self.field_manifest(cid))
         if plan.owner:
-            return typed_storage.hydrate(self.conn, rows), snapshot
+            return typed_storage.hydrate(self.conn, rows, check=check), snapshot
         layout = (typed_storage.require_layout(self.conn, cid)
                   if typed_storage.collection_encoding(self.conn, cid) != typed_storage.JSON_V1 else None)
-        for row in rows:
+        for index, row in enumerate(rows):
+            if index % 256 == 0:
+                check()  # a clock read per row would cost more than the decode it bounds
             if layout is None:
                 values = read_selected_tree(BytesIO(row["values_json"].encode()), plan.fields,
                                             max_bytes=256 * 1024, check=lambda: None)
@@ -1926,103 +1995,223 @@ class OperationAuthorization:
             return ()
         return catalog
 
+    def projection_present(self, path: str) -> bool:
+        """Which paths need the full projection release check, including unresolved paths."""
+        try:
+            return self.projection_subjects(path) is not None
+        except _PROJECTION_RELEASE_ERRORS:
+            return True
+
     def projection_decision(self, path: str, *, content: bytes | None = None,
                             manifest_for=None) -> Decision | None:
-        """Authorize canonical subjects, then prove any bytes are their current render."""
+        """Authorize canonical subjects, then prove any bytes are their current render.
+
+        The decision is kept on the release cache under the path, the bytes' digest and this
+        operation's release inputs (`_kept_projection_key`), which with the store are all it reads.
+        The cache drops it when the store may have changed (`ReleaseCache.finish`), so a save that
+        writes only vault pages decides no view again.
+        """
+        digest = None if content is None else hashlib.sha256(content)
+        key = self._kept_projection_key(path, digest)
+        cache = self.cache
+        # Another connection's commit, or a write of this one that nothing accounted, drops every kept decision.
+        cache.check()
+        # A write transaction that changed a collection has not dropped the kept decisions yet (`finish`).
+        served = cache.pending is None or (cache.free and not cache.pending)
+        if (key is not None and served and (kept := cache.projections.get(key)) is not None
+                and kept[1] == cache._stamp()[1:]):
+            cache.projections.move_to_end(key)
+            return kept[0]
+        # Read before deciding, so a write that lands meanwhile leaves this decision unkept.
+        stamp, undecided = cache._stamp(), self.undecided
         try:
-            targets = self.projection_subjects(path)
-            if targets is None:
-                return None
-            if not targets:
-                return Decision(0)
-            manifest = self.field_manifest(targets[0].collection_id)
-            plan = self.field_plan(manifest)
-            projection_kind = self.conn.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
-            if not plan.owner and projection_kind == ("summary",):
-                # The stored page carries private stamps; direct reads use the canonical released overview instead.
-                return Decision(0)
-            if not self.holds_every_field(manifest):
-                # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
-                return Decision(0)
-            decisions = tuple(self.decision(subject) for subject in targets)
-            if path != targets[0].basis.identity:
-                if decisions[0].level < 6:
-                    return Decision(0)
-                decisions = decisions[1:]
-            decision = egress._meet_decisions(decisions)
-            if decision.level == 0:
-                return decision
-            if projection_kind == ("history",):
-                from . import history
-
-                if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
-                    return Decision(0)
-                context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
-                if not context.exists(path):
-                    # A retired page must not disclose a raw-history boundary through an empty matching header.
-                    return Decision(0)
-            if content is not None:
-                cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
-                row = cursor.fetchone()
-                if row is None:
-                    return Decision(0)
-                projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
-                # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
-                if projection["kind"] not in {"manifest", "item", "held", "summary", "log", "history"}:
-                    return Decision(0)
-                if projection["kind"] == "item" and not any(
-                    subject.row_id == projection["row_id"] for subject in targets[1:]
-                ):
-                    return Decision(0)
-                manifest = manifest_for(projection["collection_id"])
-                digest = hashlib.sha256(content)
-                if not self._bytes_are_current_render(projection, manifest, content, digest.digest()):
-                    return Decision(0)
-                parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
-                if parsed is None:
-                    return Decision(0)
-                extra = set(membership.evaluate_snapshot(
-                    parsed, self.policy, content_hash=digest.hexdigest(),
-                )) - set(decision.scope_ids)
-                if extra:
-                    decision = egress._meet_decisions((decision,
-                        connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy),
-                        decide(extra, audience=self.who.audience_id, purpose=self.purpose,
-                               policy=self.policy, active_grants=self.policy.grants)))
-            return decision
-        except (collections.CollectionError, membership.MembershipUnresolved, ValueError,
-                TypeError, KeyError, sqlite3.Error):
+            decision, keepable = self._projection_decision(path, content, digest, manifest_for)
+        except _PROJECTION_RELEASE_ERRORS:
             return Decision(0)
+        # None is kept mid-write, from an unreadable input, or unless the decision began at the checked
+        # stamp and the store, this connection's or another's, stayed there throughout.
+        if (key is not None and keepable and self.undecided == undecided and cache.pending is None
+                and not cache.unmanaged and stamp == cache.observed == cache._stamp()):
+            cache._remember(cache.projections, key, (decision, stamp[1:]), _MAX_CACHED_SUBJECTS)
+        return decision
 
-    def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes) -> bool:
+    def _kept_projection_key(self, path, digest):
+        """The key that a kept projection decision holds under, or None where none is kept.
+
+        A session reads time and its own grants, and a failed snapshot decides nothing, so neither
+        keeps one; nor does an operation on a caller's own ownership proof. The inputs are this
+        operation's own snapshot: the caller, the policy, the access file, the tombstones, the
+        purpose, the connector ceiling, the registry assignment and the caller's unrestricted access.
+        Two more live outside the store: the Planning values that a manifest parse reads
+        (`field_manifest`), and the ownership binding and admitted collections, which the enrollment
+        and the coordinator's fence decide.
+        """
+        if (self.context is not None or self.failed or self.authority is not None
+                or self._ownership_proof is not None):
+            return None
+        if self._kept_inputs is None:
+            from ..cli_ops import OpError
+
+            try:
+                proof = self.projection_ownership()
+                inputs = (self.who, self._release_dependency(), membership.subject_inputs(self.root, self.policy),
+                          PlanningValues(self.root, server_side=True).admitted_dependency(),
+                          proof.binding, proof.admitted,
+                          # A quarantined hold, or one whose item is unreadable, is the unrestricted owner's.
+                          raw_protection.has_unrestricted_access(self.root, self.who))
+                hash(inputs)
+            except (connector_boundary.BoundaryUnavailable, OpError, TypeError):
+                # The decision itself meets the same input and refuses as before; only keeping stops here.
+                return None
+            self._kept_inputs = inputs
+        return path, None if digest is None else digest.digest(), self._kept_inputs
+
+    def _projection_decision(self, path, content, digest, manifest_for):
+        """`(decision, keepable)`: keepable when the decision read only the store and its key's inputs."""
+        targets = self.projection_subjects(path)
+        if targets is None:
+            return None, True
+        if not targets:
+            return Decision(0), True
+        manifest = self.field_manifest(targets[0].collection_id)
+        plan = self.field_plan(manifest)
+        projection_kind = self.conn.execute("SELECT kind FROM projection_state WHERE path=?", (path,)).fetchone()
+        if not plan.owner and projection_kind == ("summary",):
+            # The stored page carries private stamps; direct reads use the canonical released overview instead.
+            return Decision(0), True
+        if not self.holds_every_field(manifest):
+            # File views and audit rationale carry complete-field authority; recipients use admitted record projections.
+            return Decision(0), True
+        decisions = tuple(self.decision(subject) for subject in targets)
+        if path != targets[0].basis.identity:
+            if decisions[0].level < 6:
+                return Decision(0), True
+            decisions = decisions[1:]
+        decision = egress._meet_decisions(decisions)
+        if decision.level == 0:
+            return decision, True
+        history_page = None
+        keepable = True
+        if projection_kind == ("history",):
+            from . import history
+
+            if not self._allows_path_metadata(path, metadata=history.page_subject(path)):
+                return Decision(0), True
+            # Read before the context reads the store, so a commit that lands meanwhile can only make a later
+            # proof lookup miss.
+            stamp = self.cache._stamp()
+            context = history.PageContext(self.conn, self.root, manifest, cache=self.cache)
+            # The page renders from the context's own read of the file-held inputs: a decision is kept only
+            # where that read is this operation's, which its key names.
+            keepable = context.inputs == self._history_inputs()
+            if not context.exists(path):
+                # A retired page must not disclose a raw-history boundary through an empty matching header.
+                return Decision(0), keepable
+            history_page = context, stamp
+        if content is not None:
+            cursor = self.conn.execute("SELECT * FROM projection_state WHERE path=?", (path,))
+            row = cursor.fetchone()
+            if row is None:
+                return Decision(0), keepable
+            projection = dict(zip((column[0] for column in cursor.description), row, strict=True))
+            # nosemgrep: ep-word-membership -- The projection_state.kind CHECK fixes these kinds.
+            if projection["kind"] not in {"manifest", "item", "held", "summary", "log", "history"}:
+                return Decision(0), keepable
+            if projection["kind"] == "item" and not any(
+                subject.row_id == projection["row_id"] for subject in targets[1:]
+            ):
+                return Decision(0), keepable
+            manifest = manifest_for(projection["collection_id"])
+            # A relationship label reads vault files, which no key here names.
+            presentation = manifest.item_presentation
+            keepable = keepable and (presentation is None or not presentation.relationships)
+            if not self._bytes_are_current_render(projection, manifest, content, digest.digest(),
+                                                  history_page=history_page):
+                return Decision(0), keepable
+            parsed = find_corpus.parse_page(self.root / path, 0, self.root, content=content)
+            if parsed is None:
+                return Decision(0), keepable
+            extra = set(membership.evaluate_snapshot(
+                parsed, self.policy, content_hash=digest.hexdigest(),
+            )) - set(decision.scope_ids)
+            if extra:
+                try:
+                    ceiling = connector_boundary.decide_scopes(self.root, self.who, extra, compiled=self.policy,
+                                                               strict=True)
+                except connector_boundary.UNDECIDED:
+                    # Withheld for this operation only, as the unstrict call answers; nothing keeps it.
+                    self.undecided += 1
+                    ceiling = Decision(policy.DISCLOSURE_MIN)
+                decision = egress._meet_decisions((decision, ceiling,
+                    decide(extra, audience=self.who.audience_id, purpose=self.purpose,
+                           policy=self.policy, active_grants=self.policy.grants)))
+        return decision, keepable
+
+    def _history_inputs(self):
+        """The `history.release_inputs` digest of this operation's own policy, access file and tombstones."""
+        from . import history
+
+        return history.inputs_of(self.policy, self.tombstones, self.access_fingerprint, self.access,
+                                 self.access_blocked).digest
+
+    def _bytes_are_current_render(self, projection, manifest, content: bytes, digest: bytes, *,
+                                  history_page=None) -> bool:
         """Whether ``content`` is the current render of ``projection``, or a migrated original.
 
-        This proof is a function of the store and the bytes alone, never of the caller or the policy,
-        so a repeat at the same store stamp keeps it. The verdict built on it is decided again each time.
+        An adoption or a takeover starts a new store instance and rewrites no view, so the current
+        render may name an earlier instance of the store's lineage: the one whose stamp ``content``
+        carries. Every other byte, the version and the hash included, must still match exactly.
+
+        This proof is a function of the store and the bytes, never of the caller, so a repeat at the
+        same store stamp keeps it. A history page also renders from its release's file-held inputs
+        (the policy, the access file and the tombstones), so its proof names their digest as well. The
+        verdict built on a proof is decided again each time.
+
+        ``history_page`` is the decision's own ``(PageContext, stamp)`` for a history page: the render
+        reuses that context, and the stamp read before it.
         """
-        from . import legacy_originals, views
+        from . import edit_back, legacy_originals, views
 
         cache, key = self.cache, (projection["path"], digest)
-        # Read before the render, so a commit that lands in between can only make a later lookup miss.
-        stamp = cache._stamp()
-        # A relationship label reads vault files through this operation; a history page is not proved
-        # to depend on the store alone. Neither is kept. Nor is any proof made mid-write or past an
-        # unseen write of this connection.
+        context = None
+        if history_page is not None and projection["kind"] == "history":
+            context, stamp = history_page
+            # A context reads only these two from its manifest; a page they no longer name renders afresh.
+            if (context.manifest.collection_id, context.manifest.path) != (manifest.collection_id, manifest.path):
+                context = None
+        if context is None:
+            # Read before the render, so a commit that lands in between can only make a later lookup miss.
+            stamp = cache._stamp()
+        # The release inputs that the context read once stand for the files a history page renders from.
+        proof = (stamp, None if context is None else context.inputs)
+        # A relationship label reads vault files through this operation, and a history page rendered
+        # without its decision's context names no release inputs. Neither is kept. Nor is any proof made
+        # mid-write or past an unseen write of this connection.
         presentation = manifest.item_presentation
-        keepable = (projection["kind"] != "history"
+        keepable = ((projection["kind"] != "history" or context is not None)
                     and (presentation is None or not presentation.relationships)
                     and cache.pending is None and not cache.unmanaged
                     and stamp[0] == cache.observed[0])
-        if keepable and cache.render_proofs.get(key) == stamp:
+        if keepable and cache.render_proofs.get(key) == proof:
             cache.render_proofs.move_to_end(key)
             return True
-        _version, rendered = views.render_view(
-            self.conn, views.store_identity(self.conn), projection, manifest,
-            root=self.root, cache=cache, operation=self,
-        )
+        if context is not None:
+            rendered = context.render_many((projection["path"],))[projection["path"]][1]
+        else:
+            _version, rendered = views.render_view(
+                self.conn, views.store_identity(self.conn), projection, manifest,
+                root=self.root, cache=cache, operation=self,
+            )
+            # Only a kind that renders the store identity can name an earlier instance; a history page renders none.
+            if content != rendered.encode("utf-8"):
+                earlier = edit_back.earlier_identity(self.conn, projection, manifest, content)
+                if earlier is not None:
+                    _version, rendered = views.render_view(
+                        self.conn, earlier, projection, manifest, root=self.root, cache=cache, operation=self,
+                    )
         if content == rendered.encode("utf-8"):
             if keepable:
-                cache._remember(cache.render_proofs, key, stamp, _MAX_CACHED_SUBJECTS)
+                cache._remember(cache.render_proofs, key, proof, _MAX_CACHED_SUBJECTS)
             return True
         # Migration preserves initial source bytes before asynchronous stamping.
         return legacy_originals.current_view_matches(self.conn, projection, content)
@@ -2171,16 +2360,20 @@ class OperationAuthorization:
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             return False  # An input that cannot be read leaves the content-free refusal.
 
-    def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
-        """Decode only released rows; the manifest is an independent L6 gate."""
+    def _release_or_refuse(self, cid: str) -> SummaryRelease | None:
+        """``summary_release``, or the content-free refusal for any failure, so no row reader is an existence oracle."""
         try:
-            release = self.summary_release(cid)
+            return self.summary_release(cid)
         except collections.CollectionError as error:
             _pass_release_limit(error)
             self.refuse()
         except (ValueError, TypeError, StopIteration, sqlite3.Error,
                 authorization_session_lifecycle.AuthorizationSessionUnavailable):
             self.refuse()
+
+    def authorized_rows(self, cid: str) -> tuple[list[dict[str, Any]], str, set[str]]:
+        """Decode only released rows; the manifest is an independent L6 gate."""
+        release = self._release_or_refuse(cid)
         if release is not None:
             return self._summary_rows(cid, release)
         allowed = self.released_subjects(cid)
@@ -2192,11 +2385,26 @@ class OperationAuthorization:
             names = [column[0] for column in cursor.description]
             rows.extend(dict(zip(names, row, strict=True)) for row in cursor)
         rows, snapshot = self.field_rows(cid, rows, self.visible_snapshot(cid, allowed))
-        rows.sort(key=lambda row: (row["view_path"] or "", row["item_key"]))
+        rows.sort(key=_view_order)
         return rows, snapshot, {
             subject.row_id for subject in allowed if isinstance(subject.row_id, str)
         }
 
+
+    def row_release(self, cid: str) -> tuple[Callable[[int, str], bool], str]:
+        """This caller's read decision on one row, and the snapshot ``authorized_rows`` would return.
+
+        It decodes no row and refuses as ``authorized_rows`` does, so a caller that cannot read
+        the collection learns nothing from it and a withheld row decides as an absent one.
+        """
+        release = self._release_or_refuse(cid)
+        if release is not None:
+            uniform = release.released == release.rows
+            return (lambda _row_id, key: release.released > 0 and (
+                uniform or self._summary_row_released(release, {"item_key": key}))), release.snapshot
+        allowed = self.released_subjects(cid)
+        row_ids = {subject.row_id for subject in allowed if isinstance(subject.row_id, int)}
+        return (lambda row_id, _key: row_id in row_ids), self.visible_snapshot(cid, allowed)
 
     def _summary_rows(self, cid: str, release: SummaryRelease) -> tuple[list[dict[str, Any]], str, set[str]]:
         """A whole summary snapshot only within the interactive visit and deadline bounds.
@@ -2204,13 +2412,26 @@ class OperationAuthorization:
         Larger reads page through a collection query with its continuation;
         this never returns some of the rows as if they were all of them.
         """
-        from ..query_engine.runtime import QueryLimits
+        from ..query_engine.runtime import Deadline, QueryLimits, current_deadline, records_refusal
         limits = QueryLimits()
         if release.released > limits.max_row_visits:
             raise collections.CollectionError(
                 "QUERY_COST_LIMIT", "summary rows exceed one bounded read; page them with a collection query",
                 {"released_rows": release.released, "max_row_visits": limits.max_row_visits})
-        deadline = time.monotonic() + limits.timeout_ms / 1000
+        # A Records query's deadline bounds its whole read, decode included, and refuses as its routed
+        # read does. Any other whole read keeps one interactive read's bound on its fetch alone.
+        query = current_deadline()
+        deadline = query or Deadline(limits.timeout_ms)
+
+        def check():
+            if (expired := deadline.expired()) is None:
+                return
+            if query is not None:
+                raise records_refusal(expired, query)
+            raise collections.CollectionError(
+                "QUERY_TIMEOUT", f"summary rows exceed one bounded read ({expired.message}); "
+                "page them with a collection query", {"timeout_ms": deadline.cpu_ms, "wall_ms": deadline.wall_ms})
+
         rows = []
         if release.released and self.conn.execute("SELECT derived FROM collections WHERE collection_id=?",
                                                   (cid,)).fetchone()[0]:
@@ -2224,23 +2445,41 @@ class OperationAuthorization:
             with closing(self.conn.execute("SELECT * FROM items WHERE collection_id=? ORDER BY row_id", (cid,))) as cursor:
                 names = [column[0] for column in cursor.description]
                 while batch := cursor.fetchmany(512):
-                    if time.monotonic() > deadline:
-                        raise collections.CollectionError(
-                            "QUERY_TIMEOUT", "summary rows exceed one bounded read; page them with a collection query",
-                            {"timeout_ms": limits.timeout_ms})
+                    check()
                     batch = [dict(zip(names, row, strict=True)) for row in batch]
                     if not uniform:
                         batch = [row for row in batch if self._summary_row_released(release, row)]
                     rows.extend(batch)
-        rows.sort(key=lambda row: row["item_key"])
+        rows.sort(key=_key_order)
         held = {subject.row_id for subject, decision in release.held if decision.level >= 6}
-        rows, snapshot = self.field_rows(cid, rows, release.snapshot)
+        rows, snapshot = self.field_rows(cid, rows, release.snapshot, check=check if query else lambda: None)
         return rows, snapshot, held
 
     def _summary_row_released(self, release: SummaryRelease, row: Mapping[str, Any]) -> bool:
         found = subjects(self.conn, release.manifest.collection_id, self.logical_vault_id,
                          identity=release.row_prefix + row["item_key"])
         return bool(found) and self.decision(found[0]).level >= 6
+
+
+def input_order(manifest: collections.CollectionManifest) -> Callable[[Mapping[str, Any]], tuple]:
+    """The key of the order a collection's rows reach every legacy reader, over ``items`` columns.
+
+    A markdown log keeps its declared insertion order. Summary rows go by item key: a converted
+    row keeps its old item file path, which need not follow it. Other rows go by view path, then
+    item key.
+    """
+    if manifest.storage.strategy == "markdown-log":
+        sign = -1 if manifest.storage.descriptor.get("insertion") == "newest-first" else 1
+        return lambda row: (sign * row["created_txn"], sign * row["row_id"])
+    return _key_order if manifest.view_mode == SUMMARY else _view_order
+
+
+def _view_order(row: Mapping[str, Any]) -> tuple[str, str]:
+    return row["view_path"] or "", row["item_key"]
+
+
+def _key_order(row: Mapping[str, Any]) -> tuple[str]:
+    return (row["item_key"],)
 
 
 def resolve_bound_membership(root: Path, identity: str, candidate: policy.Policy,

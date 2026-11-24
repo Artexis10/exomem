@@ -23,6 +23,7 @@ themselves never get an LLM — extraction happens in the caller (the sandbox).
 from __future__ import annotations
 
 import base64
+import contextlib
 import datetime as dt
 import hashlib
 import io
@@ -37,18 +38,31 @@ import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, Any, BinaryIO
 
-from . import indexes, memory_refs, privacy_log, semantic_contract, temporal
+from . import (
+    capture_metadata,
+    document_identity,
+    indexes,
+    media_capacity,
+    memory_refs,
+    originals,
+    privacy_log,
+    semantic_contract,
+    source_taxonomy,
+    temporal,
+)
 from .asr_facts import LANGUAGE_MODE_MULTILINGUAL, AsrFacts
-from .kbdir import kb_prefix
-from .ocr_facts import OcrFacts
-from .source_inspection import Inspection, inspect_source
+from .capture_metadata import CaptureFacts
+from .kbdir import managed_join, managed_relative
+from .ocr_facts import OcrFacts, engine_with_ocr_text
+from .source_inspection import Inspection, inspect_source, is_dataset_name
 from .vault import (
     MISSING_CONTENT_HASH,
     ContentHashMismatchError,
     DeferredGraphCompletion,
     DefiniteNoEffect,
+    FrontmatterError,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
@@ -62,6 +76,7 @@ from .vault import (
     parse_frontmatter,
     prepend_log_entry,
     read_guarded_text,
+    relative_posix,
     respell_new_path,
     with_newline,
     yaml_scalar,
@@ -301,6 +316,15 @@ class PreserveError(Exception):
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
 
 
+def validate_diarize_text(diarize: bool | None, text: str | None) -> None:
+    """A supplied transcript skips the speech extraction that assigns speaker labels."""
+    if diarize and text and text.strip():
+        raise PreserveError(
+            "DIARIZE_NOT_APPLICABLE", ["diarize", "text"],
+            "submit the recording without supplied text to request speaker labels",
+        )
+
+
 def validate_raw_capture(
     filename: str | None = None, *, destination: str = "", raw_protection: bool = False,
 ) -> bool:
@@ -340,6 +364,21 @@ def _sidecar_path(artifact: Path, *, protected: bool) -> Path:
     return artifact.with_name(f"{artifact.name}.md")
 
 
+def _refuse_reserved_capture(vault_root: Path, paths: tuple[Path, ...]) -> None:
+    """Refuse a capture whose artifact or page would take a path a moved page still claims.
+
+    A moved artifact leaves with its page, so both of its old names stay reserved (`prior_claims`).
+    """
+    from . import prior_claims
+
+    for path in dict.fromkeys(paths):
+        try:
+            prior_claims.require_unreserved(vault_root, path.relative_to(vault_root).as_posix())
+        except prior_claims.ReservedPathError as error:
+            code = "ARTIFACT_EXISTS" if error.code == "FILE_EXISTS" else error.code
+            _raise(code, ["filename"], f"{error.reason}; pick a new filename")
+
+
 def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> tuple[Path, ...]:
     canonical = _sidecar_path(artifact, protected=protected)
     if source and not protected:
@@ -348,6 +387,22 @@ def _sidecar_paths(artifact: Path, *, protected: bool, source: bool = False) -> 
         if legacy != canonical:
             return canonical, legacy
     return (canonical,)
+
+
+def _pooled_sha256(vault_root: Path, artifact: Path) -> str | None:
+    """The SHA-256 that the shared object of a pooled filing holds now, else None.
+
+    A shared original keeps no file at its logical path. None also covers an object that cannot be read.
+    """
+    from . import held_fs, media_store, reserved_paths
+
+    try:
+        filing = originals.pooled(vault_root, artifact)
+        if filing is None:
+            return None
+        return media_store.pooled_head(vault_root, artifact.relative_to(vault_root).as_posix(), filing).sha256
+    except (OSError, ValueError, media_store.MediaStoreError, held_fs.HeldFsError, reserved_paths.ReservedPathLeafError):
+        return None
 
 
 def stored_artifact(
@@ -365,13 +420,17 @@ def stored_artifact(
     sidecar = _sidecar_path(artifact, protected=protected)
     digest = hashlib.sha256()
     try:
-        with artifact.open("rb") as source:
-            while chunk := source.read(_STREAM_CHUNK):
-                digest.update(chunk)
+        try:
+            with artifact.open("rb") as source:
+                while chunk := source.read(_STREAM_CHUNK):
+                    digest.update(chunk)
+            stored_sha256 = digest.hexdigest()
+        except FileNotFoundError:
+            stored_sha256 = _pooled_sha256(vault_root, artifact)
         ref = memory_refs.ref_from_markdown(sidecar.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError):
         return None
-    if digest.hexdigest() != sha256 or not isinstance(ref, str) or not ref:
+    if stored_sha256 != sha256 or not isinstance(ref, str) or not ref:
         return None
     return DuplicateArtifact(
         hash=sha256,
@@ -469,6 +528,23 @@ def evidence_artifact(
     return evidence_folder(vault_root, scope, category) / name, protected
 
 
+def too_large(limit: int) -> PreserveError:
+    """The refusal for bytes past `limit`, raised while they are copied in and again when an upload door stages them."""
+    return PreserveError(code="TOO_LARGE", missing=["file"], reason=f"upload exceeds the {limit:,}-byte limit")
+
+
+def pools_evidence_original(vault_root: Path, artifact_name: str) -> bool:
+    """Whether a binary filed as `artifact_name` goes to the shared original pool.
+
+    A dataset stays an ordinary resident file beside its notes (design D1); every other binary of an
+    activated archive pools. An upload door asks before the boundary, for its upload to stage the pool
+    object there, and `preserve` asks again under the boundary: this is the one rule.
+    """
+    from .add import pools_named_original
+
+    return pools_named_original(vault_root, artifact_name) and not is_dataset_name(artifact_name)
+
+
 def preserve(
     vault_root: Path,
     *,
@@ -478,6 +554,7 @@ def preserve(
     content_base64: str | None = None,
     content: str | None = None,
     content_stream: BinaryIO | None = None,
+    staged: Any | None = None,
     content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
@@ -488,6 +565,8 @@ def preserve(
     text_origin: str = "upload",
     raw_protection: bool = False,
     media_pending: bool = False,
+    diarize: bool | None = None,
+    defer_fanout_to_terminal: bool = False,
     _allocation: Mapping[str, str | None] | None = None,
     _prepare: Callable[[dict], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
@@ -501,6 +580,16 @@ def preserve(
     `media_pending` stores a media stub in the pending state `media_processing.reconcile_media`
     would give it. A caller that reconciles the original straight after sets it, so that
     reconcile only queues the job instead of committing the page a second time.
+
+    `diarize` records an explicit speaker-label choice on an audio or video sidecar.
+
+    `staged` is a binary that an upload door already copied, hashed and fsynced into a private stage
+    (`upload_stage.StagedUpload`) before it took the mutation boundary. It stands in for
+    `content_stream`: nothing is copied here, and the batch renames the stage into place.
+
+    `defer_fanout_to_terminal` is the upload doors' opt-in. The pages' full-refresh custody is recorded
+    before the install, and the derived fan-out waits for the caller's `fanout_after_release` scope, so
+    the boundary is held only to plan and install.
     """
     if text_origin not in ("upload", "client"):
         raise ValueError("text_origin must be 'upload' or 'client'")
@@ -519,6 +608,7 @@ def preserve(
     if category_refusal:
         missing.append("category")
         reasons.append(category_refusal)
+    from . import media_previews
     from .governance import raw_protection as raw_guard
 
     filename_safe, raw_protection = _artifact_name(
@@ -528,7 +618,7 @@ def preserve(
         missing.append("filename")
         reasons.append(_EMPTY_FILENAME)
 
-    if sum(x is not None for x in (content_base64, content, content_stream)) != 1:
+    if sum(x is not None for x in (content_base64, content, content_stream, staged)) != 1:
         return _raise(
             "INVALID_PRESERVE",
             ["content"],
@@ -538,6 +628,14 @@ def preserve(
 
     if missing:
         return _raise("INVALID_PRESERVE", missing, "; ".join(reasons))
+
+    media_type = _extract_module().media_type_for(filename_safe)
+    if diarize is not None:
+        from . import media_engines
+
+        if media_engines.engine_for(media_type) != media_engines.SPEECH:
+            return _raise("DIARIZE_NOT_APPLICABLE", ["diarize"], "speaker labels apply to audio and video only")
+        validate_diarize_text(diarize, text)
 
     now = today or temporal.now()
     date_iso = temporal.render_date(now)
@@ -554,7 +652,12 @@ def preserve(
     if _allocation is not None and _allocation["artifact"] != artifact_path.relative_to(vault_root).as_posix():
         raise ValueError("native preservation destination changed")
 
-    if artifact_path.exists():
+    # A pooled filing has no file at its logical name, which stays taken while its companion binds it.
+    try:
+        taken = artifact_path.exists() or originals.pooled(vault_root, artifact_path) is not None
+    except originals.RetirementUnconfirmed:
+        taken = True  # A filing whose deletion its witness cannot confirm still holds its name.
+    if taken:
         if _allocation is not None:
             raise DefiniteNoEffect.destination_exists(_allocation["destination"])
         return _raise(
@@ -589,9 +692,9 @@ def preserve(
             )
         artifact_bytes = decoded
         artifact_text = None
-    elif content_stream is not None:
-        # Large binary: copied into a bounded private spool below, so no canonical
-        # path becomes visible before governance preflight and held publication.
+    elif content_stream is not None or staged is not None:
+        # Large binary: copied into a bounded private spool below, or already in an upload
+        # stage, so no canonical path becomes visible before governance preflight and held publication.
         artifact_bytes = None
         artifact_text = None
     else:
@@ -620,26 +723,38 @@ def preserve(
 
     container_stack = ExitStack()
     container_metadata = None
-    artifact_stage = tempfile.SpooledTemporaryFile(
-        max_size=min(max(max_decoded_bytes, 1), 8 * 1024 * 1024),
-        mode="w+b",
+    spool_limit = min(max(max_decoded_bytes, 1), 8 * 1024 * 1024)
+    artifact_stage = (
+        staged.open()
+        if staged is not None
+        else tempfile.SpooledTemporaryFile(max_size=spool_limit, mode="w+b")
     )
+
+    def spool(chunk: bytes) -> None:
+        offset = artifact_stage.tell()
+        if offset + len(chunk) <= spool_limit:
+            artifact_stage.write(chunk)
+            return
+        rolling = offset <= spool_limit
+        device = os.stat(tempfile.gettempdir()).st_dev if rolling else os.fstat(artifact_stage.fileno()).st_dev
+        media_capacity.append_disk_spool(vault_root, artifact_stage, chunk, device=device, rolling=rolling)
+
     try:
-        if content_stream is not None:
+        if staged is not None:
+            artifact_size, artifact_hash = staged.size, staged.sha256
+        elif content_stream is not None:
             # Stream into a process-private spool first. It spills to disk above
             # 8 MiB, so large uploads stay bounded in RAM while no canonical path
             # becomes visible before governance preflight succeeds.
-            artifact_size, artifact_hash = _copy_stream(
-                content_stream, artifact_stage, limit=max_stream_bytes
-            )
+            artifact_size, artifact_hash = _copy_stream(content_stream, spool, limit=max_stream_bytes)
         elif artifact_bytes is not None:
-            artifact_stage.write(artifact_bytes)
             artifact_size = len(artifact_bytes)
+            spool(artifact_bytes)
             artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
         else:
             artifact_text_bytes = (artifact_text or "").encode("utf-8")
-            artifact_stage.write(artifact_text_bytes)
             artifact_size = len(artifact_text_bytes)
+            spool(artifact_text_bytes)
             artifact_hash = hashlib.sha256(artifact_text_bytes).hexdigest()
         artifact_stage.seek(0)
 
@@ -652,6 +767,7 @@ def preserve(
                 artifact_stage,
                 artifact_size,
                 artifact_hash,
+                staged=staged,
             )
         writes: list[PlannedWrite] = [
             PlannedWrite(
@@ -659,6 +775,7 @@ def preserve(
                 content=staged_content,
                 create_only=True,
                 expected_hash=MISSING_CONTENT_HASH,
+                media_allocation=True,
             )
         ]
 
@@ -680,19 +797,22 @@ def preserve(
         elif text_clean:
             # An explicit uploader extraction keeps its existing behavior.
             inspection = None
+        pooled_artifact = (isinstance(staged_content, PreparedBinaryContent)
+                           and pools_evidence_original(vault_root, artifact_path.name))
+        if pooled_artifact:
+            writes = [write for write in writes if write.path != artifact_path]
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
         # text later. The actionable stub is independent of worker availability:
         # a disabled/unavailable worker can be remediated and retried later.
-        extract = _extract_module()
-        media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and artifact_text is None and not text_clean
         # Unconditional, because an artifact with no page is not addressable at
         # all: no `exomem_id`, no `ingested_into`, and no corpus presence, since
         # only `.md` is indexed. A preserved transcript used to land exactly
         # that way, which is why citing it reported the source as missing.
         sidecar_path = _sidecar_path(folder / filename_safe, protected=raw_protection)
+        _refuse_reserved_capture(vault_root, (artifact_path, sidecar_path))
         if sidecar_path.exists():
             return _raise(
                 "COMPANION_EXISTS",
@@ -772,6 +892,8 @@ def preserve(
                     sha256=artifact_hash,
                     size=artifact_size,
                 )
+            sidecar_md = set_diarize_pin(sidecar_md, diarize)
+            sidecar_md = media_previews.stamp_intent(sidecar_md, rel_artifact, artifact_hash)
             if document_containers.is_container(filename_safe):
                 container_plan = container_stack.enter_context(document_containers.plan(
                     vault_root, parent=rel_artifact, parent_page=sidecar_rel,
@@ -813,7 +935,7 @@ def preserve(
                       "writes": [write for write in planned if write.path in core_paths]})
 
         # Index + log updates.
-        rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
+        rel_artifact_for_summary = managed_relative(rel_artifact)
         activity_summary = (
             f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
             f"mobile via exomem)"
@@ -829,11 +951,13 @@ def preserve(
             log_body += f" Description: {desc_one_line}"
 
         from .governance import connector_boundary
+        from .vault_store import read as store_read
 
         effect_admitted = connector_boundary.effect_admission(vault_root)
         top_index = kb / "index.md"
-        if top_index.exists() and not raw_protection and effect_admitted(top_index):
-            current_top, _guard = read_guarded_text(vault_root, top_index)
+        top_held = store_read.holds_file(vault_root, relative_posix(top_index, vault_root))
+        if top_held and not raw_protection and effect_admitted(top_index):
+            current_top, top_guard = read_guarded_text(vault_root, top_index)
             new_top, _trim_note = indexes._prepend_recent_activity(
                 with_newline(current_top, "\n"),
                 date_iso=date_iso,
@@ -853,15 +977,19 @@ def preserve(
                 PlannedWrite(
                     path=top_index,
                     content=new_top,
+                    # Keep the existing content-conflict exception before the guard checks.
                     expected_hash=content_hash(current_top),
+                    guard=top_guard,
                 )
             )
             writes.extend(sub_writes)
-        elif not raw_protection and not top_index.exists():
-            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
+        elif not raw_protection and not top_held:
+            warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
-        if log_file.exists() and not raw_protection and effect_admitted(log_file):
+        # A store-mode log is a stored page that may have no file yet; the disk alone would call it missing.
+        log_held = store_read.holds_file(vault_root, relative_posix(log_file, vault_root))
+        if log_held and not raw_protection and effect_admitted(log_file):
             current_log, _guard = read_guarded_text(vault_root, log_file)
             new_log = _prepend_log_entry(
                 current_log,
@@ -876,8 +1004,8 @@ def preserve(
                     expected_hash=content_hash(current_log),
                 )
             )
-        elif not raw_protection and not log_file.exists():
-            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+        elif not raw_protection and not log_held:
+            warnings.append(f"{managed_join('log.md')} missing; skipped log entry")
 
         from .governance import catalog_publication, graph_producer
 
@@ -906,9 +1034,37 @@ def preserve(
         from . import curation_witness
 
         curation_witness.bind_native_core(vault_root, [write for write in writes if write.path in core_paths])
-        batch_atomic_write(writes, vault_root=vault_root,
-                           _prepare=prepare_final if _prepare is not None else None,
-                           _validate_prepared_bindings=_validate_inputs)
+        with contextlib.ExitStack() as pooled_stack:
+            publish_original = None
+            pooled_guards: tuple[PathGuard, ...] = ()
+            if pooled_artifact:
+                from .add import staged_pool_publication
+
+                publish_original = staged_pool_publication(
+                    pooled_stack, vault_root, artifact_stage, artifact_hash, artifact_size,
+                    prepared=staged.pool if staged is not None else None)
+                # A pooled filing leaves no ordinary file at its logical path; one appearing there would shadow it.
+                pooled_guards = (PathGuard.capture(vault_root, rel_artifact, leaf_policy="absent"),)
+            if defer_fanout_to_terminal and _prepare is None:
+                from . import add as add_module
+
+                publication_intents: list[object] = []
+                created_paths = [write.path for write in writes if not os.path.lexists(write.path)]
+                custody = add_module.full_refresh_custody(vault_root, writes)
+                committed = batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                                               post_commit_fanout=False,
+                                               publication_intents_out=publication_intents,
+                                               _validate_prepared_bindings=_validate_inputs,
+                                               _publish_originals=publish_original)
+                assert isinstance(committed, list)
+                # Queued now, so a catalog refusal below still leaves the committed pages their fan-out.
+                add_module.deferred_fanout(vault_root, committed, created_paths=created_paths,
+                                           publication_intents=publication_intents, receipts=custody)
+            else:
+                batch_atomic_write(writes, vault_root=vault_root, required_guards=pooled_guards,
+                                   _prepare=prepare_final if _prepare is not None else None,
+                                   _validate_prepared_bindings=_validate_inputs,
+                                   _publish_originals=publish_original)
         written_artifact = True
         from . import lexstore
 
@@ -940,6 +1096,8 @@ def preserve(
 
     from .media_store import enqueue_offload
 
+    if not media_pending and not media_previews.enqueue(vault_root, artifact_path, expected_sha256=artifact_hash):
+        warnings.append("Preview admission deferred. Media reconciliation will retry the recorded intent.")
     enqueue_offload(vault_root, artifact_path)
     return PreserveResult(
         path=artifact_path.relative_to(vault_root).as_posix(),
@@ -962,7 +1120,8 @@ def preserve_stream(
     scope: str,
     category: str,
     filename: str,
-    stream: BinaryIO,
+    stream: BinaryIO | None = None,
+    staged: Any | None = None,
     content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
@@ -972,8 +1131,13 @@ def preserve_stream(
     text_origin: str = "upload",
     raw_protection: bool = False,
     media_pending: bool = False,
+    diarize: bool | None = None,
+    defer_fanout_to_terminal: bool = False,
 ) -> PreserveResult:
     """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
+
+    A `staged` binary (an upload door's own copy, made before the mutation boundary) is committed
+    in place of a `stream`: the commit takes the boundary only to plan and install it.
 
     The bytes arrive out-of-band (multipart over HTTP) and are copied to disk in
     chunks, so a multi-hundred-MB upload never materializes fully in RAM — peak
@@ -990,6 +1154,7 @@ def preserve_stream(
         category=category,
         filename=filename,
         content_stream=stream,
+        staged=staged,
         content_type=content_type,
         description=description,
         text=text,
@@ -999,6 +1164,8 @@ def preserve_stream(
         text_origin=text_origin,
         raw_protection=raw_protection,
         media_pending=media_pending,
+        diarize=diarize,
+        defer_fanout_to_terminal=defer_fanout_to_terminal,
     )
 
 
@@ -1047,7 +1214,7 @@ _STREAM_CHUNK = 1024 * 1024  # 1 MiB copy buffer
 
 def _copy_stream(
     stream: BinaryIO,
-    destination: IO[bytes],
+    write: Callable[[bytes], None],
     *,
     limit: int,
 ) -> tuple[int, str]:
@@ -1065,9 +1232,9 @@ def _copy_stream(
             break
         written += len(buf)
         if written > limit:
-            _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
+            raise too_large(limit)
         digest.update(buf)
-        destination.write(buf)
+        write(buf)
     return written, digest.hexdigest()
 
 
@@ -1225,9 +1392,10 @@ def _render_sidecar(
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
-    Uses `type: source` (with `source_type: other`) since the page-type
-    taxonomy doesn't have a dedicated `evidence` type. Tags surface the
-    evidence + scope context.
+    Uses `type: source` since the page-type taxonomy doesn't have a dedicated
+    `evidence` type. A dataset card carries `dataset-export`; every other sidecar
+    carries the unclassified kind, because no agent chose one for the artifact.
+    Tags surface the evidence + scope context.
 
     `description` is a short human caption; `text` is the full extracted/OCR'd
     content of the artifact. Either or both may be present (the caller only
@@ -1257,7 +1425,11 @@ def _render_sidecar(
     label = _ARTIFACT_TREE_LABELS.get(tree, "Evidence")
     display_title = f"{label}: {artifact_name}"
     lines.append(f"title: {yaml_scalar(display_title)}")
-    lines.append("source_type: dataset-export" if dataset_format else "source_type: other")
+    lines.append(
+        "source_type: dataset-export"
+        if dataset_format
+        else f"source_type: {source_taxonomy.UNCLASSIFIED_KIND}"
+    )
     lines.append(f"captured: {date_iso}")
     if inspection is not None:
         lines.append(f"inspection_status: {inspection.status}")
@@ -1398,6 +1570,17 @@ def _render_sidecar(
     return "\n".join(lines)
 
 
+def _require_unclaimed_page(vault_root: Path, page: Path) -> None:
+    """Raise `prior_claims.ReservedPathError` when a moved page still claims `page`.
+
+    A binary at such a path arrived after its namesake pair moved. A page for it there would
+    capture the moved page's old links, so the binary stays unpaged until it is renamed.
+    """
+    from . import prior_claims
+
+    prior_claims.require_unreserved(vault_root, page.relative_to(vault_root).as_posix())
+
+
 def ensure_media_sidecar(
     vault_root: Path, binary_path: Path, *, today: dt.date | None = None
 ) -> tuple[Path, bool]:
@@ -1423,6 +1606,7 @@ def ensure_media_sidecar(
     connector_boundary.require_create(vault_root, sidecar.relative_to(vault_root).as_posix(), replace_existing=True)
     if sidecar.exists():
         return sidecar, False
+    _require_unclaimed_page(vault_root, sidecar)
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)
     md = _render_sidecar(
@@ -1480,6 +1664,7 @@ def ensure_artifact_page(
     connector_boundary.require_create(vault_root, page.relative_to(vault_root).as_posix(), replace_existing=True)
     if page.exists():
         return page, False
+    _require_unclaimed_page(vault_root, page)
 
     rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
     tree, scope, category = artifact_location(rel)
@@ -1657,6 +1842,7 @@ def update_sidecar_extraction(
     binary_hints: tuple[int, int] | None = None,
     defer_index_fanout: bool = False,
     defer_graph_completion: bool = False,
+    commit_batch: Callable[[Path, tuple[PlannedWrite, ...]], list[Path]] | None = None,
 ) -> list[Path] | DeferredGraphCompletion:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
@@ -1671,6 +1857,9 @@ def update_sidecar_extraction(
     frontmatter list so the transcript's `[Speaker A]: …` turns are also queryable
     structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
     existing call site is unaffected.
+
+    A supplied `commit_batch` publishes the prepared writes and owns their index
+    fan-out. The caller can keep a short guarded commit without holding it for indexing.
     """
     before, guard = read_guarded_text(vault_root, sidecar_path)
     plan, write = sidecar_extraction_writes(
@@ -1686,12 +1875,14 @@ def update_sidecar_extraction(
         ocr=ocr,
         binary_hints=binary_hints,
     )
-    result = commit_media_sidecar_writes(
-        vault_root,
-        (write, *plan.writes),
-        post_commit_fanout=not defer_index_fanout,
-        defer_graph_completion=defer_graph_completion,
-    )
+    writes = (write, *plan.writes)
+    if commit_batch is None:
+        result = commit_media_sidecar_writes(
+            vault_root, writes,
+            post_commit_fanout=not defer_index_fanout, defer_graph_completion=defer_graph_completion,
+        )
+    else:
+        result = commit_batch(vault_root, writes)
     parts = _parts_module()
     kept = parts.retire(vault_root, plan.surplus)
     if kept:
@@ -1715,17 +1906,19 @@ def sidecar_extraction_writes(
     """
     parts = _parts_module()
     pieces = parts.split(text)
+    metadata = parse_frontmatter(before)[0]
     plan = parts.plan(
         vault_root,
         sidecar_path,
         pieces,
-        inherited=parse_frontmatter(before)[0],
+        inherited=metadata,
         date_iso=temporal.stamp(temporal.now()),
     )
     content = render_sidecar_extraction(
         before,
         text=pieces[0],
         parts=parts.layout(sidecar_path, pieces),
+        identity_check=document_identity.after_extraction(metadata, pieces[0]),
         **fields,
     )
     write = PlannedWrite(
@@ -1752,15 +1945,38 @@ def _part_field_lines(parts: Layout | None) -> list[str]:
 #: with the old text. They are the sidecar schema's own field names, a closed set.
 _SPEAKER_FIELDS = ("speakers", "speaker_verification")
 _ASR_FIELD_PREFIX = "asr_"
+_DIARIZE_REQUESTED_FIELD = "diarize_requested"
 _EXTRACTION_FIELDS = frozenset({
     "extracted_by", "processing_state", "processing_attempts", "processing_error",
-    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD, *_SPEAKER_FIELDS,
+    "processing_retryable", "processing_next_action", OCR_CONFIDENCE_FIELD,
+    _DIARIZE_REQUESTED_FIELD, *_SPEAKER_FIELDS,
 })
 
 
 def is_extraction_field(key: str) -> bool:
     """Whether a sidecar frontmatter key describes the extraction held under `## Extracted text`."""
     return key in _EXTRACTION_FIELDS or key.startswith(_ASR_FIELD_PREFIX)
+
+
+def diarize_pin(content: str) -> bool | None:
+    """Read the item's explicit speaker-label preference from its sidecar."""
+    value = parse_frontmatter(content)[0].get(_DIARIZE_REQUESTED_FIELD)
+    return value if isinstance(value, bool) else None
+
+
+def set_diarize_pin(content: str, diarize: bool | None) -> str:
+    """Save an explicit preference and keep an existing preference when omitted."""
+    if diarize is None:
+        return content
+    return _set_frontmatter_field(content, _DIARIZE_REQUESTED_FIELD, "true" if diarize else "false")
+
+
+def disclose_retained_speaker_choice(receipt: dict, requested: bool | None) -> None:
+    """Tell a caller that reuse of stored bytes kept the existing choice."""
+    if requested is not None:
+        receipt.setdefault("warnings", []).append(
+            "The stored recording keeps its speaker-label choice. To change it, use process_media with reprocess."
+        )
 
 
 def render_sidecar_extraction(
@@ -1770,13 +1986,16 @@ def render_sidecar_extraction(
     engine: str,
     speakers: list[dict] | None = None,
     speaker_verification: str | None = None,
+    diarize: bool | None = None,
     attempts: int | None = None,
     asr: AsrFacts | None = None,
     ocr: OcrFacts | None = None,
+    capture: CaptureFacts | None = None,
     prior_extractions: tuple[str, ...] = (),
     reset_speakers: bool = False,
     parts: Layout | None = None,
     binary_hints: tuple[int, int] | None = None,
+    identity_check: dict | None = None,
 ) -> str:
     """Render an extraction sidecar without touching canonical or derived state.
 
@@ -1784,8 +2003,9 @@ def render_sidecar_extraction(
     part pages that hold the rest, as `extraction_parts.layout` gives it.
 
     `asr` records what the speech engine decided; facts of an earlier extraction never
-    survive into the new one. `ocr` records the confidence of an image's OCR and holds the
-    words it withheld under `## Low-confidence OCR`; an extraction without it records neither.
+    survive into the new one. `ocr` records confidence and withheld words. The engine label
+    carries any OCR text availability measurement.
+    `capture` is what the original states about its capture; without it the page's capture fields stay as they are.
     `prior_extractions` lists, in order, the vault-relative
     paths (no extension) of the pages that hold the extractions this one replaced.
     `reset_speakers` drops the speaker fields of the replaced transcript, whose labels
@@ -1804,7 +2024,10 @@ def render_sidecar_extraction(
     content = before
     if reset_speakers:
         content = _remove_frontmatter_fields(content, lambda key: key in _SPEAKER_FIELDS)
-    content = _set_frontmatter_field(content, "extracted_by", engine)
+    content = set_diarize_pin(content, diarize)
+    if diarize is False or (diarize is None and diarize_pin(before) is False):
+        speaker_verification = "not-requested"
+    content = _set_frontmatter_field(content, "extracted_by", engine_with_ocr_text(engine, ocr))
     content = _set_frontmatter_field(content, "processing_state", "completed")
     content = _set_frontmatter_field(content, "processing_error", "null")
     content = _set_frontmatter_field(content, "processing_retryable", "false")
@@ -1828,6 +2051,11 @@ def render_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_asr_facts(content, asr)
     content = _set_ocr_confidence(content, ocr)
+    if capture is not None:
+        content = set_capture_fields(content, capture)
+    if identity_check is not None:
+        # The recorded check could not read a scanned PDF; the OCR text now can (`document_identity.after_extraction`).
+        content = _set_frontmatter_field(content, "identity_check", document_identity.render(identity_check))
     if binary_hints is not None:
         content = _media_processing_module().record_read_hints(
             content, mtime_ns=binary_hints[0], ctime_ns=binary_hints[1]
@@ -1842,6 +2070,63 @@ def render_sidecar_extraction(
         content, text, _cap_low_confidence_text(ocr.low_confidence_text) if ocr is not None else ""
     )
     return with_newline(content, newline)
+
+
+def set_capture_fields(content: str, capture: CaptureFacts) -> str:
+    """`content` with its capture fields replaced by exactly what `capture` states, in the frontmatter alone.
+
+    A field that the file does not state is removed, so a sidecar never keeps a value that the original
+    no longer supports. The extracted text, the preserved notes and every other field stay as they are.
+    """
+    stated = capture.frontmatter()
+    content = _remove_frontmatter_fields(
+        content, lambda key: key in capture_metadata.FIELDS and key not in stated
+    )
+    for field, value in stated.items():
+        content = _set_frontmatter_field(content, field, value)
+    return content
+
+
+def without_position_fields(content: str) -> str | None:
+    """`content` as a page with no recorded position reads: the position fields removed, nothing else.
+
+    The lines are removed by their key, so a key spelled another way (quoted, spaced) survives. A text
+    that still states a position afterwards has no safe form to show, and the answer is `None`.
+    """
+    stripped = _remove_frontmatter_fields(content, lambda key: key in capture_metadata.LOCATION_FIELDS)
+    return None if states_position(stripped) else stripped
+
+
+def states_position(content: str) -> bool:
+    """Whether the page text states a position, or has frontmatter too damaged to prove that it states none."""
+    try:
+        fields = parse_frontmatter(content, custody=True)[0]
+    except FrontmatterError:
+        # An unparseable block cannot be shown to hold no position (a key can be escaped past any name check), so it
+        # counts as stating one and a restricted caller gets no raw text. The body and parsed fields stay readable.
+        return True
+    return capture_metadata.carries_position(fields)
+
+
+def render_capture_block(before: str, capture: CaptureFacts) -> str:
+    """The owner backfill's write: `before` with only its capture block replaced.
+
+    A page that already holds exactly that block comes back as it is. A sidecar whose preserved notes
+    have no machine-owned boundary is refused when the write would change it, as an extraction write
+    is: the backfill leaves such a page to its owner rather than guess.
+    """
+    newline = document_newline(before)
+    text = with_newline(before, "\n")
+    updated = set_capture_fields(text, capture)
+    if updated == text:
+        return before
+    if _has_ambiguous_legacy_preserved_notes(text):
+        raise PreserveError(
+            code="AMBIGUOUS_SIDECAR_BOUNDARY",
+            missing=[],
+            reason="unmarked nonempty preserved notes have no machine-owned boundary",
+        )
+    return with_newline(updated, newline)
 
 
 #: The pin a caller left asks for the same language on every later run, so it outlives a new extraction.
@@ -1863,7 +2148,7 @@ def asr_language_pin(content: str) -> tuple[str | None, bool]:
 
 
 def _set_ocr_confidence(content: str, ocr: OcrFacts | None) -> str:
-    """Record the mean word confidence of this extraction's OCR, or drop the one an earlier extraction left."""
+    """Record the mean OCR word confidence or remove the measurement from the earlier extraction."""
     if ocr is None or ocr.confidence is None:
         return _remove_frontmatter_fields(content, lambda key: key == OCR_CONFIDENCE_FIELD)
     return _set_frontmatter_field(content, OCR_CONFIDENCE_FIELD, repr(round(float(ocr.confidence), 1)))
@@ -2016,6 +2301,10 @@ def commit_media_sidecar_writes(
             ),
             operation="vault_store_media_sidecar_commit",
         )
+    from . import trash_metadata
+
+    # The catalog binds the page bytes before the batch, so a Trash backlink that the batch ends goes first.
+    writes = trash_metadata.withdraw_ended_backlinks(vault_root, writes)
     intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
 
     def graph_replacement_provider():
@@ -2184,7 +2473,8 @@ def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     head, body = content[:end], content[end:]
     pattern = re.compile(rf"(?m)^{re.escape(field)}:.*$")
     if pattern.search(head):
-        head = pattern.sub(f"{field}: {value}", head, count=1)
+        line = f"{field}: {value}"
+        head = pattern.sub(lambda _match: line, head, count=1)  # a callable: a backslash in a value is no template escape
     else:
         head = head.rstrip("\n") + f"\n{field}: {value}"
     updated = head + body

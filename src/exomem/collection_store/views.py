@@ -13,7 +13,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .. import held_fs, record_formats, reserved_paths, vault
-from . import authority, capability, connection, governance, log_view, summary, typed_storage
+from . import (
+    authority,
+    capability,
+    connection,
+    governance,
+    held_sources,
+    log_view,
+    summary,
+    typed_storage,
+)
 
 STAGE_PREFIX = ".exomem-collection-stage-"
 ASIDE_PREFIX = ".exomem-collection-aside-"
@@ -180,6 +189,7 @@ class PublicationBatch:
         the pair needs no render to be proved.
         """
         conn = self.writer.connection
+        dependency = None
         if projection["kind"] == "item":
             row = conn.execute("SELECT governance_json,updated_txn,values_json,encoding,collection_id FROM items "
                                "WHERE row_id=?", (projection["row_id"],)).fetchone()
@@ -200,8 +210,10 @@ class PublicationBatch:
                     (projection["collection_id"],),
                 ).fetchone()
         else:
-            row = conn.execute("SELECT governance_json FROM held_candidates WHERE held_id=? AND view_path=?",
+            row = conn.execute("SELECT governance_json,dependency_json FROM held_candidates WHERE held_id=? AND view_path=?",
                                (Path(projection["path"]).stem, projection["path"])).fetchone()
+            if row is not None and row[1] is not None:
+                dependency = held_sources.Descriptor.model_validate_json(row[1]).model_dump(mode="json")
         if row is None:
             return None
         metadata = governance._json(governance._metadata(row[0]))
@@ -246,6 +258,8 @@ class PublicationBatch:
         context = {"path": projection["path"], "collection_id": cid, "kind": projection["kind"],
                 "row_id": projection.get("row_id"), "row_version": version,
                 "sha256": digest, "governance_json": metadata}
+        if dependency is not None:
+            context["source_dependency"] = dependency
         if projection["kind"] == "log" and pair is None:
             # Only a render of this snapshot proves its frame; historical governance backfill cannot.
             frame = conn.execute("SELECT log_frame_json FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
@@ -275,7 +289,9 @@ class PublicationBatch:
             result = self._fs().file(parent, Path(path).name)
             if result.ok:
                 with result.require() as file:
-                    raw = self._fs().read(file).require()
+                    from . import edit_back
+
+                    _, raw = edit_back._read_render(self._fs(), file)
                     digest = _digest(raw)
                 pair = next((pair for pair in pairs if pair[1] == digest), None)
                 if pair is not None:
@@ -343,7 +359,9 @@ class PublicationBatch:
             opened = self._fs().file(parent, Path(path).name)
             if opened.ok:
                 with opened.require() as file:
-                    raw = self._fs().read(file).require()
+                    from . import edit_back
+
+                    native_version, raw = edit_back._read_render(self._fs(), file)
                 digest = _digest(raw)
                 if digest in self.accepted_digests(path, descriptor):
                     # An earlier transaction adopted or preserved these bytes; this install may displace them.
@@ -351,7 +369,8 @@ class PublicationBatch:
                 elif digest not in {previous["published_sha256"], previous["pending_sha256"]}:
                     source = {"source_pairs": previous["source_pairs"],
                               "source_contexts": contexts}
-                    if not self.writer._register_view_input(previous, raw, descriptor["token"], "offline", source=source):
+                    if not self.writer._register_view_input(previous, raw, descriptor["token"], "offline", source=source,
+                                                            native_version=native_version):
                         self.pending = True
             elif opened.error.code != "MISSING":
                 raise opened.error
@@ -393,7 +412,7 @@ class PublicationBatch:
         return self.filesystem
 
     def _parent(self, path, *, create=False):
-        relative = str(Path(path).parent)
+        relative = held_fs.split_relative(path)[0]
         if relative not in self.parents:
             self.parents[relative] = self.stack.enter_context(
                 self._fs().parent(relative, create=create, access="mutate").require()
@@ -652,6 +671,13 @@ class PublicationBatch:
                 if result.ok:
                     aside = ASIDE_PREFIX + publication.descriptor["token"] + f"-{slot}"
                     with result.require() as file:
+                        plan = self.writer._dependency_plan
+                        if plan is not None:
+                            from . import edit_back
+
+                            version, raw = edit_back._read_render(fs, file)
+                            if not plan.native_input(publication.path, None, "offline", raw, version):
+                                raise held_fs.HeldFsError("INPUT_CHANGED", "projection target lacks its admitted native observation")
                         if os.name == "nt":
                             fs.rename(file, parent, aside).require()
                         else:

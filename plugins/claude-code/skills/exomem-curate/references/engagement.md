@@ -58,12 +58,15 @@ Updating a resolved entity follows the live capture disposition; the threshold f
   recurring routine, historical baseline, or durable affiliation. Capture it only
   when both stability or recurrence and reusable comparison, interpretation, or
   decision value are clear. Attach a facet or affiliation to a uniquely resolved
-  Entity; otherwise save one concise compiled observation. Use Records only for an
-  observed measurement accepted by a compatible existing collection. Fleeting
-  preferences, one-off activity, incidental associations, trivial metrics, and
-  tentative events stay quiet. Durable interpretations may be preserved with
-  explicit attribution and uncertainty; they are not established facts or
-  observed events. Eligibility never creates an Entity, collection, or
+  Entity; otherwise save one concise compiled observation. A recurring named item or
+  measurement goes to Records: reuse a matching collection by natural key, else
+  create a minimal one under `proactive_capture`. Fleeting
+  preferences, one-off activity, incidental associations, and trivial metrics get
+  no note. A tentative or unresolved claim never becomes a baseline: it gets no
+  facet and no affiliation. When later work could use it, save it as tentative,
+  attributed, with its uncertainty (see the landing below). Durable interpretations
+  may be preserved with explicit attribution and uncertainty; they are not
+  established facts or observed events. Eligibility never creates an Entity, collection, or
   schema: a new Entity or your own affiliation edge follows `proactive_capture`;
   accepting a queued relation uses `link_acceptance`; merge or substantial curation
   uses confirmed `restructure_execution`; concise observations and narrow additive
@@ -125,19 +128,36 @@ Updating a resolved entity follows the live capture disposition; the threshold f
 - An **observed outcome or event** is the mirror class: the conversation reports
   that something happened, was produced, measured, delivered, approved,
   published, or failed. Route it to Records — `add_record(...)`
-  into the one compatible collection.
+  into the one compatible collection, else a minimal new one under `proactive_capture`.
 - **Pairing rule.** Append an observed outcome to Records first; it is the
   canonical observation. It never changes Planning automatically. An explicit
   user intent may request a guarded transition; otherwise a
   propose-after-outcome posture may only propose one. A **tentative** claim ("probably posted, not sure") is never
-  written as an event — say so in a note field if the manifest offers one — and
-  elapsed time is never an outcome.
+  written as an event, and elapsed time is never an outcome. When later work could
+  use the claim, save it as unsure and attributed, in a note field if the manifest
+  offers one (see the landing below).
+- A **held view, an unsure report, an open question, or a settled value** is a
+  landing too. Save each at its true strength: never write a claim more certain,
+  more general, or more settled than its source made it.
+  - A view someone holds, or an interpretation or working hypothesis the evidence
+    does not settle, is saved attributed to its holder, with its uncertainty. A
+    remark made in passing is not a held view.
+  - A person's unsure report that later work could use ("I think I posted it
+    Tuesday") is saved as unsure and attributed, with its doubt, never as fact, as
+    an event, or as a baseline.
+  - A question the work leaves open is saved as open, including whether something
+    happened at all.
+  - The values a task settled (times, prices, terms, contacts, limits) are saved in
+    full, never as a pointer to a working file.
+
+  Mid-thought exploration gets no note. A write never mentions what stays unwritten,
+  not even to say it was left out.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
 
-Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
-questions, or incidental names without durable reusable context. Capture at the
-landing, not during the flight.
+Not a stepping-stone: mid-thought exploration, brainstorm tangents, or incidental
+names without durable reusable context. Capture at the landing, not during the
+flight.
 
 Do not wait to be asked. "Did you save that?" arriving after a result already
 landed is the failure, not the prompt.
@@ -356,9 +376,11 @@ receipt, through `add_record(delivery={...}, ...)` and one
 compatible existing Records collection whose declared link field names the
 Evidence companion. Keep reported remote identity separate and set verified
 identity only from matching platform proof; never infer remote byte equality.
-A missing collection is `structural_suggestions`; creating or changing it is
-confirmed `restructure_execution`. A separately accepted relation remains
-`link_acceptance`. Adoption success never waits on any of those later changes.
+A missing collection follows the bounded Records rule: one minimal collection under
+`proactive_capture` ([Records and Planning](planning-records.md)). A collection outside
+those bounds, and any schema change other than adding fields, is confirmed `restructure_execution`. A separately
+accepted relation remains `link_acceptance`. Adoption success never waits on any of those
+later changes.
 
 ## Global stance
 

@@ -10,10 +10,10 @@ read back from the store's rows, never from the importer's own report.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
-import sys
 import threading
 import types
 
@@ -27,6 +27,8 @@ from test_vault_store_migration import build_indexes, migrate_apply
 from test_vault_store_projector import NOTES
 
 from exomem import (
+    delete_directory,
+    delete_file,
     extract,
     file_watcher,
     media_jobs,
@@ -34,6 +36,8 @@ from exomem import (
     media_store,
     media_worker,
     move_file,
+    preserve,
+    recover_from_trash,
     reserved_paths,
 )
 from exomem.collection_store import runtime
@@ -47,10 +51,6 @@ coordinator_url = importer_suite.coordinator_url
 vault = importer_suite.vault
 stored = importer_suite.stored
 selected_store = media_store_suite.selected_store
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 PICTURE = f"{NOTES}/plain.png"
 PICTURE_BYTES = b"\x89PNG plain"
@@ -282,6 +282,166 @@ def test_moving_an_evicted_original_fetches_it_first_and_the_media_store_still_k
     assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", moved) == [(moved,)]
 
 
+ORIGINAL_BYTES = b"original bytes"
+
+
+def offloaded(vault, rel):
+    """An original at ``rel`` that file mode extracted and offloaded to the media store."""
+    path = vault / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ORIGINAL_BYTES)
+    with library_scope():
+        media_processing.reconcile_media(vault, path)
+        preserve.update_sidecar_extraction(
+            vault, path.with_name(f"{path.name}.md"), text="extracted text", engine="text"
+        )
+    media_jobs.MediaJobStore(vault).retire_ocr(path, "text")
+    _offload(vault, path)
+    return path
+
+
+def enter_store_mode(vault):
+    stop_writer()  # file mode's writes started this process's writer; the offline route refuses it
+    build_indexes(vault)
+    assert migrate_apply(vault) == 0
+
+
+def on_store_thread(thread, work):
+    """Run a write door on the store thread, with its writer bound, as the service runs it."""
+    results = []
+    thread.run(lambda _writer: results.append(work()))
+    return results[0]
+
+
+def test_an_original_evicted_before_store_mode_comes_back_from_the_trash_without_a_record(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode recovery that looks for a binary only in the store's records: an original that
+    was evicted in the trash before the vault entered store mode has none, and its dry run and its
+    recovery answered NOT_FOUND although the media store holds its bytes."""
+    rel = f"{NOTES}/Media/loose.txt"
+    offloaded(vault, rel)
+    trashed = delete_file.delete_file(vault, path=rel, confirm=True)
+    with media_store.open_original(vault, vault / trashed.trash_path):
+        pass  # a read records the cache binding that an eviction at the trash path needs
+    assert media_store.evict(vault, vault / trashed.trash_path)
+    enter_store_mode(vault)
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", trashed.trash_path) == []
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        planned = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path, validate_only=True))
+        recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path))
+    finally:
+        thread.close()
+
+    assert planned.restored_path == recovered.restored_path == rel
+    assert (vault / rel).read_bytes() == ORIGINAL_BYTES
+    assert not (vault / trashed.trash_path).exists()
+
+
+def test_a_trashed_folder_that_holds_a_recorded_evicted_original_comes_back_whole(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode folder recovery that lists the folder before it fetches: the store records the
+    evicted original below the folder, the disk does not hold it, and the dry run and the recovery
+    refused with RECOVER_FAILED."""
+    folder = f"{NOTES}/Album"
+    rel = f"{folder}/sample.txt"
+    (vault / folder).mkdir(parents=True)
+    (vault / rel).write_bytes(ORIGINAL_BYTES)
+    trashed = delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True)
+    entry = f"{trashed.trash_path}/sample.txt"
+    offloaded(vault, entry)  # the media worker settles the original where it now lies
+    enter_store_mode(vault)
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", entry) == [(entry,)]
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    try:
+        with media_store.open_original(vault, vault / entry):
+            pass  # a read records the cache binding that an eviction needs
+        assert media_store.evict(vault, vault / entry)
+        planned = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path, validate_only=True))
+        recovered = on_store_thread(thread, lambda: recover_from_trash.recover_from_trash(
+            vault, trash_path=trashed.trash_path))
+    finally:
+        thread.close()
+
+    assert planned.restored_path == recovered.restored_path == folder
+    assert (vault / rel).read_bytes() == ORIGINAL_BYTES
+    assert rows(vault, "SELECT path FROM store_binaries WHERE path = ?", rel) == [(rel,)]
+
+
+def test_a_folder_dry_run_reads_the_store_as_often_for_four_evicted_originals_as_for_two(
+    vault, selected_store, monkeypatch
+):
+    """A store-mode folder dry run that resolves each evicted original below the folder with its own read
+    of the companion's body, though the recovery has read the folder's pages in one batch: every evicted
+    original added one statement. Both folders hold four originals and four pages, so they differ only in
+    how many originals are evicted. Each folder's dry run runs once before the counted one, so the
+    registries that the first recovery loads are not counted."""
+    trashed = {}
+    for evicted in (2, 4):
+        folder = f"{NOTES}/Album {evicted}"
+        (vault / folder).mkdir(parents=True)
+        for index in range(4):
+            (vault / folder / f"sample-{index}.txt").write_bytes(ORIGINAL_BYTES)
+        trash = delete_directory.delete_directory(vault, path=folder, confirm=True, recursive=True).trash_path
+        trashed[evicted] = (folder, trash, [f"{trash}/sample-{index}.txt" for index in range(evicted)])
+        for index in range(4):
+            offloaded(vault, f"{trash}/sample-{index}.txt")  # the media worker settles each original where it lies
+    enter_store_mode(vault)
+    thread = StoreThread(vault)
+    serve_through(monkeypatch, thread)
+    statements = {}
+    planned = {}
+    real = read.connection.store_reader
+
+    def traced(trash):
+        log = statements[trash] = []
+
+        @contextlib.contextmanager
+        def tracing(*arguments, **keywords):
+            with real(*arguments, **keywords) as reader:
+                reader.set_trace_callback(log.append)
+                try:
+                    yield reader
+                finally:
+                    reader.set_trace_callback(None)
+
+        def dry_run(writer):
+            writer.connection.set_trace_callback(log.append)
+            try:
+                with monkeypatch.context() as patch:
+                    patch.setattr(read.connection, "store_reader", tracing)
+                    planned[trash] = recover_from_trash.recover_from_trash(
+                        vault, trash_path=trash, validate_only=True)
+            finally:
+                writer.connection.set_trace_callback(None)
+
+        thread.run(dry_run)
+
+    try:
+        for _folder, _trash, entries in trashed.values():
+            for entry in entries:
+                with media_store.open_original(vault, vault / entry):
+                    pass  # a read records the cache binding that an eviction needs
+                assert media_store.evict(vault, vault / entry)
+        for _round in range(2):  # each call starts its folder's log afresh, so the second round counts
+            for _folder, trash, _entries in trashed.values():
+                traced(trash)
+    finally:
+        thread.close()
+
+    assert [planned[trash].restored_path for _folder, trash, _entries in trashed.values()] == [
+        folder for folder, _trash, _entries in trashed.values()]
+    two, four = (statements[trashed[evicted][1]] for evicted in (2, 4))
+    assert two and len(four) == len(two)
+
+
 def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and_restored(
     stored, selected_store, store_thread
 ):
@@ -315,6 +475,37 @@ def test_a_new_original_that_a_store_mode_vault_offloads_can_then_be_evicted_and
 
     assert restored.imported == [] and media_state(stored, PICTURE) == before
     assert before["held"] == []
+
+
+def test_trash_retirement_tracks_the_authoritative_companion_before_markdown_projection(
+    stored, selected_store, store_thread
+):
+    """Disk-only retirement validation loses a stored companion or rejects a legitimate stored edit."""
+    import json
+
+    from exomem import delete_file, originals, trash_metadata
+    from exomem.vault import PlannedWrite
+
+    settling = importer.Importer(stored, run=store_thread.run)
+    (stored / PICTURE).write_bytes(PICTURE_BYTES)
+    settling.import_paths([PICTURE])
+    assert _offload(stored, stored / PICTURE) is not None
+    results = []
+    store_thread.run(lambda _writer: results.append(delete_file.delete_file(stored, path=PICTURE, confirm=True)))
+    trashed = results[0]
+    companion = originals.sidecar_path(stored / PICTURE)
+    before = read.owned_bytes(stored, companion.relative_to(stored).as_posix()).decode("utf-8")
+    assert not originals.sidecar_path(stored / trashed.trash_path).exists()
+    store_thread.run(lambda writer: batch.commit_batch(
+        writer, [PlannedWrite(companion, before + "\nAn updated stored observation.\n")], vault_root=stored,
+    ))
+
+    metadata = json.loads((stored / (trashed.trash_path + trash_metadata.METADATA_SUFFIX)).read_bytes())
+    current = read.owned_bytes(stored, companion.relative_to(stored).as_posix())
+    assert metadata["original_retirement"]["after"] == sha(current)
+    assert media_store.drain_census(stored) == (0, 0)
+    with media_store.open_original(stored, trashed.trash_path) as source:
+        assert source.stream.read() == PICTURE_BYTES
 
 
 def test_a_media_result_that_lands_while_the_store_is_busy_commits_on_the_store_thread(

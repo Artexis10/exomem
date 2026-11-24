@@ -34,19 +34,25 @@ def _constructor_map():
     store's constructor pins the scratch location too.
     """
     from exomem import (
+        brief_watermarks,
         claims,
         deferred_index,
         due_state,
         epistemic_graph,
+        generated_fragment_store,
         graph_sync,
         index_paths,
         lexstore,
         maintenance_jobs,
         media_jobs,
+        media_previews,
         memory_refs,
+        ownership_rotation,
         review_state,
         served_context,
+        source_imports,
         voice_profiles,
+        write_intake,
     )
     from exomem.governance import (
         projection_measurement_store,
@@ -64,6 +70,9 @@ def _constructor_map():
         lane="vector",
         extractor_version="extractor-v1",
         model_version="model-v1",
+    )
+    source_import = source_imports.ImportCapture(
+        key="a" * 64, input_digest="b" * 64, original_sha256="c" * 64, protected=False,
     )
 
     return {
@@ -90,12 +99,18 @@ def _constructor_map():
         ),
         "clip-store": (index_paths.clip_sidecar_path,),
         "refs-store": (memory_refs.sidecar_path,),
+        "generated-fragments-index": (generated_fragment_store.cache_path,),
         "maintenance-jobs-store": (maintenance_jobs.store_path,),
+        "write-intake-store": (write_intake.store_path,),
         "media-jobs-store": (media_jobs.job_store_path, media_jobs.worker_lock_path),
+        "media-previews": (media_previews.store_path,),
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
+        "ownership-review": (ownership_rotation.asked_path, ownership_rotation.rotation_path),
         "review-state": (review_state.state_path,),
+        "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
+        "source-import-intents": (source_import._pending_path,),
         "voice-profile-store": (voice_profiles.voice_profiles_path,),
         "authorization-projections": (
             lambda root: projection_store.variant_store_path(root, namespace),
@@ -114,6 +129,7 @@ def _constructor_map():
 #: automatically and follows content into the vault necessarily.
 _FOLLOWS_ITS_TARGET = {
     "batch-workspace": "stages a note install; atomic rename requires the note's volume",
+    "upload-stage": "an upload's bytes, renamed into a batch workspace and its destination on the vault's volume",
     "held-publication": "temp leaf under the retained parent of the published file",
     "held-probe": "capability probe scratch in the root it tests, only while the probe runs",
     "collection-publication": "staged and displaced view leaves under the retained target parent",
@@ -135,6 +151,7 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "due-state",
     "embeddings-store",
     "freshness-store",
+    "generated-fragments-index",
     "governance-store",
     "graph-coordination",
     "graph-handoff",
@@ -150,15 +167,21 @@ _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
     "lexical-staged-lock",
     "maintenance-jobs-store",
     "media-jobs-store",
+    "media-previews",
+    "ownership-review",
     "references-store",
     "refs-store",
     "review-state",
     "served-context",
+    "source-import-intents",
     "voice-profile-store",
+    "brief-watermarks",
+    "write-intake-store",
 }
 
 _SOURCE_DESCRIBED_TARGET_ADJACENT_FAMILIES = {
     "batch-workspace",
+    "upload-stage",
     "held-publication",
     "held-probe",
     "collection-publication",
@@ -173,8 +196,12 @@ _SOURCE_DESCRIBED_VAULT_CANONICAL_FAMILIES = {
     "collection-replica",
     "consolidation-tree",
     "governance-tree",
+    "generated-fragments",
+    "original-pool",
     "procedure-approvals",
     "source-corrections",
+    "source-custody",
+    "source-imports",
 }
 
 #: Canonical data outside the vault: under the state root, but never rebuilt,
@@ -325,6 +352,48 @@ def test_every_descriptor_has_exactly_one_explicit_placement() -> None:
     ) == len(registry), (
         "every registered family must appear in exactly one placement partition"
     )
+
+
+def test_the_vault_backup_stages_exactly_the_families_declared_not_rebuildable() -> None:
+    from exomem import reserved_paths
+
+    declared = {d.id for d in reserved_paths.non_rebuildable_state_descriptors()}
+
+    # Dropping a family from this set drops its owner decisions out of every backup, so the set is pinned.
+    assert declared == {
+        "governance-store",
+        "media-jobs-store",
+        "voice-profile-store",
+        "review-state",
+        "ownership-review",
+        "collection-store",
+        "collection-archive",
+        "procedure-approval-key",
+        "source-import-intents",
+        "write-intake-store",
+    }
+    assert {d.id for d in reserved_paths.external_canonical_descriptors()} <= declared
+
+
+def test_an_external_family_that_does_not_say_whether_it_is_rebuildable_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new family must choose: leaving it unset would decide silently whether a backup carries its files."""
+    from exomem import reserved_paths
+
+    undecided = reserved_paths.InternalStateDescriptor(
+        "a-new-family", "a_new_family", reserved_paths.StatePlacement.EXTERNAL_STATE, exact=(".a-new-family.sqlite",),
+    )
+    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths._REGISTRY, undecided))
+    with pytest.raises(RuntimeError, match="registry is invalid"):
+        reserved_paths._validate_registry()
+
+    decided = reserved_paths.InternalStateDescriptor(
+        "a-new-family", "a_new_family", reserved_paths.StatePlacement.EXTERNAL_STATE, rebuildable=False,
+        exact=(".a-new-family.sqlite",),
+    )
+    monkeypatch.setattr(reserved_paths, "_REGISTRY", (*reserved_paths._REGISTRY[:-1], decided))
+    reserved_paths._validate_registry()
 
 
 def test_the_seam_resolves_env_override_then_platform_default(

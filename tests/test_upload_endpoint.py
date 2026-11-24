@@ -160,7 +160,7 @@ def test_upload_supported_media_routes_through_canonical_reconciliation(
     monkeypatch.setattr(
         media_processing,
         "reconcile_media",
-        lambda root, path, *, explicit=True: calls.append((root, path, explicit)),
+        lambda root, path, *, explicit=True, commit_guard=None: calls.append((root, path, explicit)),
     )
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
 
@@ -215,6 +215,42 @@ def test_a_fresh_media_upload_is_stored_pending_so_reconciliation_commits_nothin
     assert frontmatter["processing_state"] == "pending"
 
 
+@pytest.mark.parametrize(("choice", "expected"), [("false", False), ("true", True)])
+def test_audio_upload_pins_its_speaker_label_choice(vault, monkeypatch, choice, expected) -> None:
+    from exomem.vault import parse_frontmatter
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    response = client.post(
+        "/upload",
+        files={"file": ("recording.m4a", b"original audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "diarize": choice},
+        headers={"Authorization": "Bearer test-upload-token"},
+    )
+
+    assert response.status_code == 201, response.text
+    receipt = response.json()
+    fields = parse_frontmatter((vault / receipt["sidecar_path"]).read_text())[0]
+    assert fields["diarize_requested"] is expected
+    assert (vault / receipt["path"]).read_bytes() == b"original audio bytes"
+
+
+@pytest.mark.parametrize("lane", ["evidence", "source"])
+def test_audio_upload_refuses_labeling_a_supplied_transcript(vault, monkeypatch, lane) -> None:
+    from exomem import upload_tokens
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="test-upload-token")
+    token = upload_tokens.mint_for_endpoint("test-upload-token", "https://example.invalid", lane=lane)["token"]
+    response = client.post(
+        "/upload", files={"file": ("recording.m4a", b"audio bytes", "audio/mp4")},
+        data={"scope": "Test", "category": "Audio", "source_kind": "session", "diarize": "true", "text": "Caller transcript"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "DIARIZE_NOT_APPLICABLE"
+    assert not list(vault.rglob("recording.m4a*"))
+
+
 def test_upload_reconciles_when_media_worker_is_unavailable(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -226,7 +262,7 @@ def test_upload_reconciles_when_media_worker_is_unavailable(
     monkeypatch.setattr(
         media_processing,
         "reconcile_media",
-        lambda root, path, *, explicit=True: calls.append((root, path, explicit)),
+        lambda root, path, *, explicit=True, commit_guard=None: calls.append((root, path, explicit)),
     )
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
 
@@ -263,7 +299,7 @@ def test_upload_reconciliation_does_not_block_async_event_loop(
     release = threading.Event()
     reconcile_threads: list[int] = []
 
-    def blocking_reconcile(root, path, *, explicit=True) -> None:
+    def blocking_reconcile(root, path, *, explicit=True, commit_guard=None) -> None:
         assert root == vault
         assert path.name == "blocking.m4a"
         reconcile_threads.append(threading.get_ident())
@@ -317,9 +353,14 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     events: list[str] = []
+    real_manager = writer_lease.get_manager()
 
     class RecordingManager:
         depth = 0
+
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
 
         def ensure_writer(self) -> None:
             events.append("legacy-ensure")
@@ -363,36 +404,48 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
     assert events == ["guard-enter", "preserve", "guard-exit"]
 
 
-def test_upload_media_reconciliation_uses_writer_authority(
+def test_upload_media_reconciliation_holds_the_boundary_only_for_its_commit(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from exomem import media_processing, writer_lease
 
     depth = 0
+    seen: list[tuple[int, int]] = []
 
     class Manager:
+        def __getattr__(self, name):  # noqa: ANN001, ANN204
+            # The derived fan-out after the release reads the real manager's state root.
+            return getattr(real_manager, name)
+
         @contextmanager
         def reserved_identity_guard(self, _vault, **_kwargs):
             yield
 
         @contextmanager
         def absorbing_mutation_guard(self, guarded_vault, *, operation):
+            yield
+
+        @contextmanager
+        def mutation_guard(self, guarded_vault, *, operation, **_kwargs):
             nonlocal depth
             assert guarded_vault == vault
+            assert operation == "upload_reconcile_commit"
             depth += 1
             try:
                 yield
             finally:
                 depth -= 1
 
+    def reconcile(_root, _path, *, explicit=True, commit_guard=None):
+        # The provenance hash of the binary runs before the boundary; only the sidecar write takes it.
+        before = depth
+        with commit_guard():
+            seen.append((before, depth))
+
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    real_manager = writer_lease.get_manager()
     monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
-    monkeypatch.setattr(
-        media_processing,
-        "reconcile_media",
-        lambda *_a, **_kw: depth == 1
-        or pytest.fail("post-upload reconciliation escaped mutation guard"),
-    )
+    monkeypatch.setattr(media_processing, "reconcile_media", reconcile)
     response = client.post(
         "/upload",
         files={"file": ("guarded.m4a", b"audio", "audio/mp4")},
@@ -401,6 +454,7 @@ def test_upload_media_reconciliation_uses_writer_authority(
     )
 
     assert response.status_code == 201, response.text
+    assert seen == [(0, 1)]
     assert depth == 0
 
 
@@ -419,6 +473,10 @@ def test_upload_maps_mutation_lock_errors(
     class RejectingManager:
         def ensure_writer(self) -> None:
             return None
+
+        @contextmanager
+        def reserved_identity_guard(self, _vault, **_kwargs):
+            yield
 
         @contextmanager
         def absorbing_mutation_guard(self, _vault, *, operation):
@@ -466,20 +524,77 @@ def test_an_upload_waits_out_a_held_boundary_and_commits_once(
     ]
 
 
-def test_a_busy_raised_after_the_stream_was_read_is_not_run_again(
+@pytest.mark.parametrize("door", ["upload-evidence", "upload-source", "session-evidence", "session-source"])
+def test_every_upload_door_hands_its_commit_a_stage_filled_before_the_boundary(
+    vault, monkeypatch: pytest.MonkeyPatch, door: str
+) -> None:
+    """A commit that copies the bytes itself holds the boundary for the whole copy, and no result shows it."""
+    from exomem import add, preserve, server_transfer, upload_sessions, upload_stage, upload_tokens
+
+    data = b"bytes copied once, before the boundary"
+    digest = hashlib.sha256(data).hexdigest()
+    handed: list[tuple[object, object]] = []
+    real_preserve, real_add = preserve.preserve_stream, add.add
+
+    def preserve_stream(root, **kwargs):
+        handed.append((kwargs.get("staged"), kwargs.get("stream")))
+        return real_preserve(root, **kwargs)
+
+    def add_source(root, source_schema, **kwargs):
+        handed.append((kwargs["artifact"].staged, None))
+        return real_add(root, source_schema, **kwargs)
+
+    monkeypatch.setattr(preserve, "preserve_stream", preserve_stream)
+    monkeypatch.setattr(add, "add", add_source)
+    if door.startswith("upload"):
+        lane = door.removeprefix("upload-")
+        token = upload_tokens.mint("sekret", scope=upload_tokens.upload_scope(lane))
+        response = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret").post(
+            "/upload",
+            files={"file": ("door.bin", data, "application/octet-stream")},
+            data={"scope": "Door", "category": "Stage", "title": "Door"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 201, response.text
+    else:
+        target = {"filename": "door.bin", "scope": "Door", "category": "Stage", "description": None,
+                  "raw_protection": False, "archive": None}
+        if door == "session-source":
+            target |= {"lane": "source", "title": "Door", "source_type": "session", "domain": None,
+                       "url": None, "content_type": None}
+            target["destination"] = server_transfer._source_session_destination(
+                vault, target, size=len(data), sha256=digest)
+        session, _secret = upload_sessions.create(
+            vault, binding=door, length=len(data), sha256=digest, target=target,
+            max_bytes=upload_sessions.DEFAULT_MAX_BYTES)
+        patch = upload_sessions.Patch(session, 0, len(data))
+        patch.write(data)
+        patch.close()
+        server_transfer.commit_session(vault, session.part, session.record)
+
+    assert len(handed) == 1
+    staged, stream = handed[0]
+    assert isinstance(staged, upload_stage.StagedUpload)
+    assert (staged.sha256, staged.size, stream) == (digest, len(data), None)
+    # Whatever the commit did not take is gone once the door returns.
+    assert list(upload_stage.stage_root(vault).glob("*")) == []
+
+
+def test_a_busy_raised_by_the_commit_body_is_not_run_again(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Running the body again would preserve an empty stream: only the acquire is waited out."""
+    """The commit may have installed before it raised, so only the acquire is waited out."""
     from exomem import preserve
     from exomem.cli_ops import OpError
 
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     runs = 0
 
-    def busy_after_reading(_vault, *, stream, **_kwargs):
+    def busy_after_reading(_vault, *, staged, **_kwargs):
         nonlocal runs
         runs += 1
-        stream.read()
+        with staged.open() as handle:
+            handle.read()
         raise OpError("MUTATION_BUSY", "nested boundary busy", details={"committed": False})
 
     monkeypatch.setattr(preserve, "preserve_stream", busy_after_reading)

@@ -493,6 +493,44 @@ def test_scope_constraint_rejects_provenance_and_multiline_oracles(
     assert any(finding["code"] == "invalid_constraint" for finding in compiled.findings)
 
 
+def test_preview_bound_distinguishes_a_large_or_unavailable_approved_dependency(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bridge, source = _write_bridge_fixture(
+        vault, approval=True, source_title="Measured output " * 120,
+    )
+    compiled = policy.load(vault)
+    raw = bridge.read_bytes()
+
+    def decide():
+        with request_scope(_external()):
+            return bridges.admit(vault, BRIDGE_PATH, raw, policy=compiled, audience="external")
+
+    def unavailable():
+        raise TimeoutError
+
+    def large():
+        raise OverflowError
+
+    assert decide().allowed
+    assert source.stat().st_size > len(raw)
+    with bridges.preview_read_bound(len(raw), unavailable, large), pytest.raises(OverflowError):
+        decide()
+
+    from exomem import reserved_paths
+
+    read = reserved_paths.read_generic_bytes
+
+    def hold_dependency(root, value, **kwargs):
+        if value == SOURCE_PATH:
+            raise reserved_paths.ReservedPathLeafError("IO_REFUSED")
+        return read(root, value, **kwargs)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", hold_dependency)
+    with bridges.preview_read_bound(None, unavailable, large), pytest.raises(TimeoutError):
+        decide()
+
+
 def test_complete_bridge_without_release_approval_is_withheld_everywhere(
     vault: Path,
 ) -> None:

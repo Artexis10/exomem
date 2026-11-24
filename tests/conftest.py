@@ -466,25 +466,26 @@ def pytest_runtest_makereport(item, call):  # noqa: ANN001, ANN201
 def _query_deadline_off_the_runner_clock():
     """A functional query test's answer must not depend on how loaded the runner is.
 
-    The interactive profile's 200 ms deadline is wall-clock time from before the query
-    reader opens, so a contended CI shard trips QUERY_TIMEOUT on a query of a few rows.
-    The relaxed profile is the session's baseline, so a test that patches
-    `runtime.PROFILES` through `monkeypatch` saves and restores the baseline and leaks
-    nothing; mutating the profile dict in place would still leak. Tests
-    of the timeout pass their own `timeout_ms`. Unmarked tests also accept an
-    interactive `timeout_ms` up to 10 s, which production refuses above 200 ms.
+    The interactive (200 ms) and records (1 s) budgets count the query thread's CPU, under a
+    wall-clock backstop of 2 s or the budget, so a contended CI shard can still trip
+    QUERY_TIMEOUT on a query of a few rows. The relaxed profiles are the session's baseline,
+    so a test that patches `runtime.PROFILES` through `monkeypatch` saves and restores the
+    baseline and leaks nothing; mutating a profile dict in place would still leak. Tests of
+    the timeout pass their own `timeout_ms`. Unmarked tests also accept an interactive
+    `timeout_ms` up to 10 s, which production refuses above 200 ms.
     """
     from exomem.query_engine import runtime
 
-    shipped = runtime.PROFILES["interactive"]
+    shipped = {name: runtime.PROFILES[name] for name in ("interactive", "records")}
     with pytest.MonkeyPatch.context() as patch:
-        patch.setitem(runtime.PROFILES, "interactive", {**shipped, "timeout_ms": 10_000})
+        for name, profile in shipped.items():
+            patch.setitem(runtime.PROFILES, name, {**profile, "timeout_ms": 10_000})
         yield shipped
 
 
 @pytest.fixture(autouse=True)
 def _shipped_query_deadline(request, monkeypatch, _query_deadline_off_the_runner_clock):
-    """A test marked `query_deadline` checks the shipped interactive profile.
+    """A test marked `query_deadline` checks the shipped interactive and records profiles.
 
     It uses the test's own `monkeypatch`, so the swap unwinds in order with whatever
     else the test patches.
@@ -492,7 +493,8 @@ def _shipped_query_deadline(request, monkeypatch, _query_deadline_off_the_runner
     if request.node.get_closest_marker("query_deadline"):
         from exomem.query_engine import runtime
 
-        monkeypatch.setitem(runtime.PROFILES, "interactive", _query_deadline_off_the_runner_clock)
+        for name, profile in _query_deadline_off_the_runner_clock.items():
+            monkeypatch.setitem(runtime.PROFILES, name, profile)
 
 
 @pytest.fixture(autouse=True)
@@ -535,6 +537,22 @@ def _cancel_upload_reattempts():
         session_ids = list(upload_sessions._RUNNING)
     for session_id in session_ids:
         upload_sessions._forget(session_id)
+
+
+@pytest.fixture(autouse=True)
+def _stop_write_intake_drainers():
+    """No test leaves a write-intake drainer (`exomem-write-intake`) running into the next one.
+
+    The serving runtime starts one per vault and only its shutdown stops it. The thread
+    never ends by itself, so it cannot join `_VAULT_WALKING_THREAD_NAMES`; it is stopped here.
+    """
+    yield
+    from exomem import write_intake
+
+    with write_intake._DRAINERS_LOCK:
+        roots = list(write_intake._DRAINERS)
+    for root in roots:
+        write_intake.stop(root)
 
 
 #: Captured before any test can instrument the filesystem primitives: the
@@ -1045,6 +1063,21 @@ def _drain_background_threads(timeout: float = _GRAPH_QUIESCE_TIMEOUT_SECONDS) -
 
 
 @pytest.fixture(autouse=True)
+def _launcher_support_ends_with_its_test():
+    """No test hands its launcher-support claim to the next.
+
+    A standalone server start claims support for every lifecycle format for the rest of its process. In the
+    suite, that claim would let a later test's new vault start shared storage, which records a format that a
+    managed upgrade then requires.
+    """
+    from exomem import artifact_lifecycle
+
+    claimed = artifact_lifecycle._supported
+    yield
+    artifact_lifecycle._supported = claimed
+
+
+@pytest.fixture(autouse=True)
 def _quiesce_graph_rebuilds():
     """Let no graph rebuild outlive the test that started it.
 
@@ -1208,6 +1241,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # synchronous by default and let its focused recovery tests opt back into
     # the real background path.
     monkeypatch.setenv("EXOMEM_SYNC_DUE_STATE_WARM", "1")
+    # The ownership rotation asks about never-asked pages once a day, so any test that
+    # reads due state would otherwise gain items it did not create. Its own tests set a
+    # daily slice.
+    monkeypatch.setenv("EXOMEM_OWNERSHIP_ROTATION_DAILY", "0")
 
 
 @pytest.fixture
@@ -1257,9 +1294,15 @@ def obligations_only(vault: Path) -> Path:
 
     The Sources there are an outstanding backlog (`unprocessed_source`), which counts
     in the due-state projection. A module that counts dated obligations uses this
-    through `pytestmark`, so the backlog does not shift its totals.
+    through `pytestmark`, so the backlog does not shift its totals. The fixture's
+    slug-named pages are a second backlog (`name_drift`), so that family is switched off.
     """
+    from exomem import review_state
+
     shutil.rmtree(vault / "Knowledge Base" / "Sources")
+    review_state.ReviewStateStore(vault).set_disposition(
+        "name_drift", "off", why="handled: the fixture's slug names are not under test"
+    )
     find_module.clear_cache()
     return vault
 

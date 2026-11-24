@@ -189,6 +189,19 @@ CANDIDATE_SINCE_ANNOTATION = "exomem.io/candidate-since"
 ROLLOUT_ANNOTATIONS = (UPGRADE_WINDOW_ANNOTATION, UPGRADE_WINDOW_AT_ANNOTATION, CANDIDATE_SINCE_ANNOTATION)
 
 
+def upgrade_start_annotations(started_at: str, previous_image: str, target: str) -> dict[str, str]:
+    """warm-cell-catalogue: the hold that an upgrade start writes by patch, not by
+    server-side apply, in the pass that cancels the cell's catalogue builds."""
+
+    return {HOLD_ANNOTATION: "upgrade", HOLD_STARTED_ANNOTATION: started_at,
+            PREVIOUS_IMAGE_ANNOTATION: previous_image, UPGRADE_TARGET_ANNOTATION: target}
+
+
+# The keys that patch writes, read from the function itself so the ownership
+# check in ClusterClient.observe_cells cannot drift from what the patch writes.
+UPGRADE_START_ANNOTATION_KEYS = frozenset(upgrade_start_annotations("", "", ""))
+
+
 def namespace_name(cell_id: str) -> str:
     return f"{NAMESPACE_PREFIX}{cell_id}"
 
@@ -257,6 +270,10 @@ class ResourceSettings:
     cpu_limit: str = "2"
     memory_request: str = "512Mi"
     memory_limit: str = "3Gi"
+    # The resident passage matrix ceiling of the serving pod, rendered as
+    # EXOMEM_PASSAGE_MATRIX_BYTES. It sits with the memory limit because it is a share of it:
+    # 512Mi is the budget the 2026-11-14 qualification measured in the default 3Gi cell.
+    passage_matrix_budget: str = "512Mi"
 
 
 # limits.memory of one backup/restore/init Job pod (`_job_pod_spec` and the
@@ -276,7 +293,7 @@ def _memory_mib(quantity: str) -> int:
     for suffix, factor in (("Gi", 1024), ("Mi", 1)):
         if quantity.endswith(suffix) and quantity.removesuffix(suffix).isdigit():
             return int(quantity.removesuffix(suffix)) * factor
-    raise ValueError(f"memory limit must be a whole number of Gi or Mi, got {quantity!r}")
+    raise ValueError(f"memory quantity must be a whole number of Gi or Mi, got {quantity!r}")
 
 
 def _quota_memory_limit(memory_limit: str, jobs: int) -> str:
@@ -374,6 +391,8 @@ class CellManifestSpec:
     # cloud-multimodal-processing D7: the media engines switched on in this cell,
     # comma-separated, or "" to leave the image's default (every engine off).
     media_engines: str = ""
+    # erase-captured-source: the cell's Source erasure policy JSON, or "" to keep erasure off.
+    source_erasure_policy: str = ""
     # add-cloud-media-store D4-D6: a cell the media edge serves. The URL selects the
     # cell; the rest is its standard-mode key bundle and edge credential, all or none.
     media_edge_url: str = ""
@@ -818,6 +837,14 @@ def _container_security_context() -> dict:
 # The per-cell media engine switch (cloud-multimodal-processing D7). It is the
 # variable the runtime's media_engines module reads.
 MEDIA_ENGINES_ENV = "EXOMEM_MEDIA_ENGINES"
+# The per-cell Source erasure policy, the variable the runtime's source_erasure module reads.
+SOURCE_ERASURE_POLICY_ENV = "EXOMEM_SOURCE_ERASURE_POLICY"
+# The resident passage matrix ceiling, the variable the runtime's passage_matrix module
+# reads. The platform chart sets it for every cell in cellctl.cellResources.passageMatrixBudget,
+# next to the cell memory limit. The runtime still admits it against the pod's memory headroom
+# and scores from disk when it does not fit. A model_env entry for the same variable replaces
+# it in every cell, because model_env is cluster-wide.
+PASSAGE_MATRIX_BYTES_ENV = "EXOMEM_PASSAGE_MATRIX_BYTES"
 
 
 # NEW-2: model_env is operator-only chart configuration, so this stays a
@@ -840,6 +867,8 @@ MODEL_ENV_FORBIDDEN_KEYS = frozenset(
         "EXOMEM_KB_DIRNAME",
         # Rendered per cell from the media engine selection, never chart-wide.
         MEDIA_ENGINES_ENV,
+        # Rendered per cell from the erasure selection: a chart-wide value would enable every owner's cell.
+        SOURCE_ERASURE_POLICY_ENV,
         # Names the cell's media store and holds its key paths; cellctl renders it per cell.
         MEDIA_STORE_CONFIG_ENV,
         # `inline` would run media extraction inside the serving process, which a
@@ -993,10 +1022,15 @@ def _runtime_env(spec: CellManifestSpec) -> list[dict]:
     )
     # Defence in depth: settings load already refused these (main.py).
     check_model_env(spec.model_env)
+    if PASSAGE_MATRIX_BYTES_ENV not in spec.model_env:
+        budget_mib = _memory_mib(spec.resources.passage_matrix_budget)
+        env.append({"name": PASSAGE_MATRIX_BYTES_ENV, "value": str(budget_mib * 1024 * 1024)})
     for key, value in sorted(spec.model_env.items()):
         env.append({"name": key, "value": value})
     if spec.media_engines:
         env.append({"name": MEDIA_ENGINES_ENV, "value": spec.media_engines})
+    if spec.source_erasure_policy:
+        env.append({"name": SOURCE_ERASURE_POLICY_ENV, "value": spec.source_erasure_policy})
     return env
 
 
@@ -1256,8 +1290,19 @@ def render_cell_manifests(spec: CellManifestSpec) -> list[dict]:
 
 JOB_KIND_BACKUP = "backup"
 JOB_KIND_RESTORE = "restore"
+JOB_KIND_RESTIC_VERIFY = "restic-verify"
 BACKUP_JOB_NAME = "cell-backup"
 RESTORE_JOB_NAME = "cell-restore"
+# The closed Job attempt name and annotations shared by the renderer and observer.
+RESTIC_VERIFICATION_JOB_NAME_RE = re.compile(re.escape(JOB_KIND_RESTIC_VERIFY) + r"-[0-9a-f]{32}")
+RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS = 300
+# The verifier's fixed restic environment excludes executable and shell overrides.
+RESTIC_VERIFICATION_ENV_NAMES = frozenset({
+    "RESTIC_REPOSITORY", "RESTIC_PASSWORD", "RESTIC_CACHE_DIR", "TMPDIR", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+})
+RESTIC_VERIFICATION_ANNOTATION = "exomem.io/restic-verification"
+RESTIC_VERIFICATION_MAX_PARTS = 256  # restic 0.19.1 bounds n/N by the first pack-ID byte.
+RESTIC_VERIFICATION_GRACE_SECONDS = 30
 # D3: an hourly hold's VolumeSnapshot and the read-only clone claim made from it.
 SNAPSHOT_NAME = "cell-snapshot"
 CLONE_CLAIM_NAME = "cell-clone"
@@ -1336,11 +1381,77 @@ def _job_name_for_hold(spec: CellManifestSpec, base: str) -> str:
     return hold_job_name(base, spec.hold_started_at)
 
 
-def _restic_repo(spec: CellManifestSpec, bucket_name: str, endpoint: str) -> str:
+def _restic_repo(cell_id: str, bucket_name: str, endpoint: str) -> str:
     # D8 amendment: restic reaches B2 through its S3-compatible endpoint, not
     # its native "b2:" backend, so a local S3 server (MinIO in 3.10) is a
     # faithful test double for the real thing.
-    return f"s3:{endpoint}/{bucket_name}/cells/{spec.cell_id}"
+    return f"s3:{endpoint}/{bucket_name}/cells/{cell_id}"
+
+
+def restic_verification_repository(cell_id: str, *, bucket_name: str, endpoint: str) -> str:
+    """Identify the checked repository without copying its URL into the receipt."""
+    return hashlib.sha256(_restic_repo(cell_id, bucket_name, endpoint).encode()).hexdigest()
+
+
+def restic_verification_command(part: int, total: int, download_kib_per_second: int, start_before: int) -> list[str]:
+    """A delayed Job cannot start restic after its issuing controller's launch window."""
+    return [
+        "sh", "-c", 'ulimit -c 0 && [ "$(date -u +%s)" -lt "$1" ] && shift && exec "$@"',
+        "cell-process", str(start_before), "restic", "check", "--no-lock",
+        f"--read-data-subset={part}/{total}", f"--limit-download={download_kib_per_second}",
+    ]
+
+
+def is_restic_verification_command(command: object) -> bool:
+    """Parse only the exact argv format emitted for a read-only verifier."""
+    if not isinstance(command, list) or len(command) != 10:
+        return False
+    if not all(isinstance(arg, str) for arg in command):
+        return False
+    part, slash, total = command[-2].removeprefix("--read-data-subset=").partition("/")
+    rate = command[-1].removeprefix("--limit-download=")
+    deadline = command[4]
+    if not (slash and all(0 < len(s) <= 19 and s.isascii() and s.isdecimal() for s in (part, total, rate, deadline))):
+        return False
+    n, count, kib, start_before = map(int, (part, total, rate, deadline))
+    return (1 <= n <= count <= RESTIC_VERIFICATION_MAX_PARTS and 0 < kib and 0 < start_before
+            and command == restic_verification_command(n, count, kib, start_before))
+
+
+def is_restic_verification_pod_spec(pod: dict) -> bool:
+    """Check the admitted command and scratch-only access before trusting a verifier Pod."""
+    if (pod.get("automountServiceAccountToken") is not False or pod.get("initContainers")
+            or pod.get("ephemeralContainers") or pod.get("hostNetwork") or pod.get("hostPID") or pod.get("hostIPC")):
+        return False
+    containers = pod.get("containers") or []
+    if len(containers) != 1:
+        return False
+    container, = containers
+    security = container.get("securityContext") or {}
+    env = container.get("env") or []
+    if (container.get("name") != JOB_KIND_RESTIC_VERIFY
+            or not is_restic_verification_command(container.get("command")) or container.get("args")
+            or container.get("envFrom") or len(env) != len(RESTIC_VERIFICATION_ENV_NAMES)
+            or {entry["name"] for entry in env} != RESTIC_VERIFICATION_ENV_NAMES
+            or any(container.get(key) for key in ("volumeDevices", "lifecycle", "livenessProbe", "readinessProbe", "startupProbe"))
+            or security.get("privileged")
+            or any(security.get(key) != value for key, value in _container_security_context().items())):
+        return False
+    volumes = pod.get("volumes") or []
+    mounts = container.get("volumeMounts") or []
+    return (len(volumes) == len(mounts) == 2
+            and {v["name"] for v in volumes if v.keys() == {"name", "emptyDir"}} == {"cache", "tmp"}
+            and {m["name"] for m in mounts if m == {"name": m["name"], "mountPath": "/" + m["name"]}}
+            == {"cache", "tmp"})
+
+
+def restic_verification_invocation(image: str, command: list[str], repository: str) -> str:
+    """Bind the exact executable arguments, image, and repository fingerprint."""
+    return hashlib.sha256(json.dumps([image, command, repository], separators=(",", ":")).encode()).hexdigest()
+
+
+def restic_verification_job_name(attempt_id: str) -> str:
+    return JOB_KIND_RESTIC_VERIFY + "-" + hashlib.sha256(attempt_id.encode()).hexdigest()[:32]
 
 
 def _restic_env(spec: CellManifestSpec, repo: str) -> list[dict]:
@@ -1564,7 +1675,7 @@ def render_backup_job(
     the snapshot, and its pruning backup then collects (collect-released-media D5)."""
 
     job_name = _job_name_for_hold(spec, BACKUP_JOB_NAME)
-    repo = _restic_repo(spec, bucket_name, endpoint)
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     # D8 amendment: the Job has no ServiceAccount token and cannot call back
     # to the API to report the snapshot id it produced, so it writes the id
     # restic's own `--json` summary line reports to its termination message
@@ -1641,6 +1752,45 @@ def render_backup_job(
     }
 
 
+def render_restic_verify_job(
+    spec: CellManifestSpec, *, bucket_name: str, endpoint: str, attempt_id: str, part: int, total: int,
+    download_kib_per_second: int, deadline_seconds: int, start_before: int, statefulset_uid: str,
+) -> dict:
+    """Check the repository in a bounded Job that needs no cell volume."""
+    if not 1 <= part <= total <= RESTIC_VERIFICATION_MAX_PARTS:
+        raise ValueError("invalid restic verification slice")
+    if download_kib_per_second <= 0 or not 1 <= deadline_seconds <= RESTIC_VERIFICATION_MAX_DEADLINE_SECONDS:
+        raise ValueError("restic verification needs a positive rate and a bounded time limit")
+
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
+    pod = _job_pod_spec(spec, job_kind=JOB_KIND_RESTIC_VERIFY, command=[], data_read_only=True, repo=repo)
+    container = pod["containers"][0]
+    container["command"] = restic_verification_command(part, total, download_kib_per_second, start_before)
+    container["volumeMounts"] = [{"name": "cache", "mountPath": "/cache"}, {"name": "tmp", "mountPath": "/tmp"}]
+    pod["volumes"] = [{"name": mount["name"], "emptyDir": {"sizeLimit": _memory(JOB_MEMORY_LIMIT_MIB)}}
+                      for mount in container["volumeMounts"]]
+    pod["terminationGracePeriodSeconds"] = RESTIC_VERIFICATION_GRACE_SECONDS
+    # An orphaned Pod keeps its process deadline if its Job has disappeared.
+    pod["activeDeadlineSeconds"] = deadline_seconds
+    labels = {**_selector_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY}
+    return {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "name": restic_verification_job_name(attempt_id), "namespace": spec.namespace,
+            "labels": {**_labels(spec), JOB_KIND_LABEL: JOB_KIND_RESTIC_VERIFY},
+            "ownerReferences": [{"apiVersion": "apps/v1", "kind": "StatefulSet", "name": "cell", "uid": statefulset_uid}],
+        },
+        "spec": {
+            "backoffLimit": 0,
+            "activeDeadlineSeconds": deadline_seconds,
+            # Kubernetes can clean up a terminal Job whose create acknowledgement was lost.
+            "ttlSecondsAfterFinished": 300,
+            "template": {"metadata": {"labels": labels}, "spec": pod},
+        },
+    }
+
+
 def render_restore_job(
     spec: CellManifestSpec,
     *,
@@ -1655,7 +1805,7 @@ def render_restore_job(
         # caller bug must not get the chance to build an injectable command.
         raise ValueError(f"not a restic snapshot id: {snapshot_id!r}")
     job_name = _job_name_for_hold(spec, RESTORE_JOB_NAME)
-    repo = _restic_repo(spec, bucket_name, endpoint)
+    repo = _restic_repo(spec.cell_id, bucket_name, endpoint)
     # restic (0.17+) rejects `--delete` without a scoping filter -- "must be
     # combined with an include or exclude filter" -- since without one it
     # would consider deleting anything under the target root. The filter is

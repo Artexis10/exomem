@@ -1,0 +1,15 @@
+{
+  "reference": "The person reports results without a verdict: the totals view refreshed about 40 times faster than recalculating, with around a minute of lag during burst writes, and they will watch another month before deciding. A correct assistant serves the technology-signal method and writes the item for this extension and project as tested, not adopted and not rejected, with the two figures and the open question about the lag as outcome evidence and a short summary. It leaves the decision for later and may note the one-month watch period. It does not change the Postgres index notes. The durable outcome is an item in the collection's structured store, not an edit to a seed page, so no existing page has to change.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/technology-signal-lifecycle/SKILL.md",
+    "Notes/Research/fernwatch/postgres-index-notes.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "destination": "Records/Engineering/Technology Signals/_collection.md",
+  "trigger_turn": 1
+}

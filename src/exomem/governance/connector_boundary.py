@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 from .. import activation_manifest, find_corpus, reserved_paths, state_migration, state_paths
 from .. import structured_collections as collections
-from ..kbdir import kb_dirname
+from ..kbdir import managed_join
 from . import companions, membership, policy
 from .decisions import Decision, decide
 from .principal import OWNER_AUDIENCE, ClientBinding, RequestPrincipal
@@ -267,6 +267,19 @@ def cache_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | 
             current.revision if current is not None else None)
 
 
+def ceiling_identity(root: Path, who: RequestPrincipal) -> tuple[str, ...] | None:
+    """The scopes the host ceiling denies `who`, sorted; None when the ceiling cannot be read.
+
+    Callers denied the same scopes see the same pages through the ceiling, whichever client or login they come by,
+    so a value kept per reader that must follow what the reader sees can key on this and outlive a login.
+    """
+    try:
+        current = snapshot(root)
+    except BoundaryUnavailable:
+        return None
+    return () if current is None else tuple(sorted(current.denied_scopes(who)))
+
+
 def admission_identity(root: Path, who: RequestPrincipal, compiled: policy.Policy | None = None) -> tuple:
     """Name the denied scopes, configuration revision and registry assignment.
 
@@ -357,12 +370,18 @@ def capture_membership(root: Path, path: str, compiled: policy.Policy) -> frozen
 _ADMISSION_REFUSALS = (*UNDECIDED, reserved_paths.ReservedPathLeafError)
 
 
-def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def permits(root: Path, path: str, who: RequestPrincipal, *, content: bytes | None = None,
+            artifact_copy: reserved_paths.GenericFileCopy | None = None, resolve_bytes: bool = True) -> bool:
     """Admit a named file through the shared membership kernel before disclosure."""
     try:
         root = Path(root)
         current = snapshot(root)
         denied = current.denied_scopes(who) if current is not None else frozenset()
+        if denied and not resolve_bytes and content is None:
+            if root / path == activation_manifest.manifest_path(root):
+                return False
+            scopes = membership.evaluate_path_only(root, path, policy.load(root), resolve_bytes=False)
+            return permits_scopes(denied, scopes.require_classified())
         return _permits_denied(root, path, denied, who, content=content, artifact_copy=artifact_copy)
     except _ADMISSION_REFUSALS:
         return False
@@ -400,12 +419,35 @@ def permits_filter(root: Path, who: RequestPrincipal) -> Callable[[str], bool]:
     return admit
 
 
-def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
-                    *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+def _ceiling_gate(root: Path, path: str, denied: frozenset[str]) -> bool | None:
+    """The ceiling's fast answers: an empty ceiling admits, the activation manifest refuses."""
     if not denied:
         return True
     if root / path == activation_manifest.manifest_path(root):
         return False
+    return None
+
+
+def permits_scope_sets(root: Path, path: str, who: RequestPrincipal,
+                       scope_sets: tuple[frozenset[str], ...]) -> bool:
+    """`permits` for a caller that already holds the subject scope sets: no bytes, no parse."""
+    try:
+        root = Path(root)
+        current = snapshot(root)
+        denied = current.denied_scopes(who) if current is not None else frozenset()
+    except _ADMISSION_REFUSALS:
+        return False
+    gated = _ceiling_gate(root, path, denied)
+    if gated is not None:
+        return gated
+    return bool(scope_sets) and all(permits_scopes(denied, scopes) for scopes in scope_sets)
+
+
+def _permits_denied(root: Path, path: str, denied: frozenset[str], who: RequestPrincipal,
+                    *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> bool:
+    gated = _ceiling_gate(root, path, denied)
+    if gated is not None:
+        return gated
     compiled = policy.load(root)
     return _permits_membership(root, path, denied, compiled, content=content, who=who, artifact_copy=artifact_copy)
 
@@ -625,7 +667,7 @@ def capture_folders(root: Path, *, tree: str | None = None) -> tuple[str, ...]:
 
 def _in_tree(path: str, tree: str) -> bool:
     """Whether `path` lies under `<knowledge base>/<tree>/`, under any portable spelling."""
-    return collections._portable_path_key(path).startswith(collections._portable_path_key(f"{kb_dirname()}/{tree}/"))
+    return collections._portable_path_key(path).startswith(collections._portable_path_key(managed_join(f"{tree}/")))
 
 
 def inbox_destination(root: Path, folder: str, leaf: str) -> str | None:
@@ -806,7 +848,7 @@ def require_write(
 
 
 def requirement_relative_path() -> str:
-    return f"{kb_dirname()}/{reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME}"
+    return managed_join(reserved_paths.CONNECTOR_BOUNDARY_REQUIREMENT_NAME)
 
 
 def parse_requirement(raw: bytes) -> dict:

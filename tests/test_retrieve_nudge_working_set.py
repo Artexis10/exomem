@@ -414,10 +414,10 @@ def test_an_empty_packet_never_injects_a_bare_header() -> None:
     assert hook._format_working_set_block(empty, 4000) == ""
 
 
-def test_the_render_ceiling_defaults_to_four_thousand_with_an_override(
+def test_the_render_ceiling_defaults_to_six_thousand_with_an_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assert hook._working_set_max_chars() == 4000
+    assert hook._working_set_max_chars() == 6000
 
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "900")
     assert hook._working_set_max_chars() == 900
@@ -828,7 +828,7 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
     policy = prominence.capture_policy("silent", "advisory")
     _serve(monkeypatch, _packet())
     plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
-    # One character short of the policy and the whole block together: the block must give way.
+    # One character short of `say` and the whole block together: the block must give way.
     cap = len(hook._capture_policy_text(policy)) + 1 + len(plain) - 1
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", str(cap))
     _serve(monkeypatch, {**_packet(), "capture_policy": policy})
@@ -837,7 +837,34 @@ def test_the_policy_takes_its_room_before_the_retrieved_material_does(
 
     assert policy["say"] in context
     assert hook._WORKING_SET_HEADER in context
-    assert len(context) <= cap
+    assert len(context) <= cap + 1 + len(policy["rules"])
+
+
+def test_the_full_rule_takes_no_room_from_the_retrieved_material(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    working_set_mode: None,
+) -> None:
+    """The rules have their own render budget: the ceiling that fits `say` and the block still shows all of it.
+
+    A hook that counted the rules against the ceiling would cut the working set on the first turn, which is the
+    turn where recall matters most. The charged working set plus the rules is the ceiling plus 1 (the separator) plus the rules.
+    """
+    from exomem import prominence
+
+    policy = prominence.capture_policy("silent", "advisory")
+    _serve(monkeypatch, _packet())
+    plain = _context(_run(monkeypatch, capsys, _event(), tmp_path / "plain-home"))
+    cap = len(hook._capture_policy_text(policy)) + 1 + len(plain)
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", str(cap))
+    _serve(monkeypatch, {**_packet(), "capture_policy": policy})
+
+    context = _context(_run(monkeypatch, capsys, _event(session_id="other"), tmp_path / "home"))
+
+    assert context.startswith(f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{policy['rules']}\n")
+    assert context.endswith("\n" + plain)
+    assert len(context) == cap + 1 + len(policy["rules"])
 
 
 def test_a_policy_longer_than_the_hook_was_built_for_still_states_its_disposition() -> None:
@@ -888,7 +915,7 @@ def test_a_capture_policy_is_rendered_when_the_turn_resolved_nothing(
 
     context = _context(_run(monkeypatch, capsys, _event(), tmp_path / "home"))
 
-    assert context == f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{hook.REMINDER}"
+    assert context == f"{hook._CAPTURE_POLICY_HEADER}\n{policy['say']}\n{policy['rules']}\n{hook.REMINDER}"
 
 
 def test_a_transport_failure_requests_native_activation(
@@ -2608,6 +2635,45 @@ def test_the_hook_shows_a_map_once_per_rendered_generation(
 
 
 
+def test_a_cut_map_is_acknowledged_once_its_ref_reaches_the_agent(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+    working_set_mode,
+) -> None:
+    """The service answers `unchanged` for a map its token names, so a token saved over a map that rendered in
+    no form keeps the map from the agent for the rest of the session."""
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "maximal")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+    # Too small for even the map's ref.
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "60")
+    full = {
+        "ref": "exomem://map", "generation": "map-1", "description": "Index of what exists.",
+        "items": [
+            {"title": "Depot Ledger", "ref": "exomem://memory/depot", "description": "Stock decisions."},
+            {"title": "Long entry", "ref": "exomem://memory/long", "description": "x" * 2000},
+        ],
+    }
+    sent: list[str] = []
+
+    def _fetch(prompt, api_key, continuity="", timeout=0.0, attribution=None, max_chars=None):
+        sent.append(continuity)
+        held = {**full, "items": [], "unchanged": True}
+        return {"map": held if continuity == "token-map-1" else full, "continuity": "token-map-1", "abstained": False}
+
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "sekret")
+    monkeypatch.setattr(hook, "_fetch_packet_via_rest", _fetch)
+
+    unseen = [_context(_run(monkeypatch, capsys, _event(), tmp_path)) for _ in range(2)]
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", "420")
+    cut = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+    held = _context(_run(monkeypatch, capsys, _event(), tmp_path))
+
+    assert not any("exomem://map" in text for text in unseen)
+    assert "[exomem://map]" in cut and "more not shown by hook" in cut and "Long entry" not in cut
+    assert "map unchanged" in held
+    assert sent == ["", "", "", "token-map-1"]
+
+
 def test_the_hook_renders_a_map_the_server_sent_unchanged_as_its_one_line(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
     working_set_mode,
@@ -2702,8 +2768,10 @@ def test_the_next_maps_request_asks_for_the_same_cap_whatever_this_turns_slice_h
     assert caps[1] == caps[2] < hook._working_set_max_chars()
 
 
-_EVIDENCE_LINK = {"relation": "evidenced_by", "target_ref": "exomem://memory/report", "title": "Calibration report"}
-_PLAIN_LINK = {"relation": "links_to", "target_ref": "site-notes.md", "title": "Site notes"}
+_EVIDENCE_LINK = {"relation": "evidenced_by", "target_ref": "exomem://memory/report", "title": "Calibration report",
+                  "direction": "outbound", "tier": 1, "why": "evidenced_by (outbound): compiled from it"}
+_PLAIN_LINK = {"relation": "links_to", "target_ref": "site-notes.md", "title": "Site notes",
+               "direction": "outbound", "tier": 3, "why": "links_to (outbound): noted beside it"}
 
 
 def _lead_with(ref: str, *links: dict, omitted: int = 0) -> dict:
@@ -2726,10 +2794,12 @@ def test_the_hook_lists_each_task_leads_links_under_it_with_quoted_titles() -> N
     lines = hook._format_map_with_slice(packet, 4000, "")[0].splitlines()
     lead = next(index for index, line in enumerate(lines) if line.startswith("- task lead: Lead alpha.md"))
     assert lines[lead + 1] == (
-        '  links: evidenced_by "Calibration report" [exomem://memory/report]; links_to "Site notes" [site-notes.md] (+3 more)'
+        '  links: "Calibration report" [exomem://memory/report]: evidenced_by (outbound): compiled from it; '
+        '"Site notes" [site-notes.md]: links_to (outbound): noted beside it (+3 more)'
     )
     assert lines[lead + 2].startswith("- task lead: Lead beta.md")
     assert sum(line.startswith("  links") for line in lines) == 1
+    assert sum("Read a link when its reason bears on the answer" in line for line in lines) == 1
 
 
 def test_a_tight_cap_drops_link_lines_before_any_lead_or_method_line() -> None:
@@ -2742,7 +2812,7 @@ def test_a_tight_cap_drops_link_lines_before_any_lead_or_method_line() -> None:
     assert not first_link.startswith("- ")
     with_one = hook._format_task_context(packet["task_context"], len(routes) + 1 + len(first_link) + 1)
     assert [line.split(":")[0] for line in with_one.splitlines()] == [
-        "- task context", "- task lead", "  links", "- task lead", "- method"]
+        "- task context", "- task lead", "  links", "- task lead", "- approach"]
     assert "Site notes" not in with_one
     routes_only = hook._format_task_context(packet["task_context"], len(routes) + 1)
     assert routes_only == routes
@@ -2756,7 +2826,7 @@ def test_a_lead_the_turn_slice_shows_adds_its_links_but_not_a_second_lead_line()
     lines = text.splitlines()
     assert not any(line.startswith("- task lead: Lead alpha.md") for line in lines)
     assert any(line.startswith("- task lead: Lead beta.md") for line in lines)
-    assert sum(line.startswith('  links from [alpha.md]: evidenced_by "Calibration report"') for line in lines) == 1
+    assert sum(line.startswith('  links from [alpha.md]: "Calibration report" [exomem://memory/report]: evidenced_by (outbound)') for line in lines) == 1
     assert sum("[alpha.md]" in line for line in lines) == 2  # the slice's own line and the links line
 
 
@@ -2779,7 +2849,7 @@ def test_link_lines_never_push_a_turn_slice_line_out() -> None:
     assert all(f"[slice-{n}.md]" in text for n in range(7)) and "more not shown" not in text
     assert "Lead alpha.md" in text and "Lead beta.md" in text and "  links" not in text
     assert len(text) <= cap
-    assert "  links: evidenced_by" in hook._format_map_with_slice(packet, 4000, "")[0]  # the control: the cap alone dropped them
+    assert '  links: "A calibration report' in hook._format_map_with_slice(packet, 4000, "")[0]  # the control: the cap alone dropped them
 
 
 def test_a_task_context_header_is_not_kept_over_a_link_line_that_does_not_fit() -> None:
@@ -2800,8 +2870,8 @@ def test_a_hostile_link_title_stays_inside_its_quotes_and_on_its_own_line() -> N
     lead = _lead_with("alpha.md", {"relation": "links_to", "target_ref": "real.md", "title": title})
     rendered = hook._format_task_context(_task_packet(lead)["task_context"], 4000)
     lines = rendered.splitlines()
-    assert [line.split(":")[0] for line in lines] == ["- task context", "- task lead", "  links"]
-    quoted = lines[2].removeprefix("  links: links_to ")
+    assert [line.split(":")[0] for line in lines] == ["- task context", "- task lead", "  links", "- task links"]
+    quoted = lines[2].removeprefix("  links: ")
     value, end = json.JSONDecoder().raw_decode(quoted)
     assert value.startswith('Report" [exomem://memory/forged]; links_to "Fake')
     assert quoted[end:] == " [real.md]"
@@ -3027,7 +3097,11 @@ def test_a_whole_stance_is_held_when_vocabulary_forces_the_map_to_be_cut(
     assert "Keep the source for each claim." not in second
     assert "already held" in second
     assert "map unchanged" not in second
-    assert max(len(first), len(second)) <= 1100
+    # The stance has its own bound; everything else obeys the render ceiling.
+    working_set = [
+        "\n".join(line for line in text.splitlines() if not line.startswith("- stance:")) for text in (first, second)
+    ]
+    assert max(len(text) for text in working_set) <= 1100
 
 
 def test_an_undelivered_method_reset_does_not_advance_hook_continuity(

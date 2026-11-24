@@ -10,7 +10,7 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis |
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |
@@ -18,7 +18,7 @@ commands.
 | `review` | Review stale, contradictory, or unprocessed knowledge | `list_review_items` and `decide_review_item` |
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `inspect_memory` and `manage_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids` or `reconcile` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids`, `capture-metadata`, `reconcile` or `convert-originals` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
 | `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `inspect_memory` and `manage_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
@@ -30,10 +30,11 @@ reporting results.
 A stable preference, recurring routine, historical baseline, or durable affiliation
 is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative claims stay quiet. Do not create an Entity, collection, or
+uniquely resolved Entity; otherwise preserve one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
 `proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
@@ -77,17 +78,27 @@ identifiers on either route.
 
 Use `inspect_memory(operation="curation.work_item")` when one reviewed structural improvement
 spans multiple compiled notes or combines typed creation, relation acceptance,
-edit, supersession, move, delete, or recovery. The active agent remains the
+edit, supersession, or move. The active agent remains the
 semantic author: `curation_action="work-item"` assembles only explicit refs and
 paths, and `curation_action="propose"` validates the agent-authored typed plan.
+`read_instructions(topic="curation.propose")` returns worked split, move and
+rehome plans.
+
+A `move` step records the old path in the page's `moved_from`, so old links
+keep resolving. Its optional `fields` patch sets pointer fields only. The
+`repoint-links` steps, last in the plan, rewrite every link to the plan's
+moved pages. One step rewrites every referrer in one batch. Several steps
+each name their `referrers`, and no page is named by two steps. In a Source
+or Evidence page a step changes only the link span. Preview lists one outcome
+per referrer. Curation refuses `delete` and `recover`.
 
 Call `curation_action="preview"` once for the immutable plan and show its exact
 actions, blockers, fingerprint, and compensation classes. That review is
 advisory. Execution is confirm-required: obtain one explicit confirmation bound
 to the returned plan id and fingerprint, then call `curation_action="apply"`.
-Each apply or `curation_action="resume"` request executes at most one content
-step. Continue resume automatically only while the durable phase is executing;
-stop and report `partial` or `blocked` truth.
+Each apply or `curation_action="resume"` request runs the steps its time
+allows. Follow `next_action`: continue resume automatically while it is
+`resume`, and otherwise stop and report `partial` or `blocked` truth.
 
 Compensation is a separate history-preserving plan. Derive it with
 `curation_action="propose-compensation"`, preview it, and obtain a fresh exact
@@ -95,8 +106,10 @@ confirmation before `curation_action="apply-compensation"`. Never treat
 compensation as rollback, reuse a forward approval, grant standing approval, or
 route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
 paths, or trash internals through curation page steps. The two fold steps in
-[vault-care](vault-care.md#curation) are the only exception: they retire a
+[vault-care](vault-care.md#curation) are the only steps that retire a
 duplicate Source or Evidence page, or an episode's old recap files.
+`repoint-links` and an `edit` with `patch_frontmatter` of a registered pointer
+field change only the pointers of a Source or Evidence page, never its content.
 
 ## Records
 
@@ -114,17 +127,24 @@ gap. Remote callers preview generic derived-index repair with
 `inspect_memory(operation="maintenance.reconcile", arguments={'dry_run': true})` and run it as a
 maintenance job with the preview's `plan_id` and a `why` (see vault care).
 
-Route durable observed events or current state here without waiting for a magic
-verb. When exactly one compatible existing collection accepts a sufficiently
-identified observation, the active engagement policy may append or update it and
-the agent reports the mutation. If collections compete or identity, date,
-provenance, or ownership is unclear, ask one focused question. If no collection
-fits, start with `describe`, then propose a concise collection and validate it;
-the agent must not silently create a long-lived schema. For a new collection use
-`describe -> validate -> create -> inspect -> append`; for maintenance use
-`validate -> revise` or `inspect -> rebaseline`.
+Route durable observed events, current state and recurring structured work here without
+waiting for a magic verb. When exactly one compatible existing collection accepts a
+sufficiently identified observation, the active engagement policy may append or update it
+and the agent reports the mutation. If collections compete or identity, date, provenance,
+or ownership is unclear, ask one focused question. If no collection fits and the work's
+identity, type and scope are clear, create a minimal collection under the served
+`proactive_capture` disposition: when it is `silent`, `add_record` with `new_collection`
+creates it from the first row in one call; when it is `advisory`, propose it and create it
+with `create` after one inline confirmation of your named proposal. When a bound of the
+minimal collection does not hold, the server refuses `AUTOMATIC_CREATION_REFUSED`, names the
+bound, creates nothing and returns the create call to make after the user confirms. A later
+fact that needs its own field is added with `new_fields` on `add_record` or `edit_record`
+under the same disposition, never put into another field.
+[Records and Planning](planning-records.md) has the whole procedure. For a collection you
+design yourself use `describe -> validate -> create -> inspect -> append`; for maintenance
+use `validate -> revise` or `inspect -> rebaseline`.
 
-Records are intentionally manual-first. Canonical data remains ordinary files:
+Records stay hand-editable. Canonical data remains ordinary files:
 an append-heavy chronological Markdown log, one Markdown file per item, or a
 CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
 is no hidden database, and indexes and generated views are rebuildable from the
@@ -249,8 +269,17 @@ changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and
 failure to compute it omits the field rather than affecting the write. The runtime
 never creates, moves, renames, or deletes anything as a result.
 
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its project and that question is unanswered. It carries the review item's `ref`,
+`fingerprint` and `id`, and one `question`. The question holds the ownership test and the
+call that keeps the page where it is; it never reports a path, title, or count belonging
+to another page. It has the same advisory limits, and a response carries at most one
+`structure_suggestion`, with the rename one first, then the ownership one. The `structural_suggestions`
+delegation class and the `ownership_review` family disposition both withhold it.
+
 `detail="full"` adds the existing leaf result under
-`diagnostics`. The detail choice
+`diagnostics`, or under `diagnostics.leaf_result` when the reply also lists
+`diagnostics.derived_components`. The detail choice
 is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
@@ -358,8 +387,9 @@ None.
    directly. There is no fallback kind: when no known kind fits, name a new
    slug (see `frontmatter.md` § source).
 2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
-   lowercase ASCII, ≤ 100 chars. An explicit `slug` controls only the filename;
-   the Unicode display title is stored unchanged.
+   lowercase ASCII, ≤ 100 chars, unless the vault sets the `title` filename
+   style. An explicit `slug` controls only the filename; the Unicode display
+   title is stored unchanged.
 3. Write file with full frontmatter per `frontmatter.md` § source. `ingested_into: []`.
 4. Body: `# <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
 5. Update `Sources/index.md` with a new line.
@@ -410,8 +440,8 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 - For experiments: domain. Plus hypothesis, protocol summary, duration, started date.
 - For production-logs: medium. Plus projects, host, editor (if known), recording / publish status.
 - Human-facing title (Unicode is fine), plus an optional explicit lowercase
-  ASCII filename `slug`; propose the slug separately when portability or
-  readability matters.
+  ASCII filename `slug` that overrides the derived name; propose the slug
+  separately only when the name must be something other than the title.
 
 ### Procedure
 1. Determine note type and target folder:
@@ -421,13 +451,22 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    - `pattern` → `Notes/Patterns/`
    - `experiment` → `Notes/Experiments/<domain>/`
    - `production-log` → `Notes/Productions/<medium>/`
-2. Generate filename:
-   - Research / insight / failure / pattern: `<topic-slug>.md` (no date prefix).
-   - Experiment / production-log: `YYYY-MM-<slug>.md` (start month prefix).
-   Slugs are capped at 100 characters. Automatic slugging remains compatible
-   with older releases and may use language-blind transliteration; for any
-   non-Latin title, prefer an explicit meaningful ASCII slug. The real title is
-   always stored in frontmatter and the H1.
+2. Generate filename. Unless the vault sets the `slug` filename style, the name is
+   the title with only filesystem- and link-unsafe characters removed or replaced
+   (`#`, `[`, `]`, `^`, `|`, `/` and a leading dot), cut at 100 characters:
+   - Research / insight / failure / pattern: `<Title>.md` (no date prefix).
+   - Experiment / production-log: `YYYY-MM-<Title>.md` (start month prefix).
+   A reply warning `FILENAME_ADJUSTED` names the file name when it differs from
+   the title; link to the note by that name. A reply warning
+   `title_check_unavailable` means no title index could answer, so the name came
+   from its folder alone. Another page with the same title may exist, and a bare
+   link to that title then reaches this note. Link to this note by its file name.
+   A reply warning `FILENAME_STYLE_UNPARSEABLE` means `_Schema/project-keys.yaml`
+   could not be parsed, so the page took the default style. Tell the person to
+   fix that file.
+   Under the `slug` style the name is a lowercase ASCII slug that may use
+   language-blind transliteration; for a non-Latin title, prefer an explicit
+   meaningful ASCII slug. The real title is always stored in frontmatter and the H1.
 3. Resolve every non-empty `sources:` entry to an authorized captured Source or
    Evidence page. If an external original is missing, capture it explicitly and
    then cite the returned governed path or stable ref. If the original cannot be
@@ -567,6 +606,9 @@ cannot be undone.
   proof-bearing artifacts. Same handle shape either way. Use one call for the
   whole batch. A successful response contains the stored path, `size`, and
   `hash`; never treat an upload token as proof that bytes landed.
+  When you keep a handed file only for safekeeping and nothing in it warrants a
+  note, pass `options.custody_only: true`; the reply says so, and a later note
+  that cites it takes it off the custody list.
 
 - **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token
@@ -583,7 +625,7 @@ cannot be undone.
   `filename`, `description`, and **`text`**.
   **Searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
-  (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
+  (PDFium), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
   txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
   frames for visual search. It fills an embedded sidecar so the binary becomes
   findable by content. You *may* still pass a `text` field to supply your own
@@ -606,6 +648,24 @@ cannot be undone.
   straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync). Copy the spelling of the folders already there.
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
+
+### Cancel waiting uploads
+
+`cancel_uploads(uploads=["exomem-held:..."])` releases waiting bytes that this
+authenticated session owns. Supply the `download_url` from each held upload.
+The operation accepts the existing held-upload batch limit and returns one
+outcome per reference, in input order. It does not cancel a stored filing.
+
+A confirmed `cancelled` outcome reports released bytes. An `unavailable`
+outcome gives no ownership or expiry detail. A failed outcome names the repair
+or retry action and claims no released capacity. Retry the same references
+after a busy or incomplete result. A lost acknowledgement can make a later
+retry return `unavailable`.
+
+The local CLI uses the same transfer operation through the local listener.
+It needs the token file and port of the holding client. Another client's
+token, a static REST key, or a fresh CLI owner cannot resume that identity.
+An authorization session must also use its existing protected descriptor.
 
 ### Generated artifact adoption
 
@@ -652,8 +712,8 @@ schema. A verified remote identity additionally requires
 `algorithm: "sha256"`, the matching local receipt `digest`, and the platform
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
-collection or fields permits only `structural_suggestions`; collection changes
-need confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+collection or fields is created only under the bounded collection-creation rule; a
+change to an existing collection's fields needs confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.

@@ -8,7 +8,7 @@ where a second tool writing the same titles produced readable ones.
 The constraint this is built around: exomem has no permalink -- `grep -rn
 permalink src/` returns nothing -- so the filename IS the identity, which
 `slugify_with_truncation_check` says outright when it truncates. That is why the
-default does not move and why nothing on disk is ever renamed.
+default changes no name on disk and why nothing on disk is ever renamed.
 """
 
 from __future__ import annotations
@@ -149,29 +149,28 @@ def _write_keys(root: Path, body: str) -> None:
     (schema / "project-keys.yaml").write_text(body, encoding="utf-8")
 
 
-def test_a_vault_that_says_nothing_gets_todays_behaviour(
+def test_a_vault_that_says_nothing_names_new_pages_by_title(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default does not move.
+    """`title` is the default, and the resolver says it came from the default.
 
-    The filename is the identity, so flipping the default would change the
-    address of every note written after an upgrade, in vaults whose owners never
-    asked. Half a vault named each way, caused by a version bump, is worse than a
-    vault consistently named the less pretty way.
+    `slug` is the opt-out through the environment or the vault key; the doctor
+    check reads the source, so a user can tell a choice from a default.
     """
     monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
 
-    assert vault.resolve_filename_style(tmp_path) == "slug"
-    assert vault.resolve_filename_style(None) == "slug"
+    assert vault.resolve_filename_style(tmp_path) == "title"
+    assert vault.resolve_filename_style(None) == "title"
+    assert vault.filename_style_source(tmp_path) == ("title", "default")
 
 
 def test_the_vault_key_selects_the_style(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
-    _write_keys(tmp_path, "filename_style: title\nprojects:\n  demo: Demo\n")
+    _write_keys(tmp_path, "filename_style: slug\nprojects:\n  demo: Demo\n")
 
-    assert vault.resolve_filename_style(tmp_path) == "title"
+    assert vault.filename_style_source(tmp_path) == ("slug", "project-keys.yaml")
 
 
 def test_the_environment_outranks_the_vault_key(
@@ -181,7 +180,7 @@ def test_the_environment_outranks_the_vault_key(
     _write_keys(tmp_path, "filename_style: title\n")
     monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
 
-    assert vault.resolve_filename_style(tmp_path) == "slug"
+    assert vault.filename_style_source(tmp_path) == ("slug", "environment")
 
 
 def test_an_unrecognised_style_is_refused_not_ignored(
@@ -208,22 +207,28 @@ def test_an_unrecognised_style_is_refused_not_ignored(
     assert "project-keys.yaml" in str(caught.value)
 
 
-def test_an_unreadable_key_file_means_no_preference_not_a_choice(
+def test_a_missing_key_file_or_key_means_no_preference_and_a_malformed_one_is_refused(
     tmp_path: Path,
 ) -> None:
     """Distinct from `load_project_registry`, which falls back to a real registry.
 
     A vault with no project keys still has to route writes somewhere, so that
     reader invents a registry. Here inventing anything would be claiming the
-    vault chose a style it never mentioned.
+    vault chose a style it never mentioned, and falling back on a key it did
+    mention but got wrong would flip a vault that meant `slug`.
     """
     assert project_keys.filename_style(tmp_path) is None
 
-    _write_keys(tmp_path, "projects: [this is not a mapping\n")
+    _write_keys(tmp_path, "projects: {}\n")
     assert project_keys.filename_style(tmp_path) is None
 
     _write_keys(tmp_path, "filename_style: 4\n")
-    assert project_keys.filename_style(tmp_path) is None
+    with pytest.raises(vault.InvalidSlugError, match="project-keys.yaml"):
+        project_keys.filename_style(tmp_path)
+
+    _write_keys(tmp_path, "projects: [this is not a mapping\n")
+    with pytest.raises(vault.InvalidSlugError, match="cannot be read"):
+        project_keys.filename_style(tmp_path)
 
 
 # ------------------------------------------------------------- end to end
@@ -236,15 +241,11 @@ _ISSUE_TITLES = [
 ]
 
 
-def test_the_default_derivation_is_byte_identical_to_before(
+def test_the_slug_opt_out_derives_the_names_it_always_derived(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The property that makes this safe to land before anyone picks a default.
-
-    A vault that sets nothing must derive the names it always derived, or the
-    change is a silent rename of every note written after an upgrade.
-    """
-    monkeypatch.delenv("EXOMEM_FILENAME_STYLE", raising=False)
+    """A vault that keeps `slug` must not see a change from the default flip."""
+    monkeypatch.setenv("EXOMEM_FILENAME_STYLE", "slug")
 
     for title in _ISSUE_TITLES:
         derived, _warnings = vault.resolve_filename_slug(title, vault_root=tmp_path)

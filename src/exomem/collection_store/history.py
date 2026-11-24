@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage, types
+from . import chain, tokens, typed_storage, types, version_sources
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -47,48 +47,116 @@ class PrefixProofs:
             self.collections.popitem(last=False)
 
 
+def _refuse_unbound_effects(conn, txn):
+    """Fail the first effect, in ordinal order, that does not name its immutable version and predecessor.
+
+    One statement joins every effect of the event to its version and predecessor, and returns only a
+    failure, so a sound event costs one step however many rows it wrote.
+    """
+    moved = txn["operation"] == "view_move"
+    reason = conn.execute(
+        "SELECT reason FROM (SELECT e.ordinal AS ordinal, CASE "
+        "WHEN i.row_id IS NULL OR v.row_id IS NULL OR i.collection_id IS NOT :collection "
+        "OR i.item_key IS NOT e.item_key OR v.payload_hash IS NOT e.hash_after "
+        "OR e.version_after IS NOT CASE WHEN :moved THEN e.version_before "
+        "WHEN e.version_before IS NULL THEN 1 ELSE e.version_before + 1 END "
+        "OR (NOT :moved AND v.txn_id IS NOT :txn) THEN 'effect version binding differs' "
+        "WHEN p.payload_hash IS NOT e.hash_before THEN 'effect predecessor payload differs' END AS reason "
+        "FROM audit_effects e LEFT JOIN item_rows i ON i.row_id=e.row_id "
+        "LEFT JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+        "LEFT JOIN version_identity p ON p.row_id=e.row_id AND p.row_version=e.version_before "
+        "WHERE e.txn_id=:txn) WHERE reason IS NOT NULL ORDER BY ordinal LIMIT 1",
+        {"collection": txn["collection_id"], "moved": moved, "txn": txn["txn_id"]}).fetchone()
+    if reason is not None:
+        _fail(txn, reason[0])
+
+
+def _effect_material(conn, txn):
+    """Each effect's key, hash and sources, proving its stored version decodes to the hash it names.
+
+    Reads one statement per payload layout that the event's versions use, in ordinal order, never one
+    per effect. Every row's descriptor, epoch and format are read once for the whole event.
+    """
+    groups = conn.execute(
+        "SELECT v.encoding, v.payload_generation, i.collection_id FROM audit_effects e "
+        "JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+        "JOIN item_rows i ON i.row_id=e.row_id WHERE e.txn_id=? "
+        "GROUP BY v.encoding, v.payload_generation, i.collection_id ORDER BY MIN(e.ordinal)",
+        (txn["txn_id"],)).fetchall()
+    material = {}
+    for encoding, generation, collection_id in groups:
+        if encoding == typed_storage.JSON_V1:
+            layout = metadata = None
+            payload = "LEFT JOIN item_versions t ON t.row_id=v.row_id AND t.row_version=v.row_version"
+            columns = "t.values_json,t.body"
+        else:
+            layout = typed_storage.version_layout(conn, collection_id, generation)
+            metadata = typed_storage.shared_metadata(conn, layout)
+            payload = (f"LEFT JOIN {layout.version_table} t ON t.row_id=v.row_id "  # noqa: S608
+                       "AND t.row_version=v.row_version")
+            columns = f"t.body,{','.join(f't.{name}' for name in (*layout.value_columns, 'r'))},t.row_id"
+        cursor = conn.execute(
+            f"SELECT e.ordinal,e.item_key,e.hash_after,v.payload_hash,v.schema_version,"  # noqa: S608
+            "(SELECT json_group_array(json_array(s.ordinal,s.source_ref)) FROM item_sources s "
+            f"WHERE s.row_id=e.row_id AND s.row_version=e.version_after),{columns} "
+            "FROM audit_effects e JOIN version_identity v ON v.row_id=e.row_id AND v.row_version=e.version_after "
+            f"JOIN item_rows i ON i.row_id=e.row_id {payload} "
+            "WHERE e.txn_id=? AND v.encoding=? AND v.payload_generation IS ? AND i.collection_id=? "
+            "ORDER BY e.ordinal", (txn["txn_id"], encoding, generation, collection_id))
+        for ordinal, key, hash_after, payload_hash, schema_version, sources, *stored in cursor.fetchall():
+            if layout is None:
+                values, body = json.loads(stored[0]), stored[1]
+            else:
+                if stored[-1] is None:
+                    raise typed_storage.TypedStorageError("typed version payload is absent")
+                body = stored[0]
+                values = typed_storage.decode_row(layout, stored[1:-1], connection=conn, metadata=metadata)
+            if payload_hash != hash_after or tokens.payload_hash(schema_version, key, values, body) != payload_hash:
+                _fail(txn, "immutable version differs from its audit effect")
+            material[ordinal] = {"key": key, "payload_hash": hash_after,
+                                 "sources": [ref for _, ref in sorted(json.loads(sources))]}
+    return [material[ordinal] for ordinal in sorted(material)]
+
+
+def _retract_material(conn, txn):
+    """A retraction's key, retracted version and payload hash, proven against that immutable version.
+
+    The row is read from ``item_rows``, since a later re-admission makes it current again.
+    """
+    found = conn.execute(
+        "SELECT e.item_key,e.version_before,e.hash_before,e.effect,e.version_after,e.hash_after,"
+        "i.collection_id,i.item_key,p.payload_hash FROM audit_effects e "
+        "LEFT JOIN item_rows i ON i.row_id=e.row_id "
+        "LEFT JOIN version_identity p ON p.row_id=e.row_id AND p.row_version=e.version_before "
+        "WHERE e.txn_id=? ORDER BY e.ordinal", (txn["txn_id"],)).fetchall()
+    if len(found) != 1:
+        _fail(txn, "a retraction has exactly one effect")
+    key, version, digest, effect, after, hash_after, collection, row_key, predecessor = found[0]
+    if (effect != "retract" or version is None or after is not None or hash_after is not None
+            or collection != txn["collection_id"] or row_key != key or predecessor != digest):
+        _fail(txn, "retraction effect differs from its immutable predecessor")
+    return {"key": key, "retracted_version": version, "payload_hash": digest}
+
+
 def effects(conn, txn):
     """Reconstruct precisely the native v1 event's effect material."""
     receipt = json.loads(txn["receipt_json"])
+    if txn["operation"] == "retract":
+        return _retract_material(conn, txn)
     if txn["operation"] in mutation_terminal.CONTROL_OPERATIONS:
         return {name: receipt[name] for name in ("counts", "ids")}
     if txn["operation"] == "rebaseline":
         return {name: receipt[name] for name in
                 ("acknowledged_gap_codes", "gap_fingerprint", "checkpoint_snapshot_hash")}
-    found = list(_rows(conn.execute("SELECT * FROM audit_effects WHERE txn_id=? ORDER BY ordinal",
-                                   (txn["txn_id"],))))
-    for effect in found:
-        identity = conn.execute("SELECT i.collection_id,i.item_key,v.payload_hash,v.txn_id FROM items i "
-                                "JOIN version_identity v ON i.row_id=v.row_id WHERE i.row_id=? AND v.row_version=?",
-                                (effect["row_id"], effect["version_after"])).fetchone()
-        before = effect["version_before"]
-        moved = txn["operation"] == "view_move"
-        expected = before if moved else 1 if before is None else before + 1
-        if (identity is None or identity[:3] != (txn["collection_id"], effect["item_key"], effect["hash_after"])
-                or effect["version_after"] != expected or (not moved and identity[3] != txn["txn_id"])):
-            _fail(txn, "effect version binding differs")
-        prior = None if before is None else conn.execute(
-            "SELECT payload_hash FROM version_identity WHERE row_id=? AND row_version=?",
-            (effect["row_id"], before)).fetchone()
-        if (prior[0] if prior is not None else None) != effect["hash_before"]:
-            _fail(txn, "effect predecessor payload differs")
+    _refuse_unbound_effects(conn, txn)
     if txn["operation"] == "view_move":
+        first = conn.execute("SELECT version_before FROM audit_effects WHERE txn_id=? ORDER BY ordinal LIMIT 1",
+                             (txn["txn_id"],)).fetchone()
+        if first is None:
+            raise IndexError("a view move has no effect")
         return {"old_path": receipt["affected_paths"][0], "path": receipt["affected_paths"][1],
-                "generation": txn["generation_before"], "version": found[0]["version_before"]}
-    material = []
-    for effect in found:
-        if effect["row_id"] is None or effect["version_after"] is None:
-            _fail(txn, "native effect has no immutable version")
-        identity = conn.execute("SELECT payload_hash,schema_version FROM version_identity WHERE row_id=? AND row_version=?",
-                                (effect["row_id"], effect["version_after"])).fetchone()
-        values, body = typed_storage.version_values(conn, effect["row_id"], effect["version_after"])
-        if (identity is None or identity[0] != effect["hash_after"]
-                or tokens.payload_hash(identity[1], effect["item_key"], values, body) != identity[0]):
-            _fail(txn, "immutable version differs from its audit effect")
-        material.append({"key": effect["item_key"], "payload_hash": effect["hash_after"],
-                         "sources": [row[0] for row in conn.execute(
-                             "SELECT source_ref FROM item_sources WHERE row_id=? AND row_version=? ORDER BY ordinal",
-                             (effect["row_id"], effect["version_after"]))]})
+                "generation": txn["generation_before"], "version": first[0]}
+    material = _effect_material(conn, txn)
     return material if txn["operation"] == "bulk_upsert" else material[0] if material else None
 
 
@@ -118,7 +186,7 @@ def verify_event(conn, txn):
             if original is None:
                 for row_id, key, version, payload, schema_version in conn.execute(
                     "SELECT v.row_id,i.item_key,v.row_version,v.payload_hash,v.schema_version FROM version_identity v "
-                    "JOIN items i ON i.row_id=v.row_id WHERE v.txn_id=?", (txn["txn_id"],)):
+                    "JOIN item_rows i ON i.row_id=v.row_id WHERE v.txn_id=?", (txn["txn_id"],)):
                     values, body = typed_storage.version_values(conn, row_id, version)
                     if tokens.payload_hash(schema_version, key, values, body) != payload:
                         _fail(txn, "imported version payload differs")
@@ -133,7 +201,10 @@ def verify_event(conn, txn):
                       "manifest_version_before", "manifest_version_after", "prev_event_hash", "committed_at",
                       "why", "request_hash")}
             event.update(manifest_hash=manifest[0], effects=effects(conn, txn))
-            digest = hashlib.sha256(b"exomem-collection-event:v1\0" + records._canonical_json(event)).hexdigest()
+            version = txn.get("event_version", 1)
+            if version == 2:
+                event.update(version_sources.event_fields(conn, txn))
+            digest = tokens.event_hash(event, version=version)
         if digest != txn["event_hash"]:
             _fail(txn, "event hash differs from immutable material")
     except (KeyError, IndexError, TypeError, ValueError) as error:
@@ -303,12 +374,12 @@ def agent_history(writer, manifest):
         return {"status": "history_incomplete", "complete": False, "truncated": False, "events": []}
 
     def released(row_id):
-        item = writer.connection.execute("SELECT item_key FROM items WHERE row_id=? AND collection_id=?",
+        item = writer.connection.execute("SELECT item_key FROM item_rows WHERE row_id=? AND collection_id=?",
                                         (row_id, manifest.collection_id)).fetchone()
         if item is None:
             return False
         subject = next(iter(governance.iter_subjects(writer.connection, manifest.collection_id,
-            writer._operation.logical_vault_id, row_key=item[0])), None)
+            writer._operation.logical_vault_id, row_key=item[0], retained=True)), None)
         return subject is not None and writer._operation.decision(subject).level >= 6
 
     for txn in transactions(writer.connection, manifest.collection_id):
@@ -341,7 +412,7 @@ def agent_history(writer, manifest):
             legacy_event = json.loads(txn["legacy_event_json"])
             key = legacy_event.get("item_key")
             if key is not None:
-                current = writer.connection.execute("SELECT row_id FROM items WHERE collection_id=? AND item_key=?",
+                current = writer.connection.execute("SELECT row_id FROM item_rows WHERE collection_id=? AND item_key=?",
                                                      (manifest.collection_id, key)).fetchone()
                 if current is None:
                     # Only unrestricted readers can release an imported event with no current row metadata.
@@ -380,10 +451,16 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
     manifest = writer._collection_manifest(writer._collection_row(manifest))[0]
     from . import governance
 
-    subject = next(iter(governance.iter_subjects(conn, cid, writer._operation.logical_vault_id, row_key=item_key)), None)
+    subject = next(iter(governance.iter_subjects(
+        conn, cid, writer._operation.logical_vault_id, row_key=item_key, retained=True)), None)
     if not writer._operation.reads_whole_row(cid, subject):
         raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
-    item = writer._item(cid, item_key)
+    # A retracted row keeps its history, so this lookup reads the table of every row.
+    item = conn.execute("SELECT row_id FROM item_rows WHERE collection_id=? AND item_key=?",
+                        (cid, item_key)).fetchone()
+    if item is None:
+        raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+    item = {"row_id": item[0]}
     assessment = audit(writer, writer._collection_row(manifest))
     relative = record_history.history_dir(cid, item_key)
     names = registry_history.kept_names(writer.root, relative, suffix=record_history._SUFFIX) or []
@@ -406,9 +483,10 @@ def row_history(writer, manifest, *, item_key, limit=None, continuation=None):
                 continue
             legacy[event["transition_id"]] = event
             continue
-        effect = conn.execute("SELECT version_before,version_after,hash_before,hash_after FROM audit_effects "
+        effect = conn.execute("SELECT version_before,version_after,hash_before,hash_after,effect FROM audit_effects "
                               "WHERE txn_id=? AND row_id=?", (txn["txn_id"], item["row_id"])).fetchone()
-        if effect is None or effect[0] is None or effect[2] == effect[3]:
+        # A re-admission with unchanged content is still an event of its own, so only an update is skipped.
+        if effect is None or effect[0] is None or (effect[2] == effect[3] and effect[4] != "insert"):
             continue
         if any(not writer._operation.allows_history_path(path) for path in event_paths(txn)):
             withheld = True
@@ -523,6 +601,11 @@ class _FileInputs:
     access_blocked: bool
     key: tuple
 
+    @property
+    def digest(self):
+        """One digest over every input; it moves when any of them does."""
+        return hashlib.sha256(json.dumps([self.policy.fingerprint, *self.key]).encode()).hexdigest()
+
 
 def _file_inputs(root):
     """Read a release's file-held inputs once; a page's epoch and the repair key both come from here, so they cannot drift."""
@@ -531,6 +614,11 @@ def _file_inputs(root):
 
     loaded, tombstones = policy.load(root), lifecycle.tombstoned_paths(root)
     access_fingerprint, rules, blocked = access._policy_state(root)
+    return inputs_of(loaded, tombstones, access_fingerprint, rules, blocked)
+
+
+def inputs_of(loaded, tombstones, access_fingerprint, rules, blocked):
+    """The file-held inputs of a history release from inputs already read, such as an operation's snapshot."""
     return _FileInputs(loaded, tombstones, rules, blocked, (access_fingerprint, blocked, tuple(sorted(tombstones))))
 
 
@@ -540,8 +628,7 @@ def release_inputs(root):
     The store thread keys its history repair on this, so a changed policy, access file, blocked flag
     or tombstone marks the pages pending without a census render. It reads no history.
     """
-    found = _file_inputs(root)
-    return hashlib.sha256(json.dumps([found.policy.fingerprint, *found.key]).encode()).hexdigest()
+    return _file_inputs(root).digest
 
 
 class PageContext:
@@ -556,6 +643,8 @@ class PageContext:
         found = _file_inputs(root)
         self.policy, self.tombstones, self.access, self.access_blocked = (
             found.policy, found.tombstones, found.access, found.access_blocked)
+        # The `release_inputs` of this context's own read, so a proof of its render names what it rendered from.
+        self.inputs = found.digest
         # A failed policy read cannot turn its empty scopes into permission to publish history.
         if self.policy.blocked:
             governance.OperationAuthorization.refuse()
@@ -648,7 +737,7 @@ class PageContext:
             key = original.get("item_key")
             if key is not None:
                 row = self.conn.execute("SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
-                    "FROM items WHERE collection_id=? AND item_key=?", (self.manifest.collection_id, key)).fetchone()
+                    "FROM item_rows WHERE collection_id=? AND item_key=?", (self.manifest.collection_id, key)).fetchone()
                 if row is None:
                     self.unresolved = True
                     return None
@@ -677,7 +766,7 @@ class PageContext:
             effects = {}
             for row in self.conn.execute(
                 "SELECT e.txn_id,i.row_id,i.item_key,i.row_version,i.payload_hash,i.view_path,i.governance_json "
-                "FROM audit_effects e LEFT JOIN items i ON i.row_id=e.row_id "
+                "FROM audit_effects e LEFT JOIN item_rows i ON i.row_id=e.row_id "
                 "WHERE e.txn_id IN (SELECT value FROM json_each(?)) ORDER BY e.txn_id,e.ordinal",
                 (json.dumps([txn["txn_id"] for txn in batch]),),
             ):

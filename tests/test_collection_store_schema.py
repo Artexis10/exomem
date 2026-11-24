@@ -38,9 +38,10 @@ EXPECTED_TABLES = {
     "collection_type_versions",
     "collection_manifests",
     "collections",
-    "items",
+    "item_rows",
     "item_versions",
     "item_sources",
+    "version_source_bindings",
     "txns",
     "audit_effects",
     "held_candidates",
@@ -65,6 +66,7 @@ EXPECTED_TABLES = {
     "store_binaries",
     "store_manifest",
     "store_projection_queue",
+    "store_derivation_queue",
     "store_held",
     "store_audit",
 }
@@ -173,8 +175,11 @@ def _item(
     view_path: str,
     collection_id: str = COLLECTION_ID,
 ) -> int:
+    # A store older than schema 19 still keeps its rows in the table named ``items``.
+    table = "item_rows" if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='item_rows'").fetchone() else "items"
     cursor = conn.execute(
-        "INSERT INTO items(collection_id, item_key, natural_key, row_version, schema_version,"
+        f"INSERT INTO {table}(collection_id, item_key, natural_key, row_version, schema_version,"
         " values_json, payload_hash, view_path, created_txn, updated_txn)"
         " VALUES (?,?,?,?,?,?,?,?,?,?)",
         (collection_id, item_key, natural_key, 1, 1, "{}", H, view_path, 1, 1),
@@ -231,7 +236,7 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
 
 def test_every_store_table_is_strict(store: connection.WriterConnection) -> None:
     rows = store.connection.execute(
-        "SELECT name, strict FROM pragma_table_list WHERE schema='main'"
+        "SELECT name, strict FROM pragma_table_list WHERE schema='main' AND type='table'"
         " AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
     tables = {name: strict for name, strict in rows}
@@ -243,7 +248,7 @@ def test_strict_tables_refuse_a_mistyped_value(store: connection.WriterConnectio
     with pytest.raises(sqlite3.IntegrityError), store.transaction() as conn:
         _seed_collection(conn)
         conn.execute(
-            "INSERT INTO items(collection_id, item_key, row_version, schema_version, values_json,"
+            "INSERT INTO item_rows(collection_id, item_key, row_version, schema_version, values_json,"
             " payload_hash, view_path, created_txn, updated_txn) VALUES (?,?,?,?,?,?,?,?,?)",
             (COLLECTION_ID, "k", "not-a-version", 1, "{}", H, "v.md", 1, 1),
         )
@@ -273,15 +278,15 @@ def test_append_only_tables_abort_update_and_delete(
 def test_item_rows_are_never_deleted(store: connection.WriterConnection) -> None:
     _populated(store)
     with pytest.raises(sqlite3.IntegrityError, match="never deleted"), store.transaction() as tx:
-        tx.execute("DELETE FROM items")
-    assert store.connection.execute("SELECT count(*) FROM items").fetchone()[0] == 1
+        tx.execute("DELETE FROM item_rows")
+    assert store.connection.execute("SELECT count(*) FROM item_rows").fetchone()[0] == 1
 
 
 def test_item_rows_remain_updatable(store: connection.WriterConnection) -> None:
     ids = _populated(store)
     with store.transaction() as tx:
-        tx.execute("UPDATE items SET row_version = 2 WHERE row_id = ?", (ids["row_id"],))
-    assert store.connection.execute("SELECT row_version FROM items").fetchone()[0] == 2
+        tx.execute("UPDATE item_rows SET row_version = 2 WHERE row_id = ?", (ids["row_id"],))
+    assert store.connection.execute("SELECT row_version FROM item_rows").fetchone()[0] == 2
 
 
 # --- P1a.1: keys ---------------------------------------------------------------
@@ -399,7 +404,6 @@ def test_writer_applies_the_store_pragmas(store: connection.WriterConnection) ->
 def test_a_new_store_is_current_schema_with_identity(store: connection.WriterConnection) -> None:
     meta = dict(store.connection.execute("SELECT key, value FROM store_meta").fetchall())
     assert meta["schema_version"] == str(schema.SCHEMA_VERSION)
-    assert schema.SCHEMA_VERSION == 17
     assert meta["store_id"] != meta["instance_id"]
     for key in ("store_id", "instance_id"):
         assert len(meta[key]) == 36 and meta[key].count("-") == 4
@@ -503,7 +507,7 @@ def test_present_revision_metadata_cannot_masquerade_as_legacy(
         connection.open_writer(path, lease_check=_allow)
 
 
-@pytest.mark.parametrize("revision", ["17", "9"])
+@pytest.mark.parametrize("revision", [str(schema.SCHEMA_VERSION), "9"])
 def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
     path = store.path
     store.connection.execute("ALTER TABLE alembic_version RENAME TO intermediate_revision")
@@ -518,12 +522,12 @@ def test_revision_table_names_follow_sqlite_identifier_case(store, revision):
         with pytest.raises(connection.CollectionStoreError, match="COLLECTION_STORE_SCHEMA_INVALID"):
             connection.open_writer(path, lease_check=_allow)
     else:
-        assert schema.schema_version(store.connection) == 17
+        assert schema.schema_version(store.connection) == schema.SCHEMA_VERSION
         store.close()
         with closing(connection.open_reader(path)) as reader:
-            assert schema.schema_version(reader) == 17
+            assert schema.schema_version(reader) == schema.SCHEMA_VERSION
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [("17",)]
+            assert writer.connection.execute("SELECT version_num FROM ALEMBIC_VERSION").fetchall() == [(str(schema.SCHEMA_VERSION),)]
 
 
 def test_a_schema_14_store_gains_the_empty_store_mode_tables_and_keeps_its_rows(tmp_path, monkeypatch):
@@ -577,7 +581,7 @@ def test_a_schema_15_store_gains_page_mtimes_from_its_manifest_and_keeps_its_row
 
     with connection.open_writer(path, lease_check=_allow) as writer:
         conn = writer.connection
-        assert schema.schema_version(conn) == 17
+        assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         assert conn.execute("SELECT * FROM store_projection_queue").fetchall() == [
             (pages[0][0], 1, "write", None, "t1")]
         with writer.transaction() as tx:
@@ -616,7 +620,7 @@ def test_legacy_current_store_is_stamped_without_changing_its_data(tmp_path):
         assert reader.execute("SELECT * FROM items").fetchall() == rows
     for _ in range(2):
         with connection.open_writer(path, lease_check=_allow) as writer:
-            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [("17",)]
+            assert writer.connection.execute("SELECT version_num FROM alembic_version").fetchall() == [(str(schema.SCHEMA_VERSION),)]
             assert dict(writer.connection.execute("SELECT key,value FROM store_meta")) == before
             assert writer.connection.execute("SELECT * FROM items").fetchall() == rows
 
@@ -1004,8 +1008,8 @@ def test_item_conflicting_inserts_are_refused(
     _populated(store)
     conn = store.connection
     conn.execute(f"PRAGMA recursive_triggers={recursive}")
-    columns = [row[1] for row in conn.execute("PRAGMA table_info('items')")]
-    before = conn.execute("SELECT * FROM items").fetchall()
+    columns = [row[1] for row in conn.execute("PRAGMA table_info('item_rows')")]
+    before = conn.execute("SELECT * FROM item_rows").fetchall()
     values = dict(zip(columns, before[0], strict=True))
     for column, replacement in (
         ("row_id", 2), ("item_key", "k2"), ("view_path", "v/b.md"), ("natural_key", "other")
@@ -1014,12 +1018,12 @@ def test_item_conflicting_inserts_are_refused(
             values[column] = replacement
     values["body"] = "REPLACED"
     prefix = "INSERT" if statement == "UPSERT" else statement
-    sql = f"{prefix} INTO items ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
+    sql = f"{prefix} INTO item_rows ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})"
     if statement == "UPSERT":
         sql += " ON CONFLICT DO UPDATE SET body=excluded.body"
     with pytest.raises(sqlite3.IntegrityError, match="items"), store.transaction() as tx:
         tx.execute(sql, tuple(values.values()))
-    assert conn.execute("SELECT * FROM items").fetchall() == before
+    assert conn.execute("SELECT * FROM item_rows").fetchall() == before
 
 
 def _two_items(writer: connection.WriterConnection) -> tuple[int, int]:
@@ -1038,16 +1042,16 @@ def test_update_or_replace_cannot_delete_an_item(
 ) -> None:
     first, second = _two_items(store)
     conn = store.connection
-    before = conn.execute("SELECT * FROM items ORDER BY row_id").fetchall()
-    conflicting = conn.execute(f"SELECT {key} FROM items WHERE row_id=?", (second,)).fetchone()[0]
+    before = conn.execute("SELECT * FROM item_rows ORDER BY row_id").fetchall()
+    conflicting = conn.execute(f"SELECT {key} FROM item_rows WHERE row_id=?", (second,)).fetchone()[0]
     # Catch inside the transaction: ABORT must preserve both rows even if
     # the caller commits after handling the refusal.
     with store.transaction() as tx:
         tx.execute(f"PRAGMA recursive_triggers={recursive}")
         with pytest.raises(sqlite3.IntegrityError, match="items"):
-            tx.execute(f"UPDATE OR REPLACE items SET {key}=? WHERE row_id=?", (conflicting, first))
-        assert tx.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
-    assert conn.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+            tx.execute(f"UPDATE OR REPLACE item_rows SET {key}=? WHERE row_id=?", (conflicting, first))
+        assert tx.execute("SELECT * FROM item_rows ORDER BY row_id").fetchall() == before
+    assert conn.execute("SELECT * FROM item_rows ORDER BY row_id").fetchall() == before
 
 
 @pytest.mark.parametrize("key, unused", [
@@ -1060,20 +1064,20 @@ def test_ordinary_item_update_still_allowed(
 ) -> None:
     first, second = _two_items(store)
     conn = store.connection
-    other_before = conn.execute("SELECT * FROM items WHERE row_id=?", (second,)).fetchone()
+    other_before = conn.execute("SELECT * FROM item_rows WHERE row_id=?", (second,)).fetchone()
     with store.transaction() as tx:
         tx.execute(f"PRAGMA recursive_triggers={recursive}")
-        tx.execute("UPDATE items SET row_version=2, body='updated' WHERE row_id=?", (first,))
-        tx.execute(f"UPDATE items SET {key}=? WHERE row_id=?", (unused, first))
+        tx.execute("UPDATE item_rows SET row_version=2, body='updated' WHERE row_id=?", (first,))
+        tx.execute(f"UPDATE item_rows SET {key}=? WHERE row_id=?", (unused, first))
     updated_id = unused if key == "row_id" else first
     assert conn.execute(
-        f"SELECT {key}, row_version, body FROM items WHERE row_id=?", (updated_id,)
+        f"SELECT {key}, row_version, body FROM item_rows WHERE row_id=?", (updated_id,)
     ).fetchone() == (unused, 2, "updated")
-    assert conn.execute("SELECT * FROM items WHERE row_id=?", (second,)).fetchone() == other_before
-    assert conn.execute("SELECT count(*) FROM items").fetchone() == (2,)
+    assert conn.execute("SELECT * FROM item_rows WHERE row_id=?", (second,)).fetchone() == other_before
+    assert conn.execute("SELECT count(*) FROM item_rows").fetchone() == (2,)
 
 
-@pytest.mark.parametrize("table", [*APPEND_ONLY, "items"])
+@pytest.mark.parametrize("table", [*APPEND_ONLY, "item_rows"])
 def test_conflict_key_registry_matches_unique_indexes(
     store: connection.WriterConnection, table: str,
 ) -> None:
@@ -1104,12 +1108,12 @@ def test_ensure_schema_restores_the_update_guard(store: connection.WriterConnect
         assert conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='items_never_replaced_update'"
         ).fetchone() == (1,)
-        before = conn.execute("SELECT * FROM items ORDER BY row_id").fetchall()
+        before = conn.execute("SELECT * FROM item_rows ORDER BY row_id").fetchall()
         with reopened.transaction() as tx:
             tx.execute("PRAGMA recursive_triggers=OFF")
             with pytest.raises(sqlite3.IntegrityError, match="items"):
-                tx.execute("UPDATE OR REPLACE items SET row_id=? WHERE row_id=?", (second, first))
-        assert conn.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before
+                tx.execute("UPDATE OR REPLACE item_rows SET row_id=? WHERE row_id=?", (second, first))
+        assert conn.execute("SELECT * FROM item_rows ORDER BY row_id").fetchall() == before
 
 
 def test_schema_ensure_restores_protection_at_current_version(

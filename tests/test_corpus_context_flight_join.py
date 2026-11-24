@@ -652,12 +652,12 @@ _DECLARED_UNBOUNDED_JOINS = {
     "complete_component borrow, each for one batch, and lend makes no offer after its room",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "process.wait",
     ): "age exits once its output reaches EOF or after kill; its input ends with the feed",
     (
         "media_store.py",
-        "_decrypt_into",
+        "_decrypted_chunks",
         "feeder.join",
     ): "the feed ends at the object's end, a broken pipe, or the edge store's per-read timeout",
     (
@@ -711,6 +711,11 @@ _DECLARED_UNBOUNDED_JOINS = {
         "self.child.wait",
     ): "enclosed by asyncio.wait_for with the remaining migration/handoff deadline",
     (
+        "service_manager.py",
+        "WorkerRuntime.cleanup_cancellations",
+        "self.child.wait",
+    ): "enclosed by asyncio.wait_for with the remaining downgrade-cleanup deadline",
+    (
         "collection_store/admission.py",
         "_offline_owner",
         "renewer.join",
@@ -744,10 +749,21 @@ _DECLARED_UNBOUNDED_JOINS = {
         "embeddings.get_embedding_index(vault_root).start_corpus_matrix_load().join",
     ): "startup warm thread joins the background matrix load it shares; not a request path",
     (
+        "server_runtime.py",
+        "_warm_embedding_matrix",
+        "loading.join",
+    ): "startup warm thread joins the optional passage-matrix load it requested; not a request path",
+    (
         "working_set_runtime.py",
         "join_builds",
         "thread.join",
     ): "shutdown joins the owned refresh after scheduling closes; the supervisor bounds process retirement",
+    (
+        "vault_backup.py",
+        "_end_copier",
+        "helper.wait",
+    ): "the backup's staging thread reaps a copier it has just killed, before it removes the copy the "
+    "copier was writing; a bounded wait would let a late write reach the snapshot; not a request path",
     (
         "writer_lease.py",
         "LeaseManager.writer_authority_guard",

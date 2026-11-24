@@ -707,17 +707,28 @@ def test_original_high1_fixture_never_leaks_on_records_cues(tmp_path, turn):
     assert "SECRETFACT" in json.dumps(_owner(vault, turn))
 
 
-def test_graph_lane_skips_withheld_neighbours_before_its_node_cap() -> None:
+def test_graph_lane_skips_withheld_neighbours_before_its_connection_cap(tmp_path) -> None:
     """A withheld page must not take a graph-lane slot before the guard runs."""
     from types import SimpleNamespace
 
+    from test_context_catalogue import _built, _page
+
+    from exomem import context_roles, epistemic_graph
     from exomem import working_set as ws
 
-    role = SimpleNamespace(id="graph-role")
-    visible = [f"Knowledge Base/Notes/Insights/v{i:02d}.md" for i in range(ws.GRAPH_MAX_NODES)]
-    withheld = "Knowledge Base/Notes/Aaa-withheld/x.md"  # sorts before every visible path
-    anchor = SimpleNamespace(path="Knowledge Base/Entities/x.md", neighbourhood=frozenset([withheld, *visible]))
-    items = ws._graph_lane(role, anchors=[anchor], neighbourhood=frozenset(visible))
+    vault = tmp_path / "vault"
+    anchor = _page(vault, "entity-page", body="The entity.\n")
+    for i in range(ws.GRAPH_CONNECTIONS_PER_ANCHOR + 1):
+        _page(vault, f"v{i:02d}", body=f"Body {i}.\n- links_to [[{anchor.removesuffix('.md')}]]\n")
+    withheld = _page(vault, "aaa-withheld", body=f"Body.\n- links_to [[{anchor.removesuffix('.md')}]]\n")
+    _built(vault).close()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    role = context_roles.load_roles().roles["connections"]
+    resolved = SimpleNamespace(status="resolved", path=anchor, ref=anchor)
+    items = ws._graph_lane(
+        vault, role, anchors=[resolved],
+        visible=lambda path: path != withheld,
+    )
     paths = [item.path for item in items]
     assert withheld not in paths
-    assert len(paths) == ws.GRAPH_MAX_NODES
+    assert len(paths) == ws.GRAPH_CONNECTIONS_PER_ANCHOR

@@ -14,7 +14,7 @@ import sqlite3
 import stat
 import unicodedata
 import uuid
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 from functools import partial
@@ -23,9 +23,17 @@ from typing import Any, NotRequired
 
 from typing_extensions import TypedDict
 
-from . import record_formats, record_governance, state_paths, vault, writer_lease
+from . import (
+    automatic_collection,
+    record_formats,
+    record_governance,
+    state_paths,
+    vault,
+    writer_lease,
+)
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .kbdir import managed_join
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +247,19 @@ def lifecycle_guards(
         "expected_manifest_hash": manifest.manifest_version.hash,
         "expected_container_hash": _container_hash(manifest, snapshot),
     }
+
+
+def validate_new_row(
+    manifest: collections.CollectionManifest, item: Mapping[str, Any], *, body: str | None = None
+) -> None:
+    """Refuse, with `append_record`'s own errors, a first row that `manifest` cannot hold.
+
+    A caller that creates the collection for one row checks it here first, so a refused row leaves no empty collection.
+    """
+    _refuse_excluded_authored_names(item)
+    _validate_values(manifest, item)
+    if body is not None:
+        _validate_body(body)
 
 
 def append_record(
@@ -503,6 +524,11 @@ def append_record(
                 collections.SourceVersion(canonical_path.relative_to(root).as_posix(), item_hash),
             )
         )
+        from . import record_source_custody
+
+        dependencies = record_source_custody.prepare(root, operation_id=audit_correlation,
+            effects={audit_correlation: record_source_custody.Effect(record_source_custody.facts(body, prepared=origin_inputs))},
+            preview=_prepare is not None)
         audit = _audit_body(
             transition_id=audit_correlation,
             parent_id=parent,
@@ -518,6 +544,7 @@ def append_record(
             after_container_hash=after_hash,
             payload_hash=payload_hash,
             why=why,
+            _dependencies=dependencies,
         )
         log_plan = _plan_required_audit(root, manifest, key, audit, after_hash)
         writes = [
@@ -553,6 +580,7 @@ def append_record(
                 *((delivery_guard,) if delivery_guard is not None else ()),
             ),
             origin_inputs=(origin_inputs,),
+            dependency_plan=dependencies,
             _prepare=prepare_final if _prepare is not None else None,
             _validate_inputs=_validate_inputs,
         )
@@ -639,6 +667,7 @@ def _publish_with_origin(
     *,
     required_guards: tuple[Any, ...],
     origin_inputs: tuple[Any, ...] = (),
+    dependency_plan: Any = None,
     _prepare: Callable[[list[vault.PlannedWrite]], None] | None = None,
     _validate_inputs: Callable[[], None] | None = None,
 ) -> None:
@@ -658,13 +687,19 @@ def _publish_with_origin(
         origin_guards = tuple(
             guard for item in prepared for guard in item.required_guards(root, writes)
         )
-        vault.batch_atomic_write(
-            writes,
-            vault_root=root,
-            required_guards=(*required_guards, *origin_guards),
-            _validate_prepared_bindings=revalidate if prepared or _validate_inputs is not None else None,
-            _prepare=_prepare,
-        )
+        if dependency_plan is not None and _prepare is None:
+            dependency_plan.begin(root)
+        try:
+            vault.batch_atomic_write(
+                writes,
+                vault_root=root,
+                required_guards=(*required_guards, *origin_guards),
+                _validate_prepared_bindings=revalidate if prepared or _validate_inputs is not None else None,
+                _prepare=_prepare,
+            )
+        finally:
+            if dependency_plan is not None and _prepare is None:
+                dependency_plan.observe(root, writes)
     except vault.BatchWriteError:
         raise
     except provenance.OriginError as error:
@@ -1101,6 +1136,16 @@ class _BulkPlan:
     existing: record_formats.Record | None
     source: str | None
     rationale: str
+    source_proof: ResolvedSource
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedSource:
+    """A released path and its guarded incarnation, kept together through preparation."""
+
+    path: str
+    guard: vault.PathGuard
+    canonical_ref: str | None
 
 
 def _bulk_reject(index: int, code: str, message: str, **extra: Any) -> dict[str, Any]:
@@ -1163,11 +1208,21 @@ def resolve_preserved_source(
     """
     if type(reference) is not str or not reference or len(reference.encode("utf-8")) > 1024:
         return None
+    lanes = tuple(managed_join(f"{lane}/") for lane in _BULK_SOURCE_LANES)
     try:
-        path, relative = vault.resolve_under_vault(
-            root, reference, must_exist=True, must_be_file=True
-        )
-        lanes = tuple(f"{vault.kb_prefix()}{lane}/" for lane in _BULK_SOURCE_LANES)
+        try:
+            path, relative = vault.resolve_under_vault(
+                root, reference, must_exist=True, must_be_file=True
+            )
+        except vault.VaultPathError:
+            from . import originals
+
+            # A shared archive keeps a preserved original's bytes in its pool, so its filing has no file at its
+            # path. The read gate decides: a deleted filing resolves to nothing, like an absent one.
+            path, relative = vault.resolve_under_vault(root, reference)
+            if (os.path.lexists(path) or not relative.startswith(lanes)
+                    or originals.digest_addressed(root, relative) is None):
+                return None
         if relative == reference and relative.startswith(lanes) and released(relative, path):
             return path, relative
     except (vault.VaultPathError, vault.PathGuardError, OSError, ValueError, UnicodeDecodeError):
@@ -1179,19 +1234,21 @@ def _resolve_bulk_source(
     root: Path,
     reference: object,
     allowed: Callable[[str], bool],
-    cache: dict[str, tuple[str, vault.PathGuard] | None],
-) -> tuple[str, vault.PathGuard] | None:
+    cache: dict[str, ResolvedSource | None],
+) -> ResolvedSource | None:
     """Resolve one provenance reference to a preserved, released Sources/Evidence page."""
     if type(reference) is not str:
         return None
     if reference in cache:
         return cache[reference]
-    resolved: tuple[str, vault.PathGuard] | None = None
+    resolved: ResolvedSource | None = None
     found = resolve_preserved_source(root, reference, lambda relative, _path: allowed(relative))
     if found is not None:
         try:
-            _text, guard = vault.read_guarded_text(root, found[0])
-            resolved = (found[1], guard)
+            from . import memory_refs
+
+            text, guard = vault.read_guarded_text(root, found[0])
+            resolved = ResolvedSource(found[1], guard, memory_refs.ref_from_markdown(text))
         except (vault.VaultPathError, vault.PathGuardError, OSError, UnicodeDecodeError):
             resolved = None
     cache[reference] = resolved
@@ -1312,7 +1369,7 @@ def bulk_upsert_records(
         for record in snapshot.records:
             by_key.setdefault(record.identity.key, []).append(record)
         allowed = record_governance.full_release_filter(root)
-        source_cache: dict[str, tuple[str, vault.PathGuard] | None] = {}
+        source_cache: dict[str, ResolvedSource | None] = {}
         has_sources_field = _bulk_sources_field(manifest)
         seen: dict[str, int] = {}
         outcomes: list[dict[str, Any]] = []
@@ -1329,7 +1386,7 @@ def bulk_upsert_records(
                     _bulk_reject(
                         index,
                         "INVALID_BULK_ROW",
-                        "a row is an object of item, optional body and optional source",
+                        "a row is an object of item, optional body and source; a source is required on the row or once for the batch",
                     )
                 )
                 continue
@@ -1362,7 +1419,7 @@ def bulk_upsert_records(
                         )
                     )
                     continue
-                source_rel, source_guard_row = resolved
+                source_rel, source_guard_row = resolved.path, resolved.guard
                 values = _bulk_row_values(manifest, raw["item"], source_rel)
             except collections.CollectionError as error:
                 outcomes.append(_bulk_error_row(index, error))
@@ -1449,6 +1506,7 @@ def bulk_upsert_records(
                     existing=current_record,
                     source=source_rel,
                     rationale=rationale,
+                    source_proof=resolved,
                 )
             )
             outcomes.append(
@@ -1520,6 +1578,7 @@ def bulk_upsert_records(
         new_item_guards: dict[int, vault.DirectoryCensusGuard] = {}
         audit_bodies: list[str] = []
         origin_inputs: list[Any] = []
+        dependency_effects = {}
         history_writes: list[vault.PlannedWrite] = []
         by_index = {row["index"]: row for row in outcomes}
 
@@ -1527,6 +1586,7 @@ def bulk_upsert_records(
             return pos + sum(d for p, d in shifts if p < pos or (p == pos and not is_end))
 
         for plan in plans:
+            prepared = None
             transition = _transition_id()
             next_text = record_formats.render_manifest_audit_head(
                 prev_text, transition, semantic_profile=manifest.semantic_profile
@@ -1692,6 +1752,12 @@ def bulk_upsert_records(
                         after_item_hash=item_hash,
                     )
                 )
+            from . import record_source_custody
+
+            dependency_effects[transition] = record_source_custody.Effect(
+                current=record_source_custody.facts(body if plan.kind == "insert" else after_body,
+                                                  explicit=plan.source_proof, prepared=prepared),
+                prior=record_source_custody.facts(record.body if record is not None else None))
             audit_bodies.append(
                 _audit_body(
                     transition_id=transition,
@@ -1717,6 +1783,10 @@ def bulk_upsert_records(
             prev_container = next_container
 
         profile = profile_for(manifest.semantic_profile)
+        dependencies = record_source_custody.prepare(root, operation_id=batch_id, effects=dependency_effects)
+        audit_bodies = [dependencies.audit_body(profile.activity_prefix, body) for body in audit_bodies]
+        history_writes = [dependencies.history(write, json.loads(write.content)["transition_id"])
+                          if write.content else write for write in history_writes]
         log_plan = vault.plan_log_writes_many(
             root,
             date_iso=dt.date.today().isoformat(),
@@ -1757,6 +1827,7 @@ def bulk_upsert_records(
                 *source_guards.values(),
             ),
             origin_inputs=tuple(origin_inputs),
+            dependency_plan=dependencies,
         )
         return _report(
             committed=True,
@@ -1888,7 +1959,7 @@ def update_record(
             merged.pop(name, None)
         merged.update(changes)
         try:
-            values = _validate_values(manifest, merged)
+            values = _validate_values(manifest, merged, written=changes)
         except collections.CollectionError as error:
             raise _hold_refusal(
                 root,
@@ -1996,6 +2067,13 @@ def update_record(
                 ),
             )
         after_item_hash = hashlib.sha256(replacement.encode("utf-8")).hexdigest()
+        from . import record_source_custody
+
+        dependencies = record_source_custody.prepare(root, operation_id=audit_correlation,
+            effects={audit_correlation: record_source_custody.Effect(
+                current=record_source_custody.facts(body if body is not None else record.body, prepared=origin_inputs),
+                prior=record_source_custody.facts(record.body))},
+            preview=_prepare is not None)
         audit = _audit_body(
             transition_id=audit_correlation,
             parent_id=parent,
@@ -2011,6 +2089,7 @@ def update_record(
             after_container_hash=after_container_hash,
             payload_hash=None,
             why=why,
+            _dependencies=dependencies,
         )
         log_plan = _plan_required_audit(root, manifest, item_key, audit, after_container_hash)
         record_governance.precommit_authorize_mutation(
@@ -2056,6 +2135,7 @@ def update_record(
             after_item_hash=after_item_hash,
             binding=_history_binding,
         )
+        kept = dependencies.history(kept, audit_correlation)
         _publish_with_origin(
             root,
             [
@@ -2069,6 +2149,7 @@ def update_record(
                 *(guard for guard in snapshot.path_guards if guard.target != record.source.path),
             ),
             origin_inputs=(origin_inputs,),
+            dependency_plan=dependencies,
             _prepare=prepare_final if _prepare is not None else None,
             _validate_inputs=_validate_inputs,
         )
@@ -2111,9 +2192,10 @@ def _plan_create_audit(
     scaffold: bool,
     transition_id: str,
     why: str,
+    automatic: bool = False,
 ) -> tuple[str | None, str, vault.LogWritePlan]:
     """A file create's after item and container hashes, and the log writes of its event, the
-    archive of a rotation it makes due included.
+    archive of a rotation it makes due included. An automatic create adds its marker line to the event.
 
     ``proposed_manifest_hash`` is the hash of the caller's manifest before the commit marks it.
     It names that archive, so validation and the commit name the same one.
@@ -2155,6 +2237,8 @@ def _plan_create_audit(
         before_container_hash=None,
         proposed_manifest_hash=proposed_manifest_hash,
     )
+    if automatic:
+        audit = f"{audit}\n{automatic_collection.create_line(manifest.collection_id)}"
     return (
         after_item_hash,
         after_container_hash,
@@ -2169,8 +2253,13 @@ def create_collection(
     *,
     why: str,
     scaffold: bool = True,
+    automatic: bool = False,
 ) -> dict[str, Any]:
-    """Create a new collection only when its manifest and canonical source are absent."""
+    """Create a new collection only when its manifest and canonical source are absent.
+
+    `automatic` marks an agent-initiated create: the daily bound is checked under the mutation lock,
+    and the create's log entry records it, for the next count and the inventory.
+    """
     root = Path(vault_root)
     _validate_why(why)
     path = root / manifest_path
@@ -2183,12 +2272,16 @@ def create_collection(
             raise collections.CollectionError(
                 "INVALID_COLLECTION_MANIFEST", "manifest must be _collection.md"
             )
-        manifest = _preflight_collection_create(root, path, manifest_text, scaffold=scaffold)
+        manifest = _preflight_collection_create(
+            root, path, manifest_text, scaffold=scaffold, commit=True
+        )
         _refuse_store_only_features(manifest)
         manifest_guard = vault.PathGuard.capture(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
         )
         _require_activity_log(root)
+        if automatic:
+            automatic_collection.require_daily_room(root)
         proposed_manifest_hash = manifest.manifest_version.hash
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
@@ -2236,6 +2329,7 @@ def create_collection(
             scaffold=scaffold,
             transition_id=audit_correlation,
             why=why,
+            automatic=automatic,
         )
         record_governance.precommit_authorize_mutation(
             root,
@@ -2265,7 +2359,7 @@ def create_collection(
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         _refresh_manifest_due_state(root, manifest)
-        return _result(
+        receipt = _result(
             operation="create",
             manifest=manifest,
             key=None,
@@ -2278,6 +2372,7 @@ def create_collection(
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+        return {**receipt, "automatic": True} if automatic else receipt
 
 
 def validate_collection_create(
@@ -2371,7 +2466,7 @@ def _validate_collection_create_for_profile(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
         )
     manifest = _preflight_collection_create(
-        root, root / manifest_path, manifest_text, scaffold=scaffold
+        root, root / manifest_path, manifest_text, scaffold=scaffold, commit=False
     )
     if manifest.semantic_profile != semantic_profile:
         raise collections.CollectionError(
@@ -2384,7 +2479,7 @@ def _validate_collection_create_for_profile(
     _require_activity_log(root)
     if not all(
         record_governance.full_release_filter(root)(path)
-        for path in (manifest.path, manifest.storage.source, f"{vault.kb_prefix()}log.md")
+        for path in (manifest.path, manifest.storage.source, managed_join("log.md"))
     ):
         raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
     if manifest.storage.strategy != collections.SQLITE_STORAGE:
@@ -2429,6 +2524,12 @@ def _validate_collection_create_for_profile(
         "normalized_contract": _normalized_manifest_contract(manifest),
         "warnings": warnings,
     }
+
+
+def manifest_text(vault_root: Path, manifest: collections.CollectionManifest) -> str:
+    """The text of a file collection's manifest as it is stored now."""
+    data, _guard = _read_record_bytes(Path(vault_root), manifest.path)
+    return data.decode("utf-8")
 
 
 def validate_collection_revision(
@@ -2780,7 +2881,7 @@ def _lifecycle_mutation(
         record_formats.validate_storage_contract(current)
         record_governance.require_proposed_manifest_visibility(root, current)
         for record in snapshot.records:
-            _validate_values(current, record.values)
+            _validate_values(current, record.values, written=())
         guards = lifecycle_guards(current, snapshot)
         _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
         _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
@@ -2971,14 +3072,26 @@ def _validate_revision_manifest(
         )
     record_formats.validate_storage_contract(proposed)
     record_governance.require_proposed_manifest_visibility(root, proposed)
+    newly_required = _newly_required(current, proposed)
     for record in snapshot.records:
-        _validate_values(proposed, record.values)
+        _validate_values(proposed, record.values, written=newly_required)
         if proposed.record_presentation is not None:
             record_formats._presentation_payload(proposed, record.values)
         if proposed.item_presentation is not None:
             record_formats._item_presentation_digests(proposed, record.values)
     _plan_presentation_revision(root, current, proposed, snapshot)
     return proposed
+
+
+def _newly_required(
+    current: collections.CollectionManifest, proposed: collections.CollectionManifest
+) -> frozenset[str]:
+    """The fields a revision makes required: a new claim about every stored row, so each is checked as written."""
+    return frozenset(
+        name
+        for name, spec in proposed.schema.fields.items()
+        if spec.required and not (name in current.schema.fields and current.schema.fields[name].required)
+    )
 
 
 def _plan_presentation_revision(
@@ -3307,12 +3420,35 @@ def _lifecycle_result(
     }
 
 
+def _require_unclaimed(
+    root: Path,
+    paths: tuple[str, ...],
+    *,
+    taken: str = "CREATE_ONLY_CONFLICT",
+    newest: bool = True,
+) -> None:
+    """Refuse a new collection file at a path that a moved page still claims (`prior_claims`).
+
+    A commit reads the newest claims; a validation passes `newest=False` and reads its request's
+    store revision, as every other read of that request does.
+    """
+    from . import prior_claims
+
+    for rel in paths:
+        try:
+            prior_claims.require_unreserved(root, rel, newest=newest)
+        except prior_claims.ReservedPathError as error:
+            code = taken if error.code == "FILE_EXISTS" else error.code
+            raise collections.CollectionError(code, error.reason) from None
+
+
 def _preflight_collection_create(
     root: Path,
     path: Path,
     manifest_text: str,
     *,
     scaffold: bool,
+    commit: bool,
 ) -> collections.CollectionManifest:
     record_governance.require_candidate_manifest_visibility(root, path.relative_to(root).as_posix())
     _assert_portable_absent(root, path)
@@ -3330,6 +3466,9 @@ def _preflight_collection_create(
     _assert_portable_absent(root, source)
     if source.exists() or _casefold_alias(source):
         raise collections.CollectionError("CREATE_ONLY_CONFLICT", "canonical source already exists")
+    # A markdown-items source is a folder, which no page's name reserves.
+    log_page = (manifest.storage.source,) if manifest.storage.strategy == "markdown-log" else ()
+    _require_unclaimed(root, (path.relative_to(root).as_posix(), *log_page), newest=commit)
     if scaffold and manifest.storage.strategy == "markdown-log":
         # Descriptor shape is validated above; this access pins the exact scaffold fields.
         manifest.storage.descriptor["section"]["title"]
@@ -3474,7 +3613,7 @@ def _inspect_audit_chain(
 
     try:
         history_guard = vault.DirectoryCensusGuard.capture(
-            root, f"{vault.kb_prefix()}_archive/logs", max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
+            root, managed_join("_archive/logs"), max_entries=_MAX_AUDIT_ARCHIVE_ENTRIES
         )
     except vault.PathGuardError:
         return _incomplete_audit_chain()
@@ -4016,8 +4155,8 @@ def _audit_events(
     the whole vault's. ``transition_ids`` names further transitions whose every occurrence the
     caller needs.
     """
-    live = f"{vault.kb_prefix()}log.md"
-    archive = f"{vault.kb_prefix()}_archive/logs"
+    live = managed_join("log.md")
+    archive = managed_join("_archive/logs")
     candidates = [live]
     archive_guard: vault.DirectoryCensusGuard | None = None
     try:
@@ -4158,6 +4297,14 @@ def _select_audit_history(
 
 
 def _valid_audit_event(event: Any, semantic_profile: str = "records") -> bool:
+    from . import record_source_custody
+
+    if (isinstance(event, dict) and type(event.get("version")) is int
+            and event["version"] == record_source_custody.EVENT_VERSION):
+        if not record_source_custody.valid_metadata(event):
+            return False
+        original = {key: value for key, value in event.items() if key not in record_source_custody.METADATA_FIELDS}
+        return _valid_audit_event({**original, "version": 1}, semantic_profile)
     if isinstance(event, dict) and event.get("version") == _LIFECYCLE_EVENT_VERSION:
         return _valid_lifecycle_audit_event(event, semantic_profile)
     if not _audit_event_syntax(event, semantic_profile):
@@ -4413,13 +4560,20 @@ def _load_guarded_manifest(
 
 
 def _validate_values(
-    manifest: collections.CollectionManifest, item: Mapping[str, Any]
+    manifest: collections.CollectionManifest,
+    item: Mapping[str, Any],
+    *,
+    written: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """Validate one candidate, reporting every failing field in one refusal.
 
     The refusal keeps the code and message the raise-first path produced, so
     existing consumers are untouched; the complete field-addressed account rides
     in ``details.issues`` beside ``details.field`` for the first issue.
+
+    ``written`` names the fields whose values this write supplies; ``None`` is a whole new row.
+    A required value it supplies must be non-null. Any other is checked as it was stored, so a
+    required field must be present and may hold the ``null`` an earlier release admitted.
     """
     if not isinstance(item, Mapping):
         raise collections.CollectionError("INVALID_ITEM", "item must be an object")
@@ -4444,7 +4598,7 @@ def _validate_values(
             )
         )
     schema_values = {name: value for name, value in item.items() if name in manifest.schema.fields}
-    value = _collect_schema_issues(manifest.schema, schema_values, issues)
+    value = _collect_schema_issues(manifest.schema, schema_values, issues, written)
     if representational:
         note = item.get(representational)
         if note is not None and type(note) is not str:
@@ -4524,27 +4678,32 @@ def _value_class(value: Any) -> str:
 
 
 def _collect_schema_issues(
-    schema: collections.ItemSchema, values: Mapping[str, Any], issues: list[_Issue]
+    schema: collections.ItemSchema,
+    values: Mapping[str, Any],
+    issues: list[_Issue],
+    written: Collection[str] | None,
 ) -> dict[str, Any]:
     """Run the shipped per-field schema rules field by field, in declared order."""
     value = dict(values)
     for name, spec in schema.fields.items():
-        if spec.required and name not in value:
+        supplied = written is None or name in written
+        if spec.required and (name not in value or (supplied and value[name] is None)):
+            gap = "missing" if name not in value else "null"
             issues.append(
                 _Issue(
                     field=name,
                     code="SCHEMA_REQUIRED_FIELD",
-                    reason=f"required field is missing: {name}",
+                    reason=f"required field is {gap}: {name}",
                     received="null",
                 )
             )
         if name in value:
-            _collect_field_issues(name, name, value[name], spec, issues)
+            _collect_field_issues(name, name, value[name], spec, issues, non_null=supplied)
     return value
 
 
 def _collect_field_issues(
-    path: str, name: str, value: Any, spec: collections.FieldSpec, issues: list[_Issue]
+    path: str, name: str, value: Any, spec: collections.FieldSpec, issues: list[_Issue], *, non_null: bool
 ) -> None:
     """Address one field's failure, refining the path into arrays and objects.
 
@@ -4552,11 +4711,11 @@ def _collect_field_issues(
     the refinement below only decides which sub-path to name.
     """
     try:
-        collections.validate_field_value(name, value, spec)
+        collections.validate_field_value(name, value, spec, non_null=non_null)
         return
     except collections.CollectionError as error:
         failure = error
-    located = _locate_field_failure(path, name, value, spec)
+    located = _locate_field_failure(path, name, value, spec, non_null)
     if not located:
         issues.append(
             _Issue(
@@ -4579,15 +4738,15 @@ def _collect_field_issues(
 
 
 def _locate_field_failure(
-    path: str, name: str, value: Any, spec: collections.FieldSpec
+    path: str, name: str, value: Any, spec: collections.FieldSpec, non_null: bool
 ) -> list[tuple[str, Any, collections.CollectionError]]:
     if spec.type == "array" and isinstance(value, list) and spec.items is not None:
         found: list[tuple[str, Any, collections.CollectionError]] = []
         for index, entry in enumerate(value):
             try:
-                collections.validate_field_value(name, entry, spec.items)
+                collections.validate_field_value(name, entry, spec.items, non_null=non_null)
             except collections.CollectionError as error:
-                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items)
+                deeper = _locate_field_failure(f"{path}[{index}]", name, entry, spec.items, non_null)
                 found.extend(deeper or [(f"{path}[{index}]", entry, error)])
         return found
     if spec.type == "object" and isinstance(value, Mapping):
@@ -5500,9 +5659,8 @@ def _natural_key_twins(
     hold one observation twice under two identities and neither would be wrong.
     The scan runs over the snapshot the append has already loaded.
     """
-    try:
-        serialized = collections.manifest_natural_key(manifest, values)
-    except ValueError:
+    serialized = collections.complete_natural_key(manifest, values)
+    if serialized is None:
         return []
     twins = {
         record.identity.key
@@ -5523,16 +5681,12 @@ def _natural_key_moved(
     only that write is refused. An update that leaves the key alone is judged by
     nothing here -- otherwise a vault that already holds twins from before the
     check existed could not be edited at all, including by the very edit the
-    refusal's remediation asks for.
+    refusal's remediation asks for. A key completed by this update, where a
+    component was missing or `null`, moves onto it like a changed one.
     """
-    try:
-        return collections.manifest_natural_key(
-            manifest, before
-        ) != collections.manifest_natural_key(manifest, after)
-    except ValueError:
-        # One side carries no natural key at all. It cannot collide, and it
-        # cannot be moved onto a key it does not have.
-        return False
+    after_key = collections.complete_natural_key(manifest, after)
+    # An incomplete key names no item, so it cannot collide.
+    return after_key is not None and collections.complete_natural_key(manifest, before) != after_key
 
 
 def _same_natural_key(
@@ -5625,6 +5779,8 @@ def _new_item_path(
         Path(entry.relative_path).name.casefold() == target_name for entry in source_guard.entries
     ) or any(Path(path).name.casefold() == target_name for path in reserved):
         raise collections.CollectionError("RECORD_ID_CONFLICT", "item path already exists")
+    # An item that moved out of the collection still claims its old path and its links.
+    _require_unclaimed(root, (target.relative_to(root).as_posix(),), taken="RECORD_ID_CONFLICT")
     return target, (source_guard,)
 
 
@@ -5707,7 +5863,7 @@ def _portable_absence_guards(root: Path, *targets: Path) -> tuple[vault.Director
 def _require_activity_log(root: Path) -> None:
     from .vault_store import read as store_read
 
-    if not store_read.holds_file(root, f"{vault.kb_prefix()}log.md"):
+    if not store_read.holds_file(root, managed_join("log.md")):
         raise collections.CollectionError(
             "RECORD_AUDIT_UNAVAILABLE", "Knowledge Base/log.md is required"
         )
@@ -5805,6 +5961,7 @@ def _audit_body(
     after_container_hash: str | None,
     payload_hash: str | None,
     why: str,
+    _dependencies: Any = None,
 ) -> str:
     """Render one strict, content-free activity event."""
     profile = profile_for(manifest.semantic_profile)
@@ -5834,6 +5991,8 @@ def _audit_body(
         "payload_hash": payload_hash,
         "rationale": why,
     }
+    if _dependencies is not None:
+        event = _dependencies.event(profile.activity_prefix, event)
     return profile.activity_prefix + json.dumps(
         event, ensure_ascii=False, separators=(",", ":"), allow_nan=False, sort_keys=True
     )

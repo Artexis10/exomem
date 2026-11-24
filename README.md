@@ -33,7 +33,7 @@ vault: /tmp/exomem-demo-XXXXXX
 1. doctor: PASS (0.8s)
 2. find "retrieval": PASS (0.1s)
    - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
-   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
+   - Knowledge Base/Notes/Insights/Retrieval needs owned files.md
 3. get retrieval insight: PASS (0.0s)
    - title: Retrieval needs owned files
    - type: insight
@@ -431,7 +431,7 @@ Examples:
 ```bash
 kb find "project handoff" --mode keyword
 kb find "stale decision" --json
-kb get "Notes/Insights/retrieval-needs-owned-files" --json
+kb get "Notes/Insights/Retrieval needs owned files" --json
 kb note --note-type insight --title "Agents need durable context" \
   --content "# Agents need durable context"
 ```
@@ -564,4 +564,20 @@ operations.
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE).
+The server, CLI and everything not listed below are AGPL-3.0-or-later. See
+[LICENSE](LICENSE).
+
+| Path | Licence |
+|---|---|
+| `plugins/` (the Claude Code and Exomem Cloud client plugins) | Apache-2.0, see [`plugins/claude-code/LICENSE`](plugins/claude-code/LICENSE) |
+| `src/exomem/_scaffold/` (the starter skill and vault scaffold) | Apache-2.0, see [`src/exomem/_licenses/Apache-2.0.txt`](src/exomem/_licenses/Apache-2.0.txt) |
+| `infra/topolvm/` | Apache-2.0, upstream's own licence |
+
+The plugin hooks under `plugins/claude-code/hooks/` are copies of `src/exomem/_hooks/`. The
+source stays AGPL-3.0-or-later; the copies the plugin ships are Apache-2.0.
+
+Exomem Cloud offers its source from the app and from the MCP handshake, which names the
+running release and this repository. The names Exomem and Substrate Systems follow
+[TRADEMARK.md](TRADEMARK.md). Contributions need a signed [CLA](CLA.md).
+
+[docs/cloud-security-model.md](docs/cloud-security-model.md) lists Exomem Cloud's security claims and the evidence behind each one, with its limits.

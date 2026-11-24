@@ -14,6 +14,7 @@ import re
 import stat
 import threading
 import time
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -46,11 +47,12 @@ from . import (
 )
 from . import find as find_module
 from .cli_ops import OpError, relation_review_stable_id_remediation
-from .kbdir import kb_dirname
+from .kbdir import managed_join, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .semantic_units import SemanticUnitDocument, SourceSpan
 from .structure_promotion import BREADTH_SLUG_SUFFIXES, BREADTH_TAGS
 from .vocabulary import instances
+from .vocabulary import registry as vocabulary_registry
 
 _REVIEW_KINDS = frozenset({"reviewed_none", "bootstrap"})
 _DISPOSITION_KINDS = frozenset(
@@ -136,7 +138,7 @@ def _reference_only_directory_names() -> tuple[str, ...]:
         sorted(
             name
             for name in _IDENTITY_CENSUS_RESERVED_KB_DIRS
-            if not vault.in_excluded_scan_dir(f"{kb_dirname()}/{name}")
+            if not vault.in_excluded_scan_dir(managed_join(name))
         )
     )
 
@@ -144,11 +146,8 @@ def _reference_only_directory_names() -> tuple[str, ...]:
 def _is_reference_only_path(rel_path: str) -> bool:
     """Whether a vault-relative path lies under a reference-only directory."""
     segments = PurePosixPath(rel_path).parts
-    return (
-        len(segments) > 2
-        and segments[0] == kb_dirname()
-        and segments[1] in _reference_only_directory_names()
-    )
+    below = managed_split_parts(segments)
+    return below is not None and len(below) > 1 and below[0] in _reference_only_directory_names()
 
 
 def _reference_only_entries(root: Path) -> tuple[StableIdentityEntry, ...]:
@@ -475,6 +474,34 @@ class StableIdentityCensus:
         return StableIdentityCensus(
             (*filter(other, self.entries), replacement), self.reference_only_entries
         )
+
+    def with_pages(
+        self,
+        pages: Mapping[str, SemanticPageState | None],
+        *,
+        casefold_paths: bool = False,
+    ) -> StableIdentityCensus:
+        """`with_page` for each page in `pages` at once, dropping the entry where it is None.
+
+        One census for the batch: a census per page re-sorts every entry once per page.
+        """
+        def key(path: str) -> str:
+            return path.casefold() if casefold_paths else path
+
+        replaced = {key(path) for path in pages}
+        entries = [entry for entry in self.entries if key(entry.path) not in replaced]
+        reference_only = [
+            entry for entry in self.reference_only_entries if key(entry.path) not in replaced
+        ]
+        for page in pages.values():
+            if page is None:
+                continue
+            replacement = StableIdentityEntry(
+                page.path,
+                page.identity if page.identity_kind == "exomem_id" else None,
+            )
+            (reference_only if _is_reference_only_path(page.path) else entries).append(replacement)
+        return StableIdentityCensus(tuple(entries), tuple(reference_only))
 
     @classmethod
     def from_states(
@@ -979,9 +1006,10 @@ def _route_name(path: str) -> str | None:
     if _path_excluded_from_compiled_destination(path):
         return None
     parts = _path_parts(path)
-    if len(parts) < 4 or parts[:2] != (kb_dirname().casefold(), note_types.NOTES_FOLDER.casefold()):
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is None or len(below) < 3 or below[0] != note_types.NOTES_FOLDER.casefold():
         return None
-    return parts[2]
+    return below[1]
 
 
 def _type_basis(page: SemanticPageState) -> note_types.Basis:
@@ -1099,7 +1127,7 @@ def compiled_structure_finding(page: SemanticPageState) -> ContractFinding | Non
             span=None,
             detail=(
                 f"compiled frontmatter type {normalized_compiled_type(page.page_type)!r} "
-                f"sits outside a {kb_dirname()}/{note_types.NOTES_FOLDER}/<Folder> destination"
+                f"sits outside a {managed_join(f'{note_types.NOTES_FOLDER}/')}<Folder> destination"
             ),
             remediation=(
                 f"Move the document under `{note_types.NOTES_FOLDER}/<Folder>` or use "
@@ -1216,6 +1244,14 @@ class SemanticCorpusContext:
     identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
     writer_visibility: Any = field(default=_DECIDE, repr=False, compare=False)
+    #: The prior-path claims its links resolved against when those are not the index's current
+    #: ones: a move's after corpus binds the claims its commit leaves (`PriorClaims.with_pages`).
+    prior_claims: Any = field(default=None, repr=False, compare=False)
+    capture_inventory: Any = field(default=None, repr=False, compare=False)
+    #: In store mode, the title that the writer's resolver indexes for each corpus path that holds no
+    #: page state here (a file that cannot be read as text, a stored page that the identity walk prunes,
+    #: such as one in the trash). None when that set is not known: the writer then builds from the disk.
+    unparsed_titles: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1266,6 +1302,7 @@ class SemanticCorpusContext:
         *,
         registry: relation_registry.RelationRegistry,
         identity_census: StableIdentityCensus,
+        prior_claims: Any = None,
     ) -> SemanticCorpusContext:
         by_path: dict[str, SemanticPageState] = {}
         for state in states:
@@ -1280,18 +1317,43 @@ class SemanticCorpusContext:
                 tuple(identity_census.entries), identity_census.reference_only_entries
             ),
             writer_visibility=vault.writer_link_visibility(Path(vault_root)),
+            prior_claims=prior_claims,
+        )
+
+    def link_resolver(self) -> Any:
+        """The resolver that every page judged over this corpus shares, built from no entries.
+
+        The corpus already holds the maps of the resolver it was built from, and a link to a path
+        some page left resolves by the claims the corpus holds. Typed `Any`: link resolution reads
+        only these attributes of a `vault.WikilinkResolver`.
+        """
+        return _WikilinkResolverView(
+            full_paths=self.resolver_full_paths,
+            kb_stripped=self.resolver_kb_stripped,
+            stems=self.resolver_stems,
+            titles=self.resolver_titles,
+            candidates_by_key=self.resolver_candidates_by_key,
+            bound_claims=self.prior_claims,
         )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
         pages = dict(self.pages)
+        added = state.path not in pages
         pages[state.path] = state
-        if _stable_topology_replacement(self, state):
+
+        def joined() -> StableIdentityCensus:
+            return self.identity_census.with_page(
+                state, casefold_paths=vault.vault_casefolds(self.vault_root)
+            )
+
+        if added or _stable_topology_replacement(self, state):
             patched = _context_with_page_delta(
                 self,
                 pages,
                 (state.path,),
                 registry=self.registry,
-                identity_census=self.identity_census,
+                # A replacement keeps its identity, so the census stands; a new page joins it.
+                identity_census=joined() if added else self.identity_census,
                 writer_visibility=self.writer_visibility,
             )
             if patched is not None:
@@ -1300,10 +1362,45 @@ class SemanticCorpusContext:
             self.vault_root,
             pages,
             self.registry,
-            self.identity_census.with_page(
-                state, casefold_paths=vault.vault_casefolds(self.vault_root)
-            ),
+            joined(),
             writer_visibility=self.writer_visibility,
+        )
+
+    def with_pages(
+        self, pages: Mapping[str, SemanticPageState | None], *, prior_claims: Any
+    ) -> SemanticCorpusContext:
+        """This corpus once each page in `pages` holds its state, or is gone where it is None.
+
+        Its links resolve prior paths by `prior_claims`, the claims those pages leave. Only what
+        the change reaches is derived again where that is provable, else the whole corpus is.
+        """
+        states = dict(self.pages)
+        for path, state in pages.items():
+            if state is None:
+                states.pop(path, None)
+            else:
+                states[path] = state
+        census = self.identity_census.with_pages(
+            pages, casefold_paths=vault.vault_casefolds(self.vault_root)
+        )
+        patched = _context_with_page_delta(
+            self,
+            states,
+            tuple(pages),
+            registry=self.registry,
+            identity_census=census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
+        )
+        if patched is not None:
+            return patched
+        return _context_from_state_map(
+            self.vault_root,
+            states,
+            self.registry,
+            census,
+            writer_visibility=self.writer_visibility,
+            prior_claims=prior_claims,
         )
 
     def registry_for(self, path: str) -> relation_registry.RelationRegistry:
@@ -1412,6 +1509,15 @@ def build_page_state(
 
 #: The registry subjects whose instance definitions reinterpret a page's units.
 _PAGE_DEFINITION_SUBJECTS = ("relations", "categories")
+
+
+def page_definitions_dependency(root: Path) -> tuple:
+    """What interpreting a page's units reads besides the page: the relations and categories of every instance.
+
+    A result kept per page must be dropped when this changes, since a private instance can reinterpret a page
+    that no edit touched.
+    """
+    return instances.definitions_dependency(root, _PAGE_DEFINITION_SUBJECTS)
 
 
 def enrich_page_state(
@@ -1533,8 +1639,13 @@ def _parse_page_state(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
     complete_authored_effects: bool = False,
+    owner_type_basis: note_types.Basis | None = None,
 ) -> SemanticPageState:
-    """Build detached semantic state from one already-read Markdown string."""
+    """Build detached semantic state from one already-read Markdown string.
+
+    ``owner_type_basis`` is the owner-local note-type basis that the caller shares across the pages
+    it parses, so that each page does not load the registry again.
+    """
     request_budget.checkpoint()
     root = Path(vault_root)
     rel_path = _normalize_path(root, path)
@@ -1628,7 +1739,9 @@ def _parse_page_state(
     writable_placed = (
         connectable_placed and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
     )
-    compiled = writable_placed and note_types.Basis(root, owner_local=True).selects(
+    if owner_type_basis is None:
+        owner_type_basis = note_types.Basis(root, owner_local=True)
+    compiled = writable_placed and owner_type_basis.selects(
         activation.normalized_page_type(parsed.page_type), note_types.compiled
     )
     return SemanticPageState(
@@ -1959,6 +2072,63 @@ def reference_identity_snapshot_is_current(
             )
 
 
+@dataclass(slots=True)
+class _WriterCensus:
+    proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None
+
+
+_WRITER_CENSUS: contextvars.ContextVar[_WriterCensus | None] = contextvars.ContextVar(
+    "writer_disk_census", default=None
+)
+
+
+@contextmanager
+def share_writer_disk_census() -> Iterator[None]:
+    """Let one save's initial preflight use its resolver's disk proof once."""
+    token = _WRITER_CENSUS.set(_WriterCensus())
+    try:
+        yield
+    finally:
+        _WRITER_CENSUS.reset(token)
+
+
+def current_store_writer_resolver(vault_root: Path) -> vault.WikilinkResolver | None:
+    """A detached resolver over the resident corpus of a store-mode vault, else None.
+
+    The corpus holds the resolver maps of every page that it parses, and the titles of the other paths
+    that a build of the writer's resolver indexes (the store's pages and the files that it does not own),
+    and the store-mode proof that the corpus is current (``_store_resident_entry``) needs no walk of the
+    stored pages. A miss reads and builds nothing: the caller's own build from the store and the disk
+    handles it.
+    """
+    request_budget.checkpoint()
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    entry = _store_resident_entry(
+        root,
+        _corpus_cache_key(root),
+        relation_registry.core_registry(),
+        semantic_language_registry.core_registry(),
+        writer_resolver=True,
+    )
+    if entry is None:
+        return None
+    context = entry[1]
+    if context.unparsed_titles is None:
+        return None
+    resolver = vault.WikilinkResolver.from_maps(
+        root,
+        full_paths=context.resolver_full_paths,
+        kb_stripped=context.resolver_kb_stripped,
+        stems=context.resolver_stems,
+        titles=context.resolver_titles,
+        candidates_by_key=context.resolver_candidates_by_key,
+    )
+    resolver.on_entries_changed(context.unparsed_titles.items(), ())
+    return resolver
+
+
 def current_writer_resolver_entries(
     vault_root: Path,
     *,
@@ -2075,7 +2245,7 @@ def _resolve_reference_wikilink_from_context(
         return ReferenceWikilinkResolution("unresolved")
 
     if "/" in cleaned:
-        for key in (cleaned, f"{vault.kb_prefix()}{cleaned}"):
+        for key in (cleaned, managed_join(cleaned)):
             matches = vault.wikilink_candidates(
                 context.resolver_candidates_by_key, (key,), visible=visible
             )
@@ -2084,7 +2254,7 @@ def _resolve_reference_wikilink_from_context(
             if matches:
                 return ReferenceWikilinkResolution("resolved", matches[0].path)
         # No Knowledge-Base-relative step follows: `normalize_wikilink` matches that form
-        # by `kb_prefix() + cleaned` in `full_paths`, which the second candidate above
+        # by `managed_join(cleaned)` in `full_paths`, which the second candidate above
         # already tried. Testing `kb_stripped` instead would let a hidden vault-root page
         # with the same name decide the result.
         return ReferenceWikilinkResolution("unresolved")
@@ -2138,6 +2308,233 @@ class LinkSnapshot:
 
     resolver: _WikilinkResolverView
     reference_owners: Mapping[str, tuple[str, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedCorpusSnapshot:
+    """Proved resident pages; a store revision covers only store-owned paths."""
+
+    _corpus: SemanticCorpusContext = field(repr=False)
+    census: tuple
+    checkpoint: freshness.FreshnessCheckpoint | None
+    _owns: Callable[[str], bool] | None = field(default=None, repr=False)
+
+    def pages(self) -> Iterator[tuple[str, SemanticPageState]]:
+        """Expose only pages covered by this publication's proof."""
+        for path, page in self._corpus.pages.items():
+            if self._owns is None or self._owns(path):
+                yield path, page
+
+    def source_hash(self, path: str) -> str | None:
+        """The hash of the bytes this publication parsed for one page that its proof covers."""
+        page = self._corpus.pages.get(path)
+        if page is None or (self._owns is not None and not self._owns(path)):
+            return None
+        return page.source_hash
+
+
+def _resident_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple[tuple, SemanticCorpusContext], freshness.FreshnessCheckpoint | None] | None:
+    """Share configuration, store revision and registry proofs without a corpus walk."""
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        caption = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
+        language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+    if (
+        entry is not None
+        and language_hash == f"{language.schema_version}:{language.content_hash}"
+        and _config_census(root) == _stored_config_census(entry[0])
+        and (entry[1].registry.core_version, entry[1].registry.extension_hash)
+        == (registry.core_version, registry.extension_hash)
+    ):
+        return entry, caption
+    return None
+
+
+def _published_corpus_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    checkpoint: freshness.FreshnessCheckpoint,
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """An ordinary event hit also requires its exact publication caption."""
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    return resident[0] if resident is not None and resident[1] == checkpoint else None
+
+
+def _store_resident_entry(
+    root: Path,
+    cache_key: tuple[str, str],
+    registry: relation_registry.RelationRegistry,
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    writer_resolver: bool = False,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
+) -> tuple[tuple, SemanticCorpusContext] | None:
+    """In store mode, the resident entry when the store and the disk both stand where it was built.
+
+    The store's revision and its recorded registry revisions are in the configuration census, and
+    every commit moves them, so a census that holds them equal needs no row of the store: the stored
+    pages are those that the entry was built or advanced from (``advance_corpus_for_store_commit``).
+    The files that the store does not own have no such revision, so a walk proves them. This needs no
+    freshness registry: a store-mode watcher seeds none. A file's entry holds what its build reads of it
+    besides its bytes (``_file_entry``), so a chmod or a new hard link fails the proof as an edit does.
+    """
+    share = _WRITER_CENSUS.get() if writer_resolver else None
+    if _store_census_owns(root) is None:
+        return None
+    resident = _resident_corpus_entry(root, cache_key, registry, language)
+    if resident is None:
+        return None
+    entry = resident[0]
+    # The entry and its configuration still match the resolver's proof. The first
+    # eligible preflight consumes it. Creation revalidation and ordinary readers
+    # take their own census.
+    if writer_proof is not None and writer_proof[0] == root and writer_proof[1] is entry:
+        return entry
+    disk = _disk_page_census(root)
+    if disk is None or disk != frozenset(item for item in entry[0] if item[1] == "f"):
+        return None
+    if share is not None:
+        from .collection_store.preview import bound_writer
+
+        if bound_writer(root) is not None:
+            share.proof = (root, entry)
+    return entry
+
+
+def borrow_published_corpus(vault_root: Path) -> PublishedCorpusSnapshot | None:
+    """Borrow an immutable generation without serializing readers behind its publisher."""
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    owned = _store_census_owns(root)
+    checkpoint = None
+    if owned is None:
+        if not freshness.is_live(root, "vault"):
+            return None
+        checkpoint = freshness.consumer_checkpoint(root, "vault")
+        if checkpoint.triple is None:
+            return None
+
+    cache_key = _corpus_cache_key(root)
+    language = semantic_language_registry.core_registry()
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), language)
+    if resident is None:
+        return None
+    entry, caption = resident
+    if owned is None and caption != checkpoint:
+        return None
+    # Publishers replace immutable entries. Readers need only revalidate their selected generation.
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if (
+            _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+            or _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+            != f"{language.schema_version}:{language.content_hash}"
+            or owned is None and _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key) != caption
+        ):
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    # Check after the cache identity: a publisher can advance events before replacing its entry.
+    if owned is None:
+        if (
+            not freshness.is_live(root, "vault")
+            or freshness.consumer_checkpoint(root, "vault") != checkpoint
+        ):
+            return None
+    return PublishedCorpusSnapshot(entry[1], entry[0], checkpoint, owned)
+
+
+def borrow_capture_inventory(vault_root: Path):
+    """Borrow complete raw metadata with an O(1) publisher-witness recheck."""
+    from . import capture_inventory
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    root = Path(vault_root)
+    if not corpus_context_cache_enabled():
+        return None
+    cache_key = _corpus_cache_key(root)
+    resident = _resident_corpus_entry(root, cache_key, relation_registry.core_registry(), semantic_language_registry.core_registry())
+    if resident is None:
+        return None
+    entry, _caption = resident
+    inventory = entry[1].capture_inventory
+    if (inventory is None or inventory.type_dependency is None or vocabulary_registry.dependency_unavailable(inventory.type_dependency)
+            or note_types.Basis(root).loaded_dependency() != inventory.type_dependency):
+        return None
+    if inventory.store_identity is not None:
+        with read.snapshot(root) as view:
+            identity = store_identity(view.connection)
+            witness = (identity["store_id"], identity["instance_id"], view.revision)
+            if inventory.store_identity != witness:
+                return None
+            generation = hashlib.sha256(repr(witness).encode()).hexdigest()
+    else:
+        witness = capture_inventory.raw_witness(root)
+        if witness is None or not witness.current(inventory.raw_stamp):
+            return None
+        generation = hashlib.sha256(repr(inventory.raw_stamp).encode()).hexdigest()
+    with _CORPUS_CONTEXT_CACHE_LOCK:
+        if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+            return None
+    if _config_census(root) != _stored_config_census(entry[0]):
+        return None
+    if inventory.store_identity is None and not witness.current(inventory.raw_stamp):
+        return None
+    return inventory, generation
+
+
+def publish_capture_inventory(root: Path, witness, *, census: bool = False, excluded=frozenset()) -> bool:
+    """Publish raw-only deltas without admitting excluded pages to semantic fan-out."""
+    from . import capture_inventory
+
+    if capture_inventory.raw_witness(root) is not witness or not witness.live:
+        return False
+    if census:
+        # A strict reconciliation is a new raw observation, including previously missed events.
+        witness.withdraw()
+    epoch, pending, seeded = witness.snapshot()
+    try:
+        cache_key = _corpus_cache_key(root)
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+        if entry is None or _config_census(root) != _stored_config_census(entry[0]):
+            witness.withdraw()
+            return False  # The existing corpus warm owns cold work after lexical publication.
+        if not census and not pending and seeded:
+            if entry[1].capture_inventory is not None and witness.current(entry[1].capture_inventory.raw_stamp):
+                return True
+            witness.withdraw()
+            epoch, pending, seeded = witness.snapshot()
+            census = True
+        with _CORPUS_CONTEXT_UPDATE_LOCK:
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            if entry is None or entry[1].capture_inventory is None:
+                witness.withdraw()
+                return False
+            inventory, covered = capture_inventory.refreshed(root, entry[1].capture_inventory, pending,
+                                                            census=census or not seeded, excluded=excluded)
+            inventory = replace(inventory, raw_stamp=(witness.instance, epoch))
+            context = replace(entry[1], capture_inventory=inventory)
+            with _CORPUS_CONTEXT_CACHE_LOCK:
+                if (_CORPUS_CONTEXT_CACHE.get(cache_key) is not entry
+                        or capture_inventory.raw_witness(root) is not witness or not witness.live):
+                    return False
+                _CORPUS_CONTEXT_CACHE[cache_key] = (entry[0], context)
+                witness.acknowledge(epoch, covered, seeded=census or not seeded)
+        return True
+    except Exception:  # noqa: BLE001 - raw proof failure never withdraws ordinary recall.
+        witness.withdraw()
+        log.warning("canonical raw inventory publication is incomplete")
+        return False
 
 
 def borrow_link_snapshot(
@@ -2306,34 +2703,83 @@ def _config_inputs(root: Path) -> tuple[Path, ...]:
     )
 
 
-def _corpus_census(root: Path) -> tuple | None:
-    """Stat census of every filesystem input ``build_corpus_context`` reads.
+def _markdown_name(name: str) -> bool:
+    """Whether a file name has the ``.md`` suffix, in any letter case (``Path.suffix``: a name that is only
+    the suffix has none). A file extension is a closed set that the format fixes."""
+    return len(name) > 3 and name.casefold().endswith(".md")
+
+
+_FileEntry = tuple[str, str, int, int, int, int, int, int]
+
+
+def _file_entry(rel: str, info: os.stat_result, path: str | os.PathLike[str]) -> _FileEntry:
+    """The census entry of a Markdown file, from the one ``lstat`` that the walk takes of it.
+
+    Size and mtime say that its bytes may have changed. The mode (type and permission bits), the link
+    count and the owner say what a build makes of it: the vault walk leaves out a file that has another
+    hard link, and a page that the process cannot read has no title. A chmod, a link or a chown moves
+    neither size nor mtime. An access-control list or a security label is in no stat result, so no entry
+    carries it.
+
+    The link count is the one that the vault walk's rule reads (``lstat``). A directory entry's own stat
+    withholds it (zero) on Windows, so only there is the file stat'ed again, as ``semantic_census`` does
+    for the file id; on POSIX the entry costs no further stat. A walk and a patch then record the same
+    entry for the same file on every platform.
+    """
+    if not info.st_nlink:
+        info = os.stat(path, follow_symlinks=False)
+    return (rel, "f", info.st_size, info.st_mtime_ns, info.st_mode, info.st_nlink, info.st_uid, info.st_gid)
+
+
+def _lstat_is_page_file(info: os.stat_result) -> bool:
+    """Whether an ``lstat`` result is a file that the vault walk can yield: regular, and no link or reparse point.
+
+    The walk (``vault._walk_vault_md_entry``) judges each entry by ``lstat`` and leaves out a link, whatever it
+    points to. A census that followed links would hold the stats of the target and miss the swap of a file for a
+    link to a copy with the same stats, which a build over the disk then leaves out.
+    """
+    return stat.S_ISREG(info.st_mode) and not vault._is_reparse(info)
+
+
+def _listing_is_reparse_folder(child: os.DirEntry) -> bool:
+    """Whether a listed folder is a reparse point, which the vault walk leaves out as it does a link.
+
+    ``DirEntry.is_dir(follow_symlinks=False)`` reads a Windows junction as a folder, and ``is_symlink()`` is false
+    for it, so the listing's type alone would enter it. Only Windows stat results carry ``st_file_attributes``
+    (``os.stat_result`` has no such field elsewhere), and the listing supplies them with no further call; a POSIX
+    folder is judged by the listing's type alone, with no stat. The rule is the one that the walk and the page
+    check apply (``vault._is_reparse``).
+    """
+    return hasattr(os.stat_result, "st_file_attributes") and vault._is_reparse(child.stat(follow_symlinks=False))
+
+
+def _disk_page_census(root: Path) -> frozenset[_FileEntry] | None:
+    """Stat census of every Markdown file that ``build_corpus_context`` reads from the disk.
 
     Mirrors both production walks — ``_build_identity_census`` (every canonical
     ``.md`` under the KB, refusing filesystem aliases) and ``vault.walk_vault_md``
-    (the full vault minus skip dirs and sync-conflict copies) — and appends
-    the non-Markdown inputs in ``_config_inputs``: ``_access.yaml`` (page
-    eligibility via ``access.access_tier``) and the selected note-type
-    overlay (the owner's compiled eligibility). In store mode the walks skip
-    the stored pages, and each stored page that a cold build reads has its
-    store row's entry instead. Returns
-    ``None`` when the tree cannot be fingerprinted safely; callers must then
-    build uncached so the build path surfaces its own safety errors.
+    (the full vault minus skip dirs and sync-conflict copies). In store mode both
+    walks leave out the stored pages, whose files are projections: the folders that
+    the store owns are listed by name only, and a path that the store holds is judged
+    by its string, with no stat. Returns ``None`` when the tree cannot be fingerprinted
+    safely; callers must then build uncached so the build path surfaces its own safety
+    errors.
     """
     request_budget.checkpoint()
-    entries: set[tuple[str, str, int, int]] = set()
+    entries: set[_FileEntry] = set()
     kb = vault.kb_root(root)
     owned = _store_census_owns(root)
 
-    def strict_walk(directory: Path) -> None:
+    def strict_walk(directory: Path, directory_rel: str) -> None:
         # Mirror of _build_identity_census: every canonical entry under KB,
         # alias-free. Closed runtime namespaces are never knowledge inputs.
+        at_kb_root = directory == kb
         for child in os.scandir(directory):
             request_budget.checkpoint()
-            if _prune_identity_census_directory(kb, directory, child.name):
+            rel = f"{directory_rel}/{child.name}"
+            if owned is not None and owned(rel):
                 continue
-            path = Path(child.path)
-            if owned is not None and owned(path.relative_to(root).as_posix()):
+            if _prune_identity_census_name(child.name, at_kb_root=at_kb_root):
                 continue
             # Alias refusal comes first and applies to EVERY entry, exactly as
             # in the walk this mirrors: an aliased subtree can hide or
@@ -2351,7 +2797,7 @@ def _corpus_census(root: Path) -> tuple | None:
             # between the listing and the stat raised FileNotFoundError, which
             # the handler below turns into a census of `None` -- degrading
             # every caller to an uncached full build (#561).
-            if not is_directory and path.suffix.casefold() != ".md":
+            if not is_directory and not _markdown_name(child.name):
                 continue
             # A `.md` that vanishes in that same window still fails closed,
             # unlike in `_build_identity_census`, which skips it. That walk
@@ -2362,39 +2808,34 @@ def _corpus_census(root: Path) -> tuple | None:
             if vault._is_reparse(info):
                 raise _CensusUnsafe
             if stat.S_ISDIR(info.st_mode):
-                strict_walk(path)
+                strict_walk(Path(child.path), rel)
                 continue
             if not stat.S_ISREG(info.st_mode):
                 raise _CensusUnsafe
-            entries.add((path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns))
+            entries.add(_file_entry(rel, info, child.path))
 
-    def loose_walk(directory: Path) -> None:
-        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies,
-        # with the same is_dir()/is_file() semantics (which traverse links).
+    def loose_walk(directory: Path, directory_rel: str) -> None:
+        # Mirror of vault.walk_vault_md: skip dirs and sync-conflict copies, and leave out every link or reparse
+        # point, a folder or a page, as its `lstat` rule does. The listing says a link is one with no stat on POSIX.
         for child in os.scandir(directory):
             request_budget.checkpoint()
-            path = Path(child.path)
-            if owned is not None and owned(path.relative_to(root).as_posix()):
+            rel = f"{directory_rel}/{child.name}" if directory_rel else child.name
+            if owned is not None and owned(rel):
                 continue
-            if child.is_dir():
-                if vault.in_excluded_scan_dir(path.relative_to(root).as_posix()):
+            if child.is_dir(follow_symlinks=False):
+                if vault.in_excluded_scan_dir(rel) or _listing_is_reparse_folder(child):
                     continue
-                loose_walk(path)
-            elif (
-                child.is_file()
-                and path.suffix.lower() == ".md"
-                and ".sync-conflict-" not in child.name
-            ):
+                loose_walk(Path(child.path), rel)
+            elif _markdown_name(child.name) and ".sync-conflict-" not in child.name:
                 try:
-                    info = child.stat()
+                    info = child.stat(follow_symlinks=False)
                 except FileNotFoundError:
                     # Same race, same answer as the strict walk above: a page
                     # that vanished between the listing and the stat is not in
                     # this snapshot.
                     continue
-                entries.add(
-                    (path.relative_to(root).as_posix(), "f", info.st_size, info.st_mtime_ns)
-                )
+                if _lstat_is_page_file(info):
+                    entries.add(_file_entry(rel, info, child.path))
 
     try:
         try:
@@ -2406,9 +2847,38 @@ def _corpus_census(root: Path) -> tuple | None:
             # census must refuse to vouch for that tree rather than mask it.
             if not stat.S_ISDIR(kb_info.st_mode) or vault._is_reparse(kb_info):
                 raise _CensusUnsafe
-            strict_walk(kb)
-        loose_walk(root)
-        request_budget.checkpoint()
+            strict_walk(kb, kb.relative_to(root).as_posix())
+        loose_walk(root, "")
+    except _CensusUnsafe:
+        # A deliberate refusal: the tree holds an alias or a nonregular page.
+        log.debug("corpus census refused an unsafe tree at %s", root)
+        return None
+    except (OSError, ValueError):
+        # Anything else -- and the two used to be indistinguishable in
+        # production, so a vanished sidecar and a genuine refusal looked the
+        # same from the outside (#561).
+        log.debug("corpus census could not read %s", root, exc_info=True)
+        return None
+    return frozenset(entries)
+
+
+def _corpus_census(root: Path) -> tuple | None:
+    """Stat census of every filesystem input ``build_corpus_context`` reads.
+
+    The Markdown files of the disk (``_disk_page_census``), and the non-Markdown inputs in
+    ``_config_inputs``: ``_access.yaml`` (page eligibility via ``access.access_tier``) and
+    the selected note-type overlay (the owner's compiled eligibility). In store mode
+    each stored page that a cold build reads has its store row's entry instead of its
+    file's. Returns ``None`` when the tree cannot be fingerprinted safely; callers must
+    then build uncached so the build path surfaces its own safety errors.
+    """
+    request_budget.checkpoint()
+    disk = _disk_page_census(root)
+    if disk is None:
+        return None
+    entries = set(disk)
+    owned = _store_census_owns(root)
+    try:
         if owned is None:
             config = _config_census(root)
         else:
@@ -2421,14 +2891,7 @@ def _corpus_census(root: Path) -> tuple | None:
         if config is None:
             raise OSError("the semantic configuration inputs could not be read")
         entries.update(config)
-    except _CensusUnsafe:
-        # A deliberate refusal: the tree holds an alias or a nonregular page.
-        log.debug("corpus census refused an unsafe tree at %s", root)
-        return None
     except (OSError, ValueError):
-        # Anything else -- and the two used to be indistinguishable in
-        # production, so a vanished sidecar and a genuine refusal looked the
-        # same from the outside (#561).
         log.debug("corpus census could not read %s", root, exc_info=True)
         return None
     return tuple(sorted(entries))
@@ -2497,7 +2960,10 @@ def corpus_validity_token(
     """
     from .governance import egress
 
-    if status_dependencies is None or egress.owner_only_aggregate(root) is not None:
+    # The token discloses nothing, so it asks only whether the caller is restricted, not the
+    # aggregate's proof that every projected view is current: the corpus build's release filter
+    # already withheld an unproven view from the verdict this token lets the commit reuse.
+    if status_dependencies is None or egress.caller_restricted(root):
         return None
     basis = lifecycle_statuses.Basis(root)
     if not all(basis.matches(dependency) for dependency in status_dependencies):
@@ -2553,7 +3019,8 @@ def validity_stamp_current(
     """
     from .governance import egress
 
-    if stamp is None or commit_generation is None or egress.owner_only_aggregate(root) is not None:
+    # As in `corpus_validity_token`: a restricted caller reuses nothing, and the owner's check walks no view.
+    if stamp is None or commit_generation is None or egress.caller_restricted(root):
         return False
     sc_token, captured_generation = stamp
     if sc_token is None or len(sc_token) != 4 or captured_generation is None:
@@ -2590,7 +3057,7 @@ def _store_census_owns(root: Path) -> Callable[[str], bool] | None:
 
     if not find_corpus.store_serves(root):
         return None
-    return lambda rel: ownership.classify(rel) is ownership.Ownership.PAGE
+    return ownership.page_classifier()
 
 
 def _is_page_entry(entry: tuple) -> bool:
@@ -2751,11 +3218,15 @@ def _patch_markdown_census(
             continue
         path = root / rel_path
         try:
-            info = path.stat()
+            info = path.lstat()
         except FileNotFoundError:
             entries.pop(rel_path, None)
         else:
-            entries[rel_path] = (rel_path, "f", info.st_size, info.st_mtime_ns)
+            # What the walk does with the path: a link, a folder or another file type has no entry.
+            if _lstat_is_page_file(info):
+                entries[rel_path] = _file_entry(rel_path, info, path)
+            else:
+                entries.pop(rel_path, None)
     return tuple(sorted(entries.values()))
 
 
@@ -2782,11 +3253,14 @@ def _registries_match_disk(
 def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | None:
     """Return changed Markdown paths, or ``None`` for a non-page delta.
 
-    Census entries are ``(path, kind, size, mtime_ns)``. A removed path only
+    Census entries are ``(path, kind, size, mtime_ns, ...)``; a file's carry its mode, link count and
+    owner after those (``_file_entry``). A removed path only
     exists in ``before`` and an added path only in ``after``; both remain safe
     incremental page changes when their surviving entry is a page's
     (``_is_page_entry``). The store revision names no page: the stored pages'
-    entries say what its move changed, so it is no delta of its own.
+    entries say what its move changed, so it is no delta of its own. A file whose mode, links or owner
+    moved is none either: a delta reads bytes, and cannot tell whether the walk still admits the file
+    or whether the process can still read it, as the build from nothing does.
     """
     before_by_path = {str(entry[0]): entry for entry in _without_store_revision(before)}
     after_by_path = {str(entry[0]): entry for entry in _without_store_revision(after)}
@@ -2803,6 +3277,8 @@ def _markdown_census_delta(before: tuple, after: tuple) -> tuple[str, ...] | Non
         if (old is not None and not _is_page_entry(old)) or (
             new is not None and not _is_page_entry(new)
         ):
+            return None
+        if old is not None and new is not None and old[1] == new[1] == "f" and old[4:] != new[4:]:
             return None
     return changed
 
@@ -2900,8 +3376,12 @@ def _reconcile_markdown_delta(
     *,
     relation_definitions: relation_registry.RelationRegistry,
     language: semantic_language_registry.SemanticLanguageRegistry,
-) -> SemanticCorpusContext:
+    patch_only: bool = False,
+) -> SemanticCorpusContext | None:
     """Apply current Markdown bytes to an already-materialized context.
+
+    With ``patch_only`` a delta whose locality is not provable returns None, where otherwise the
+    whole corpus is derived: a caller that must stay cheap leaves that derivation to its next reader.
 
     The stable-identity census intentionally covers every canonical Markdown
     file under the KB, including scan-excluded paths. Closed runtime namespaces
@@ -2912,8 +3392,14 @@ def _reconcile_markdown_delta(
 
     In store mode a stored page is read from the store, as the cold build reads
     it, and judged by the cold build's rules for a stored page, its strict
-    frontmatter parse included.
+    frontmatter parse included. A file is judged as the walk judges it
+    (``vault.walk_vault_md_admits``) and read as the cold build reads it
+    (``_read_loose_page``), so that a new hard link or a file that cannot be read
+    is what a build from nothing makes of it.
     """
+    from . import capture_inventory
+
+    raw_changes = {}
     request_budget.checkpoint()
     states = dict(context.pages)
     previous_identities = {entry.path: entry for entry in context.identity_census.entries}
@@ -2925,6 +3411,8 @@ def _reconcile_markdown_delta(
     kb_rel = vault.kb_root(root).relative_to(root).as_posix().rstrip("/")
     owned = _store_census_owns(root)
     stored = tuple(rel for rel in changed_paths if owned is not None and owned(rel))
+    unparsed = None if context.unparsed_titles is None else dict(context.unparsed_titles)
+    walk_listings: dict[Path, frozenset[str] | None] = {}
     stored_bodies: Mapping[str, bytes] = {}
     if stored:
         from .vault_store import read
@@ -2934,6 +3422,8 @@ def _reconcile_markdown_delta(
             stored_bodies = view.bodies(stored)
     for rel_path in changed_paths:
         request_budget.checkpoint()
+        if unparsed is not None:
+            unparsed.pop(rel_path, None)
         reference_only_path = _is_reference_only_path(rel_path)
         if reference_only_path:
             # Read as the reference scan reads it and as leniently: a deleted
@@ -2954,7 +3444,8 @@ def _reconcile_markdown_delta(
             # The cold build parses a stored page only when the identity census admits it, and
             # keeps its state when the vault corpus holds it too.
             identity_member = _stored_identity_member(kb_rel + "/", rel_path)
-            included = identity_member and read.corpus_member(rel_path, "vault")
+            corpus_member = read.corpus_member(rel_path, "vault")
+            included = identity_member and corpus_member
             raw = stored_bodies.get(rel_path) if identity_member else None
             try:
                 source = None if raw is None else raw.decode("utf-8")
@@ -2964,18 +3455,28 @@ def _reconcile_markdown_delta(
                 # The cold build's refusal, so that whether a page is accepted never depends on
                 # the cache. A parse that it accepts reads the identity that the state below holds.
                 _strict_page_identity(rel_path, source)
+            # Only a page that a build over the disk indexes but the identity walk prunes (the cold
+            # build's `eligible` less its states); a page outside the vault corpus, such as a trashed
+            # one, is in no resolver.
+            if unparsed is not None and rel_path in stored_bodies and corpus_member and not identity_member:
+                unparsed[rel_path] = vault.display_title_from_bytes(stored_bodies[rel_path], rel_path)
         else:
             identity_member = in_kb and not reference_only_path
-            included = not vault.in_excluded_scan_dir(rel_path) and (
-                ".sync-conflict-" not in PurePosixPath(rel_path).name
-            )
+            # The walk's own rule (`vault.walk_vault_md_admits`), as the cold build gets its paths from the
+            # walk: a hard link, an alias, a conflict copy or a path in a skipped folder is no page of the corpus.
+            included = vault.walk_vault_md_admits(root, source_path, walk_listings)
             if in_kb:
                 source = _identity_guarded_delta_source(root, rel_path)
+            elif included:
+                source = _read_loose_page(root, rel_path, source_path)
+                if source is None and unparsed is not None:
+                    # The cold build indexes such a path with the title that it can read, and no page state.
+                    unparsed[rel_path] = vault.WikilinkResolver.read_title(source_path)
             else:
-                try:
-                    source = _read_corpus_source(root, source_path)
-                except FileNotFoundError:
-                    source = None
+                source = None
+        if capture_inventory.raw_path(root, rel_path):
+            raw_changes[rel_path] = (capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
+                                     if source is not None else None)
         if source is None:
             states.pop(rel_path, None)
             identities.pop(rel_path, None)
@@ -3015,15 +3516,36 @@ def _reconcile_markdown_delta(
         identity_census=identity_census,
         writer_visibility=context.writer_visibility,
     )
-    if candidate is not None:
-        return candidate
-
-    return _context_from_state_map(
+    if candidate is None:
+        if patch_only:
+            return None
+        candidate = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
+
+    inventory = context.capture_inventory
+    if inventory is not None:
+        inventory = inventory.with_delta(raw_changes)
+        if inventory.store_identity is not None:
+            inventory = _inventory_at_store_snapshot(root, inventory)
+    return replace(
+        candidate,
+        capture_inventory=inventory,
+        unparsed_titles=None if unparsed is None else MappingProxyType(unparsed),
+    )
+
+
+def _inventory_at_store_snapshot(root: Path, inventory):
+    """``inventory`` with its store witness at the store state that this request reads."""
+    from .collection_store.views import store_identity
+    from .vault_store import read
+
+    with read.snapshot(root) as view:
+        identity = store_identity(view.connection)
+        return replace(inventory, store_identity=(identity["store_id"], identity["instance_id"], view.revision))
 
 
 def on_corpus_files_changed(
@@ -3118,6 +3640,7 @@ def publish_corpus_files_changed_classified(
     changed: Iterable[Path] = (),
     deleted: Iterable[Path | str] = (),
     populate_on_miss: bool = True,
+    observed: Iterable[vault.PathGuard] = (),
 ) -> CorpusPublicationFailure | None:
     """:func:`publish_corpus_files_changed`, reporting WHICH half failed.
 
@@ -3131,6 +3654,7 @@ def publish_corpus_files_changed_classified(
     because its consumers' apply follows this publication, and calls
     :func:`populate_cold_corpus_context` once that apply has landed.
     """
+    guards = tuple(observed)
     root = Path(vault_root)
     changed_values = tuple(Path(value) for value in changed)
     deleted_values = tuple(Path(value) for value in deleted)
@@ -3142,7 +3666,17 @@ def publish_corpus_files_changed_classified(
     )
     with _CORPUS_CONTEXT_UPDATE_LOCK:
         try:
-            freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
+            if guards:
+                from .find_corpus import CACHE
+
+                vault.recheck_path_guards(root, guards)
+                CACHE.invalidate_paths(root, (guard.target for guard in guards))
+                freshness.on_files_changed(
+                    root, changed=changed_paths, deleted=deleted_paths,
+                    observed=(root / guard.target for guard in guards),
+                )
+            else:
+                freshness.on_files_changed(root, changed=changed_paths, deleted=deleted_paths)
             # Read the token here, not in the patch call below: it is a
             # registry-side read, so a failure in it is registry-side too and
             # must not be reported as the projection's fault.
@@ -3158,6 +3692,8 @@ def publish_corpus_files_changed_classified(
                 deleted=deleted_values,
                 event_checkpoint=event_checkpoint,
             )
+            if guards:
+                vault.recheck_path_guards(root, guards)
         except BaseException as error:
             # Freshness already advanced, so the previous context can no
             # longer prove continuity. Evict every caption before reporting
@@ -3304,6 +3840,93 @@ def _patch_corpus_files_changed_locked(
             else:
                 _drop_corpus_caption_locked(cache_key)
     return _CORPUS_PATCH_APPLIED
+
+
+def _store_census_revision(census: tuple) -> int | None:
+    """The store revision that a census stands at, from its ``<store>`` entry."""
+    for entry in census:
+        if entry[0] == _STORE_CENSUS_MARKER:
+            return entry[2]
+    return None
+
+
+def advance_corpus_for_store_commit(
+    vault_root: Path, before_revision: int, after_revision: int, paths: Iterable[str]
+) -> bool:
+    """Move the resident corpus context across one store commit, so the next save's build is a hit.
+
+    A commit evicts nothing by itself, but it moves the store revision that the census holds, so the
+    next reader walked and reconciled every page to learn what the commit's own paths already say.
+    Here the context and the census stand at ``before_revision``, and the commit's Markdown ``paths``
+    (a move names both) are the only pages that differ: re-derive those from the store at
+    ``after_revision`` by the same page delta that a file event applies. Returns whether it advanced.
+
+    Any other state leaves the entry as it is, and the next reader's census walk reconciles or
+    rebuilds it as before: a context at another revision, a changed registry, overlay or policy
+    input, more than ``_PAGE_DELTA_LIMIT`` pages (a bulk change is cheaper derived once, by its
+    reader), a delta whose locality is not provable, or a store that moved again. The advance drops
+    the event caption, so the next reader proves the files that the store does not own by a walk.
+    """
+    if not corpus_context_cache_enabled():
+        return False
+    root = Path(vault_root)
+    changed = tuple(sorted({rel for rel in paths if PurePosixPath(rel).suffix.casefold() == ".md"}))
+    if len(changed) > _PAGE_DELTA_LIMIT:
+        return False
+    cache_key = _corpus_cache_key(root)
+    with request_budget.locked(_CORPUS_CONTEXT_UPDATE_LOCK):
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
+            language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
+        if entry is None or _store_census_revision(entry[0]) != before_revision:
+            return False
+        relation_definitions = relation_registry.core_registry()
+        language = semantic_language_registry.core_registry()
+        if language_hash != f"{language.schema_version}:{language.content_hash}" or (
+            entry[1].registry.core_version, entry[1].registry.extension_hash,
+        ) != (relation_definitions.core_version, relation_definitions.extension_hash):
+            return False
+        from .vault_store import read
+
+        # The pages, the census entries and the configuration read one store state.
+        with read.request_snapshot(root):
+            config = _config_census(root)
+            if (
+                config is None
+                or _store_census_revision(config) != after_revision
+                or _without_store_revision(config)
+                != _without_store_revision(_stored_config_census(entry[0]))
+            ):
+                return False
+            if changed:
+                context = _reconcile_markdown_delta(
+                    root, entry[1], changed,
+                    relation_definitions=relation_definitions, language=language, patch_only=True,
+                )
+            else:
+                # A commit that names no Markdown page, such as the derivation that follows each
+                # governed write, changes no capture input. The inventory's witness moves with the
+                # census, or every inventory read after the commit would answer "pending".
+                context = entry[1]
+                inventory = context.capture_inventory
+                if (inventory is not None and inventory.store_identity is not None
+                        and inventory.store_identity[2] == before_revision):
+                    context = replace(context, capture_inventory=_inventory_at_store_snapshot(root, inventory))
+            if context is None:
+                return False
+            patched = _patch_markdown_census(
+                root, entry[0], changed_paths=changed, deleted_paths=()
+            )
+        census = tuple(sorted((*(item for item in patched if _is_page_entry(item)), *config)))
+        with _CORPUS_CONTEXT_CACHE_LOCK:
+            if _CORPUS_CONTEXT_CACHE.get(cache_key) is not entry:
+                return False
+            _CORPUS_CONTEXT_CACHE[cache_key] = (census, context)
+            # A store-mode vault's registry never sees a file event (the watcher seeds none), so a
+            # kept caption always matches and every build would be an event hit that never proves the
+            # files the store does not own. The next reader proves them (`_store_resident_entry`).
+            _drop_corpus_caption_locked(cache_key)
+    return True
 
 
 def _trim_corpus_cache_locked(keep: tuple[str, str]) -> None:
@@ -3558,6 +4181,12 @@ def warm_corpus_context(vault_root: Path) -> None:
             "MUTATION_WARMING", "semantic corpus warm-up did not retain a current context"
         )
 
+    from . import capture_inventory
+
+    witness = capture_inventory.raw_witness(root)
+    if witness is not None and witness.live:
+        publish_capture_inventory(root, witness, census=not witness.seeded)
+
 
 def build_corpus_context_with_census(
     vault_root: Path,
@@ -3567,22 +4196,33 @@ def build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     status_basis: lifecycle_statuses.Basis | None = None,
     type_basis: note_types.Basis | None = None,
+    writer_preflight: bool = False,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """Enrich admitted pages without publishing caller facts into the shared cache.
 
     The owner and an unbound library call admit every page without a per-page
     decision. A restricted caller's admissions are collected in their own
     disclosure boundary: they shape this context, not the caller's receipt.
+
+    The enrichment memo holds the enrichment of every page. A build that withholds
+    any page, or whose type or status dependency is unavailable, never writes it. A
+    restricted caller never enriches a page it may not see. It reads the memo when
+    it can validate it, with each such page at its raw state. When it cannot, it
+    enriches the pages it may see and keeps nothing.
     """
     from .governance import egress
 
     root = Path(vault_root)
     basis = status_basis or lifecycle_statuses.Basis(root)
     type_basis = type_basis or note_types.Basis(root)
+    share = _WRITER_CENSUS.get() if writer_preflight else None
+    if share is not None:
+        _WRITER_CENSUS.set(None)
     context, census = _build_corpus_context_with_census(
         root,
         registry=relation_registry.core_registry(),
         language_registry=semantic_language_registry.core_registry(),
+        writer_proof=share.proof if share is not None else None,
     )
     # A supplied registry is the meaning of every page without its own binding,
     # so its identity is a dependency of each enriched page.
@@ -3599,10 +4239,9 @@ def build_corpus_context_with_census(
     writer_visibility = vault.writer_link_visibility(root)
     selection = instances.DefinitionsSelection(root, _PAGE_DEFINITION_SUBJECTS)
     definitions = None
-    with egress.disclosure_boundary(root, "semantic_corpus_admission"):
+    with egress.disclosure_boundary(root, "semantic_corpus_admission", sink=True):
         visible = egress.restricted_release_filter(root)
-        if visible is not None or writer_visibility is not None:
-            memo_key = None
+        restricted = visible is not None or writer_visibility is not None
         memo = None
         if memo_key is not None:
             definitions = selection.dependency()
@@ -3613,21 +4252,31 @@ def build_corpus_context_with_census(
                 and memo[1][2] == definitions and memo[1][3] == supplied
             ):
                 memo = None
-            if memo is not None and memo[0] is context:
+            if memo is not None and memo[0] is context and not restricted:
                 return memo[2], census
+        # A filter decides every page: as one set, under one snapshot.
+        admitted = None if visible is None else egress.admitted(visible, context.pages, kept=True)
+        withheld = frozenset() if admitted is None else frozenset(context.pages) - admitted
+        # The current admission proved every page. Reuse the validated enrichment
+        # without copying its page states into a second mapping.
+        if not withheld and memo is not None and memo[0] is context:
+            enriched = memo[2]
+            if writer_visibility is not None:
+                enriched = replace(enriched, writer_visibility=writer_visibility)
+            return enriched, census
         previous = memo[0].pages if memo is not None else {}
         reused = memo[3] if memo is not None else {}
-        # A filter turns the memo off, so it decides every page: as one set, under one snapshot.
-        admitted = None if visible is None else egress.admitted(visible, context.pages)
+        # A page this caller may not see keeps its raw state and is enriched by no one on its behalf:
+        # nothing it enriches reaches the caller's context, and the memo only ever holds a build of every page.
         states = {
             path: (
-                reused[path]
+                state
+                if path in withheld
+                else reused[path]
                 if previous.get(path) is state
                 else enrich_page_state(root, state, basis, type_basis, relation_definitions=registry,
                                        language=language_registry, require_status=False,
                                        definitions_selection=selection)
-                if admitted is None or path in admitted
-                else state
             )
             for path, state in context.pages.items()
         }
@@ -3654,8 +4303,31 @@ def build_corpus_context_with_census(
         corpus_registry = (
             selection.snapshot("relations").typed if unarmed else context.registry
         )
-    # Enrichment changes interpretation, not titles, paths or structural census inputs.
-    if candidate is None:
+
+    def derive(
+        page_states: Mapping[str, SemanticPageState], view: Any, *, patching: SemanticCorpusContext | None
+    ) -> SemanticCorpusContext:
+        """The corpus of `page_states` for the writer view `view`: `patching` by the states that differ, else in full.
+
+        Enrichment changes interpretation, not titles, paths or structural census inputs, so the
+        structural context's resolver and activation census stand for any enrichment.
+        """
+        if patching is not None:
+            patched = _context_with_page_delta(
+                patching,
+                page_states,
+                tuple(dict.fromkeys(
+                    path for path in (*page_states, *patching.pages)
+                    if patching.pages.get(path) is not page_states.get(path)
+                )),
+                registry=corpus_registry,
+                identity_census=identity,
+                writer_visibility=view,
+                resolver_source=context,
+                activation_census=context.activation_census,
+            )
+            if patched is not None:
+                return patched
         resolver = _WikilinkResolverView(
             full_paths=context.resolver_full_paths,
             kb_stripped=context.resolver_kb_stripped,
@@ -3663,49 +4335,38 @@ def build_corpus_context_with_census(
             titles=context.resolver_titles,
             candidates_by_key=context.resolver_candidates_by_key,
         )
-        enriched = None
-        if memo is not None:
-            # The memo holds the enrichment of an earlier structure; patch it by
-            # the pages whose enriched state is a new object.
-            enriched = _context_with_page_delta(
-                memo[2],
-                states,
-                tuple(dict.fromkeys(
-                    path for path in (*states, *memo[2].pages)
-                    if memo[2].pages.get(path) is not states.get(path)
-                )),
-                registry=corpus_registry,
-                identity_census=identity,
-                writer_visibility=writer_visibility,
-                resolver_source=context,
-                activation_census=context.activation_census,
-            )
-        if enriched is None:
-            facts = _derive_relation_facts(root, states, resolver, corpus_registry)  # type: ignore[arg-type]
-            enriched = _context_from_resolved_state(
-                root, states, corpus_registry, identity,
-                entries=context.resolver_entries,
-                resolver=resolver,  # type: ignore[arg-type]
-                facts=facts,
-                writer_visibility=writer_visibility,
-                validated_census=context.activation_census,
-            )
-    else:
-        enriched = _context_from_state_map(
-            root, states, corpus_registry, identity, writer_visibility=writer_visibility,
+        facts = _derive_relation_facts(root, page_states, resolver, corpus_registry)  # type: ignore[arg-type]
+        return _context_from_resolved_state(
+            root, page_states, corpus_registry, identity,
+            entries=context.resolver_entries,
+            resolver=resolver,  # type: ignore[arg-type]
+            facts=facts,
+            writer_visibility=view,
+            validated_census=context.activation_census,
         )
-    if memo_key is not None:
+
+    if candidate is not None:
+        return _context_from_state_map(
+            root, states, corpus_registry, identity, writer_visibility=writer_visibility,
+        ), census
+    if withheld or memo_key is None:
+        # This caller's context is its own: cut from the owner's memo when it validates it, else built in
+        # full, and never kept.
+        return derive(states, writer_visibility, patching=memo[2] if memo is not None else None), census
+    # The shared enrichment stands for no caller: it carries no writer view.
+    enriched = derive(states, None, patching=memo[2] if memo is not None else None)
+    # The reused states keep this basis object, so record the dependency it will have once a
+    # later read loads it.
+    dependency = (basis.dependency, type_basis.loaded_dependency(), definitions, supplied)
+    # An "unavailable" overlay is one that this caller could not admit or read: no other caller can
+    # match it, so it is no enrichment to share, and it must not replace one that others can.
+    if not any(vocabulary_registry.dependency_unavailable(each) for each in dependency[:2]):
         with _CORPUS_CONTEXT_CACHE_LOCK:
             cached = _CORPUS_CONTEXT_CACHE.get(memo_key[0])
             if cached is not None and cached[1] is context:
-                _ENRICHED_CONTEXT_MEMO[memo_key] = (
-                    context,
-                    # The reused states keep this basis object, so record the
-                    # dependency it will have once a later read loads it.
-                    (basis.dependency, type_basis.loaded_dependency(), definitions, supplied),
-                    enriched,
-                    states,
-                )
+                _ENRICHED_CONTEXT_MEMO[memo_key] = (context, dependency, enriched, states)
+    if writer_visibility is not None:
+        enriched = replace(enriched, writer_visibility=writer_visibility)
     return enriched, census
 
 
@@ -3757,6 +4418,7 @@ def _build_corpus_context_with_census(
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
     warm: bool = False,
     join_deadline: float | None = None,
+    writer_proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None,
 ) -> tuple[SemanticCorpusContext, tuple | None]:
     """``build_corpus_context`` plus the exact census that validated it.
 
@@ -3786,29 +4448,23 @@ def _build_corpus_context_with_census(
         cache_key = _corpus_cache_key(root)
         event_checkpoint = freshness.consumer_checkpoint(root, "vault")
         if event_checkpoint.triple is not None:
-            with _CORPUS_CONTEXT_CACHE_LOCK:
-                event_entry = _CORPUS_CONTEXT_CACHE.get(cache_key)
-                cached_checkpoint = _CORPUS_CONTEXT_EVENT_CHECKPOINTS.get(cache_key)
-                cached_language_hash = _CORPUS_CONTEXT_LANGUAGE_HASHES.get(cache_key)
-            if (
-                event_entry is not None
-                and cached_checkpoint == event_checkpoint
-                and cached_language_hash == f"{language.schema_version}:{language.content_hash}"
-                and _config_census(root) == _stored_config_census(event_entry[0])
-                and (
-                    event_entry[1].registry.core_version,
-                    event_entry[1].registry.extension_hash,
-                )
-                == (
-                    relation_definitions.core_version,
-                    relation_definitions.extension_hash,
-                )
-            ):
+            event_entry = _published_corpus_entry(
+                root, cache_key, event_checkpoint, relation_definitions, language
+            )
+            if event_entry is not None:
                 log.info(
                     "semantic corpus context event-hit pages=%d",
                     len(event_entry[1].pages),
                 )
                 return event_entry[1], event_entry[0]
+        store_entry = _store_resident_entry(
+            root, cache_key, relation_definitions, language, writer_proof=writer_proof
+        )
+        if store_entry is not None:
+            log.info(
+                "semantic corpus context store-hit pages=%d", len(store_entry[1].pages)
+            )
+            return store_entry[1], store_entry[0]
         miss_reason = _event_miss_reason(
             root, cache_key, event_checkpoint, relation_definitions, language
         )
@@ -4105,16 +4761,16 @@ def _build_corpus_context_uncached(
     language: semantic_language_registry.SemanticLanguageRegistry,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
+    from . import capture_inventory
+
+    raw_inputs = {}
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     eligible: dict[str, Path] = {}
     paths = find_corpus.corpus_paths(root, "vault", lambda **walk: vault.walk_vault_md(root, **walk))
     # A stored page's path is the store's: resolving its file would stat a projection.
-    stored = (
-        {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages}
-        if isinstance(paths, find_corpus.StoreCorpus)
-        else {}
-    )
+    store_mode = isinstance(paths, find_corpus.StoreCorpus)
+    stored = {root.joinpath(*meta.path.split("/")): meta.path for meta in paths.pages} if store_mode else {}
     for disk_path in sorted(paths, key=lambda item: item.as_posix()):
         request_budget.checkpoint()
         rel_path = stored.get(disk_path)
@@ -4127,6 +4783,8 @@ def _build_corpus_context_uncached(
             eligible[rel_path] = disk_path
 
     def consume(rel_path: str, source: str) -> None:
+        if capture_inventory.raw_path(root, rel_path):
+            raw_inputs[rel_path] = capture_inventory.input_from_bytes(root, rel_path, source.encode("utf-8"))
         if rel_path in eligible:
             states[rel_path] = _parse_page_state(
                 root,
@@ -4142,31 +4800,77 @@ def _build_corpus_context_uncached(
         request_budget.checkpoint()
         if rel_path.startswith(kb_prefix):
             continue
-        try:
-            source = _read_corpus_source(root, disk_path)
-        except (OSError, UnicodeDecodeError) as error:
-            if (
-                activation.is_managed_governed_path(root, disk_path)
-                and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
-            ):
-                raise activation_manifest.ActivationManifestError(
-                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
-                    f"could not read governed semantic page {disk_path}: {error}",
-                ) from error
-            continue
-        consume(rel_path, source)
+        source = _read_loose_page(root, rel_path, disk_path)
+        if source is not None:
+            consume(rel_path, source)
     if candidate is not None:
         states[candidate.path] = candidate
         identity_census = identity_census.with_page(
             candidate, casefold_paths=vault.vault_casefolds(root)
         )
-    return _context_from_state_map(
+    context = _context_from_state_map(
         root,
         states,
         _copy_registry(relation_definitions),
         identity_census,
     )
+    return replace(
+        context,
+        capture_inventory=capture_inventory.collect(root, raw_inputs),
+        unparsed_titles=(
+            _unparsed_titles(
+                root,
+                {rel: path for rel, path in eligible.items() if rel not in states},
+                frozenset(stored.values()),
+            )
+            if store_mode
+            else None
+        ),
+    )
 
+
+def _unparsed_titles(
+    root: Path, skipped: Mapping[str, Path], stored: frozenset[str]
+) -> Mapping[str, str | None]:
+    """The title that the writer's resolver build indexes for each ``skipped`` corpus path.
+
+    A stored page's title comes from the store's bytes, a file's from the disk, and a path that
+    cannot be read is indexed with no title, as ``WikilinkResolver`` builds it.
+    """
+    from .vault_store import read
+
+    bodies: Mapping[str, bytes] = {}
+    held = [rel for rel in skipped if rel in stored]
+    if held:
+        with read.snapshot(root) as view:
+            bodies = view.bodies(held)
+    titles: dict[str, str | None] = {}
+    for rel, disk_path in skipped.items():
+        if rel not in stored:
+            titles[rel] = vault.WikilinkResolver.read_title(disk_path)
+        elif rel in bodies:  # a stored page that the store no longer holds is not in a build either
+            titles[rel] = vault.display_title_from_bytes(bodies[rel], rel)
+    return MappingProxyType(titles)
+
+
+def _read_loose_page(root: Path, rel_path: str, disk_path: Path) -> str | None:
+    """The text of a Markdown page outside the Knowledge Base that the walk yields; None when it is skipped.
+
+    The cold build and the page delta share this rule. A file that is not UTF-8 text, or that the process
+    cannot read, is no page state; one in a read-write governed folder refuses the build instead.
+    """
+    try:
+        return _read_corpus_source(root, disk_path)
+    except (OSError, UnicodeDecodeError) as error:
+        if (
+            activation.is_managed_governed_path(root, disk_path)
+            and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+        ):
+            raise activation_manifest.ActivationManifestError(
+                "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+                f"could not read governed semantic page {disk_path}: {error}",
+            ) from error
+        return None
 
 
 def _read_corpus_source(root: Path, path: Path) -> str:
@@ -4384,11 +5088,13 @@ def _context_from_state_map(
     identity_census: StableIdentityCensus,
     *,
     writer_visibility: Any = _DECIDE,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     request_budget.checkpoint()
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
     resolver = vault.WikilinkResolver.from_entries(root, entries)
+    resolver.bound_claims = prior_claims
     facts = _derive_relation_facts(root, ordered_pages, resolver, registry)
     return _context_from_resolved_state(
         root,
@@ -4399,6 +5105,7 @@ def _context_from_state_map(
         resolver=resolver,
         facts=facts,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -4459,12 +5166,11 @@ def _resolver_dependency_keys(root: Path, path: str, title: str) -> set[str]:
     """Every key under which a wikilink can reach one page.
 
     Read from the resolver's own maps, so the keys are the ones resolution
-    uses. Casefolded to meet `_dependency_key`, which is a superset of the
-    case-sensitive match.
+    uses, in the spelling `_dependency_fold` gives every link key.
     """
     resolver = vault.WikilinkResolver.from_entries(root, ((path, title),))
     return {
-        key.casefold()
+        _dependency_fold(key)
         for keys in (resolver.full_paths, resolver.kb_stripped, resolver.stems, resolver.titles)
         for key in keys
     }
@@ -4500,13 +5206,15 @@ def _context_with_page_delta(
     writer_visibility: Any,
     resolver_source: SemanticCorpusContext | None = None,
     activation_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext | None:
     """The corpus of `pages` from `base` by re-deriving only what `delta` reaches.
 
     `delta` lists the paths whose state was added, replaced or removed.
     `resolver_source` is a context that already holds the resolver of `pages`;
-    without it the resolver is patched from `base`. Returns None, and the
-    caller derives the whole corpus, whenever locality is not provable.
+    without it the resolver is patched from `base`. `prior_claims`, when given,
+    are the claims the links of `pages` resolve prior paths by. Returns None, and
+    the caller derives the whole corpus, whenever locality is not provable.
     """
     old = base.pages
     delta = tuple(path for path in delta if old.get(path) is not pages.get(path))
@@ -4535,6 +5243,7 @@ def _context_with_page_delta(
             stems=resolver_source.resolver_stems,
             titles=resolver_source.resolver_titles,
             candidates_by_key=resolver_source.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
     elif any(
         path not in old or path not in pages or old[path].title != pages[path].title
@@ -4553,6 +5262,7 @@ def _context_with_page_delta(
             candidates_by_key=base.resolver_candidates_by_key,
         )
         resolver.on_entries_changed(updated.items(), removed)
+        resolver.bound_claims = prior_claims
     else:
         entries = base.resolver_entries
         resolver = _WikilinkResolverView(
@@ -4561,6 +5271,7 @@ def _context_with_page_delta(
             stems=base.resolver_stems,
             titles=base.resolver_titles,
             candidates_by_key=base.resolver_candidates_by_key,
+            bound_claims=prior_claims,
         )
 
     # A link resolves differently only through a key one of these pages held or
@@ -4570,6 +5281,19 @@ def _context_with_page_delta(
         for page in (old.get(path), pages.get(path)):
             if page is not None:
                 keys |= _resolver_dependency_keys(base.vault_root, page.path, page.title)
+    if prior_claims is not None:
+        from . import prior_claims as claims_module
+
+        # A link names a prior path by the claims, so each one whose claimants change, or that
+        # a changed page claims, reaches the links that name it.
+        before = (
+            base.prior_claims if base.prior_claims is not None
+            else claims_module.current(base.vault_root)
+        )
+        for prior in claims_module.changed_priors(before, prior_claims, delta):
+            keys |= _resolver_dependency_keys(
+                base.vault_root, prior.removesuffix(".md") + ".md", ""
+            )
     dependent = {
         identity
         for key in keys
@@ -4635,6 +5359,7 @@ def _context_with_page_delta(
         facts=facts,
         writer_visibility=writer_visibility,
         validated_census=census,
+        prior_claims=prior_claims,
     )
 
 
@@ -4649,6 +5374,7 @@ def _context_from_resolved_state(
     facts: tuple[RelationFact, ...],
     writer_visibility: Any = _DECIDE,
     validated_census: activation_manifest.ActivationCensus | None = None,
+    prior_claims: Any = None,
 ) -> SemanticCorpusContext:
     inbound: dict[str, list[RelationFact]] = {}
     outbound: dict[str, list[RelationFact]] = {}
@@ -4706,6 +5432,7 @@ def _context_from_resolved_state(
         identity_census=identity_census,
         registry=registry,
         writer_visibility=writer_visibility,
+        prior_claims=prior_claims,
     )
 
 
@@ -5050,9 +5777,18 @@ def _derive_relation_facts(
     return tuple(sorted(facts, key=lambda item: item.identity))
 
 
+def _dependency_fold(key: str) -> str:
+    """The spelling in which a link key meets the keys that can reach a page: NFC, casefolded.
+
+    A superset of each resolver match: a title matches NFC and lower-cased (`vault.title_key`),
+    a path or a stem as written, so a link typed decomposed reaches the title it resolves to.
+    """
+    return unicodedata.normalize("NFC", key).casefold()
+
+
 def _dependency_key(raw_target: str) -> str:
     path, _, _ = _target_parts(raw_target)
-    return vault.wikilink_page_key(path).casefold()
+    return _dependency_fold(vault.wikilink_page_key(path))
 
 
 def require_page_status(page: SemanticPageState | None) -> None:
@@ -5083,7 +5819,7 @@ def _structural_relation_reasons(
     reasons: list[str] = []
     definition = registry.definition(fact.canonical_relation or "")
     target_page = corpus.pages.get(fact.logical_target_path)
-    expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
+    expected_successor = _dependency_fold(fact.logical_source_path.removesuffix(".md"))
     mutual_supersession = bool(
         definition is not None
         and registry.has(definition.key, "replaces")
@@ -5196,6 +5932,8 @@ class _WikilinkResolverView:
     stems: Mapping[str, tuple[str, ...]]
     titles: Mapping[str, tuple[str, ...]]
     candidates_by_key: Mapping[str, tuple[vault.WikilinkCandidate, ...]]
+    #: The corpus's own prior-path claims, when it binds any (`SemanticCorpusContext.prior_claims`).
+    bound_claims: Any = None
 
 
 def _qualifying_body_wikilink_targets(
@@ -5204,13 +5942,7 @@ def _qualifying_body_wikilink_targets(
     visible: Callable[[str], bool] | None = None,
 ) -> tuple[str, ...]:
     """Resolve body links by normalized set membership without relation facts."""
-    resolver = _WikilinkResolverView(
-        full_paths=corpus.resolver_full_paths,
-        kb_stripped=corpus.resolver_kb_stripped,
-        stems=corpus.resolver_stems,
-        titles=corpus.resolver_titles,
-        candidates_by_key=corpus.resolver_candidates_by_key,
-    )
+    resolver = corpus.link_resolver()
     targets: list[str] = []
     for raw_target, _line in page.body_wikilinks:
         status, resolved, _anchor, _alias = _resolve_target(
@@ -5281,8 +6013,8 @@ def writer_view_relations(
     also feeds the published graph, keeps every fact.
 
     A caller judging many pages of one corpus passes the writer's `visible`
-    (from `vault.writer_link_visibility`) and a `resolver` built from the
-    corpus once, rather than deciding them per page.
+    (from `vault.writer_link_visibility`) rather than deciding it per page. The
+    `resolver` defaults to the maps the corpus already holds, so no page builds one.
     """
     outbound = corpus.outbound.get(page.path, ())
     inbound = corpus.inbound.get(page.path, ())
@@ -5293,7 +6025,7 @@ def writer_view_relations(
     if visible is None or not callable(visible) or not visible(page.path):
         return outbound, inbound, None
     if resolver is None:
-        resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+        resolver = corpus.link_resolver()
     own = _derive_relation_facts(
         corpus.vault_root,
         {page.path: page},
@@ -5349,7 +6081,7 @@ def writer_authored_facts(
         visible = vault.writer_link_visibility(corpus.vault_root)
     if visible is None or not visible(page.path):
         return tuple(fact for fact in corpus.relation_facts if fact.authored_path == page.path)
-    resolver = vault.WikilinkResolver.from_entries(corpus.vault_root, corpus.resolver_entries)
+    resolver = corpus.link_resolver()
     return tuple(
         sorted(
             _derive_relation_facts(
@@ -6197,6 +6929,46 @@ def _finding_sort_key(finding: ContractFinding) -> tuple[Any, ...]:
     )
 
 
+def _profile_topic_findings(page: SemanticPageState, vault_root: Path) -> list[ContractFinding]:
+    """A profile page covers one domain or all of them: two domains is an error, an unregistered one a warning.
+
+    A page that names two domains would serve one profile for both. A topic the registry does not know yet is only
+    a warning, because a governed write registers a new topic; until then the page supplies nothing and is not global.
+    """
+    if not _type_basis(page).selects(normalized_compiled_type(page.page_type), note_types.profile):
+        return []
+    # Imported here: the taxonomy reads the vault's registry files, which a pure page judgement otherwise never needs.
+    from . import source_taxonomy, vocabulary_resolution
+
+    scope = vocabulary_resolution.profile_scope(
+        source_taxonomy.load_taxonomy(vault_root), page.frontmatter.get("topics"),
+    )
+    named = ", ".join(scope.topics)
+    if scope.kind == vocabulary_resolution.SCOPE_MULTIPLE:
+        return [ContractFinding(
+            code="INVALID_PROFILE_TOPICS", severity="error", path=page.path, span=None,
+            detail=f"a profile covers one domain, and this page names several: {named}",
+            remediation=(
+                "Keep one topic on this page and write each other domain its own profile page, "
+                "or remove the topics to make it the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "one_domain"),
+        )]
+    if scope.kind == vocabulary_resolution.SCOPE_UNRESOLVED:
+        return [ContractFinding(
+            code="UNRESOLVED_PROFILE_TOPIC", severity="warning", path=page.path, span=None,
+            detail=f"the topic {named} is not a registered domain, so this profile is served for no turn",
+            remediation=(
+                "Register the domain in the domains registry, or name a registered domain; "
+                "remove the topics only to make this the global profile."
+            ),
+            governed_element_identity=("frontmatter", "topics"),
+            resolved_rule=("semantic_contract", "profile", "registered_domain"),
+        )]
+    return []
+
+
 def _raw_findings(
     page: SemanticPageState,
     contracts: memory_schema.ResolvedMemoryContracts,
@@ -6235,6 +7007,7 @@ def _raw_findings(
             governed_element_identity=("frontmatter", "stance"),
             resolved_rule=("semantic_contract", "stance", "boolean"),
         ))
+    findings.extend(_profile_topic_findings(page, corpus.vault_root))
     findings.extend(_diagnostic_findings(page))
     minimum_finding = _missing_semantic_unit_finding(page)
     if minimum_finding is not None:
@@ -6323,10 +7096,17 @@ def evaluate(
     before_review: RelationReviewState | None = None,
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
+    non_worsening: bool = False,
     include_relation_disposition: bool = True,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
 ) -> SemanticContractResult:
-    """Evaluate supplied immutable state without crossing any adapter boundary."""
+    """Evaluate supplied immutable state without crossing any adapter boundary.
+
+    `grandfathered` and `non_worsening` each let the page keep the error keys its before state
+    already had and refuse only the ones the operation adds. The first comes from the activation
+    baseline; the second from an operation that changes where a page lives or how its links are
+    spelled, never what it says, so it owes no debt the page carried before it.
+    """
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
     before_context_matches = before is None or before_corpus.pages.get(before.path) == before
@@ -6385,7 +7165,9 @@ def evaluate(
         finding.key for finding in after_findings if finding.severity == "error"
     }
     use_subset_exception = (
-        grandfathered and operation in _GRANDFATHERED_OPERATIONS and before is not None
+        (grandfathered or non_worsening)
+        and operation in _GRANDFATHERED_OPERATIONS
+        and before is not None
     )
     normalized: list[ContractFinding] = []
     for finding in after_findings:

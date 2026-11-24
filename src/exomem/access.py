@@ -34,7 +34,7 @@ from pathlib import Path
 
 import yaml
 
-from .kbdir import kb_dirname
+from .kbdir import managed_root, managed_split_parts
 
 log = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class PublicationPolicySnapshot:
 
 
 def access_config_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / "_access.yaml"
+    return managed_root(vault_root) / "_access.yaml"
 
 
 def _load_config(vault_root: Path) -> dict[str, list[str]]:
@@ -111,12 +111,30 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
     Unreadable, replaced, or over-limit bytes fail closed; an absent policy has
     the stable explicit ``missing`` identity.
     """
+    evidence = _publication_policy_evidence(vault_root)
+    return None if evidence is None else evidence[0]
+
+
+def publication_policy_exclusions(vault_root: Path) -> tuple[str, bool] | None:
+    """Decide exclusions from the same bounded bytes that supply the fingerprint."""
+    evidence = _publication_policy_evidence(vault_root)
+    if evidence is None:
+        return None
+    snapshot, raw = evidence
+    try:
+        excluded = raw is not None and bool(parse_config(raw)["excluded"])
+    except (UnicodeError, yaml.YAMLError, TypeError):
+        return None
+    return snapshot.fingerprint, excluded
+
+
+def _publication_policy_evidence(vault_root: Path) -> tuple[PublicationPolicySnapshot, bytes | None] | None:
     root = Path(vault_root)
     path = access_config_path(root)
     try:
         path.lstat()
     except FileNotFoundError:
-        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT)
+        return PublicationPolicySnapshot(MISSING_POLICY_FINGERPRINT), None
     except OSError:
         return None
     try:
@@ -129,7 +147,7 @@ def publication_policy_snapshot(vault_root: Path) -> PublicationPolicySnapshot |
         )
     except (OSError, ValueError):
         return None
-    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest())
+    return PublicationPolicySnapshot(hashlib.sha256(raw).hexdigest()), raw
 
 
 def _policy_signature(path: Path) -> _PolicySignature:
@@ -161,6 +179,21 @@ def _degraded_state(key: str) -> tuple[str, dict[str, list[str]], bool]:
     if cached is not None:
         return cached[1], cached[2], False
     return UNAVAILABLE_POLICY_FINGERPRINT, _empty_policy(), True
+
+
+def parse_config(raw: bytes) -> dict[str, list[str]]:
+    """The tiers that the bytes of `_access.yaml` declare.
+
+    Bytes that are not UTF-8 or not YAML raise `UnicodeError` or `yaml.YAMLError`; a document
+    that is not a mapping declares no tier.
+    """
+    data = yaml.safe_load(raw.decode("utf-8")) or {}
+    if not isinstance(data, dict):
+        data = {}
+    return {
+        "readonly": [str(x) for x in (data.get("readonly") or [])],
+        "excluded": [str(x) for x in (data.get("excluded") or [])],
+    }
 
 
 def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
@@ -209,16 +242,10 @@ def _policy_state(vault_root: Path) -> tuple[str, dict[str, list[str]], bool]:
         _CACHE[key] = (signature, fingerprint, cached[2])
         return fingerprint, cached[2], False
     try:
-        data = yaml.safe_load(raw.decode("utf-8")) or {}
-        if not isinstance(data, dict):
-            data = {}
+        cfg = parse_config(raw)
     except (UnicodeError, yaml.YAMLError) as error:
         log.warning("could not parse %s (%s); treating as no access policy", path.name, error)
-        data = {}
-    cfg = {
-        "readonly": [str(x) for x in (data.get("readonly") or [])],
-        "excluded": [str(x) for x in (data.get("excluded") or [])],
-    }
+        cfg = _empty_policy()
     _CACHE[key] = (signature, fingerprint, cfg)
     return fingerprint, cfg, False
 
@@ -231,8 +258,9 @@ def _kb_relative(rel_path: str) -> str:
     """
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0].casefold() == kb_dirname().casefold():
-        return "/".join(parts[1:])
+    below = managed_split_parts(parts, key=str.casefold)
+    if below is not None:
+        return "/".join(below)
     return rel
 
 
@@ -253,7 +281,14 @@ def access_tier(vault_root: Path, rel_path: str) -> str:
     append-only (Sources/Evidence) → read-write.
     """
     _fingerprint, cfg, fail_closed = _policy_state(vault_root)
-    if _excluded_under(cfg, fail_closed, rel_path):
+    if fail_closed:
+        return TIER_EXCLUDED
+    return tier_in(cfg, rel_path)
+
+
+def tier_in(cfg: dict[str, list[str]], rel_path: str) -> str:
+    """The tier that the parsed config `cfg` gives `rel_path`, for a caller that holds a config of its own."""
+    if _excluded_under(cfg, False, rel_path):
         return TIER_EXCLUDED
     kb_rel = _kb_relative(rel_path)
     if _matches(cfg["readonly"], kb_rel):

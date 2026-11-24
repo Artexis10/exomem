@@ -24,17 +24,19 @@
 
 # How new note filenames are derived from their titles.
 #
-#   slug   lowercase-ascii-kebab-case (the default, and what every existing
-#          vault already uses)
-#   title  the title itself, with only the characters a filesystem cannot
-#          carry removed, so the name reads the way it does in Obsidian's
-#          quick switcher and file explorer
+#   title  the title itself, with only the characters a filesystem or a link
+#          cannot carry removed, so the name reads the way it does in
+#          Obsidian's quick switcher and file explorer (the default)
+#   slug   lowercase-ascii-kebab-case, for a vault that prefers it
 #
-# Shipped unset so an upgrade never changes what an existing vault names its
-# files. Nothing on disk is renamed when this changes; it governs new names
-# only, so the two styles can coexist in one vault.
+# Shipped unset, so a new page takes the `title` style. A captured Source keeps
+# its dated slug name until you set a style. Set the key, or the environment
+# variable EXOMEM_FILENAME_STYLE, to choose one; the environment wins, and
+# `exomem doctor` shows the style in force and where it came from. Nothing on
+# disk is renamed when this changes; it governs new names only, so the two
+# styles can coexist in one vault.
 #
-# filename_style: title
+# filename_style: slug
 
 projects:
   # Cross-cutting — anything not tied to a specific project or domain.

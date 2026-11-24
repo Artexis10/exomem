@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from .k8s_client import ClusterClient
 from .manifests import ResourceSettings, check_model_env
 from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
+from .restic_verification import VerificationConfig
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
@@ -301,7 +303,7 @@ def build_media_listing() -> B2ObjectStorage | None:
 
 
 def build_catalogue_prewarm():
-    """The chart owns the conservative profile and bounded timeout; absent selects the old path."""
+    """The chart owns the measured build profile and bounded timeout; absent selects the old path."""
     from .catalogue_build import BuildConfig
 
     if os.environ.get("CELLCTL_CATALOGUE_PREWARM", "false") != "true":
@@ -311,6 +313,13 @@ def build_catalogue_prewarm():
         cpu_request=profile["requests"]["cpu"], cpu_limit=profile["limits"]["cpu"],
         memory_request=profile["requests"]["memory"], memory_limit=profile["limits"]["memory"],
     ), _positive_integer_env("CELLCTL_CATALOGUE_BUILD_TIMEOUT_SECONDS"))
+
+
+def build_restic_verification() -> VerificationConfig:
+    cell_ids = json.loads(os.environ.get("CELLCTL_RESTIC_VERIFICATION_CELL_IDS", "[]"))
+    if not isinstance(cell_ids, list):
+        raise ValueError("restic verification cell IDs must be a JSON array")
+    return VerificationConfig(cell_ids=tuple(cell_ids))
 
 
 def build_cluster_config() -> ClusterConfig:
@@ -343,6 +352,18 @@ def build_cluster_config() -> ClusterConfig:
     media_default_raw = json.loads(os.environ.get("CELLCTL_MEDIA_ENGINE_FLEET_DEFAULT", "[]"))
     if not isinstance(media_default_raw, list):
         raise ValueError("media engine fleet default must be a JSON array of engine names")
+    erasure_raw = json.loads(os.environ.get("CELLCTL_SOURCE_ERASURE_CELL_IDS", "{}"))
+    if not isinstance(erasure_raw, dict) or not all(isinstance(ids, list) for ids in erasure_raw.values()):
+        raise ValueError("Source erasure cell IDs must be a JSON object of identity system to cell ID array")
+    resources = ResourceSettings(
+        cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
+        cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
+        memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
+        memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
+        passage_matrix_budget=os.environ.get(
+            "CELLCTL_CELL_PASSAGE_MATRIX_BUDGET", DEFAULT_RESOURCES.passage_matrix_budget
+        ),
+    )
     shared_raw = json.loads(os.environ.get("CELLCTL_SHARED_WORKER", '{"mode":"off"}'))
     if not isinstance(shared_raw, dict):
         raise ValueError("shared worker policy must be a JSON object")
@@ -350,7 +371,12 @@ def build_cluster_config() -> ClusterConfig:
     if shared_raw.get("mode") != "off":
         if not isinstance(shared_raw.get("cell_ids", []), list):
             raise ValueError("shared worker cell IDs must be a JSON array")
-        shared_raw["resources"] = ResourceSettings(**shared_raw["resources"])
+        # The chart's shared-worker resources hold no budget; a shared cell has the same 3Gi limit,
+        # so it takes the cell budget.
+        shared_raw["resources"] = dataclasses.replace(
+            ResourceSettings(**shared_raw["resources"]),
+            passage_matrix_budget=resources.passage_matrix_budget,
+        )
         shared_raw["cell_ids"] = tuple(shared_raw.get("cell_ids", []))
         shared = SharedWorkerPolicy(**shared_raw)
     elif set(shared_raw) != {"mode"}:
@@ -359,6 +385,7 @@ def build_cluster_config() -> ClusterConfig:
     check_model_env(model_env)
     return ClusterConfig(
         catalogue_prewarm=build_catalogue_prewarm(),
+        restic_verification=build_restic_verification(),
         object_storage_bucket=os.environ["CELLCTL_B2_BUCKET_NAME"],
         object_storage_endpoint=os.environ["CELLCTL_B2_ENDPOINT"],
         cell_data_backup_bucket=os.environ["CELLCTL_CELL_DATA_BACKUP_BUCKET_NAME"],
@@ -366,12 +393,7 @@ def build_cluster_config() -> ClusterConfig:
         cell_data_endpoint=os.environ["CELLCTL_CELL_DATA_ENDPOINT"],
         key_retention_sources=_retention_sources(),
         access_record_enabled=os.environ.get("CELLCTL_ACCESS_RECORD_ENABLED") == "true",
-        resources=ResourceSettings(
-            cpu_request=os.environ.get("CELLCTL_CELL_CPU_REQUEST", DEFAULT_RESOURCES.cpu_request),
-            cpu_limit=os.environ.get("CELLCTL_CELL_CPU_LIMIT", DEFAULT_RESOURCES.cpu_limit),
-            memory_request=os.environ.get("CELLCTL_CELL_MEMORY_REQUEST", DEFAULT_RESOURCES.memory_request),
-            memory_limit=os.environ.get("CELLCTL_CELL_MEMORY_LIMIT", DEFAULT_RESOURCES.memory_limit),
-        ),
+        resources=resources,
         model_env=model_env,
         dedicated_cell_ids=tuple(dedicated_cell_ids),
         shared_worker=shared,
@@ -387,6 +409,7 @@ def build_cluster_config() -> ClusterConfig:
         grant_public_key=os.environ.get("CELLCTL_GRANT_PUBLIC_KEY", ""),
         media_engine_cell_ids=media_engine_cell_ids,
         media_engine_fleet_default=tuple(media_default_raw),
+        source_erasure_cell_ids={system: tuple(ids) for system, ids in erasure_raw.items()},
         job_egress_except=tuple(job_egress_except_raw.split(",")) if job_egress_except_raw else (),
         storage=build_storage_config(),
         alert_delivery_secret=build_alert_delivery_secret(),

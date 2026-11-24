@@ -285,3 +285,152 @@ def test_optional_preparation_capacity_preserves_the_complete_baseline(vault: Pa
             candidates=candidates, turn="Compare optical alignment", conversation=working_set_conversation.NONE,
             placement=config, transport=httpx.MockTransport(forbidden))
     assert baseline == candidates and status == {"state": "unavailable"}
+
+
+def test_method_fit_sends_an_api_provider_only_what_that_provider_may_see(vault: Path) -> None:
+    """The first method-fit build sent the caller's text of each method to an API provider, withheld references included."""
+    from test_context_catalogue import _write
+
+    hidden = _page(vault, "provider-only-secret", body="Provider-confined calibration material.\n")
+    write_scope(vault, paths=hidden)
+    write_rule(vault, ceiling=0, audience="fixture-provider")
+    visible_skill = _write(
+        vault, "Knowledge Base/Skills/kiln-firing/SKILL.md",
+        f"---\nname: kiln-firing\ndescription: Fire loads and log the result in {hidden} after each firing\n---\n\nSteps.\n",
+    )
+    manifest = _page(vault, "firing-log", body=f"One item per firing. See [[{hidden}]] for the calibration.\n")
+    config = context_fit.Placement(
+        placement="api", runtime="openai", endpoint="https://provider.invalid/v1", model="fixture-model",
+        model_revision="fixture-model", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=32000,
+        max_output_tokens=200, resource_allowance_gib=1.0, provider_audience="fixture-provider", disclosure_authorized=True,
+    )
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(json.loads(request.content)["messages"][1]["content"]))
+        return httpx.Response(200, json={"model": "fixture-model", "choices": [{"message": {"content": json.dumps({"methods": []})}}]})
+
+    carriers = [
+        # The withheld page is offered first under the same name as the visible skill: it must change no label.
+        {"name": "kiln-firing", "path": hidden, "kind": "skill", "description_of": context_task._body_text, "max_chars": 1024},
+        {"name": "kiln-firing", "path": visible_skill, "kind": "skill", "description_of": context_task._skill_description, "max_chars": 1024},
+        {"name": "Firing log", "path": manifest, "kind": "collection", "description_of": context_task._body_text, "max_chars": 600},
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="The glaze pots are drying", conversation=working_set_conversation.NONE,
+            limit=2, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert status["state"] == "ready" and chosen == []
+    payload = json.dumps(sent)
+    assert hidden not in payload and "Provider-confined" not in payload
+    assert [item["label"] for item in sent[0]["methods"]] == ["kiln-firing", "Firing log"]
+
+
+def test_method_fit_reading_and_model_call_share_one_deadline_of_half_the_request(vault: Path) -> None:
+    """The half-budget cap once covered only the model call, so slow carrier reading pushed the hook door past its client."""
+    import time
+
+    from exomem import request_budget
+
+    skill = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=30.0, max_input_chars=32000,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    asked = []
+
+    def slow_description(source):
+        time.sleep(0.4)
+        return "Fire the kiln."
+
+    def handler(request):
+        asked.append(request)
+        return httpx.Response(500)
+
+    carriers = [{"name": f"m{n}", "path": skill, "kind": "skill", "description_of": slow_description, "max_chars": 200}
+                for n in range(12)]
+    # A 6 s door: half is 3 s, while the request's own remaining time minus its reserve would allow 5 s.
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=6.0))
+    try:
+        with principal.request_scope(OWNER):
+            caller = context_views.CallerView.current(vault)
+            started = time.monotonic()
+            chosen, status = context_fit.select_methods(
+                vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+                limit=1, placement=config, transport=httpx.MockTransport(handler),
+            )
+            elapsed = time.monotonic() - started
+    finally:
+        request_budget.reset_current(token)
+    assert chosen == [] and status["state"] == "unavailable"
+    assert elapsed < 3.5 and not asked  # stopped at the 3 s judgment deadline, before any model call
+
+
+def test_one_oversized_method_description_does_not_hide_the_ones_after_it(vault: Path) -> None:
+    """The first build stopped offering at the first carrier that overflowed, so later carriers that fit were lost."""
+    small = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    big = _page(vault, "glaze-library", body="Glaze. " * 800 + "\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=1000,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "fixture-runtime"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "fixture-model", "digest": "fixture-digest"}]})
+        sent.append(json.loads(json.loads(request.content)["messages"][1]["content"]))
+        return httpx.Response(200, json={"model": "fixture-model", "message": {"content": json.dumps({"methods": []})}})
+
+    carriers = [
+        {"name": name, "path": path, "kind": "skill", "description_of": context_task._body_text, "max_chars": 6000}
+        for name, path in (("first", small), ("oversized", big), ("last", small))
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        _chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+            limit=1, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert [item["label"] for item in sent[0]["methods"]] == ["first", "last"]
+    assert status["considered"] == 2 and status["omitted"] == 1
+
+
+def test_a_method_whose_label_cannot_fit_is_not_read(vault: Path) -> None:
+    """Once the input allowance is spent, reading more pages costs the turn time and can change nothing."""
+    small = _page(vault, "kiln-firing", body="Fire the kiln.\n")
+    config = context_fit.Placement(
+        placement="local", runtime="ollama", endpoint="http://127.0.0.1:11434", model="fixture-model",
+        model_revision="fixture-digest", runtime_version="fixture-runtime", timeout_seconds=10.0, max_input_chars=400,
+        max_output_tokens=200, resource_allowance_gib=1.0,
+    )
+    read = []
+
+    def description(source):
+        read.append(source.title)
+        return "Fire the kiln."
+
+    def handler(request):
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "fixture-runtime"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "fixture-model", "digest": "fixture-digest"}]})
+        return httpx.Response(200, json={"model": "fixture-model", "message": {"content": json.dumps({"methods": []})}})
+
+    carriers = [
+        {"name": "short", "path": small, "kind": "skill", "description_of": description, "max_chars": 200},
+        {"name": "x" * 500, "path": small, "kind": "skill", "description_of": description, "max_chars": 200},
+    ]
+    with principal.request_scope(OWNER):
+        caller = context_views.CallerView.current(vault)
+        _chosen, status = context_fit.select_methods(
+            vault, caller=caller, carriers=carriers, turn="Fire it", conversation=working_set_conversation.NONE,
+            limit=1, placement=config, transport=httpx.MockTransport(handler),
+        )
+    assert len(read) == 1 and status["considered"] == 1 and status["omitted"] == 1

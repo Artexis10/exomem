@@ -73,6 +73,18 @@ SNAPSHOT_CLASS_API = "snapshot.storage.k8s.io/v1/VolumeSnapshotClass"
 TRANSFER_TOOLS_ENABLED = False
 
 
+@dataclass(frozen=True)
+class CataloguePrewarm:
+    """The values the catalogue-prewarm mode sets over the chart: the feature on, and the upgrade
+    window's idle and force minutes cut to the schema's 1-minute floor so a scenario finishes inside
+    one UTC hour. The build timeout and resources stay the chart's own; the mode reads them back
+    from cellctl's Deployment.
+    """
+
+    idle_minutes: int = 1
+    force_minutes: int = 1
+
+
 @dataclass
 class PlatformConfig:
     cellctl_image: str
@@ -93,6 +105,7 @@ class PlatformConfig:
     upgrade_idle_minutes: int | None = None
     upgrade_force_minutes: int | None = None
     gateway_hold_budget_seconds: int | None = None
+    catalogue_prewarm: CataloguePrewarm | None = None
 
     @property
     def renders_local_storage(self) -> bool:
@@ -161,6 +174,9 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
         cellctl["upgradeWindow"]["idleMinutes"] = config.upgrade_idle_minutes
     if config.upgrade_force_minutes is not None:
         cellctl["upgradeWindow"]["forceMinutes"] = config.upgrade_force_minutes
+    if (prewarm := config.catalogue_prewarm) is not None:
+        cellctl["cataloguePrewarm"] = True
+        cellctl["upgradeWindow"] |= {"idleMinutes": prewarm.idle_minutes, "forceMinutes": prewarm.force_minutes}
     values = {
         "cellctl": cellctl,
         "cellData": cell_data_values(stack),

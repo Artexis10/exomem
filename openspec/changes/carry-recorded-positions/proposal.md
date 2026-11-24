@@ -1,0 +1,46 @@
+# Proposal
+
+## Why
+
+People record their own positions in their notes: a working attribution of cause, an interpretation they prefer, a constraint on how something should be framed.
+Such a unit often sits late in a long page. It is dated and qualified, for example "her working guess, not yet tested".
+When a later turn brings new evidence on the same subject, the agent should keep that position in view, attributed to the person, and judge the evidence against it.
+
+In a dated incident in November 2026 it did neither, twice in one conversation.
+Recall served a short linked page as the lead and never the long page that held the position. The agent answered in its default framing.
+After the agent had read the long page in full, it still answered a challenge without the position.
+The person had to restate a position the vault already held.
+
+Replays with a real model reproduced the gap and pointed at the mechanisms:
+- Appending the raw units to the recall result did not change the replies.
+- Presenting the same units as the person's recorded positions did change them, without making the replies simply agree.
+- Under a framing that asked the agent to attribute each line as its text does, the replies, in these replays, did not carry the person's positions.
+- Where the block sat and what it opened with mattered: a block read last, framing first, was used where the same block mid-packet mostly was not.
+- Reproduced on the installed service on 2026-11-20, the block was served on the incident turn and the answer still led with a default explanation. In replays of two incident conversations, a leading yes/no question that presupposes a default cause opened every answer with "Yes", and half left the position out. Putting the block first in the response led every first answer with the position in 4 of 4 replays, against 1 of 8 with the block last.
+- A careful position runs long, and a per-unit cap turned exactly those positions into references the agent did not read.
+
+Those replays were small and scanned by text, not judged, so they guide the design but do not measure it. The blind held-out run is the measurement.
+
+## What Changes
+
+- Add a closed trait `position` to the kind-trait set, and let a category declare traits the way a kind does. A reviewed registry save declares which categories and kinds record positions. Code selects position units only through the trait, never by a category name.
+- Serve a turn-scoped `positions` block in maps responses. It holds the position units found on the served task leads and on the pages their served connections name, ranked by relevance to the turn and then by recency. The block has its own bound outside the turn allowance.
+- Frame the block as the person's own recorded positions. That rests on the trait declaration: a category carries the trait because it records the person's positions. The shipped `preference` category carries it from the pack, and a vault category from the owner's reviewed registry save. The agent carries a position with attribution where the turn bears on it, judges the evidence independently, and says plainly whether the evidence supports the position, leaves it open or contradicts it, with no hedge that the evidence gives no reason for. A recorded position stays the person's for the rest of the conversation. The framing never asks the agent to agree.
+- Serve a position whole whenever it fits the block's bound, with no per-unit cap. Lead the maps response and the hook's rendering with the block, and open the block with its framing. The framing asks the agent to state the position, attributed and dated, in its first answer, and before any yes or no.
+- Teach capture to record a person's position under a category that carries the trait, naming them, and the agent's own analysis under a category without it.
+
+## Capabilities
+
+### New Capabilities
+
+- `recorded-positions`: selection, projection and framing of the person's recorded positions for a turn.
+
+### Modified Capabilities
+
+- `semantic-unit-language`: categories can carry registry-declared traits from the closed trait set.
+
+## Impact
+
+The projection reuses task discovery's served leads and their listed links, and the semantic-unit store's batched query restricted to parent pages. It adds one query to recall, bounded by the number of served leads and their links, and its cost is proven on the recall latency instrument.
+The trait reuses the registry's reviewed-save path. A vault declares its own position categories without a code release.
+Domain profiles (`add-domain-profiles-and-curation`) stay separate on purpose. A profile line is the owner's confirmed standing instruction, which the agent applies. A position is a dated view, which the agent carries with attribution and weighs against evidence. A unit that the same packet already serves under `stance` or `domain_profiles` is not served again under `positions`.

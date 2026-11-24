@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sqlite3
 import subprocess
@@ -13,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from exomem import catalogue_prewarm as prewarm
-from exomem import freshness, lexstore, reserved_paths
+from exomem import freshness, lexstore, privacy_log, reserved_paths, source_custody
+from exomem.log_events import JsonLinesFormatter
 
 
 @pytest.fixture
@@ -88,6 +91,22 @@ def test_repeated_build_keeps_complete_copy_and_live_identity_gate_avoids_parsin
     assert prewarm.build(vault) == "already-live"
 
 
+def test_adoption_and_catalogue_route_survive_the_cloud_cells_log_redaction(vault, monkeypatch, caplog):
+    """A cloud cell blanks every plain log line, so these events are the only log evidence of adoption and of a full parse."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    privacy_log.install_hosted_log_redaction()
+    caplog.set_level(logging.INFO)
+    _stage(vault)
+    assert prewarm.adopt_at_boot(vault)
+    lines = [json.loads(JsonLinesFormatter().format(record)) for record in caplog.records]
+    events = {line["event"]: line.get("fields") for line in lines if line["event"]}
+    materialized = events["lexical_catalogue_materialized"]
+    assert isinstance(materialized.pop("elapsed_ms"), int)
+    assert materialized == {"route": "rebuilt", "basis": "not_requested", "reparsed": 0, "removed": 0,
+                            "inserted": 1, "unchanged": 0}
+    assert events["staged_catalogue_adoption"] == {"outcome": "adopted", "staged": 1, "cleanup": "done"}
+
+
 def test_second_process_declines_without_replacing_stable_build_lock(vault):
     """A second pod must not remove files owned by an active builder or split the stable lock inode."""
     store = lexstore.LexicalStore(vault)
@@ -152,6 +171,16 @@ def test_invalid_stage_is_observational_then_discarded_for_cold_fallback(vault, 
     assert not prewarm._staged_copies(store)
     lexstore.ensure_fresh(vault)
     assert store.path.exists()
+
+
+def test_a_copy_staged_before_a_source_erasure_cutoff_is_rebuilt_by_the_next_build(vault):
+    """Kept as already staged, a copy that boot refuses would leave every later boot on the cold path."""
+    _stage(vault)
+    # The persistent cutoff an erasing cell writes; its own tests drive a real erase.
+    source_custody._generation_path(vault).write_text("1\n", encoding="ascii")
+
+    assert prewarm.build(vault) == "staged"
+    assert prewarm.adopt_at_boot(vault)
 
 
 def test_adopted_copy_uses_restart_heal_for_edits_additions_and_deletions(vault, monkeypatch):

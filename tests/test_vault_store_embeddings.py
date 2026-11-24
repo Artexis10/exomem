@@ -13,9 +13,7 @@ import hashlib
 import logging
 import multiprocessing
 import os
-import signal
 import sqlite3
-import sys
 import time
 import zlib
 from contextlib import closing
@@ -27,6 +25,7 @@ import pytest
 import test_vault_store_migration as migration
 import test_vault_store_read_write as read_write
 import test_vault_store_write_path as write_path
+from hard_kill import KILLED, kill_self
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_migration import ALPHA, BETA
 
@@ -34,10 +33,14 @@ from exomem import (
     embeddings,
     find,
     find_candidates,
+    freshness,
     index_paths,
+    lexstore,
+    memory_refs,
     readiness,
     recall_space,
     semantic_drain,
+    warmup,
 )
 from exomem import vault as vault_module
 from exomem.embedding_index import (
@@ -56,10 +59,6 @@ stored = read_write.stored
 writer = read_write.writer
 put = read_write.put
 served = write_path.served
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 MOVED = "Knowledge Base/Notes/Moved.md"
 HARBOUR = (
@@ -175,7 +174,9 @@ def test_a_committed_edit_is_embedded_from_the_store_and_stamped_with_its_hash_a
     """Vector rows that do not say which bytes they came from: a reader cannot tell a current page
     from a stale one, and the revision shows nothing about how far the drain has caught up."""
     catch_up(stored)
-    revision = commit(writer, HARBOUR)
+    commit(writer, HARBOUR)
+    # The revision that the drain reads the page at: the commit's, or a later derivation's.
+    revision = read.current_revision(stored)
 
     drained = catch_up(stored)
 
@@ -387,7 +388,7 @@ def drain_and_die(environment, publications):
         token = upsert(self, *arguments, **keywords)
         published.append(token)
         if len(published) == publications:
-            os.kill(os.getpid(), signal.SIGKILL)
+            kill_self()
         return token
 
     EmbeddingIndex.upsert_batch = upsert_then_die
@@ -413,7 +414,7 @@ def test_a_drain_killed_between_publications_resumes_with_the_rows_of_an_uninter
     )
     child.start()
     child.join(180)
-    assert child.exitcode == -signal.SIGKILL
+    assert child.exitcode == KILLED
     done_before_the_kill = set(index_of(stored).store_stamps())
     assert len(done_before_the_kill) == 2 and len(done_before_the_kill) < pages
     assert index_of(stored).store_cursor() is None, "the census was not finished"
@@ -671,6 +672,89 @@ def test_find_reports_the_chunk_lane_degraded_when_the_store_cannot_say_what_to_
     assert unproved.lane_statuses["vector"]["status"] == "unavailable"
     assert unproved.lane_statuses["vector"]["reason"] == "coverage_incomplete"
     assert degraded == ["embeddings"]
+
+
+def go_cold(root) -> None:
+    """The caches a freshly started process lacks: parsed pages, catalogue handles and the resident vector matrix."""
+    find.clear_cache()
+    freshness.clear()
+    lexstore.clear_stores()
+    embeddings.clear_embedding_indexes()
+
+
+def vector_answers(root, lane: str, *, settle: bool) -> tuple:
+    """What `find` answers on one lane: each hit's path, vector rank and score, and what it reports degraded.
+
+    A managed process answers a cold matrix with a degraded lane and loads it behind the request, so
+    ``settle`` asks again until the lane is whole.
+    """
+    for _ in range(400):
+        degraded: list[str] = []
+        found = find.find(
+            root, query="lighthouse keeper tide", limit=15, mode=lane, graph=False, rerank=False,
+            degraded_out=degraded,
+        )
+        if not settle or not degraded:
+            break
+        time.sleep(0.05)
+    return (
+        [(hit.path, hit.vector_rank, round(hit.vector_score or 0.0, 5)) for hit in found],
+        degraded,
+    )
+
+
+def serve_managed(root) -> None:
+    """A managed service's request admission once its required warm finished, with the vector matrix still cold."""
+    readiness.manage_runtime()  # the `encoder` fixture's teardown resets it
+    readiness.begin_warm()
+    try:
+        warmup.warm_retrieval_catalog(root)
+    finally:
+        readiness.finish_warm()
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["one-shot", "managed-service"])
+def test_a_store_mode_vector_and_hybrid_find_return_file_modes_hits_cold_and_warm(
+    vault, encoder, monkeypatch, managed
+):
+    """A store-mode find that serves no vector hits, or other ones than file mode on the same pages,
+    cold (where a managed service defers the matrix load) or warm."""
+    if managed:
+        monkeypatch.setenv("EXOMEM_EAGER_BOOT", "1")
+        monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+
+    def lanes() -> dict:
+        answers = {}
+        for stage in ("cold", "warm"):
+            if stage == "cold":
+                go_cold(vault)
+                if managed:
+                    serve_managed(vault)
+            for lane in ("vector", "hybrid"):
+                answers[stage, lane] = vector_answers(vault, lane, settle=stage == "warm")
+        return answers
+
+    assert index_of(vault).rebuild_all() > 0
+    if managed:
+        lexstore.ensure_fresh(vault)
+        memory_refs.ReferenceIndex(vault).rebuild_all()  # a managed recall never builds it on its own thread
+    in_files = lanes()
+    expected = {lane: in_files["warm", lane][0] for lane in ("vector", "hybrid")}
+    assert expected["vector"], "file mode answers the vector lane"
+    assert not in_files["warm", "vector"][1], "and reports it whole once warm"
+
+    assert migration.migrate_apply(vault) == 0
+    catch_up(vault)
+    # Only the store holds the pages now: a vector read of a projection answers differently.
+    for rel in (ALPHA, BETA):
+        (vault / rel).write_text(POISON)
+    in_the_store = lanes()
+
+    for (stage, lane), (hits, degraded) in in_the_store.items():
+        # A managed service may answer a cold matrix as a degraded lane while it loads, never with other hits.
+        may_be_degraded = managed and stage == "cold"
+        assert may_be_degraded or not degraded, f"{stage} {lane} is whole"
+        assert degraded or hits == expected[lane], f"{stage} {lane} hits are file mode's"
 
 
 def wait_until(condition, timeout: float = 20.0) -> None:

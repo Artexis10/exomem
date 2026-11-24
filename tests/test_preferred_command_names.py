@@ -32,9 +32,10 @@ def test_name_resolution_preserves_filtered_command_identity() -> None:
         assert resolve_command(command.name, (command,)) is command
         assert resolve_command(command.public_name, ()) is None
         assert resolve_command(command.name, ()) is None
-    # 34 MCP commands, two Cloud-only commands and one owner CLI/REST readout.
-    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 37
-    assert len(commands.product_commands_for("mcp")) == 34
+    # 39 MCP commands (five of them the Source capture protocol, erasure and inventory reads), two
+    # Cloud-only commands and one owner CLI/REST readout.
+    assert len(commands.PRODUCT_COMMANDS) == len(set(commands.PRODUCT_PUBLIC_NAMES)) == 43
+    assert len(commands.product_commands_for("mcp")) == 40
     assert any(command.name == "served_context" for command in commands.product_commands_for("rest"))
     assert all(command.name != "served_context" for command in commands.product_commands_for("mcp"))
     assert sum(command.public_name != command.name for command in commands.PRODUCT_COMMANDS) == 7
@@ -55,8 +56,8 @@ def test_mcp_lists_the_public_tools_and_each_reaches_guarded_execution(vault, mo
         async with Client(mcp) as client:
             discovered = {tool.name for tool in await client.list_tools()}
             if cloud:
-                # The cell has no upload bridge here, so both file transfers stay withheld.
-                assert discovered == (_LISTED - {"upload_files", "download_files"}) | _CLOUD_TRANSFERS
+                # The cell has no upload bridge here, so the three file-transfer tools stay withheld.
+                assert discovered == (_LISTED - {"upload_files", "download_files", "cancel_uploads"}) | _CLOUD_TRANSFERS
             else:
                 assert discovered == _LISTED
             for command in commands.product_commands_for("mcp", cloud=cloud):

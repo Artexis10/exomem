@@ -5,12 +5,14 @@ from sqlalchemy.dialects.sqlite import insert
 
 metadata = MetaData()
 # These names are the closed installation schema, never user-defined fields.
-items = Table("items", metadata,
+# The row table. `items`, the view of its current rows, is read-only and has no declaration here.
+item_rows = Table("item_rows", metadata,
     Column("row_id", Integer, primary_key=True), Column("collection_id", Text),
     Column("item_key", Text), Column("natural_key", Text), Column("row_version", Integer),
     Column("schema_version", Integer), Column("values_json", Text), Column("body", Text),
     Column("payload_hash", Text), Column("view_path", Text), Column("created_txn", Integer),
-    Column("updated_txn", Integer), Column("governance_json", Text), Column("encoding", Text))
+    Column("updated_txn", Integer), Column("governance_json", Text), Column("encoding", Text),
+    Column("retracted_txn", Integer))
 collections = Table("collections", metadata,
     Column("collection_id", Text, primary_key=True), Column("generation", Integer),
     Column("audit_head", Text), Column("updated_txn", Integer))
@@ -22,18 +24,23 @@ txns = Table("txns", metadata,
     Column("actor", Text), Column("why", Text), Column("request_id", Text),
     Column("request_hash", Text), Column("receipt_json", Text), Column("committed_at", Text),
     Column("prev_event_hash", Text), Column("event_hash", Text), Column("commit_seq", Integer),
-    Column("store_head_hash", Text), Column("legacy_event_json", Text))
+    Column("store_head_hash", Text), Column("legacy_event_json", Text), Column("event_version", Integer))
 item_versions = Table("item_versions", metadata,
     Column("row_id", Integer), Column("row_version", Integer), Column("values_json", Text),
     Column("body", Text), Column("payload_hash", Text), Column("txn_id", Integer))
 item_sources = Table("item_sources", metadata,
     Column("row_id", Integer), Column("row_version", Integer), Column("ordinal", Integer),
     Column("source_ref", Text))
+version_source_bindings = Table("version_source_bindings", metadata,
+    Column("row_id", Integer), Column("row_version", Integer), Column("canonical_ref", Text),
+    Column("dep_epoch", Text), Column("dep_operation", Text), Column("auth_txn_id", Integer),
+    Column("auth_effect_ordinal", Integer))
 audit_effects = Table("audit_effects", metadata,
     Column("txn_id", Integer), Column("ordinal", Integer), Column("row_id", Integer),
     Column("item_key", Text), Column("effect", Text), Column("effect_label", Text),
     Column("version_before", Integer), Column("version_after", Integer),
-    Column("hash_before", Text), Column("hash_after", Text), Column("source_ref", Text))
+    Column("hash_before", Text), Column("hash_after", Text), Column("source_ref", Text),
+    Column("dependency_current_complete", Integer), Column("dependency_prior_complete", Integer))
 version_identity = Table("version_identity", metadata,
     Column("row_id", Integer, primary_key=True), Column("row_version", Integer, primary_key=True),
     Column("encoding", Text), Column("payload_hash", Text), Column("txn_id", Integer),
@@ -47,13 +54,22 @@ store_meta = Table("store_meta", metadata,
 alembic_version = Table("alembic_version", metadata,
     Column("version_num", Text, primary_key=True), sqlite_strict=True)
 
-INSERT_ITEM = items.insert()
-UPDATE_ITEM = items.update().where(items.c.row_id == bindparam("target_row_id")).values(
+INSERT_ITEM = item_rows.insert()
+UPDATE_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
     **{name: bindparam(name) for name in (
         "natural_key", "row_version", "values_json", "body", "payload_hash", "updated_txn", "governance_json")})
+# A retracted row leaves current state and keeps its identity, its collection and its view path.
+# A retraction clears the natural key, so no other row finds it; a revival sets it again.
+RETRACT_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
+    natural_key=None, retracted_txn=bindparam("retracted_txn"))
+REVIVE_ITEM = item_rows.update().where(item_rows.c.row_id == bindparam("target_row_id")).values(
+    **{name: bindparam(name) for name in (
+        "natural_key", "row_version", "values_json", "body", "payload_hash", "updated_txn", "governance_json")},
+    retracted_txn=None)
 INSERT_VERSION = item_versions.insert()
 INSERT_IDENTITY = version_identity.insert()
 INSERT_SOURCE = item_sources.insert()
+INSERT_SOURCE_BINDING = version_source_bindings.insert()
 INSERT_EFFECT = audit_effects.insert()
 INSERT_TXN = txns.insert()
 ADVANCE = collections.update().where(collections.c.collection_id == bindparam("target_collection_id")).values(

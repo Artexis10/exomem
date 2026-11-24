@@ -25,35 +25,65 @@ from test_mcp_schema_fidelity import _build_server
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Measure tool-object bytes with scripts/measure-tool-schema-bytes.py, excluding RPC framing.
-# The surface is 23 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
-# wire measures 28,172 B, so the budget is 28,200 B; `recall_context`'s `native_skills`, which a hook fills so the
-# skills catalogue omits what the client already loads, took the last 162 B. The door operations `imports.file`, `review.held` and
-# `maintenance.held_resolve` add 56 B to the two door enums. Raise a ceiling deliberately, in the diff that
-# needs it.
-TOTAL_BUDGET = 28_200
+# The surface is 24 typed tools and two doors, and every ceiling rounds up to 50 bytes. The complete local
+# wire measures 29,115 B, so the budget is 29,150 B. `recall_context`'s `native_skills`, which a hook fills so the
+# skills catalogue omits what the client already loads, took 162 B. The door operations `imports.file`, `review.held` and
+# `maintenance.held_resolve` add 56 B to the two door enums. `cancel_uploads`, which frees a caller's own waiting
+# uploads, added 581 B, and the passage knobs of `save_source` and `search_memory` 45 B. The wire measured 28,779 B
+# before the one `review` string that carries a profile preview's proof on `create_note`, `edit_note` and
+# `add_observation`; that string added 336 B, 112 B each. The door operation `maintenance.convert_originals`, the
+# owner's conversion into shared original storage, added the last 64 B to the two door enums.
+# `save_source.document_form`, the form of a Source as a record of a work, added 121 B (compact JSON). The door
+# operation `media.replicate`, the owner's copy of every original to a declared store, added 18 B. Raise a
+# ceiling deliberately, in the diff that needs it.
+# `save_source.options.custody_only`, keep a handed file for safekeeping only, added 12 B on 2026-11-18
+# (keep-handed-files-as-sources).
+# The door operation `maintenance.capture_metadata`, the owner's metadata-only capture backfill, added 62 B to the two
+# door enums on 2026-11-20 (index-capture-metadata).
+# The Records routes that agents act on at the moment they choose a tool added 118 B on 2026-11-22
+# (capture-structured-work-automatically): `create_note` names add_record for compared or tracked named items, and
+# `add_record` says one row per item with the user's words, the agent's proposals and outside claims in separate
+# fields. Real-model acceptance showed agents never loaded the skill that carried these rules.
+# The same day, add_record's row-key rule became 'key rows by item and date when an item recurs' (+16 B): the
+# vaguer 'per item and occasion' still produced item-only keys that overwrite a recurring item's earlier dated row.
+# `edit_record.options`, the knob that carries `new_fields` as `add_record.options` already does (the server's additive
+# field change under proactive_capture), added 68 B (compact JSON) on 2026-11-22. `add_record` grew none: `new_fields` rides
+# its existing `options`, and the refusal that names the call teaches it.
+# The per-file `diarize` speaker-label choice on the `save_source` and `save_evidence` file handles added 212 B on
+# 2026-11-22 (add-media-processing-policy).
+# The door operation `review.queued_write`, reading a save the service queued while it was busy, added 22 B to the
+# `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
+# The door operation `curation.relocate`, which derives and seals the plan that moves or renames a set of pages,
+# added 20 B to the write door's enum on 2026-11-22 (relocate-pages-in-one-curation-call).
+# The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
+# their title,
+# added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
+TOTAL_BUDGET = 29_935
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
-    "add_observation": 1500,
+    "add_observation": 1650,
     "add_plan_item": 500,
-    "add_record": 850,
-    "create_note": 1700,
+    "add_record": 940,
+    "cancel_uploads": 600,
+    "create_note": 1850,
     "decide_review_item": 1000,
     "download_files": 550,
-    "edit_note": 2550,
+    "edit_note": 2700,
     "edit_plan_item": 750,
-    "edit_record": 800,
-    "inspect_memory": 2150,
+    "edit_record": 850,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
+    "inspect_memory": 2230,
     "list_review_items": 750,
-    "manage_memory": 2450,
+    "manage_memory": 2570,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1200,
-    "save_source": 1300,
+    "save_evidence": 1300,
+    "save_source": 1550,
     "search_memory": 1050,
     "supersede_note": 1300,
     "upload_files": 800,

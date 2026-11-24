@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "sources": 1500,
+  "passages_per_source": 27,
+  "passage_words": 40,
+  "queries": 40,
+  "repeats": 3,
+  "callers": [
+    1,
+    4
+  ],
+  "limit": 30,
+  "reference_cpus": 2,
+  "cpu_threads": 2,
+  "sync_workers": 8,
+  "memory_limit_gib": 3,
+  "encoder": "warm served encoder",
+  "corpus_vectors": "deterministic normalized vectors; query encoding is never substituted",
+  "source": "../recall-latency/profile.json",
+  "boundary": "mcp-worker-socket-v1",
+  "observer": "exomem.recall_canary.measure_call",
+  "modes": [
+    "disk",
+    "resident"
+  ],
+  "decision": {
+    "bars": [
+      "passage-single",
+      "passage-four"
+    ],
+    "all_terminals_required": true,
+    "busy_refusals_allowed": 0
+  },
+  "mode_environment": {
+    "disk": {
+      "EXOMEM_PASSAGE_MATRIX_BYTES": "0"
+    },
+    "resident": {
+      "EXOMEM_PASSAGE_MATRIX_BYTES": "536870912"
+    }
+  },
+  "pairing": {
+    "confidence": 0.95,
+    "resamples": 10000,
+    "seed": 73021
+  },
+  "resource_sample_seconds": 1.0,
+  "warmup_timeout_seconds": 120,
+  "warmup_probe_interval_seconds": 1
+}

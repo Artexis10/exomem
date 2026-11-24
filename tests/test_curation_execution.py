@@ -112,7 +112,10 @@ def _witness(vault: Path, proposed: dict[str, object], step_id: str) -> dict[str
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def test_exact_approval_executes_at_most_one_real_content_step_per_request(vault: Path) -> None:
+def test_a_call_stops_starting_steps_when_its_budget_cannot_cover_another(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A call that started a step it could not finish in time would outlive the client's timeout.
     from exomem import curation
 
     proposed = _propose(
@@ -120,11 +123,13 @@ def test_exact_approval_executes_at_most_one_real_content_step_per_request(vault
         _create_step("first", "curation-first"),
         _create_step("second", "curation-second"),
     )
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
 
     first = _apply(vault, proposed)
 
     assert first["phase"] == "executing"
     assert first["step"]["step_id"] == "first"
+    assert first["progress"] == {"steps": 2, "committed": 1, "this_call": 1}
     assert (vault / first["step"]["path"]).is_file()
     assert not (vault / "Knowledge Base/Notes/Insights/curation-second.md").exists()
 
@@ -445,15 +450,15 @@ def test_relocation_steps_refuse_before_transition_publication_or_rename(
         raise AssertionError("curation attempted a rename without lineage capability")
 
     monkeypatch.setattr(reserved_paths, "move_generic_path", forbidden_rename)
-    plans = (
-        {
-            "step_id": "move",
-            "kind": "move",
-            "args": {
-                "old_path": move_source,
-                "new_path": move_source.replace(".md", "-new.md"),
-            },
+    move_step = {
+        "step_id": "move",
+        "kind": "move",
+        "args": {
+            "old_path": move_source,
+            "new_path": move_source.replace(".md", "-new.md"),
         },
+    }
+    plans = (
         {
             "step_id": "delete",
             "kind": "delete",
@@ -490,23 +495,9 @@ def test_relocation_steps_refuse_before_transition_publication_or_rename(
     assert rename_calls == []
     runs = vault / "Knowledge Base/_Governance/curation/runs"
     assert not runs.exists()
-
-
-def test_matching_relocation_hashes_cannot_authorize_placement_recovery(vault: Path) -> None:
-    from exomem import curation
-
-    path = _seed_note(vault, "curation-hash-is-not-lineage")
-    digest = content_hash((vault / path).read_text(encoding="utf-8"))
-    preparation = {
-        "effect_before": [{"path": path, "absent": True}],
-        "effect_after": [{"path": path, "content_hash": digest}],
-        "rename_after": [{"path": path, "content_hash": digest}],
-    }
-
-    with pytest.raises(
-        curation.CurationError, match="CURATION_RENAME_HISTORY_UNPROVABLE"
-    ):
-        curation._prepared_placement(vault, preparation)
+    # A move records its intent before its rename, so it proposes; nothing renames at proposal.
+    assert _propose(vault, move_step)["phase"] == "proposed"
+    assert rename_calls == []
 
 
 def test_invalid_witness_blocks_instead_of_guessing_or_retrying(vault: Path, monkeypatch) -> None:  # noqa: ANN001
@@ -608,9 +599,13 @@ def test_terminal_receipt_crash_replays_without_reexecuting_leaf(vault: Path, mo
     assert calls == 1
 
 
-def test_stale_next_step_records_partial_terminal_truth(vault: Path) -> None:
+def test_stale_next_step_records_partial_terminal_truth(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from exomem import curation
 
+    # A budget too short for a second step: the call commits one step and leaves the rest to resume.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     proposed = _propose(
         vault,
         _create_step("first", "curation-partial-first"),
@@ -859,13 +854,14 @@ def test_a_folded_head_still_reads_back_every_history_entry_under_an_access_poli
     from test_latency_gate import _seed_freshness_live
 
     from exomem import vault as vault_module
+    from exomem.kbdir import kb_prefix
 
     if obsidian_root:
         (vault_module.kb_root(vault) / ".obsidian").mkdir()
     pages = earlier_episode(4)
     named = pages[1].removesuffix(".md")
     written = vault_module.parse_frontmatter((vault / pages[0]).read_text(encoding="utf-8"))[0]["superseded_by"]
-    assert written == [f"[[{named.removeprefix(vault_module.kb_prefix()) if obsidian_root else named}]]"]
+    assert written == [f"[[{named.removeprefix(kb_prefix()) if obsidian_root else named}]]"]
     # Only a governed vault runs the gate's name lookup: an ungoverned one returns before it.
     _write_source_rule(vault, ceiling=6)
     _apply(vault, _propose(vault, _fold_step(pages, vault)))
@@ -1154,7 +1150,8 @@ def test_a_repeat_census_reads_only_the_pages_that_changed(
     read_text = Path.read_text
 
     def recording(self: Path, *args, **kwargs):  # noqa: ANN002, ANN003
-        read.append(self.relative_to(vault).as_posix() if self.is_relative_to(vault) else str(self))
+        if self.is_relative_to(vault) and self.suffix.lower() == ".md":
+            read.append(self.relative_to(vault).as_posix())
         return read_text(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", recording)
@@ -1366,7 +1363,6 @@ def test_a_plan_folds_several_copies_of_one_original_and_the_canonical_lists_eve
     """Both steps carry the canonical page as the review saw it, and both run in order."""
     from duplicate_fixtures import evidence_filing
 
-    from exomem import curation
     from exomem import vault as vault_module
 
     data = b"\x89PNG photo of the notice"
@@ -1379,9 +1375,7 @@ def test_a_plan_folds_several_copies_of_one_original_and_the_canonical_lists_eve
         _fold_duplicate_step(vault, canonical, second, step_id="second"),
     )
 
-    stopped = _apply(vault, proposed)
-    assert stopped["phase"] == "executing"
-    finished = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+    finished = _apply(vault, proposed)
 
     assert finished["phase"] == "completed"
     kept = vault_module.parse_frontmatter((vault / canonical).read_text(encoding="utf-8"))[0]

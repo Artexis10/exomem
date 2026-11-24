@@ -15,11 +15,12 @@ import json
 import logging
 import os
 import shutil
+import signal
 import statistics
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,7 +31,9 @@ from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_media_store import _offload, _volume
 from test_scene_frames import _FakeImg, _scene
 from test_vault_store_binary_writers import VIDEO, frame_rows
-from test_vault_store_bypass_writers import RAW_SOURCE
+from test_vault_store_bypass_writers import RAW_SOURCE, govern
+from test_vault_store_derivation_queue import HOLD_GROWTH_LIMIT_MS, SLOW_DERIVATION_SECONDS, holds
+from test_vault_store_governed_writers import tombstones
 from test_vault_store_media import PICTURE, PICTURE_BYTES
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, DIAGRAM_BYTES, vault  # noqa: F401
 from test_vault_store_write_path import store_rows
@@ -43,25 +46,26 @@ from exomem import (
     extraction_parts,
     graph_drain,
     media_jobs,
+    media_replicas,
     media_store,
     media_worker,
     mutation_lock,
+    relation_review,
     reserved_paths,
     scene_frames,
+    schema,
     server_runtime,
     writer_lease,
 )
-from exomem.collection_store import runtime
+from exomem.collection_store import connection, runtime
+from exomem.governance import lifecycle
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.vault_store import binaries, importer, projector, read, rederive, write
+from exomem.vault_store import derivation, derive, importer, projector, read, rederive, write
 from exomem.vault_store import media as store_media
 from exomem.vault_store import mode as store_mode
 from exomem.writer_lease import get_manager
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "linux", reason="The offline-owner lease is Linux-only"),
-    pytest.mark.timeout(300),
-]
+pytestmark = pytest.mark.timeout(300)
 
 stored = read_write.stored
 selected_store = media_store_suite.selected_store
@@ -91,14 +95,21 @@ def service(stored, monkeypatch):
         return outcome
 
     monkeypatch.setattr(runtime.StoreServer, "_registry_tick", recording)
+    with store_thread(stored):
+        yield ticks
+
+
+@contextmanager
+def store_thread(root):
+    """The service's store thread on ``root``, as a service starts it, but with no projector."""
     manager = writer_lease.start_server_lifecycle()
     server = None
     try:
         deadline = time.monotonic() + 60
-        while (server := runtime._SERVERS.get(stored.resolve())) is None or server.runtime is None:
+        while (server := runtime._SERVERS.get(root.resolve())) is None or server.runtime is None:
             assert time.monotonic() < deadline, "the store thread did not open the store"
             time.sleep(0.05)
-        yield ticks
+        yield
     finally:
         manager.close()
         if server is not None:
@@ -107,10 +118,15 @@ def service(stored, monkeypatch):
 
 
 def call(root, tool, **arguments):
-    """One MCP command as the owner, through the dispatcher that routes a write to the store."""
+    """One MCP command as the owner, through the dispatcher that routes a write to the store.
+
+    It injects what the server injects: the vault, and its source schema for a command that needs
+    it.
+    """
     command = next(c for c in commands.product_commands_for("mcp") if c.name == tool)
+    injected = (root, schema.load_source_schema(root)) if command.needs_schema else (root,)
     with request_scope(owner_principal(surface="mcp")):
-        return writer_lease.invoke_command(command, root, **arguments)
+        return writer_lease.invoke_command(command, *injected, **arguments)
 
 
 def commit(root, **change):
@@ -154,6 +170,459 @@ def manifest(root, rel):
 
 def queued(root):
     return {path for (path,) in store_rows(root, "SELECT path FROM store_projection_queue")}
+
+
+def test_a_note_trashed_through_the_served_door_comes_back_through_it(stored, service):
+    """A person's note, created, trashed and recovered through the served door, as an agent does.
+
+    The note has a stable identity and a reviewed-none decision, so its recovery binds the trash
+    proof and needs the decision in force. A recovery that refuses the proof because the page lives
+    in the store, or that looks for the decision in the projection, which has no file of it yet
+    (this fixture runs no projector), leaves the note in the trash.
+    """
+    created = call(
+        stored, "remember", title="Kept after all",
+        content="# Kept after all\n\n## Claim\n\nA note that a person trashed by mistake.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    path = created["path"]
+    body = read.owned_bytes(stored, path)
+    trashed = call(
+        stored, "manage_memory_file", operation="delete", path=path, confirm=True,
+        response_detail="full",
+    )
+    # The reply acknowledges the page's derived rows, so the delete's own result is its leaf.
+    trash_path = trashed["diagnostics"]["leaf_result"]["trash_path"]
+
+    recovered = call(stored, "manage_memory_file", operation="recover", trash_path=trash_path)
+
+    assert recovered["path"] == path
+    assert read.owned_bytes(stored, path) == body
+    assert not read.page_exists(stored, trash_path)
+
+
+def test_a_governed_trash_through_the_served_door_settles_its_receipt_in_the_request(stored, service):
+    """A governed page trashed as an agent trashes it. Settled before its request derived the rows,
+    the trash found them deferred, warned that its state was not exact and left its receipt and
+    tombstone pending until a reconcile; a recovery in that state keeps the page hidden."""
+    govern(stored, BETA)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)] == ["committed"]
+
+
+def test_a_governed_trash_holds_the_boundary_no_longer_when_its_derivation_is_slow(
+    stored, service, monkeypatch
+):
+    """A governed page trashed, recovered and trashed again through the served door, the second
+    time with rows that take seconds to derive. Settled under the boundary, the trash held it for
+    those seconds; it holds it no longer, and its request still settles its receipt."""
+    govern(stored, BETA)
+    held = holds(monkeypatch)
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True, force_orphan=True)
+    quick = max(held)
+    # A governed reply withholds the trashed path; its tombstone names it.
+    [trashed] = tombstones(stored)[0]["manifest"]
+    call(stored, "manage_memory_file", operation="recover", trash_path=trashed["trash_path"])
+    held.clear()
+    delay[0] = SLOW_DERIVATION_SECONDS
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True)
+
+    slow = max(held)
+    assert slow - quick < HOLD_GROWTH_LIMIT_MS, (
+        f"the trash held the boundary {slow:.0f} ms with a {SLOW_DERIVATION_SECONDS:.0f} s "
+        f"derivation, against {quick:.0f} ms with an instant one"
+    )
+    assert not any("not exact" in warning for warning in reply.get("warnings", ()))
+    assert [marker["state"] for marker in tombstones(stored)][-1:] == ["committed"]
+
+
+def test_a_governed_trash_whose_rows_cannot_be_derived_says_so_in_its_reply(
+    stored, service, monkeypatch
+):
+    """A governed page trashed while its rows fail to derive. The trash settles after its terminal,
+    so a warning that the settling adds then must still reach the reply, which otherwise says
+    nothing while the content stays tombstoned."""
+    govern(stored, BETA)
+
+    def derive_paths(*arguments, **keywords):
+        raise RuntimeError("the derivation fails")
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    reply = call(stored, "manage_memory_file", operation="delete", path=BETA, confirm=True,
+                 force_orphan=True, response_detail="full")
+
+    assert lifecycle.TRASH_NOT_EXACT in reply["warnings"]
+    assert reply["diagnostics"]["operational"]["warnings_count"] == len(reply["warnings"])
+    assert [marker["state"] for marker in tombstones(stored)] == ["pending"]
+
+
+def test_a_full_reply_names_each_derived_component_as_its_acknowledgement_does(stored, service):
+    """A move's and a delete's full replies, as an agent reads them: the writer's index report, made
+    before the request derived the rows, named them deferred beside an acknowledgement that names
+    them completed."""
+    moved = f"{NOTES}/Beta Moved.md"
+    replies = [
+        call(stored, "manage_memory_file", operation="move", old_path=BETA, new_path=moved,
+             response_detail="full"),
+        call(stored, "manage_memory_file", operation="delete", path=moved, confirm=True,
+             force_orphan=True, response_detail="full"),
+    ]
+
+    for reply in replies:
+        acknowledged = {(item["component"], item["state"])
+                        for item in reply["diagnostics"]["derived_components"]}
+        index = reply["diagnostics"]["leaf_result"]["index"]
+        # A delete's index is one report; a move's holds one per side of the move.
+        reports = [index] if "components" in index else [*index["upsert_reports"], index["delete_report"]]
+        reported = {(item["component"], item["outcome"]) for report in reports
+                    for item in report["components"]
+                    if item["component"] in {component for component, _state in acknowledged}}
+        assert reported and reported <= acknowledged, (reported, acknowledged)
+
+
+def derived(root, seconds=60):
+    """Wait until the store thread has derived every intent that has not failed.
+
+    A served write acknowledges at its commit, and the store thread derives its rows after that,
+    so a raw read of derived rows right after a served call would race that drain. A request waits
+    for it on its own (``read.request_snapshot``); a raw read does not.
+    """
+    deadline = time.monotonic() + seconds
+    while store_rows(root, "SELECT 1 FROM store_derivation_queue WHERE failed_code IS NULL LIMIT 1"):
+        assert time.monotonic() < deadline, "the store thread derived the rows of the served writes"
+        time.sleep(0.02)
+
+
+@contextmanager
+def derivation_held(monkeypatch):
+    """Every derivation on the store thread waits until the yielded event is set (or 30 s pass)."""
+    release = threading.Event()
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        release.wait(30)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+    try:
+        yield release
+    finally:
+        release.set()
+
+
+QUOKKA = {
+    "title": "Quokka census", "status": "draft", "summary": "A census finding.",
+    "content": "## Observations\n\n- [finding] The quokka population grew near [[Alpha]].\n",
+}
+
+
+def test_a_search_right_after_a_save_finds_the_page_and_the_graph_its_link(
+    stored, service, monkeypatch
+):
+    """A save that acknowledges once its page is stored, and a search that starts right after it,
+    before the store thread derived the page's rows. A search that read the rows as they stood would
+    miss the page that the person just saved, and the graph would lack its link."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 10.0)  # a loaded host derives slowly
+    reader_waits = threading.Event()
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        reader_waits.set()
+        return real_caught_up(still_held_back, seconds)
+
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        # The rows follow only once a reader waits for them: no reader can start after them.
+        reader_waits.wait(10)
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    saved = call(stored, "remember", **QUOKKA, response_detail="full")
+    found = call(stored, "ask_memory", query="quokka population")
+    context = call(stored, "connect_memory", operation="context", path=saved["path"])
+
+    assert saved["diagnostics"]["operational"]["derived_sync"] == "pending"
+    assert saved["path"] in [hit["path"] for hit in found["hits"]]
+    assert "notice" not in found
+    assert f"file:{ALPHA}" in {edge["dst_key"] for edge in context["graph"]["edges"]}
+
+
+def test_a_search_that_outwaits_its_bound_says_the_rows_lag_and_a_lookup_refuses(
+    stored, service, monkeypatch
+):
+    """A save and a move whose rows the store thread derives only after a later search's wait ran
+    out. The search serves the rows it has and says that recent pages lag; a read of the saved
+    page's reference still finds it from its stored bytes, and a read of the moved page's old path
+    refuses rather than answer that no such page exists."""
+    archived = f"{NOTES}/Archive/Alpha.md"
+    with derivation_held(monkeypatch) as release:
+        saved = call(stored, "remember", **QUOKKA, response_detail="full")["diagnostics"]["leaf_result"]
+        # An explanation keeps the search's internals, the lag figures among them.
+        found = call(stored, "ask_memory", query="quokka population", explain=True)
+        by_reference = call(stored, "read_memory", path=saved["ref"])
+        release.set()
+    derived(stored)
+    with derivation_held(monkeypatch):
+        call(stored, "manage_memory_file", operation="move", old_path=ALPHA, new_path=archived)
+        with pytest.raises(Exception) as refused:  # noqa: PT011 - the dispatcher's error type varies
+            call(stored, "read_memory", path=ALPHA)
+
+    assert saved["path"] not in [hit["path"] for hit in found["hits"]]
+    assert "not yet in the search" in found["notice"]
+    assert found["lag"]["derived_pending"] >= 1
+    assert isinstance(found["lag"]["oldest_derivation_age_seconds"], int)
+    assert saved["path"] not in json.dumps(found["lag"]) and "Quokka" not in found["notice"]
+    assert by_reference["path"] == saved["path"]
+    assert read.DERIVED_BEHIND in str(refused.value), refused.value
+    assert read.page_exists(stored, archived)
+
+
+def test_a_recall_that_outwaits_its_bound_says_the_rows_lag(stored, service, monkeypatch):
+    """A save whose rows the store thread derives only after the next recall's wait ran out. The
+    recall cannot rank the page yet, and without the notice that a search carries it missed the
+    page in silence."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        call(stored, "remember", **QUOKKA)
+        packet = call(stored, "activate_context", turn="How did the quokka population change?")
+
+    assert "not yet in the search" in packet["notice"]
+    assert packet["lag"]["derived_pending"] >= 1
+
+
+def test_a_recall_during_the_lag_answers_whatever_its_refs_name(stored, service, monkeypatch):
+    """A recall whose conversation cites the short id of a page saved a moment ago, and a ref that
+    names no page, while the save's rows lag. A refusal for the lag inside the shared name lookup
+    made one such ref fail the whole recall."""
+    monkeypatch.setattr(derivation, "READ_WAIT_SECONDS", 0.2)
+    with derivation_held(monkeypatch):
+        saved = call(stored, "remember", **QUOKKA)
+        short = call(stored, "read_memory", path=saved["path"])["id"]
+        cited = call(
+            stored, "activate_context", turn="Summarise the census.", conversation={"refs": [short]}
+        )
+        unnamed = call(
+            stored, "activate_context", turn="Summarise the census.",
+            conversation={"refs": ["A page that nobody wrote"]},
+        )
+
+    assert "not yet in the search" in cited["notice"]
+    assert "not yet in the search" in unnamed["notice"]
+
+
+def test_a_read_during_the_lag_gives_the_pages_own_id_and_that_id_names_it(
+    stored, service, monkeypatch
+):
+    """A save, a read of its page while its rows lag, and reads by the id that the read gave,
+    before and after the rows arrive. The compact save reply carries no id, so a read is how an
+    agent learns it. Taken from the rows, the read's id was one that named nothing once they
+    arrived, and the id lookup missed a page that only the store holds."""
+    with derivation_held(monkeypatch) as release:
+        saved = call(stored, "remember", **QUOKKA)
+        read_back = call(stored, "read_memory", path=saved["path"])
+        before = call(stored, "read_memory", path=read_back["id"])
+        release.set()
+    derived(stored)
+    after = call(stored, "read_memory", path=read_back["id"])
+
+    assert before["path"] == after["path"] == saved["path"]
+    assert read_back["ref"] == after["ref"]
+
+
+def test_a_write_and_a_drain_never_wait_for_rows(stored, service, monkeypatch):
+    """Two saves and a move while the rows of earlier saves are pending, then the drain of them all.
+    A write that waited for those rows would add up to the wait bound to every save in a burst, and
+    a drain that waited would wait for the rows it derives itself."""
+    waits = []
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        waits.append(threading.current_thread().name)
+        return real_caught_up(still_held_back, seconds)
+
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        call(stored, "remember", **QUOKKA)
+        call(stored, "remember", **{**QUOKKA, "title": "Second census"})
+        call(stored, "manage_memory_file", operation="move", old_path=ALPHA,
+             new_path=f"{NOTES}/Archive/Alpha.md")
+        assert store_rows(stored, "SELECT 1 FROM store_derivation_queue LIMIT 1"), (
+            "the rows must be pending for this check to mean anything"
+        )
+    derived(stored)
+
+    assert waits == []
+
+
+def test_a_reader_holds_no_store_connection_while_it_waits_for_the_rows(
+    stored, service, monkeypatch
+):
+    """A search that waits for a save's rows. Waiting inside its snapshot, it would hold a store
+    connection, and the WAL that the store thread writes behind it, for as long as it waits."""
+    open_readers: dict[int, int] = {}
+    real_reader = connection.store_reader
+
+    @contextmanager
+    def store_reader(*arguments, **keywords):
+        thread = threading.get_ident()
+        with real_reader(*arguments, **keywords) as reader:
+            open_readers[thread] = open_readers.get(thread, 0) + 1
+            try:
+                yield reader
+            finally:
+                open_readers[thread] -= 1
+
+    held_while_waiting = []
+    real_caught_up = derivation.caught_up
+
+    def caught_up(still_held_back, seconds):
+        def look():
+            held_while_waiting.append(open_readers.get(threading.get_ident(), 0))
+            return still_held_back()
+
+        return real_caught_up(look, seconds)
+
+    monkeypatch.setattr(connection, "store_reader", store_reader)
+    monkeypatch.setattr(derivation, "caught_up", caught_up)
+    with derivation_held(monkeypatch) as release:
+        call(stored, "remember", **QUOKKA)
+        threading.Timer(0.3, release.set).start()
+        call(stored, "ask_memory", query="quokka population")
+
+    assert held_while_waiting, "the search must wait for this check to mean anything"
+    assert set(held_while_waiting) == {0}, held_while_waiting
+
+
+def test_a_save_replies_before_the_store_thread_derives_its_rows(stored, service, monkeypatch):
+    """Two saves, the second with rows that take seconds to derive. Its reply came only after its
+    own derivation, so every save waited out the cost of its search and graph rows."""
+    delay = [0.0]
+    real = derive.derive_paths
+
+    def derive_paths(*arguments, **keywords):
+        time.sleep(delay[0])
+        return real(*arguments, **keywords)
+
+    monkeypatch.setattr(derive, "derive_paths", derive_paths)
+
+    def reply_seconds(title):
+        began = time.monotonic()
+        call(stored, "remember", **{**QUOKKA, "title": title})
+        return time.monotonic() - began
+
+    reply_seconds("Warm census")  # the first save after a start pays for warm caches
+    derived(stored)
+    quick = reply_seconds("Quick census")
+    derived(stored)
+    delay[0] = SLOW_DERIVATION_SECONDS
+    slow = reply_seconds("Slow census")
+    print(json.dumps({"quick_reply_s": round(quick, 3), "slow_derivation_reply_s": round(slow, 3)}))
+
+    assert (slow - quick) * 1000 < HOLD_GROWTH_LIMIT_MS, (
+        f"the save replied in {slow:.2f} s with a {SLOW_DERIVATION_SECONDS:.0f} s derivation, "
+        f"against {quick:.2f} s with an instant one"
+    )
+
+
+def test_a_drain_that_keeps_failing_is_retried_no_sooner_than_its_retry_delay(
+    stored, monkeypatch, caplog
+):
+    """A store whose derivation step raises each time, as a diverged store refuses it: the store
+    thread retries once per retry delay and warns once. Kept at its first owed time, the drain ran
+    again at once, hundreds of times a second, with a traceback each time."""
+    monkeypatch.setattr(runtime, "DERIVED_RETRY_SECONDS", 0.5)
+    attempts = []
+
+    def failing(*_arguments, **_keywords):
+        attempts.append(time.monotonic())
+        raise RuntimeError("the derivation step failed")
+
+    caplog.set_level(logging.DEBUG, logger=runtime.logger.name)
+    with store_thread(stored):
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", failing)
+            derivation.owe(stored.resolve())
+            deadline = time.monotonic() + 30
+            while len(attempts) < 3:
+                assert time.monotonic() < deadline, "the store thread retried the failed drain"
+                time.sleep(0.05)
+    warned = [
+        record for record in caplog.records
+        if record.levelno >= logging.WARNING and "the vault store could not advance" in record.getMessage()
+    ]
+
+    gaps = [later - earlier for earlier, later in zip(attempts[:2], attempts[1:3], strict=True)]
+    assert min(gaps) >= 0.45, gaps
+    assert len(warned) == 1
+
+
+def test_a_clean_stop_derives_the_rows_that_committed_pages_still_owe(stored, monkeypatch):
+    """A clean stop with committed pages whose rows neither their own drain nor the store thread
+    derived: the stop derives them within its bound, so none is due at the next start. The store
+    thread's own stop drain ran after the lease's handoff began, which refused it."""
+    created = [f"{NOTES}/Owed {number}.md" for number in range(3)]
+    with store_thread(stored):
+        # The thread first drains what the vault's earlier commits owe; it must be idle before these.
+        deadline = time.monotonic() + 30
+        while derivation.owed_in(stored.resolve()) is not None:
+            assert time.monotonic() < deadline, "the store thread drained what its start owed"
+            time.sleep(0.05)
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: derivation.Drained())
+            patch.setattr(derivation, "owe", lambda *_arguments, **_keywords: None)
+            commit(stored, puts=tuple(write.PagePut(rel, f"# {rel}\n".encode()) for rel in created))
+        assert sorted(store_rows(stored, "SELECT path FROM store_derivation_queue")) == [
+            (rel,) for rel in sorted(created)
+        ]
+
+    assert store_rows(stored, "SELECT path FROM store_derivation_queue") == []
+
+
+def test_a_stored_creation_receipt_over_the_size_limit_is_refused_as_file_mode_refuses_it(
+    stored, service
+):
+    """A store-mode loader that parses a stored review receipt of any size, where file mode refuses
+    one over the artifact limit: governance then judges the same receipt differently by mode."""
+    reviews = "Knowledge Base/_Schema/relation-reviews/"
+    listed = "SELECT path FROM store_pages WHERE path LIKE ?"
+    before = set(store_rows(stored, listed, reviews + "%"))
+    call(
+        stored, "remember", title="A long receipt",
+        content="# A long receipt\n\n## Claim\n\nA note whose receipt grows past its limit.\n",
+        relation_disposition="reviewed_none", relation_review_reason="a note that stands alone",
+    )
+    after = set(store_rows(stored, listed, reviews + "%"))
+    ((receipt,),) = after - before
+    body = read.owned_bytes(stored, receipt)
+    # Trailing spaces keep the JSON valid, so only the size can refuse it.
+    oversized = body.ljust(relation_review._MAX_ARTIFACT_BYTES + 1)
+    commit(stored, puts=(write.PagePut(receipt, oversized),))
+
+    with request_scope(owner_principal(surface="mcp")), pytest.raises(
+        relation_review.RelationReviewError
+    ) as refused:
+        relation_review.load_creation_receipt(stored, Path(receipt).stem)
+
+    assert refused.value.code == "RELATION_REVIEW_TOO_LARGE"
 
 
 def test_a_projector_pass_records_a_governed_writes_files_in_a_served_process(stored, service):
@@ -238,13 +707,13 @@ def test_a_busy_boundary_leaves_bookkeeping_for_the_next_pass_and_logs_no_error(
     assert created not in queued(stored) and read.owned_bytes(stored, ALPHA) == edited
 
 
-def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tick(
+def test_the_media_writers_commit_in_a_served_process_beside_a_registry_tick(
     stored, service, monkeypatch
 ):
     """A media writer that a served process refuses, or whose hop waits out the mutation timeout
-    behind a registry tick that waits for a boundary another thread holds (tasks.md 2.5)."""
-    # The scheduler starts no tick while another thread holds the boundary, so a tick parks only
-    # when a holder takes it between the tick's start and its write. ``pending`` opens that gap.
+    behind a registry tick while another thread holds the boundary (tasks.md 2.5)."""
+    # A holder takes the boundary between the tick's start and its batch. ``pending`` opens that
+    # gap. The batch takes no boundary, so the writer waits only for the holder.
     started, go = threading.Event(), threading.Event()
     pending = rederive.pending
 
@@ -255,7 +724,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         return pending(*arguments)
 
     monkeypatch.setattr(rederive, "pending", gapped)
-    mutation = get_manager()._mutation_coordinator_for(stored)
     video = stored / VIDEO
     video.parent.mkdir(parents=True, exist_ok=True)
     video.write_bytes(b"\x00video")
@@ -278,10 +746,6 @@ def test_the_media_writers_commit_in_a_served_process_past_a_parked_registry_tic
         assert started.wait(30), "a registry tick started"
         with held_elsewhere(stored) as release:
             go.set()
-            deadline = time.monotonic() + 30
-            while not mutation.waiter_count():  # the tick waits for the boundary
-                assert time.monotonic() < deadline, "the registry tick waited for the boundary"
-                time.sleep(0.01)
             threading.Timer(hold_seconds, release.set).start()
             began = time.monotonic()
             outcome = writer_call()
@@ -367,8 +831,9 @@ def test_a_served_start_runs_no_whole_vault_graph_rebuild_over_file_modes_graph_
     publish, it left its marker and retried for the life of the process."""
     monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     caplog.set_level(logging.INFO)
-    # File mode's debt: the repair its writes queued before the migration, and the barrier that a
-    # stopped rebuild leaves on the sidecar.
+    # File mode's debt: graph repair queued in the deferred index, as a file-mode write leaves it
+    # when migration has not drained it, and the barrier that a stopped rebuild leaves on the sidecar.
+    deferred_index.add_graph(stored, [ALPHA])
     assert deferred_index.snapshot_graph(stored, limit=8)
     epistemic_graph.EpistemicGraphIndex(stored).withdraw_availability()
     activation = server_runtime.LocalRuntimeActivation(stored, fallback_seconds=600.0)
@@ -423,16 +888,14 @@ def test_a_media_store_offload_publishes_its_reference_through_the_served_door(
     assert media_store.original_state(stored, PICTURE).state == "cached"
 
 
-def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_next_one_releases(
+def test_a_quarantined_eviction_pointer_waits_for_a_busy_boundary_before_repair(
     stored, service, selected_store, monkeypatch, caplog
 ):
-    """An eviction whose absent stored version must be released while another holder keeps the
-    vault boundary: ``MEDIA_STORE_BUSY`` escapes to the worker, which logs a failure or (at start)
-    skips the rest of its scan, or the reference to the lost copy is never released."""
+    """Preserve the pointer and bytes while the served boundary is busy, then publish a verified replacement."""
     (stored / PICTURE).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([PICTURE])
     reference = _offload(stored, stored / PICTURE)
-    # The stored copy is gone, so the eviction must release the reference instead of evicting.
+    # The stored copy is gone. Eviction leaves its pointer for the repair worker.
     (Path(selected_store[0]["root"]) / reference.object / reference.version).unlink()
     monkeypatch.setattr(shutil, "disk_usage", _volume(10_000, 9_000, stored / PICTURE))
     monkeypatch.setattr(store_media, "BUSY_WAIT_SECONDS", 0.5)
@@ -441,13 +904,17 @@ def test_an_eviction_that_meets_a_busy_boundary_ends_its_pass_quietly_and_the_ne
     with held_elsewhere(stored):
         assert media_store.evict_to_target(stored) == 0
         media_worker._evict(stored)
+        assert media_replicas.has_quarantined(stored, (reference,))
+        assert media_replicas.drain(stored) == 0
 
     assert reference.object.encode() in read.owned_bytes(stored, f"{PICTURE}.md")
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
-    media_worker._evict(stored)
+    assert media_replicas.drain(stored) == 1
 
-    assert reference.object.encode() not in read.owned_bytes(stored, f"{PICTURE}.md")
+    repaired = media_store.original_state(stored, PICTURE).reference
+    assert repaired is not None and repaired != reference
+    assert media_store.check_replica(stored, repaired) is None
     assert (stored / PICTURE).read_bytes() == PICTURE_BYTES
 
 
@@ -498,6 +965,544 @@ def test_a_stop_drains_no_longer_than_its_bound_and_the_next_start_projects_the_
     assert queued(stored) == set()
 
 
+REST_KEY = "replica-rest-key"
+
+
+@contextmanager
+def http_replica(root, tmp_path, name, *, activation_after=None):
+    """One installed-shape HTTP service process on ``root``, with its own lease replica id.
+
+    No request here calls the liveness route, so the service activates its background workers,
+    the vault projector among them, on its fallback timer: after ``activation_after`` seconds
+    when given, else the service's own default.
+    """
+    import socket
+    import subprocess
+    import urllib.request
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    env = {
+        **os.environ,
+        "EXOMEM_REST_API_KEY": REST_KEY,
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": name,
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / f"lease-{name}"),
+        "EXOMEM_WRITER_LEASE_PREFERRED": "0",
+        "EXOMEM_LOG_DIR": str(tmp_path / f"logs-{name}"),
+        "EXOMEM_DISABLE_EMBEDDINGS": "1",
+        "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
+        "EXOMEM_DISABLE_FILE_WATCHER": "1",
+        "EXOMEM_DISABLE_WARMUP": "1",
+    }
+    log_path = tmp_path / f"{name}.log"
+    script = Path(__file__).resolve().parents[1] / "scripts" / "e2e_http_server.py"
+    command = [sys.executable, str(script)]
+    if activation_after is not None:
+        # This case controls the fallback timer while exercising real startup admission.
+        command = [
+            sys.executable, "-c", """
+import runpy
+import sys
+from exomem.server_runtime import LocalRuntimeActivation
+
+delay = float(sys.argv.pop(1))
+script = sys.argv.pop(1)
+LocalRuntimeActivation.__init__.__kwdefaults__["fallback_seconds"] = delay
+runpy.run_path(script, run_name="__main__")
+""", str(activation_after), str(script),
+        ]
+    with log_path.open("w", encoding="utf-8") as console:
+        process = subprocess.Popen(
+            [*command, "--host", "127.0.0.1", "--port", str(port)],
+            env=env, stdout=console, stderr=subprocess.STDOUT,
+        )
+        url = f"http://127.0.0.1:{port}"
+        replica = SimpleNamespace(process=process, url=url, log=log_path)
+
+        def post(route, body):
+            request = urllib.request.Request(
+                f"{url}/api/{route}", data=json.dumps(body).encode(), method="POST",
+                headers={"Authorization": f"Bearer {REST_KEY}", "Content-Type": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60) as answer:
+                    return json.loads(answer.read())
+            except urllib.error.HTTPError as refused:
+                return json.loads(refused.read())
+
+        replica.post = post
+        try:
+            deadline = time.monotonic() + 120
+            while True:
+                assert process.poll() is None, log_path.read_text(encoding="utf-8")[-3000:]
+                try:
+                    urllib.request.urlopen(f"{url}/api/openapi.json", timeout=1).close()
+                    break
+                except OSError:
+                    assert time.monotonic() < deadline, "the replica did not start"
+                    time.sleep(0.1)
+            yield replica
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(60)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(10)
+
+
+@pytest.fixture
+def sigterm_delivered():
+    """Skips a test that stops a process by SIGTERM where none is delivered: on Windows
+    ``Popen.terminate()`` is TerminateProcess, which ends the process with no handler and no teardown."""
+    if sys.platform == "win32":
+        pytest.skip("Windows has no SIGTERM delivery")
+
+
+def remember(replica, title):
+    return replica.post(
+        "remember",
+        {"content": f"# {title}\n\n## Claim\n\nWriter-lease serialization.\n", "title": title,
+         "note_type": "insight", "status": "draft"},
+    )
+
+
+@pytest.mark.timeout(600)
+def test_a_service_stopped_before_it_activated_still_projects_the_write_it_accepted(
+    sigterm_delivered, stored, tmp_path
+):
+    """A service that accepts a write before its activation starts the vault projector, then
+    stops: a stop that drains only a started projector leaves the write's projections queued, so
+    the person's page has no file until a service starts again."""
+    with http_replica(stored, tmp_path, "unactivated", activation_after=600) as service:
+        written = remember(service, "Accepted before activation")
+        assert written["success"] is True, written
+        service.process.terminate()
+        service.process.wait(60)
+    left = store_rows(stored, "SELECT path, revision, queued_at FROM store_projection_queue")
+    assert left == [], (left, service.log.read_text(encoding="utf-8")[-6000:])
+    page = written["data"]["path"]
+    assert (stored / page).read_bytes() == read.owned_bytes(stored, page)
+    assert service.process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.timeout(600)
+def test_a_second_replica_that_takes_the_lease_and_stops_at_once_leaves_nothing_queued(
+    sigterm_delivered, stored, tmp_path
+):
+    """Two services on one vault: the first writes and stops, the second takes the lease over with
+    its own write and stops right after it. A stop that leaves that write's projections queued
+    leaves files behind the store until a service starts again, and an offline rollback refuses."""
+    with http_replica(stored, tmp_path, "replica-a") as first:
+        with http_replica(stored, tmp_path, "replica-b") as second:
+            assert remember(first, "Lease writer A")["success"] is True
+            refused = remember(second, "Lease follower B")
+            assert refused["error"]["code"] == "WRITER_LEASE_REQUIRED", refused
+            first.process.terminate()
+            first.process.wait(60)
+            deadline = time.monotonic() + 30
+            while not (taken := remember(second, "Lease takeover B")).get("success"):
+                assert time.monotonic() < deadline, taken
+                time.sleep(0.25)
+            second.process.terminate()
+            second.process.wait(60)
+    left = store_rows(stored, "SELECT path, revision, queued_at FROM store_projection_queue")
+    assert left == [], (left, second.log.read_text(encoding="utf-8")[-6000:])
+    # Each ends by the signal, as a supervisor that stops it expects.
+    assert first.process.returncode == second.process.returncode == -signal.SIGTERM
+
+
+@pytest.mark.timeout(600)
+def test_a_follower_writes_no_projection_until_it_takes_the_lease(stored, tmp_path):
+    """A replica without the writer lease runs a projector but may not record what it projects.
+
+    The leader here is this process's store thread, which runs no projector, so the follower's
+    projector is the only one that could write the leader's new page. A follower that writes the
+    file first and is then refused its bookkeeping leaves a file that no record vouches for, and a
+    second writer of the projection.
+    """
+    page = f"{NOTES}/Leader page.md"
+    with ExitStack() as leader:
+        leader.enter_context(store_thread(stored))
+        commit(stored, puts=(write.PagePut(page, b"# Leader page\n\nThe leader holds it.\n"),))
+        with http_replica(stored, tmp_path, "follower") as follower:
+            # Long enough for several of the follower's passes, each a poll interval apart.
+            watched_until = time.monotonic() + 8 * projector.POLL_SECONDS
+            while time.monotonic() < watched_until:
+                assert not (stored / page).exists(), "the follower projected the leader's page"
+                time.sleep(0.1)
+            leader.close()
+            deadline = time.monotonic() + 60
+            while not (own := remember(follower, "Follower note")).get("success"):
+                assert time.monotonic() < deadline, own
+                time.sleep(0.25)
+            projected = (page, own["data"]["path"])
+            deadline = time.monotonic() + 60
+            # Each file comes to hold what the store holds, once the follower leads.
+            while any(
+                not (stored / rel).exists()
+                or (stored / rel).read_bytes() != read.owned_bytes(stored, rel)
+                for rel in projected
+            ):
+                assert time.monotonic() < deadline, follower.log.read_text(encoding="utf-8")[-4000:]
+                time.sleep(0.25)
+
+
+def idle(service_state):
+    """Wait until no process of the replica holds a command claim on its grant, as when a service
+    has finished its last request and the background work that request started."""
+    from filelock import ReadWriteLock, Timeout
+
+    (claim,) = service_state.glob("writer-grant-*.db")
+    deadline = time.monotonic() + 90
+    while True:
+        lock = ReadWriteLock(claim, is_singleton=False)
+        try:
+            lock.acquire_write(blocking=False)
+            lock.release()
+            return
+        except Timeout:
+            assert time.monotonic() < deadline, "the service never became idle"
+            time.sleep(0.25)
+        finally:
+            lock.close()
+
+
+@pytest.mark.timeout(600)
+def test_an_idle_service_writes_after_a_cli_command_of_its_replica_hands_back_their_grant(
+    vault, tmp_path  # noqa: F811
+):
+    """A service and a one-shot CLI command with one replica id share one grant. The command hands
+    it back as it exits while the service is idle: a service that keeps trusting the grant refuses
+    its next page or record write with a lease error, or stops serving its collection store."""
+    import subprocess
+
+    from test_collection_store_writer import CID
+
+    client = writer_lease.LeaseCoordinatorClient(writer_lease.LeaseConfig.from_env())
+    with http_replica(vault, tmp_path, "shared") as service:
+        assert remember(service, "Before the command")["success"] is True
+        # A command that exits while one of the service's background steps holds a claim keeps the
+        # grant, as designed; the case needs an exit that lands while the service is idle.
+        for attempt in range(5):
+            idle(tmp_path / "lease-shared")
+            command = subprocess.run(
+                [sys.executable, "-m", "exomem", "remember", "--title", f"From command {attempt}",
+                 "--content", "# From the command\n\n## Claim\n\nA one-shot write.\n",
+                 "--field", "note_type=insight", "--field", "status=draft", "--json"],
+                env={**os.environ, "EXOMEM_WRITER_LEASE_REPLICA_ID": "shared",
+                     "EXOMEM_WRITER_LEASE_STATE_DIR": str(tmp_path / "lease-shared"),
+                     "EXOMEM_WRITER_LEASE_PREFERRED": "0", "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+                capture_output=True, text=True, timeout=300,
+            )
+            assert command.returncode == 0, command.stdout[-2000:] + command.stderr[-2000:]
+            if client.status().holder is None:  # the command handed the shared grant back
+                break
+        else:
+            pytest.fail("no command exited while the service was idle")
+
+        assert remember(service, "After the command")["success"] is True
+        appended = service.post("record_memory", {
+            "action": "append", "collection": CID, "item": {"title": "After the command"},
+            "why": "a record write after the command",
+        })
+        assert appended["success"] is True, appended
+        rows = service.post("record_memory", {"action": "query", "collection": CID})
+        assert "After the command" in [row["title"] for row in rows["data"]["rows"]], rows
+
+
+STARTS_AND_WAITS = """
+import asyncio, sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+from exomem.server import ExomemFastMCP
+
+started = Path(sys.argv[1])
+
+@asynccontextmanager
+async def lifespan(_server):
+    started.write_text("starting")
+    while started.exists():  # a startup that awaits, as the schema publication can
+        await asyncio.sleep(0.05)
+    yield
+    started.with_suffix(".torn-down").touch()
+
+ExomemFastMCP("startup", lifespan=lifespan).run(
+    transport="http", host="127.0.0.1", port=0, show_banner=False
+)
+"""
+
+
+def test_a_sigterm_while_the_http_service_starts_ends_it_by_the_signal(sigterm_delivered, tmp_path):
+    """A SIGTERM that lands while the lifespan's startup awaits: met at once, it ends the process
+    without the teardown of what the startup began, or, raised as an exception that lands in the
+    event loop, with 1, which a supervisor reads as a crash."""
+    import subprocess
+
+    started = tmp_path / "started"
+    process = subprocess.Popen(
+        [sys.executable, "-c", STARTS_AND_WAITS, str(started)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not started.exists():
+            assert process.poll() is None, process.stdout.read().decode()[-3000:]
+            assert time.monotonic() < deadline, "the service did not start its lifespan"
+            time.sleep(0.05)
+        process.terminate()
+        started.unlink()  # the startup finishes
+        output, _ = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(10)
+    torn_down = started.with_suffix(".torn-down").exists()
+    assert (torn_down, process.returncode) == (True, -signal.SIGTERM), output.decode()[-3000:]
+
+
+SERVES_UNDER_AN_EARLIER_ACTION = """
+import asyncio, signal, sys, threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+marks, port, action, startup = Path(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4]
+starting, raised = marks.with_suffix(".starting"), marks.with_suffix(".raised")
+blocked = startup in ("masked", "all blocked")
+if blocked:  # the main thread blocks SIGTERM, as an embedding caller can, and so every later thread
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+from exomem.server import ExomemFastMCP
+
+def mark(word):
+    with marks.open("a", encoding="utf-8") as out:
+        out.write(word + "\\n")
+
+joining = threading.Event()
+
+def raise_on_a_worker():
+    if startup == "all blocked":
+        joining.wait()
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    signal.raise_signal(signal.SIGTERM)
+    if startup == "all blocked":
+        signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+    raised.touch()
+    if startup == "masked":
+        threading.Event().wait()  # it stays, a thread that takes the process's SIGTERM
+
+def replacing(_signum, _frame):
+    mark("handler")
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
+@asynccontextmanager
+async def lifespan(_server):
+    if startup != "free":  # the startup awaits until the test removes the file
+        starting.touch()
+        if blocked:
+            worker = threading.Thread(target=raise_on_a_worker, daemon=True)
+            switching = sys.getswitchinterval()
+            if startup == "all blocked":
+                # No forced thread switch: the worker raises only once the main thread waits in
+                # the join, so the main thread meets the signal once every thread blocks it.
+                sys.setswitchinterval(1e6)
+            worker.start()
+            if startup == "all blocked":
+                joining.set()
+                worker.join()
+                sys.setswitchinterval(switching)
+        while starting.exists():
+            await asyncio.sleep(0.05)
+        if blocked:
+            if signal.SIGTERM in signal.sigpending():
+                mark("pending")
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    mark("started")
+    yield
+    mark("torn down")
+
+earlier = {"handler": lambda _signum, _frame: mark("handler"), "replacing": replacing,
+           "ignore": signal.SIG_IGN, "default": signal.SIG_DFL}[action]
+signal.signal(signal.SIGTERM, earlier)
+ExomemFastMCP("earlier", lifespan=lifespan).run(
+    transport="http", host="127.0.0.1", port=port, show_banner=False
+)
+mark("returned")
+"""
+
+
+@pytest.mark.parametrize(
+    ("action", "startup", "marks", "status"),
+    [
+        # The handler runs once and the runner returns, as on main; main ran it before the outer
+        # teardown, and here it runs after the teardown.
+        ("handler", "free", ["started", "torn down", "handler", "returned"], 0),
+        # As on main: the ignored signal is ignored, and the runner returns.
+        ("ignore", "free", ["started", "torn down", "returned"], 0),
+        # Main ends here without the teardown; this change runs it, then ends by the signal.
+        ("default", "free", ["started", "torn down"], -signal.SIGTERM),
+        # A SIGTERM while the startup awaits stops the service once the startup has finished: the
+        # teardown runs, then the handler, once.
+        ("handler", "held", ["started", "torn down", "handler", "returned"], 0),
+        # Also when the handler replaces the action as it runs.
+        ("replacing", "held", ["started", "torn down", "handler", "returned"], 0),
+        # So does a worker's SIGTERM while the main thread blocks it.
+        ("handler", "masked", ["started", "torn down", "handler", "returned"], 0),
+        ("default", "masked", ["started", "torn down"], -signal.SIGTERM),
+        # And one that a worker raised before every thread blocked it.
+        ("default", "all blocked", ["started", "torn down"], -signal.SIGTERM),
+    ],
+)
+def test_a_sigterm_meets_the_action_installed_before_the_http_service_ran(
+    sigterm_delivered, tmp_path, action, startup, marks, status
+):
+    """A service that stops on SIGTERM without its teardown, or whose stop drops the action that
+    its caller installed: the handler never runs or runs before the teardown, or an ignored signal
+    ends the process. A SIGTERM while the startup awaits is the same stop once the startup has
+    finished, also when a worker raised it while the main thread or every thread blocks it. Met at
+    once, it skips the teardown, waits pending, or leaves a service that serves on and whose
+    handler may have replaced the action that the stop meets."""
+    import socket
+    import subprocess
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    listener.close()
+    written = tmp_path / "marks"
+    process = subprocess.Popen(
+        [sys.executable, "-c", SERVES_UNDER_AN_EARLIER_ACTION, str(written), str(port), action,
+         startup],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+
+    def marked():
+        return written.read_text(encoding="utf-8").splitlines() if written.exists() else []
+
+    def listens():
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=1).close()
+            return True
+        except OSError:
+            return False
+
+    def until(condition, failure):
+        """Whether ``condition`` came true; False once the process ended, as the final assertion
+        then shows."""
+        deadline = time.monotonic() + 120
+        while not condition():
+            if process.poll() is not None:
+                return False
+            assert time.monotonic() < deadline, failure
+            time.sleep(0.05)
+        return True
+
+    try:
+        starting = written.with_suffix(".starting")
+        if startup == "held":
+            until(starting.exists, "the startup did not begin")
+            process.terminate()
+        elif startup != "free":
+            until(written.with_suffix(".raised").exists, "the worker raised no SIGTERM")
+        starting.unlink(missing_ok=True)
+        serves = until(listens, "the service did not start")  # it listens once it took the signals
+        if serves and (startup == "free" or marked()[:1] == ["handler"]):
+            process.terminate()  # a runner that met the startup's SIGTERM at once serves on
+        output, _ = process.communicate(timeout=60)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(10)
+    assert (marked(), process.returncode) == (marks, status), output.decode()[-3000:]
+
+
+ENDS_WITHOUT_UVICORNS_SHUTDOWN = """
+import asyncio, sys
+from contextlib import asynccontextmanager
+import uvicorn
+from exomem.server import ExomemFastMCP
+
+ending, teardown, marks = sys.argv[1], sys.argv[2], []
+tearing = asyncio.Event()
+
+@asynccontextmanager
+async def lifespan(_server):
+    marks.append("started")
+    yield
+    marks.append("tearing down")
+    tearing.set()
+    await asyncio.sleep(0.2)  # a teardown that awaits, as the stop drain does
+    if teardown == "fails":  # as a worker that does not stop
+        raise RuntimeError("the teardown failed")
+    marks.append("torn down")
+
+async def main():
+    serving, serve = asyncio.Event(), uvicorn.Server.main_loop
+
+    async def main_loop(server):
+        serving.set()
+        if ending == "the server loop raises":
+            raise ValueError("the server loop failed")
+        if ending == "the exit is forced":  # as a second SIGINT does
+            server.force_exit = True
+            return
+        await serve(server)
+
+    uvicorn.Server.main_loop = main_loop
+    runner = asyncio.create_task(ExomemFastMCP("embedded", lifespan=lifespan).run_http_async(
+        transport="http", host="127.0.0.1", port=0, show_banner=False))
+    if ending.startswith("the caller cancels"):
+        await serving.wait()
+        runner.cancel()
+    if ending == "the caller cancels twice":
+        await tearing.wait()
+        runner.cancel()
+    try:
+        await runner
+    except BaseException as error:
+        marks.append(type(error).__name__)
+        if teardown == "fails":
+            marks.append(f"context {type(error.__context__).__name__}")
+    await asyncio.sleep(0.5)  # the caller's event loop lives on
+
+asyncio.run(main())
+print(marks)  # after the loop closed, so a teardown left to that close shows last
+"""
+
+
+@pytest.mark.parametrize(
+    ("ending", "teardown", "raised"),
+    [
+        ("the caller cancels", "returns", ["torn down", "CancelledError"]),
+        ("the server loop raises", "returns", ["torn down", "ValueError"]),
+        # The runner stays until the teardown has ended, and then raises the cancellation.
+        ("the caller cancels twice", "returns", ["torn down", "CancelledError"]),
+        # A failed teardown reaches the caller, with how the runner ended as its context.
+        ("the caller cancels", "fails", ["RuntimeError", "context CancelledError"]),
+        ("the server loop raises", "fails", ["RuntimeError", "context ValueError"]),
+        ("the exit is forced", "fails", ["RuntimeError", "context NoneType"]),
+    ],
+)
+def test_an_http_runner_that_ends_without_uvicorns_shutdown_tears_down_before_it_raises(
+    ending, teardown, raised
+):
+    """An embedding caller whose awaited runner was cancelled or failed while the teardown has not
+    run: the workers and the writer lease outlive the runner until the event loop closes, the
+    teardown runs twice, a second cancellation returns before the teardown has ended, or the
+    caller sees no failure of the teardown and takes the workers as stopped."""
+    import subprocess
+
+    finished = subprocess.run(
+        [sys.executable, "-c", ENDS_WITHOUT_UVICORNS_SHUTDOWN, ending, teardown],
+        capture_output=True, text=True, timeout=120,
+    )
+    lines = finished.stdout.splitlines()
+    expected = ["started", "tearing down", *raised]
+    assert lines[-1:] == [repr(expected)], finished.stderr[-3000:]
+
+
 def trashed_once(root, rel, body):
     """Where a trashed binary's bytes are now: every file under the trash that holds them."""
     return [
@@ -507,75 +1512,42 @@ def trashed_once(root, rel, body):
     ]
 
 
-def test_a_served_projector_that_renames_a_trashed_binary_before_its_writer_does_converges(
-    stored, service, monkeypatch
-):
-    """The writer's rename after its commit racing a served projector that renames the same file
-    first: the trash refuses or warns, the file ends at both paths or neither, or a record or an
-    intent is left naming the wrong path."""
-    projector_moved = threading.Event()
-    real_rename = binaries._rename
-
-    def after_the_projector(root, entry, move, seen):
-        if entry.src == DIAGRAM:  # the writer waits until the served projector has moved the file
-            deadline = time.monotonic() + 10
-            while (stored / DIAGRAM).exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
-            if not (stored / DIAGRAM).exists():
-                projector_moved.set()
-        return real_rename(root, entry, move, seen)
-
-    monkeypatch.setattr(binaries, "_rename", after_the_projector)
-    loop = idle_service_projector(stored, poll_seconds=0.02)
-    try:
-        result = call(
-            stored, "manage_memory_file", operation="delete", path=DIAGRAM, confirm=True,
-            force_orphan=True,
-        )
-        deadline = time.monotonic() + 30
-        while queued(stored):
-            assert time.monotonic() < deadline, "the projector drained the queue"
-            time.sleep(0.05)
-    finally:
-        loop.stop()
-
-    assert projector_moved.is_set() and not (stored / DIAGRAM).exists(), result
-    (trashed,) = trashed_once(stored, DIAGRAM, DIAGRAM_BYTES)
-    assert result.get("ok") is not False and not result.get("warnings")
-    assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
-        (sha(DIAGRAM_BYTES),)
-    ]
-    assert store_rows(stored, "SELECT path FROM store_binaries WHERE path = ?", DIAGRAM) == []
-    assert store_rows(stored, "SELECT path FROM store_held") == []
-
-
 def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_converges(
     stored, service, monkeypatch, caplog
 ):
     """The served projector judging a queued binary move, then finding that the writer moved the
-    file between its look and its rename: it defers the move, logs it, or renames something."""
+    file between its look and its rename: it defers the move, logs it, or renames something.
+
+    The projector's rename takes the writer's hold, so it cannot run while the writer renames; the
+    writer can only move the file after the projector has looked at both paths.
+    """
     picture = f"{NOTES}/raced.png"
     (stored / picture).write_bytes(PICTURE_BYTES)
     importer.Importer(stored).import_paths([picture])
-    at_rename, writer_moved = threading.Event(), threading.Event()
-    real_rename, real_move = projector._rename, reserved_paths.move_generic_path
+    at_look, writer_moved = threading.Event(), threading.Event()
+    real_observe, real_move = projector.observe, reserved_paths.move_generic_path
+    looked_at_the_source, moved_after_the_look = [], []
 
-    def renaming_late(filesystem, old, new, expected):
-        if old == picture:  # the projector has judged the move; the writer now moves the file
-            at_rename.set()
+    def looking_early(filesystem, rel, **options):
+        seen = real_observe(filesystem, rel, **options)
+        if rel == picture:
+            looked_at_the_source.append(rel)
+        elif looked_at_the_source and not at_look.is_set():
+            # The projector has judged both paths of the move; the writer now moves the file.
+            at_look.set()
             writer_moved.wait(10)
-        return real_rename(filesystem, old, new, expected)
+        return seen
 
     def renaming_first(root, source, destination, **options):
         if source == picture:
-            at_rename.wait(10)
+            moved_after_the_look.append(at_look.wait(10))
             try:
                 return real_move(root, source, destination, **options)
             finally:
                 writer_moved.set()
         return real_move(root, source, destination, **options)
 
-    monkeypatch.setattr(projector, "_rename", renaming_late)
+    monkeypatch.setattr(projector, "observe", looking_early)
     monkeypatch.setattr(reserved_paths, "move_generic_path", renaming_first)
     caplog.set_level("WARNING", logger="exomem.vault_store")
     loop = idle_service_projector(stored, poll_seconds=0.02)
@@ -591,7 +1563,7 @@ def test_a_writer_that_renames_a_trashed_binary_while_the_projector_is_about_to_
     finally:
         loop.stop()
 
-    assert at_rename.is_set() and writer_moved.is_set(), result
+    assert moved_after_the_look == [True], "the writer moved the file after the projector looked"
     (trashed,) = trashed_once(stored, picture, PICTURE_BYTES)
     assert result.get("ok") is not False and not (stored / picture).exists()
     assert store_rows(stored, "SELECT sha256 FROM store_binaries WHERE path = ?", trashed) == [
@@ -712,7 +1684,8 @@ def test_a_projector_drain_holds_the_boundary_per_record_and_a_foreground_write_
                                        "max": ms(q_busy, max)},
         "create_ms_without_drain": [ms([t], max) for t in baseline],
         "create_ms_during_drain": [ms([t], max) for t in during],
-        "load_average": [round(x, 1) for x in os.getloadavg()],
+        # Windows has no load average: the figure is unknown there, not zero.
+        "load_average": [round(x, 1) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
     }
     print(json.dumps(figures))
     if report := os.environ.get("EXOMEM_SERVED_DRILL_REPORT"):

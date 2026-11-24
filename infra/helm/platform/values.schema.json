@@ -3,7 +3,7 @@
   "type": "object",
   "required": ["platformJobs", "scheduler", "observability"],
   "$defs": {
-    "mediaEngineName": {"enum": ["documents", "ocr", "speech", "frames"]}
+    "mediaEngineName": {"enum": ["documents", "ocr", "speech", "frames", "previews"]}
   },
   "allOf": [
     {"if": {"required": ["memoryHealth"], "properties": {"memoryHealth": {"required": ["enabled"], "properties": {"enabled": {"const": true}}}}}, "then": {"properties": {"cloudGateway": {"properties": {"image": {"$ref": "#/properties/cloudGateway/then/properties/image"}, "databaseEgressCidrs": {"minItems": 1}}}}}},
@@ -233,6 +233,14 @@
           "type": "array", "uniqueItems": true,
           "items": {"$ref": "#/$defs/mediaEngineName"}
         },
+        "sourceErasureCellIds": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {
+            "type": "array", "maxItems": 1024, "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}
+          }
+        },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
         "cellImageRepository": {"type": "string"},
@@ -243,6 +251,7 @@
         "b2Endpoint": {"type": "string"},
         "initDeadlineMinutes": {"type": "integer", "minimum": 1},
         "cataloguePrewarm": {"type": "boolean", "default": false},
+        "resticVerificationCellIds": {"type": "array", "uniqueItems": true, "maxItems": 1024, "items": {"type": "string", "pattern": "^[a-z2-7]{16}$"}, "default": []},
         "catalogueBuildTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 1800},
         "catalogueBuildResources": {
           "type": "object", "additionalProperties": false, "required": ["requests", "limits"],
@@ -303,12 +312,13 @@
         "cellResources": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit"],
+          "required": ["cpuRequest", "cpuLimit", "memoryRequest", "memoryLimit", "passageMatrixBudget"],
           "properties": {
             "cpuRequest": {"type": "string"},
             "cpuLimit": {"type": "string"},
             "memoryRequest": {"type": "string"},
-            "memoryLimit": {"type": "string"}
+            "memoryLimit": {"type": "string"},
+            "passageMatrixBudget": {"type": "string", "pattern": "^[0-9]+(Mi|Gi)$"}
           }
         },
         "resources": {

@@ -526,6 +526,27 @@ def test_warm_all_marks_catalog_ready_before_optional_cache_work(
     assert readiness.is_ready("retrieval_catalog") is True
 
 
+def test_warm_all_reads_the_store_only_after_the_required_warm_is_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: the store-read warm-up runs inside the required stages, so every request that waits
+    for them waits behind a read of the whole vault."""
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", lambda vr: True, raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
+    monkeypatch.setattr("exomem.semantic_contract.warm_corpus_context", lambda _root: None)
+    required_done: list[bool] = []
+    monkeypatch.setattr(
+        warmup, "warm_store_reads", lambda _root: required_done.append(readiness.required_warm_finished())
+    )
+
+    durations = warmup.warm_all(tmp_path)
+
+    assert required_done == [True]
+    assert "store_reads" in durations
+    assert readiness.is_ready("retrieval_catalog") is True
+
+
 def test_warm_retrieval_catalog_verifies_kb_and_vault_scopes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

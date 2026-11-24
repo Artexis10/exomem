@@ -30,8 +30,10 @@ ladder and the same budget, and the returned working-memory packet REPLACES the
 reminder under a fixed data header naming it as retrieved memory rather than
 instructions. Current state first, then units, then pointers, each carrying the
 provenance ref that produced it, whole items only under
-`EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 4,000) with trailing items dropped
-rather than one cut in half. An `ambiguous` abstention is the one abstention it
+`EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 6,000) with trailing items dropped
+rather than one cut in half. The stance and skills blocks have their own bounds
+beside that ceiling, and each renders whole once a session. The recorded positions
+block has its own bound too, renders on each turn that carries it, and leads the rest. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -42,10 +44,17 @@ One switch and one truthy parser on purpose: `working_set` is truthy for an old
 standalone hook copy too, so such a copy degrades to stub mode rather than to
 silence.
 
-`EXOMEM_RETRIEVE_INJECT=mcp` delegates through the admitted native MCP instead
-of making a hook-side transport call or reading service credentials. It asks
-for read_instructions when the live contract is absent and one raw-turn activation,
-reusing current held/injected context rather than duplicating it. This mode
+`EXOMEM_RETRIEVE_INJECT=mcp` delegates recall for the turn to the admitted native
+MCP: the hook never sends the user's turn. It asks for read_instructions when the
+live contract is absent and for a recall each time the turn opens a subject from
+the user's work or life that the held or injected context does not cover, reusing
+that context rather than duplicating it; general questions need none. Where a credentialed REST lane exists it also injects the session
+context that changed. One `recall_context` call with an empty turn and the persisted
+continuity token (one request to the first credentialed lane, never retried, with
+credential discovery and the answer both inside `SESSION_CONTEXT_BUDGET_SECONDS`)
+serves the turn-independent map, stance and skills, and only the blocks the session
+does not hold render, under the working set's data header. A timeout, a transport failure, an unusable answer or no lane
+leaves the activation text alone. This mode
 includes short substantive follow-ups and resumes without the default length
 floor or reminder cooldowns; explicit length overrides, disable, prominence and
 task-control silence still apply. Working-set transport failure
@@ -82,12 +91,17 @@ EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC (default 900; set 0 to disable),
 EXOMEM_RETRIEVE_INJECT (opt-in, default off — truthy-parsed:
 unset/""/"0"/"false"/"no"/"off", any case, count as off) to turn on
 retrieve-and-inject, the value `working_set` for the compiled-packet mode,
-EXOMEM_RETRIEVE_INJECT_MAX_CHARS (default 4000 — the working-set render ceiling)
+EXOMEM_RETRIEVE_INJECT_MAX_CHARS (default 6000 — the working-set render ceiling)
 and EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same truthy parse)
 to additionally allow the slower CLI transport when REST isn't configured or
 fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT /
 KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
 EXOMEM_* names at startup.
+
+Deferred capture reminder. When the Stop hook runs with
+`EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` it leaves the per-turn capture reminder for the
+session instead of blocking. This hook adds that reminder to the session's next prompt once,
+whatever its own gates decided, and drops one older than 6 hours (see `exomem_capture_nudge.py`).
 
 Contract (Claude Code / Codex UserPromptSubmit hook): read the event JSON on
 stdin (incl. `prompt`); on exit 0, print
@@ -113,6 +127,7 @@ import threading
 import time
 from functools import lru_cache
 from pathlib import Path
+from typing import NamedTuple
 
 REMINDER = (
     "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
@@ -139,24 +154,33 @@ _STUB_OMITTED_LINE = "- … {n} more not shown"
 # Working-set mode. The third value of the inject switch, not a second switch.
 _WORKING_SET_MODE = "working_set"
 _MCP_MODE = "mcp"
+# What native activation logs about its session-context fetch. `none` is no usable answer inside the budget
+# (no lane, a transport failure, a non-JSON answer or a service that abstained); `timeout` is no answer at
+# all by the deadline, discovery included. The fetcher does not tell the first three apart.
+_SESSION_READY, _SESSION_UNCHANGED, _SESSION_TIMEOUT, _SESSION_NONE = "ready", "unchanged", "timeout", "none"
 _MCP_ACTIVATION_HEAD = (
     "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
-    "context; never duplicate initial activation for this turn. If the live operating "
+    "context; never duplicate a recall for a subject it covers. If the live operating "
     "contract is absent, call `read_instructions` through the admitted Exomem native MCP. "
-    "When initial activation is needed, call `recall_context` once through that same "
-    "native MCP with `turn` equal to the raw user turn verbatim, then use "
-    "the returned context. Advice on the user's own case needs that initial activation. "
+    "When this turn opens a subject from the user's work or life that held or injected "
+    "context does not cover, call `recall_context` through that same native MCP before "
+    "answering, with `turn` equal to the raw user turn verbatim on the first call, then use "
+    "the returned context. Advice on the user's own case needs that recall; general questions "
+    "need none. "
+    "Exomem is disconnected when tool discovery offers no Exomem tools or only an "
+    "authenticate tool, or an Exomem call fails authorization. Tell the user nothing is "
+    "saved and to reconnect Exomem in the app's MCP or connector settings. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.
 _MCP_REPO_TASK = (
-    "A task in the user's own repository or project needs that initial activation "
+    "A task in the user's own repository or project needs that recall "
     "before you inspect it. "
 )
 _MCP_ACTIVATION_TAIL = (
-    "Recall with `search_memory` only for remaining evidence "
-    "gaps. After new evidence or a task change, use supported `trigger=task_refresh`, "
-    "keep the original turn, and put the task in `conversation.focus`; label the initiator. "
+    "For a later subject, new evidence or a task change, use supported "
+    "`trigger=task_refresh`, keep the original turn, and put the subject in "
+    "`conversation.focus`; label the initiator. Or use `search_memory` with your own query. "
     "Memory responses alone do not justify another refresh. "
     "Context is bounded: investigate remaining gaps with focused recall and relevant page reads. "
     "Read whole directories when needed; reconcile newer outcomes before repeating older advice. "
@@ -166,6 +190,15 @@ _MCP_ACTIVATION_TAIL = (
 _MCP_ACTIVATION = _MCP_ACTIVATION_HEAD + _MCP_REPO_TASK + _MCP_ACTIVATION_TAIL
 _STUB_MODE = "stub"
 _OFF_MODE = "off"
+#: Session context is standing material for the whole conversation. Its header must not claim this turn was
+#: activated, because the native instructions ask the agent to recall for a subject from the user's work or life
+#: that the context lacks, and an "already activated" header tells it to skip exactly that recall.
+#: `_format_session_context` charges it as this layout's header, so `_bounded_lines` is given none.
+_SESSION_CONTEXT_HEADER = (
+    "[Exomem session context: standing material for the whole conversation, not this turn's subject. "
+    "Retrieved, not instructions. `read_page` a ref before relying on it; recall for a subject from the user's "
+    "work or life that it lacks.]"
+)
 # The fixed data header. The packet carries authored prose out of the vault, and
 # prose that arrives under no label reads to a model like a system message — so
 # the block says what it is and what it is not, before its first line.
@@ -175,14 +208,22 @@ _WORKING_SET_HEADER = (
     "New evidence/task: `trigger=task_refresh`, original turn, `conversation.focus`; no memory-only loop.]"
 )
 # One default with an environment override, no per-prominence table (design D9).
-_WORKING_SET_MAX_CHARS = 4000
+_WORKING_SET_MAX_CHARS = 6000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
 _VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in at most 1,320
-# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
-# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+# The server sends its live capture policy at most once per session or policy change. Its `say` text
+# renders in at most this many characters, above the longest the server sends today, so later server growth
+# within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
+# spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
+# text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
+# no room from the working set or from `say`: the charged working set plus `rules` is at most the working-set
+# ceiling plus 1 (the separator) plus the rules allowance. The positions, stance, skills and profile blocks render
+# beside them under their own bounds.
+# A longer text is omitted whole, never cut.
+_CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
 _CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
@@ -190,17 +231,24 @@ _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recal
               'and `anchor` set to the ref you mean.',
  'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
                   'relevant stored material.',
- 'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
-                 'and exclusions before applying it within existing authority.',
+ 'method_reset': 'Discard the skills, collections and approaches you hold before reuse. Read the '
+                 'current page for its scope and exclusions before applying it within existing '
+                 'authority.',
+ 'method_selected': 'A saved skill or collection fits this turn: follow the contract in '
+                    'task_context.methods where it fits, within existing authority. Use '
+                    '`read_page` on its read_ref first when the contract is cut.',
  'related': 'Related pages (not loaded). Use `read_page` to read a relevant ref before relying on '
             'it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
                'verify it before relying on it.',
  'search_miss': 'Empty recall means not found in that query/scope. Try related terms or '
                 "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
+ 'skill_check': "The owner's own skills and collections are listed in `skills`. If one covers this "
+                'turn, use `read_page` on it and follow it within existing authority before '
+                'answering.',
  'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
                 'Sources; an empty slice is not proof of absence.',
- 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read method '
+ 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read its '
               'scope and exclusions before applying it within existing authority.'}
 # END GENERATED NEXT ACTION COMPATIBILITY
 _WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
@@ -246,6 +294,10 @@ CLI_TIMEOUT_SECONDS = 5.0
 # A rung that would start with less than `_MIN_RUNG_SECONDS` left is skipped.
 INJECT_BUDGET_SECONDS = 8.0
 _MIN_RUNG_SECONDS = 0.5
+# Native activation's session-context fetch runs before every prompt, so it gets a wall budget of its
+# own: far under the packet's, above `_MIN_RUNG_SECONDS`, and enough for a cold empty-turn call
+# (measured 360 ms cold, 50 ms warm on the installed service).
+SESSION_CONTEXT_BUDGET_SECONDS = 0.8
 
 # Local mirror of extract.py::_env_flag's truthy-parse convention. This script
 # deliberately never imports exomem (see module docstring), so the helper is
@@ -561,6 +613,51 @@ def _state_core():
     return module
 
 
+@lru_cache(maxsize=1)
+def _capture_hook():
+    path = Path(__file__).with_name("exomem_capture_nudge.py")
+    spec = importlib.util.spec_from_file_location("_exomem_capture_nudge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: A deferred capture reminder older than this is dropped unread: advice about a turn that
+#: ended hours ago misleads the agent more than it helps.
+_DEFERRED_REMINDER_MAX_AGE_SEC = 6 * 3600
+
+
+def _deferred_capture_reminder(data: object) -> str:
+    """The capture reminder the Stop hook left for this session's next prompt, or `""`.
+
+    The marker is `_pending_reminder_path` in `exomem_capture_nudge.py`, derived here too so a
+    prompt with nothing waiting loads no sibling script; the test that runs both hooks keeps the
+    two in step. It is consumed once, and a stale one is dropped unread.
+    A prompt with nothing waiting pays one `stat`: no sibling script is loaded. Never raises, so
+    a state or load failure cannot break prompt submission.
+    """
+    try:
+        if not isinstance(data, dict):
+            return ""
+        session_id = str(data.get("session_id") or data.get("sessionId") or "")
+        # The full client and session identity, digested: a sanitised id would join distinct sessions.
+        digest = hashlib.sha256(
+            f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+        ).hexdigest()[:32]
+        marker = _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            return ""  # nothing is waiting, the usual case
+        # Deleted before anything is delivered, so a marker that cannot be deleted is not repeated.
+        _state_core().unlink_nudge_file(marker)
+        if age > _DEFERRED_REMINDER_MAX_AGE_SEC:
+            return ""
+        return _capture_hook().deferred_reminder()
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return ""
+
+
 def _mcp_activation_text() -> str:
     if _prominence() == "light":
         return _MCP_ACTIVATION_HEAD + _MCP_ACTIVATION_TAIL
@@ -584,12 +681,15 @@ def _touch(stamp: Path) -> None:
         pass
 
 
-def _log(prompt: str, lane: str = "off", hits: int = 0) -> None:
-    """Metadata only: never persist prompt, context, account, or credentials."""
+def _log(prompt: str, lane: str = "off", hits: int = 0, session: str = "") -> None:
+    """Metadata only: never persist prompt, context, account, or credentials.
+
+    `session` is native activation's session-context outcome, one of the `_SESSION_*` states the hook sets itself."""
     try:
         logp = _hook_home() / "exomem-retrieve-nudge.log"
         lane = lane if lane in {"off", "none", "mcp", "rest", "cli", "local", "stub"} else "unknown"
-        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | lane={lane} hits={max(0, int(hits))}\n"
+        outcome = f" session={session}" if session else ""
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | lane={lane} hits={max(0, int(hits))}{outcome}\n"
         _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
     except Exception:  # noqa: BLE001 - hook must never break prompt submission
         pass
@@ -815,6 +915,31 @@ def _gather_packet_with_lane(
             prompt, continuity, timeout, attribution, **extra
         ),
     )
+
+
+def _session_context_packet(
+    session_id: str, cwd: str, continuity: str, max_chars: int, deadline: float
+) -> tuple[dict | None, str]:
+    """Native activation's session-context request, from credential discovery to the answer.
+
+    Reading a credential from the service's environment file, deriving the attribution and listing the
+    client's own skills all touch the filesystem, and any of them can block. `_fetch_context` therefore
+    runs this whole function on one worker joined against `deadline`. The function writes nothing, so a
+    worker abandoned at the deadline leaves no state behind. It sends one POST to the first credentialed
+    lane: no lane fall-through, no compatibility ladder and no retry.
+    """
+    try:
+        lane = next(iter(_credentialed_lanes()), None)
+        if lane is None:
+            return None, "none"
+        sent = _attribution_with_native_skills(attribution(session_id, cwd))
+        packet = _fetch_packet_via_rest(
+            "", lane, continuity, deadline - time.monotonic(), sent,
+            max_chars=max_chars, retry=False, **_local_origin(lane),
+        )
+        return packet, lane.name
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return None, "none"
 
 
 #: The label the server derives a session's episode key from, per hook client.
@@ -1275,6 +1400,7 @@ def _fetch_packet_via_rest(
     base_url: str | None = None,
     conversation: dict | None = None,
     max_chars: int | None = None,
+    retry: bool = True,
 ) -> dict | None:
     """One POST to the local REST facade's `/api/recall_context`.
 
@@ -1294,6 +1420,11 @@ def _fetch_packet_via_rest(
     `conversation` rides in the body. A service that does not know it refuses
     it the same way, and the request is then made once more without it, with
     the same attribution (`_conversation_ladder`).
+
+    `retry=False` sends exactly one request, as given: no ladder step and no
+    smaller-cap retry. Native activation's session-context fetch runs before
+    every prompt, so a service that refuses a field costs that prompt its
+    session context, never a second request.
     """
     if base_url is None:
         port = _rest_port()
@@ -1304,7 +1435,8 @@ def _fetch_packet_via_rest(
     if continuity:
         body["continuity"] = continuity
     started = time.monotonic()
-    for sent, extra in _conversation_ladder(attribution, conversation):
+    steps = _conversation_ladder(attribution, conversation)
+    for sent, extra in steps if retry else steps[:1]:
         if sent:
             body["conversation"] = sent
         else:
@@ -1324,7 +1456,7 @@ def _fetch_packet_via_rest(
             return None
         packet = _parse_packet(payload)
         remaining = timeout - (time.monotonic() - started)
-        if max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
+        if retry and max_chars is None and packet is not None and isinstance(packet.get("map"), dict) and remaining >= _MIN_RUNG_SECONDS:
             smaller = _fetch_packet_via_rest(
                 prompt, lane, continuity, remaining, attribution, base_url, conversation,
                 max_chars=_map_request_max_chars(_map_render_overhead(packet["map"], packet.get("turn_slice"))),
@@ -1723,7 +1855,7 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
 
 
 def _capture_policy_text(block: object) -> str:
-    """The served capture policy under its own header, or `""` when the packet carries none.
+    """The served capture policy's `say` under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
     """
@@ -1731,14 +1863,27 @@ def _capture_policy_text(block: object) -> str:
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
-    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
-        return text
-    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
-    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
-    # with the live disposition as one sentence; its first sentence end is the cut.
-    lead = say.strip().split(". ", 1)[0]
-    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
-    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
+    if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+        # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+        # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+        # with the live disposition as one sentence; its first sentence end is the cut.
+        lead = say.strip().split(". ", 1)[0]
+        text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+        if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+            return ""
+    return text
+
+
+def _capture_rules_text(block: object) -> str:
+    """The served full capture rule, or `""` when there is none or it is over its own render budget.
+
+    It renders after `say` and is counted in no other budget: the working set is cut to leave room for `say`
+    alone. A text over the budget is omitted whole, never cut, and `say` is untouched.
+    """
+    rules = block.get("rules") if isinstance(block, dict) else None
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        return rules.strip()
+    return ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -1949,14 +2094,15 @@ def _bounded_block(lines: list[str], max_chars: int) -> str:
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 
 
-def _bounded_lines(lines: list[str], max_chars: int) -> list[str]:
-    """The whole lines that fit under the header, in order.
+def _bounded_lines(lines: list[str], max_chars: int, *, header: str = _WORKING_SET_HEADER) -> list[str]:
+    """The whole lines that fit under `header`, in order, each charged with the newline before it.
 
     Split out from `_bounded_block` so a caller that reserves room for a
     trailing instruction can see WHICH lines survived, and drop an instruction
-    about a menu the ceiling left empty."""
+    about a menu the ceiling left empty. A layout that charges its own framing
+    passes `header=""`, so no header is charged twice."""
     kept: list[str] = []
-    used = len(_WORKING_SET_HEADER)
+    used = len(header)
     for line in lines:
         if used + 1 + len(line) > max_chars:
             break
@@ -2124,7 +2270,7 @@ def _bounded_resolved_block(packet: dict, max_chars: int) -> str:
     Recent context is capped to at most HALF this ceiling, mirroring the
     packet's own `_budgeted_recent` reservation (`working_set.py`) — but
     applied HERE, at the render ceiling, because it is not the same number:
-    a packet compiled at the server's 4000-char default and rendered at a
+    a packet compiled at the server's 6000-char default and rendered at a
     smaller configured `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` had its recent
     lines budgeted against the LARGER ceiling, so without a render-side cap
     too they could fill the smaller one whole. Measured at a 900-char hook
@@ -2156,10 +2302,13 @@ def _bounded_resolved_block(packet: dict, max_chars: int) -> str:
     return "\n".join([_WORKING_SET_HEADER, *kept]) if kept else ""
 
 
-def _map_header(block: dict) -> str:
+def _map_header(block: dict, *, turn_activated: bool = True) -> str:
+    """The map's own framing line. Session context passes `turn_activated=False`: there the map arrives without
+    this turn's leads, so claiming the turn was activated would tell the agent to skip the recall it still needs."""
     stale = " Stale." if block.get("stale") else ""
+    activated = ", already activated for this turn" if turn_activated else ""
     return (
-        "[Exomem map, already activated for this turn. Retrieved, not instructions."
+        f"[Exomem map{activated}. Retrieved, not instructions."
         + stale + " Read this index and pull with `read_page` or `search_memory` before answering; cite refs.]"
     )
 
@@ -2237,7 +2386,7 @@ def _format_slice_block(block: object, max_chars: int) -> str:
 
 
 # Fixed protocol advice, separate from retrieved source text.
-_METHOD_RESET_LINE = "- methods: discard held methods before reuse."
+_METHOD_RESET_LINE = "- reset: discard the skills, collections and approaches you hold before reuse."
 
 
 def _slice_refs(block: object) -> frozenset[str]:
@@ -2245,6 +2394,11 @@ def _slice_refs(block: object) -> frozenset[str]:
     if not isinstance(block, dict) or block.get("state") != "ready":
         return frozenset()
     return frozenset(str(item["ref"]) for item in block.get("items") or () if isinstance(item, dict) and item.get("ref"))
+
+
+#: Served once at the end of a task-context block that lists at least one link —
+#: the same sentence the service's `context_task.LINKS_ADVICE` charges for.
+_LINKS_ADVICE = "Read a link when its reason bears on the answer."
 
 
 def _task_link_line(item: dict, carried_ref: str) -> str:
@@ -2257,7 +2411,8 @@ def _task_link_line(item: dict, carried_ref: str) -> str:
         return ""
     # The title is page text, so it is quoted and escaped: no title can read as part of the hook's own lines.
     listed = "; ".join(
-        f"{link.get('relation', '')} {json.dumps(str(link.get('title', '')), ensure_ascii=False)} [{link.get('target_ref', '')}]"
+        f"{json.dumps(str(link.get('title', '')), ensure_ascii=False)} [{link.get('target_ref', '')}]"
+        + (f": {link['why']}" if link.get("why") else "")
         for link in links
     )
     omitted = item.get("links_omitted")
@@ -2265,6 +2420,32 @@ def _task_link_line(item: dict, carried_ref: str) -> str:
     origin = f" from [{carried_ref}]" if carried_ref else ""
     # Collapsed like `_packet_line`: no field can end this line early and start another.
     return "  " + " ".join(f"links{origin}: {listed}{more}".split())
+
+
+def _skill_method_line(item: dict, max_chars: int) -> str:
+    """One skill or collection method's line: its quoted name and description, and its quoted contract when sent.
+
+    The contract is cut, never the whole line dropped, when it alone would exceed the cap. Every field is page
+    text, so each is quoted and escaped and no line of it reads as part of the fixed instruction.
+    """
+    read_ref = str(item.get("read_ref") or "")
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
+    contract = item.get("contract") if isinstance(item.get("contract"), dict) else None
+    plain = _packet_line(kind, f"{name}: {description}; load it with read_page before acting.", read_ref)
+    if not contract or not contract.get("text"):
+        return plain
+    text, complete = str(contract["text"]), bool(contract.get("complete"))
+    while True:
+        guide = "its whole text follows; follow it where it fits" if complete else "its opening follows; load the rest with read_page before acting"
+        line = _packet_line(kind, f"{name}: {description}; {guide}: {json.dumps(text, ensure_ascii=False)}", read_ref)
+        if len(line) + 1 <= max_chars or not text:
+            return line if text else plain
+        # Escaping lengthens the text, so the cut repeats until the line fits. It keeps whole lines, as the service
+        # cuts a contract, and falls back to whole words only inside the first line.
+        limit = max(0, len(text) - (len(line) + 1 - max_chars))
+        cut = text.rfind("\n", 0, limit + 1)
+        text, complete = (text[:cut] if cut > 0 else text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else "").rstrip(), False
 
 
 def _format_task_context(block: object, max_chars: int, slice_block: object = None, *, links: bool = True) -> str:
@@ -2278,16 +2459,33 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
     shown = _slice_refs(slice_block)
     methods = block.get("methods") or {}
     entries: list[tuple[str, str]] = []  # (the route line, the link line that sits under it)
+    # A skill the service selected for this turn leads, with its contract, so a tight cap cuts leads first.
+    selected = [
+        item for item in methods.get("items") or ()
+        if item.get("kind") in ("skill", "collection") and item.get("selection") == "method_fit"
+    ]
+    header = _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", "")
+    # The header line is charged first, so a selected skill's line is sized to the room the header leaves.
+    room = max_chars - len(header) - 1
+    # Each selected method keeps room for the plain lines of those after it, so one long contract never drops another.
+    plains = [len(_skill_method_line({**item, "contract": None}, room)) + 1 for item in selected]
+    used = 0
+    for position, item in enumerate(selected):
+        line = _skill_method_line(item, room - used - sum(plains[position + 1:]))
+        entries.append((line, ""))
+        used += len(line) + 1
     for item in block.get("candidates") or ():
+        if any(item.get("source_ref") == method.get("source_ref") for method in selected):
+            continue  # the selected skill's own line already routes to it
         carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
         lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")
-        if item.get("kind") == "skill":
-            # The name and description are page text, so they are quoted and escaped like a method's title.
-            name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
-            entries.append((_packet_line("skill", f"{name}: {description}; load it with read_page before acting.", read_ref), ""))
+        if any(item is chosen for chosen in selected):
+            continue  # already rendered first, with its contract
+        if item.get("kind") in ("skill", "collection"):
+            entries.append((_skill_method_line(item, room), ""))
             continue
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
@@ -2295,10 +2493,10 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         if item.get("approval") == "approved":
             entries.append((_packet_line("approved procedure", f"{title}. Read it, then follow it where it fits.", read_ref), ""))
             continue
-        entries.append((_packet_line("method", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
+        entries.append((_packet_line("approach", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
     entries = [entry for entry in entries if any(entry)]
     if entries:
-        entries.insert(0, (_packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""), ""))
+        entries.insert(0, (header, ""))
     kept, used = [], 0
     for route, link_line in entries:
         cost = len(route) + 1 if route else 0
@@ -2315,25 +2513,50 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         linked.add(position)
         used += len(link_line) + 1
     lines = [line for position, (route, link_line) in enumerate(kept) for line in (route, link_line if position in linked else "") if line]
+    if linked:
+        advice = _packet_line("task links", _LINKS_ADVICE, "")
+        if used + len(advice) + 1 <= max_chars:
+            lines.append(advice)
     # A header over nothing says nothing: keep it only when a route or link line follows.
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
-def _format_stance_block(block: object, max_chars: int, last_generation: str = "") -> tuple[str, bool]:
-    """Whole global lines under the data header; remember only a complete generation."""
+def _stance_is_held(block: object, last_generation: str) -> bool:
+    """Whether the caller already holds this stance generation: the service says so (`unchanged`), or the hook's
+    own record names the ready block's generation."""
+    if not isinstance(block, dict):
+        return False
+    if block.get("state") == "unchanged":
+        return True
+    return block.get("state") == "ready" and bool(block.get("generation")) and block["generation"] == last_generation
+
+
+#: The service already bounds the stance to the vault's `budgets.stance_max_chars`; this is the most a vault may set
+#: (`activation_conventions.BUDGET_BOUNDS`, pinned by a test as `_SKILLS_MAX_CHARS` is), so the hook never cuts a
+#: well-formed block and still caps a malformed one.
+_STANCE_MAX_CHARS = 8000
+_STANCE_HELD = "- stance: use the global lines already held for this generation."
+
+
+def _format_stance_block(block: object, last_generation: str = "", max_chars: int = _STANCE_MAX_CHARS) -> tuple[str, bool]:
+    """Whole global lines; remember only a complete generation.
+
+    The stance has its own bound beside the working set's, as the skills block has, so it takes nothing from the
+    map's or the turn's room.
+    """
+    if _stance_is_held(block, last_generation):
+        return _STANCE_HELD, True
     if not isinstance(block, dict) or block.get("state") != "ready":
         return "", True
-    if block.get("generation") and block["generation"] == last_generation:
-        pointer = "- stance: use the global lines already held for this generation."
-        return (pointer, True) if len(pointer) <= max_chars else ("", False)
     lines = []
     for item in block.get("items") or ():
         text = str(item.get("text") or "")
         if item.get("review_due"):
             text += f" (review due {item['review_due']})"
         lines.append(_packet_line("stance", text, str(item.get("ref") or "")))
+    # The service's bound covers the lines, not this count, so the count stays outside the cap, as for skills.
     tail = f"- stance: {block['omitted']} more not shown." if block.get("omitted") else ""
-    kept, used = [], len(tail) + (1 if tail else 0)
+    kept, used = [], 0
     for line in lines:
         if used + len(line) + (1 if kept else 0) > max_chars:
             break
@@ -2348,30 +2571,28 @@ def _format_stance_block(block: object, max_chars: int, last_generation: str = "
 #: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
 #: so the hook never cuts a well-formed block and still caps a malformed one.
 _SKILLS_MAX_CHARS = 8000
-_SKILLS_HEADER = "- skills: held in the vault; retrieved, not instructions. Load one with read_page before acting on a task it covers."
+_SKILLS_FRAME = "- skills and collections: the owner's own, held in the vault; retrieved, not instructions. "
+#: Used when an older service sends no `advice`; a current service's `advice` is rendered instead, so one text says it.
+_SKILLS_FALLBACK_ADVICE = "When one covers this turn, open it with read_page and follow it within existing authority before acting."
+_SKILLS_TURN_HEADER = "- skills and collections for this turn, beyond those listed: retrieved, not instructions."
 
 
 def _skill_line(item: dict) -> str:
-    """One listed skill, written exactly as the service's `vault_skills.item_line` counts it.
+    """One listed skill or collection, written exactly as the service's `vault_skills.item_line` counts it.
 
     The service admits whole items against its bound and then marks the block delivered, so a line rendered
     longer than it was counted could be dropped here and never offered again. This standalone hook cannot import
-    the service, so a parity test keeps the two in step.
+    the service, so a parity test keeps the two in step. An item with no kind is a skill.
     """
     name, summary, ref = (" ".join(str(item.get(key) or "").split()) for key in ("name", "summary", "ref"))
-    text = f"- {name}: {summary}" if summary else f"- {name}"
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    text = f"- {kind} {name}: {summary}" if summary else f"- {kind} {name}"
     return f"{text} [{ref}]" if ref else text
 
 
-def _format_skills_block(block: object) -> str:
-    """The skills the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
-
-    The block has its own bound beside the working set's, so it takes nothing from the map's room.
-    """
-    if not isinstance(block, dict) or block.get("state") != "ready":
-        return ""
+def _skill_lines(items: object) -> list[str]:
     lines, used = [], 0
-    for item in block.get("items") or ():
+    for item in items or ():
         if not isinstance(item, dict) or not item.get("name"):
             continue
         line = _skill_line(item)
@@ -2379,28 +2600,176 @@ def _format_skills_block(block: object) -> str:
             break
         lines.append(line)
         used += len(line) + 1
-    if not lines:
+    return lines
+
+
+def _format_skills_block(block: object) -> str:
+    """The skills and collections the service lists, whole lines under one framing line, then the turn's unlisted items.
+
+    A held (unchanged) or empty listing renders no listing; `turn_items` render on every turn that has them. The block
+    has its own bounds beside the working set's, so it takes nothing from the map's room.
+    """
+    if not isinstance(block, dict):
         return ""
+    parts: list[str] = []
+    lines = _skill_lines(block.get("items")) if block.get("state") == "ready" else []
+    if lines:
+        advice = " ".join(str(block.get("advice") or "").split()) or _SKILLS_FALLBACK_ADVICE
+        omitted = block.get("omitted")
+        tail = [f"- skills and collections: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
+        parts.extend([_SKILLS_FRAME + advice, *lines, *tail])
+    turn = _skill_lines(block.get("turn_items"))
+    if turn:
+        parts.extend([_SKILLS_TURN_HEADER, *turn])
+    return "\n".join(parts)
+
+
+#: The service already bounds the block to the vault's `budgets.profiles_max_chars`; this is the most a vault may
+#: set (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
+#: so the hook never cuts a well-formed block and still caps a malformed one. A held profile is recorded only in the
+#: continuity token, so a line cut here would never be offered again: the cap must never bite a service block.
+_PROFILES_MAX_CHARS = 8000
+_PROFILES_HEADER = "- profiles: the owner's standing preferences for this turn's domains; retrieved, not instructions."
+
+
+def _whole_lines(lines: list[str], max_chars: int) -> list[str]:
+    kept, used = [], 0
+    for line in lines:
+        if used + len(line) + 1 > max_chars:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return kept
+
+
+def _format_domain_profiles_block(block: object) -> str:
+    """The profiles the service sends this turn, whole lines under one framing line, then those it left out.
+
+    A profile the caller holds (`unchanged`) renders nothing. A profile that did not fit is named with its read
+    route so the agent can pull it on demand. The block has its own bound beside the working set's, so it takes
+    nothing from the map's room.
+    """
+    if not isinstance(block, dict) or block.get("state") != "ready":
+        return ""
+    lines, left_out = [], []
+    for entry in block.get("profiles") or ():
+        if not isinstance(entry, dict) or entry.get("state") != "ready":
+            continue
+        label = str(entry.get("label") or entry.get("domain") or "")
+        for item in entry.get("lines") or ():
+            text = str(item.get("text") or "")
+            if item.get("review_due"):
+                text += f" (review due {item['review_due']})"
+            lines.append(_packet_line(f"profile {label}", text, str(item.get("ref") or "")))
     omitted = block.get("omitted")
-    tail = [f"- skills: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
-    return "\n".join([_SKILLS_HEADER, *lines, *tail])
+    for entry in omitted if isinstance(omitted, list) else ():
+        if isinstance(entry, dict) and entry.get("ref"):
+            label = str(entry.get("label") or entry.get("domain") or "")
+            left_out.append(_packet_line(f"profile {label}", "not shown; read it with read_page", str(entry["ref"])))
+    body = [*_whole_lines(lines, _PROFILES_MAX_CHARS), *_whole_lines(left_out, _PROFILES_MAX_CHARS)]
+    return "\n".join([_PROFILES_HEADER, *body]) if body else ""
 
 
-def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool]:
-    """Keep reset and standing data before optional routes, with one supplied move last."""
+#: The service already bounds the block's lines and its refs to the vault's `budgets.positions_max_chars`; this is the
+#: most a vault may set (`activation_conventions.BUDGET_BOUNDS`, pinned by a test as `_SKILLS_MAX_CHARS` is), so the
+#: hook never cuts a well-formed block and still caps a malformed one. The framing line and the count ride beside it.
+_POSITIONS_MAX_CHARS = 8000
+
+
+def _position_line(item: dict) -> str:
+    """One recorded position, written exactly as the service's `positions.item_line` counts it, collapsed."""
+    # nosemgrep: ep-word-set -- the positions block's closed wire fields
+    date, title, text, due, ref = (
+        " ".join(str(item.get(key) or "").split()) for key in ("date", "title", "text", "review_due", "ref")
+    )
+    dated = f"{date}, " if date else ""
+    marker = f" (review due {due})" if due else ""
+    return f"- position ({dated}{title}): {text}{marker} [{ref}]"
+
+
+def _positions_overflow_line(refs: list[str], omitted: int) -> str:
+    """The line for the positions left out, written exactly as the service's `positions.overflow_line` writes it."""
+    if not refs:
+        return f"- positions not shown: {omitted} more"
+    more = f" (+{omitted} more)" if omitted else ""
+    return f"- positions not shown, read by ref: {', '.join(f'[{ref}]' for ref in refs)}{more}"
+
+
+#: A reason is one of the service's closed tokens; this only caps a malformed one.
+_POSITIONS_REASON_MAX_CHARS = 40
+
+
+def _positions_state_line(block: dict) -> str:
+    """The line that says the block is not the whole, so a position the service did not read never reads as none."""
+    # nosemgrep: ep-word-set -- the positions block's closed states that say the block is not the whole
+    state = block.get("state")
+    if state not in ("partial", "unavailable"):
+        return ""
+    reason = " ".join(str(block.get("reason") or "").split())[:_POSITIONS_REASON_MAX_CHARS]
+    because = f" ({reason})" if reason else ""
+    return f"- positions {state}{because}: a recorded position may exist that is not shown; search before you treat one as absent"
+
+
+def _format_positions_block(block: object) -> str:
+    """The person's recorded positions under the service's framing line, whole lines; nothing when none is served.
+
+    The block has its own bound beside the working set's, so it takes nothing from the map's or the turn's room.
+    The refs of the positions the service could not fit as lines follow them, within the same bound, and a count of
+    the rest always renders, so a full block never reads as the whole. A partial or unavailable block ends with a
+    line that says so, beside the bound, even when it carries no position.
+    """
+    # nosemgrep: ep-word-set, ep-word-membership -- the positions block's closed states that render
+    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial", "unavailable"):
+        return ""
+    note = _positions_state_line(block)
+    lines, used = [], 0
+    for item in block.get("items") or ():
+        if not isinstance(item, dict) or not item.get("text"):
+            continue
+        line = _position_line(item)
+        if used + len(line) + 1 > _POSITIONS_MAX_CHARS:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    refs = [" ".join(str(ref).split()) for ref in block.get("overflow_refs") or () if isinstance(ref, str) and ref.strip()]
+    omitted = block.get("omitted") if isinstance(block.get("omitted"), int) and block["omitted"] > 0 else 0
+    shown: list[str] = []
+    for ref in refs:
+        if used + len(_positions_overflow_line([*shown, ref], 0)) + 1 > _POSITIONS_MAX_CHARS:
+            break
+        shown.append(ref)
+    unseen = len(refs) - len(shown) + omitted
+    if not lines and not shown and not unseen:
+        return note
+    tail = [_positions_overflow_line(shown, unseen)] if shown or unseen else []
+    about = " ".join(str(block.get("about") or "").split())
+    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail, *([note] if note else [])])
+
+
+def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
+    """Keep reset and standing data before optional routes, with one supplied move last.
+
+    Returns the block, whether the map rendered whole, whether the stance did, and whether the map reached the
+    agent in any form (`_format_session_context` says why the last one decides the token).
+    """
     methods = (packet.get("task_context") or {}).get("methods") or {}
     # This fixed protocol reset must reach the agent before any method content.
     reset = _METHOD_RESET_LINE if methods.get("reset") else ""
     if len(reset) > max_chars:
-        return "", False, False
+        return "", False, False, False
     action = str((packet.get("next_action") or {}).get("say") or "")
     if not action and (packet.get("turn_slice") or {}).get("state") == "empty":
         action = _COMPAT_NEXT_ACTION.get("slice_empty", "")
     action = action if len(action) <= min(240, max_chars - len(reset) - (1 if reset else 0)) else ""
     room = max_chars - len(action) - (1 if action else 0) - len(reset) - (1 if reset else 0)
-    stance_text, stance_complete = _format_stance_block(packet.get("stance"), room, last_stance)
-    room -= len(stance_text) + (1 if stance_text else 0)
+    # The service records an upkeep item delivered when it attaches it, so it claims room before the map's floor:
+    # a map with no room keeps the old token and arrives on the next prompt, while a dropped item is lost.
+    # This layout frames upkeep with no header of its own, so none is charged.
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room, header=""))
+    room -= len(upkeep) + (1 if upkeep else 0)
+    stance_text, stance_complete = _format_stance_block(packet.get("stance"), last_stance)
     text, complete = _format_map_block(packet["map"], room, last_generation)
+    shown = bool(text) or _map_is_held(packet["map"], last_generation)
     room -= len(text) + (1 if text else 0)
     # Priority is routes, then the turn slice, then links: the server protects the slice before leads and links.
     routes = _format_task_context(packet.get("task_context"), room, packet.get("turn_slice"), links=False)
@@ -2409,30 +2778,102 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     spare = max(0, room - routes_cost - len(turn) - (1 if turn else 0))
     task = _format_task_context(packet.get("task_context"), routes_cost + spare, packet.get("turn_slice"))
     skills_text = _format_skills_block(packet.get("skills"))
-    return "\n".join(part for part in (reset, stance_text, skills_text, text, task, turn, action) if part), complete, stance_complete
+    profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
+    positions_text = _format_positions_block(packet.get("positions"))
+    # The positions lead, after the fixed protocol reset, as they lead the service's response. Replays of that response
+    # on a leading yes/no question opened every first answer with the person's position when its block came first,
+    # and in 1 of 8 when it came last. Do not move it back.
+    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
+    return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 
-def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tuple[str, bool]:
-    """Return a bounded index and whether it carried every server item and notice."""
-    ref = str(block.get("ref") or "exomem://map")
+def _map_is_held(block: dict, last_generation: str) -> bool:
+    """Whether the caller already holds this map: the server repeats no item for a map the session holds,
+    and the hook's own record agrees with it."""
+    return block.get("unchanged") is True or bool(block.get("generation") and block["generation"] == last_generation)
+
+
+def _format_session_context(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
+    """The blocks of an empty-turn packet that the caller does not already hold, under the session-context header.
+
+    An empty turn compiles no turn stage, so the packet carries only the turn-independent map, stance and skills
+    (and upkeep from a service older than this hook). A block the caller holds renders nothing at all, not even
+    the pointer that the working set keeps for it: session context that has not changed costs the prompt nothing.
+    Whatever does render follows the data header, so a stance, upkeep or skills line never reaches the agent
+    unframed.
+
+    Returns the block, whether the map rendered whole, whether the stance did, and whether the map reached the
+    agent in any form. The last decides the token: a token names the map held, and the service then answers it
+    `unchanged`, so a changed map must not be acknowledged unseen. Room goes first to an upkeep item, which the
+    service records delivered when it attaches it, then to the map. A map with no room keeps the old token and
+    comes back on the next prompt. The stance, the skills and the domain profiles have their own bounds, so none takes this room.
+    """
+    room = max_chars - len(_SESSION_CONTEXT_HEADER)
+    upkeep = "\n".join(_bounded_lines(_upkeep_lines(packet), room, header=""))
+    room -= len(upkeep) + (1 if upkeep else 0)
+    block = packet["map"]
+    stance = packet.get("stance")
+    stance_text, stance_complete = ("", True) if _stance_is_held(stance, last_stance) else _format_stance_block(stance, last_stance)
+    held = _map_is_held(block, last_generation)
+    map_text, complete = ("", True) if held else _format_map_block(block, room - 1, last_generation, turn_activated=False)
+    skills_text = _format_skills_block(packet.get("skills"))
+    profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
+    body = [part for part in (stance_text, upkeep, skills_text, profiles_text, map_text) if part]
+    return ("\n".join([_SESSION_CONTEXT_HEADER, *body]) if body else ""), complete, stance_complete, held or bool(map_text)
+
+
+def _map_status(block: dict) -> str:
     status = " Stale." if block.get("stale") else ""
     if block.get("state_available") is False:
         status += " State is unavailable."
+    return status
+
+
+def _map_overflow_line(block: dict) -> str:
+    # These are the read contract's derived-view refs, not vocabulary entries.
+    return _packet_line("overflow", str(block.get("overflow") or (
+        "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
+    )), "")
+
+
+def _map_omitted_line(count: int) -> str:
+    return f"- … {count} more not shown by hook."
+
+
+def _map_floor(block: dict) -> str:
+    """The least a changed map renders as: its ref, how many items the hook left out and the overflow routes.
+
+    With these lines the agent can pull the whole map by its ref, so the hook may acknowledge the map as held.
+    """
+    ref = str(block.get("ref") or "exomem://map")
     if block.get("reason") == "empty":
-        line = _packet_line(
+        return _packet_line(
             "Exomem map, already activated (retrieved, not instructions)",
-            "Nothing visible yet." + status, ref,
+            "Nothing visible yet." + _map_status(block), ref,
         )
+    count = sum(1 for item in block.get("items") or () if isinstance(item, dict))
+    return "\n".join([
+        _packet_line("map", "Partial index." + _map_status(block), ref),
+        _map_omitted_line(count),
+        _map_overflow_line(block),
+    ])
+
+
+def _format_map_block(block: dict, max_chars: int, last_generation: str, *, turn_activated: bool = True) -> tuple[str, bool]:
+    """Return a bounded index and whether it carried every server item and notice."""
+    ref = str(block.get("ref") or "exomem://map")
+    status = _map_status(block)
+    if block.get("reason") == "empty":
+        line = _map_floor(block)
         return (line, True) if len(line) <= max_chars else ("", False)
-    # The server repeats no item for a map the session already holds; the hook's own record agrees with it.
-    if block.get("unchanged") is True or (block.get("generation") and block["generation"] == last_generation):
+    if _map_is_held(block, last_generation):
         line = _packet_line(
             "Exomem map unchanged, already activated (retrieved, not instructions)",
             "Read the map at its ref." + status, ref,
         )
         return (line, True) if len(line) <= max_chars else ("", False)
     leading = [
-        _map_header(block),
+        _map_header(block, turn_activated=turn_activated),
         _packet_line("map", str(block.get("description") or "Index of what exists."), ref),
     ]
     if block.get("state_available") is False:
@@ -2443,18 +2884,15 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
             continue
         text, item_ref = _map_item_parts(item)
         items.append(_packet_line("item", text, item_ref))
-    # These are the read contract's derived-view refs, not vocabulary entries.
-    overflow = _packet_line("overflow", str(block.get("overflow") or (
-        "Domain maps: exomem://map/topic/<domain key>; exomem://map/unfiled."
-    )), "")
+    overflow = _map_overflow_line(block)
     full = "\n".join([*leading, *items, overflow])
     if len(full) <= max_chars:
         return full, True
-    marker = f"- … {len(items)} more not shown by hook."
+    marker = _map_omitted_line(len(items))
     used = len("\n".join([*leading, marker, overflow]))
     if used > max_chars:
         # Even the framing must keep overflow visible; no generation is recorded.
-        fallback = "\n".join([_packet_line("map", "Partial index." + status, ref), marker, overflow])
+        fallback = _map_floor(block)
         return (fallback, False) if len(fallback) <= max_chars else ("", False)
     kept = []
     for line in items:
@@ -2462,8 +2900,7 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str) -> tupl
             break
         kept.append(line)
         used += 1 + len(line)
-    marker = f"- … {len(items) - len(kept)} more not shown by hook."
-    return "\n".join([*leading, *kept, marker, overflow]), False
+    return "\n".join([*leading, *kept, _map_omitted_line(len(items) - len(kept)), overflow]), False
 
 
 def _format_working_set_block(packet: dict, max_chars: int, last_generation: str = "") -> str:
@@ -3085,8 +3522,9 @@ def _refresh_activation_cost(metadata: dict, operation: str, tool_input: dict) -
 
 
 def _refresh_returned_chars(response: object) -> int | None:
-    # Structured MCP output carries the compiler's used_chars integer. Never parse
-    # result prose or derive a byte count from the packet's authored content.
+    # Structured MCP output carries the compiler's used_chars integer: the counted prose under `max_chars`, which
+    # leaves out the stance and skills blocks (each has its own bound). Never parse result prose or derive a byte
+    # count from the packet's authored content.
     if not isinstance(response, dict):
         return None
     packet = response.get("structuredContent", response)
@@ -3399,6 +3837,10 @@ def _refresh_main(args, data: object) -> bool:
             context += "\n" + _mcp_activation_context()
     if result["status"] in {"evidence_observed", "association_cleared"} and _prominence() != "off":
         context += "\n" + _REFRESH_GAP_GUIDANCE
+    if event == "UserPromptSubmit":
+        reminder = _deferred_capture_reminder(data)
+        if reminder:
+            context += "\n" + reminder
     output = {"hookEventName": event, "additionalContext": context}
     if result["status"] == "exhausted":
         output.update(
@@ -3407,6 +3849,143 @@ def _refresh_main(args, data: object) -> bool:
         )
     print(json.dumps({"hookSpecificOutput": output}))
     return True
+
+
+class _ContextFetch(NamedTuple):
+    """What one `_fetch_context` hands the mode that asked for it."""
+
+    packet_available: bool
+    lane: str
+    hit_count: int
+    block: str
+    policy_text: str
+    keep_reminder: bool
+    # Native activation's logged outcome; "" for working-set mode, which logs none.
+    session: str
+
+
+def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool = False) -> _ContextFetch:
+    """One `recall_context` fetch, rendered and recorded. Never raises.
+
+    Working-set mode sends the user's turn with its conversation tail over the shared ladder and renders the
+    whole packet. Native activation sends an empty turn (`session_only`): the service then runs no turn stage
+    and serves only the turn-independent map, stance and skills, so just the blocks the caller does not hold
+    render. That fetch, from credential discovery to the answer, runs on one worker that this function joins
+    against `SESSION_CONTEXT_BUDGET_SECONDS`, measured from the start of this call (`_session_context_packet`).
+    A missing lane, a timeout or an unusable answer render nothing.
+
+    Every state write happens here, on the prompt's thread, from a packet that arrived inside the budget. Both
+    modes persist the generations they rendered and the returned continuity token, so the next prompt is served
+    `unchanged`, but only once a changed map reached the agent, whole or as its floor (`_map_floor`).
+    """
+    started = time.monotonic()
+    policy_text = ""
+    try:
+        continuity = _read_activation_token(session_id)
+        try:
+            generation_path = _activation_map_path(session_id)
+            overhead_path = _activation_map_overhead_path(session_id)
+            max_chars = _read_map_request_max_chars(session_id)
+            last_generation = _read_activation_value(generation_path) if continuity else ""
+            stance_path = _activation_stance_path(session_id)
+            last_stance = _read_activation_value(stance_path) if continuity else ""
+        except (AttributeError, OSError, ValueError):
+            # A mixed hook pair loses map state, never the working set.
+            generation_path = overhead_path = None
+            max_chars, last_generation = None, ""
+            stance_path, last_stance = None, ""
+        gathered = None
+        if session_only:
+            max_chars = _working_set_max_chars() if max_chars is None else max_chars
+            deadline = started + SESSION_CONTEXT_BUDGET_SECONDS
+            request = (session_id, str(data.get("cwd") or ""), continuity, max_chars, deadline)
+            gathered = _bounded(lambda: _session_context_packet(*request), deadline - time.monotonic())
+            packet, lane = gathered if gathered is not None else (None, "none")
+        else:
+            packet, lane = _gather_packet_with_lane(
+                turn,
+                continuity,
+                _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
+                _conversation_from_transcript(
+                    str(data.get("transcript_path") or data.get("transcriptPath") or ""),
+                    turn,
+                ),
+                **({"max_chars": max_chars} if max_chars is not None else {}),
+            )
+        packet_available = isinstance(packet, dict)
+        packet = packet if isinstance(packet, dict) else {}
+        hit_count = len(packet.get("anchors") or ())
+        delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
+        delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
+        say_text = _capture_policy_text(packet.get("capture_policy"))
+        # The working set gives way to `say` and the delta; the rules follow `say` on their own budget.
+        render_cap = max(
+            0,
+            _working_set_max_chars()
+            - sum(len(text) + 1 for text in (delta_text, say_text) if text),
+        )
+        rules_text = _capture_rules_text(packet.get("capture_policy")) if say_text else ""
+        policy_text = f"{say_text}\n{rules_text}" if rules_text else say_text
+        acknowledged = True
+        if isinstance(packet.get("map"), dict):
+            render = _format_session_context if session_only else _format_map_with_slice
+            block, complete, stance_complete, map_shown = render(packet, render_cap, last_generation, last_stance)
+            if generation_path is not None and overhead_path is not None:
+                try:
+                    overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
+                    if session_only:
+                        # The session block's data header is hook framing too.
+                        overhead += len(_SESSION_CONTEXT_HEADER) + 1
+                    budget = packet.get("budget")
+                    requested = _working_set_max_chars() if max_chars is None else max_chars
+                    if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
+                        # Only an acknowledged cap can explain a cut; full renders replace old estimates.
+                        overhead = max(overhead, _working_set_max_chars() - requested)
+                    # An unchanged block carries no item, so it would understate the next full map's framing.
+                    if packet["map"].get("unchanged") is not True:
+                        _write_activation_value(overhead_path, str(overhead))
+                    if block and complete:
+                        _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
+                    elif not complete:
+                        _state_core().unlink_nudge_file(generation_path)
+                except (AttributeError, OSError, ValueError):
+                    pass
+            if block and stance_complete and stance_path is not None and (packet.get("stance") or {}).get("state") == "ready":
+                try:
+                    _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
+                except (AttributeError, OSError, ValueError):
+                    pass
+            # A changed map that reached the agent in no form keeps the old token, so the next prompt's request is
+            # served the map again: one request per prompt, as every prompt makes, until the map's floor fits.
+            acknowledged = map_shown
+        elif session_only:
+            # No map means the service abstained (warming, disabled, an older service): nothing to render or hold.
+            block = ""
+        else:
+            # Only a ready anchors packet proves a mode change; abstentions keep the hint.
+            if overhead_path is not None and isinstance(packet.get("anchors"), list) and not packet.get("abstained"):
+                try:
+                    _state_core().unlink_nudge_file(overhead_path)
+                except (AttributeError, OSError, ValueError):
+                    pass
+            block = _format_working_set_block(packet, render_cap)
+        methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
+        if acknowledged and (not methods_reset or _METHOD_RESET_LINE in block.splitlines()):
+            _write_activation_token(session_id, str(packet.get("continuity") or ""))
+        if delta_text:
+            block = f"{block}\n{delta_text}" if block else delta_text
+            _record_vocabulary_delta_shown(session_id, delta, delta_delivered)
+        keep_reminder = _block_keeps_the_reminder(packet)
+        session = ""
+        if session_only:
+            session = _SESSION_READY if block else _SESSION_UNCHANGED
+            if gathered is None:
+                session = _SESSION_TIMEOUT
+            elif not isinstance(packet.get("map"), dict):
+                session = _SESSION_NONE
+        return _ContextFetch(packet_available, lane, hit_count, block, policy_text, keep_reminder, session)
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return _ContextFetch(False, "none", 0, "", policy_text, False, _SESSION_NONE if session_only else "")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3502,18 +4081,33 @@ def main(argv: list[str] | None = None) -> int:
 
     if _refresh_main(args, data):
         return 0
+    additional_context = _prompt_context(data)
+    # Delivered after the retrieval work, so a hook the client kills mid-ladder leaves the marker for the next prompt.
+    reminder = _deferred_capture_reminder(data)
+    if reminder:
+        additional_context = f"{additional_context}\n\n{reminder}" if additional_context else reminder
+    if additional_context:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": additional_context,
+        }}))
+    return 0
+
+
+def _prompt_context(data: dict) -> str:
+    """The `additionalContext` this prompt's retrieval nudge adds; `""` when the hook stays silent."""
     if os.environ.get("EXOMEM_RETRIEVE_NUDGE_DISABLE"):
-        return 0
+        return ""
     preset = _PROMINENCE_PRESETS[_prominence()]
     if preset is None:  # prominence=off — the user asked for explicit invocation only
-        return 0
+        return ""
 
     prompt = _prompt(data)
     if not prompt.strip():
-        return 0
+        return ""
 
     if _is_task_control_event(data):
-        return 0
+        return ""
 
     # Explicit env still wins; the prominence level only moves the default.
     mode = _inject_mode()
@@ -3537,10 +4131,10 @@ def main(argv: list[str] | None = None) -> int:
         mode == _MCP_MODE and "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS" in os.environ
     )
     if length_gate and len(prompt.strip()) < min_chars:  # ("yes", "go", "thanks")
-        return 0
+        return ""
 
     if not referential and _is_obvious_control_prompt(prompt, control_max_chars):
-        return 0
+        return ""
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if mode == _OFF_MODE:
@@ -3555,26 +4149,22 @@ def main(argv: list[str] | None = None) -> int:
         global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
         if reminded_ok:
             if not global_ok:
-                return 0
+                return ""
             text = REMINDER
         elif _prominence() == "maximal":
             text = REMINDER_POINTER
         else:
-            return 0
+            return ""
         _touch(reminded)
         if text == REMINDER and global_cooldown > 0:
             _touch(global_stamp)
         _log(prompt, "off", 0)
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
-        }}))
-        return 0
+        return text
     ok, stamp = _cooldown_ok(session_id, cooldown)
     # Native activation is per turn; reminder cooldowns do not apply. Direct
     # working-set mode also exempts referential turns carrying recent context.
     if not ok and not referential and mode != _MCP_MODE:
-        return 0
+        return ""
 
     # Another tab/session already got the REMINDER recently. In working-set
     # mode that is all it gates: a fresh session's first packet is not the
@@ -3584,12 +4174,18 @@ def main(argv: list[str] | None = None) -> int:
     # turn; legacy reminder/stub modes stay silent here exactly as before.
     global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
     if not global_ok and mode not in {_WORKING_SET_MODE, _MCP_MODE}:
-        return 0
+        return ""
 
     additional_context = REMINDER
-    lane, hit_count = "off", 0
+    lane, hit_count, session, policy_text = "off", 0, "", ""
     if mode == _MCP_MODE:
-        additional_context, lane = _mcp_activation_context(), "mcp"
+        # The agent still decides what to recall for the turn. What the hook adds is the turn-independent
+        # session context that changed, which costs one cheap empty-turn call and no user text.
+        fetched = _fetch_context(session_id, data, "", session_only=True)
+        lane, session, policy_text = "mcp", fetched.session, fetched.policy_text
+        additional_context = _mcp_activation_context()
+        if fetched.block:
+            additional_context = fetched.block + "\n\n" + additional_context
     elif mode == _WORKING_SET_MODE:
         # Usually a payload REPLACEMENT rather than an upgrade: a packet that
         # resolved, or that hands over a choice between senses that each did,
@@ -3598,84 +4194,9 @@ def main(argv: list[str] | None = None) -> int:
         # has. The exception is a rendered `unresolved` block, where nothing
         # resolved and ordinary recall may still be exactly what is wanted — there
         # the reminder FOLLOWS, and `_block_keeps_the_reminder` is what knows.
-        policy_text = ""
-        try:
-            continuity = _read_activation_token(session_id)
-            try:
-                generation_path = _activation_map_path(session_id)
-                overhead_path = _activation_map_overhead_path(session_id)
-                max_chars = _read_map_request_max_chars(session_id)
-                last_generation = _read_activation_value(generation_path) if continuity else ""
-                stance_path = _activation_stance_path(session_id)
-                last_stance = _read_activation_value(stance_path) if continuity else ""
-            except (AttributeError, OSError, ValueError):
-                # A mixed hook pair loses map state, never the working set.
-                generation_path = overhead_path = None
-                max_chars, last_generation = None, ""
-                stance_path, last_stance = None, ""
-            request_budget = {"max_chars": max_chars} if max_chars is not None else {}
-            packet, lane = _gather_packet_with_lane(
-                prompt,
-                continuity,
-                _attribution_with_native_skills(attribution(session_id, str(data.get("cwd") or ""))),
-                _conversation_from_transcript(
-                    str(data.get("transcript_path") or data.get("transcriptPath") or ""),
-                    prompt,
-                ),
-                **request_budget,
-            )
-            packet_available = isinstance(packet, dict)
-            packet = packet if isinstance(packet, dict) else {}
-            hit_count = len(packet.get("anchors") or ())
-            delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
-            delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-            policy_text = _capture_policy_text(packet.get("capture_policy"))
-            render_cap = max(
-                0,
-                _working_set_max_chars()
-                - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
-            )
-            if isinstance(packet.get("map"), dict):
-                block, complete, stance_complete = _format_map_with_slice(packet, render_cap, last_generation, last_stance)
-                if generation_path is not None and overhead_path is not None:
-                    try:
-                        overhead = _map_render_overhead(packet["map"], packet.get("turn_slice"))
-                        budget = packet.get("budget")
-                        requested = _working_set_max_chars() if max_chars is None else max_chars
-                        if not complete and isinstance(budget, dict) and budget.get("limit_chars") == requested:
-                            # Only an acknowledged cap can explain a cut; full renders replace old estimates.
-                            overhead = max(overhead, _working_set_max_chars() - requested)
-                        # An unchanged block carries no item, so it would understate the next full map's framing.
-                        if packet["map"].get("unchanged") is not True:
-                            _write_activation_value(overhead_path, str(overhead))
-                        if block and complete:
-                            _write_activation_value(generation_path, str(packet["map"].get("generation") or ""))
-                        elif not complete:
-                            _state_core().unlink_nudge_file(generation_path)
-                    except (AttributeError, OSError, ValueError):
-                        pass
-                if block and stance_complete and stance_path is not None and (packet.get("stance") or {}).get("state") == "ready":
-                    try:
-                        _write_activation_value(stance_path, str(packet["stance"].get("generation") or ""))
-                    except (AttributeError, OSError, ValueError):
-                        pass
-            else:
-                # Only a ready anchors packet proves a mode change; abstentions keep the hint.
-                if overhead_path is not None and isinstance(packet.get("anchors"), list) and not packet.get("abstained"):
-                    try:
-                        _state_core().unlink_nudge_file(overhead_path)
-                    except (AttributeError, OSError, ValueError):
-                        pass
-                block = _format_working_set_block(packet, render_cap)
-            methods_reset = ((packet.get("task_context") or {}).get("methods") or {}).get("reset")
-            if not methods_reset or _METHOD_RESET_LINE in block.splitlines():
-                _write_activation_token(session_id, str(packet.get("continuity") or ""))
-            if delta_text:
-                block = f"{block}\n{delta_text}" if block else delta_text
-                _record_vocabulary_delta_shown(session_id, delta, delta_delivered)
-            keep_reminder = _block_keeps_the_reminder(packet)
-        except Exception:  # noqa: BLE001 - hook must never break prompt submission
-            lane, hit_count, block, keep_reminder, packet_available = "none", 0, "", False, False
+        fetched = _fetch_context(session_id, data, prompt)
+        lane, hit_count, block = fetched.lane, fetched.hit_count, fetched.block
+        policy_text, keep_reminder, packet_available = fetched.policy_text, fetched.keep_reminder, fetched.packet_available
         if block:
             additional_context = (
                 block + "\n\n" + REMINDER if keep_reminder and global_ok else block
@@ -3684,10 +4205,6 @@ def main(argv: list[str] | None = None) -> int:
             additional_context = _mcp_activation_context()
         elif not global_ok:
             additional_context = ""
-        if policy_text:
-            # First, before any retrieved material or reminder: the agent reads its authority before its
-            # context, and whatever would have followed is unchanged.
-            additional_context = f"{policy_text}\n{additional_context}" if additional_context else policy_text
     elif mode == _STUB_MODE:
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any
@@ -3701,6 +4218,10 @@ def main(argv: list[str] | None = None) -> int:
             lane, hit_count, block = "none", 0, ""
         if block:
             additional_context = REMINDER + "\n\n" + block
+    if policy_text:
+        # First, before any retrieved material or reminder: the agent reads its authority before its
+        # context, and whatever would have followed is unchanged.
+        additional_context = f"{policy_text}\n{additional_context}" if additional_context else policy_text
     # Stamped after the transport ran: a hook the client kills mid-ladder must
     # not also burn the session's cooldown and the client-wide one. The session
     # stamp moves after every fetch, printed or not, so an unreachable service
@@ -3715,14 +4236,9 @@ def main(argv: list[str] | None = None) -> int:
     if global_cooldown > 0 and REMINDER in additional_context:
         _touch(global_stamp)
     if not additional_context:
-        return 0
-    _log(prompt, lane, hit_count)
-
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
-        "additionalContext": additional_context,
-    }}))
-    return 0
+        return ""
+    _log(prompt, lane, hit_count, session)
+    return additional_context
 
 
 if __name__ == "__main__":

@@ -8,10 +8,12 @@ through ``write.commit``, as the store thread commits them.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,11 +30,13 @@ from test_vault_store_migration import (
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
+from test_vault_store_served import call
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
 from exomem import (
     activation_conventions,
+    attention,
     bm25,
     capabilities,
     commands,
@@ -53,18 +57,16 @@ from exomem import (
 )
 from exomem import find as find_module
 from exomem import vault as vault_module
+from exomem.audit import AuditFinding, AuditReport
 from exomem.collection_store import connection, preview
 from exomem.collection_store.writer import CollectionWriter
 from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
-from exomem.vault_store import availability, importer, ownership, read, write
+from exomem.kbdir import managed_join
+from exomem.vault_store import importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
-
-pytestmark = pytest.mark.skipif(
-    sys.platform != "linux", reason="The offline-owner lease is Linux-only"
-)
 
 SENTINEL = b"POISONED PROJECTION: a reader served this file instead of the store\n"
 #: How many pages only the store holds; the drill at scale sets it from the environment.
@@ -574,9 +576,11 @@ IDENTITY = "0f5c3a52-7d1e-4b8a-9c1f-2a6e4d8b0c11"
 #: When set, the index test writes each statement's ``EXPLAIN QUERY PLAN`` to this file: the plans
 #: that tasks.md 3.2 records, run with ``EXOMEM_READERS_DRILL_PAGES`` at scale.
 PLAN_REPORT = os.environ.get("EXOMEM_READERS_PLAN_REPORT")
-#: The store's settings tables hold one row per setting, never one per page, so reading all of
-#: them costs the same at any vault size.
-SETTINGS_TABLES = {"meta", "store_meta", "store_mode"}
+#: The tables whose rows do not grow with the vault. The settings tables hold one row per setting,
+#: never one per page, so reading all of them costs the same at any vault size. The derivation
+#: queue holds only the intents that still lag, which the store thread drains before each request:
+#: its rows follow the lag, not the vault.
+UNSCALED_TABLES = {"meta", "store_meta", "store_mode", "store_derivation_queue"}
 
 
 def full_reads(reader, sql):
@@ -598,7 +602,7 @@ def full_reads(reader, sql):
         opened[cursor]
         for _addr, op, cursor, *_rest in code
         if op in ("Rewind", "Last") and cursor in opened
-    } - SETTINGS_TABLES
+    } - UNSCALED_TABLES
 
 
 @pytest.mark.timeout(1800)
@@ -682,7 +686,7 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
         monkeypatch.setattr(
             lexstore, seam, lambda *args, _seam=seam, **kwargs: repairs.append(_seam)
         )
-    write.commit(writer, put(PROFILES, b"profiles: {}\n"))
+    overlay = write.commit(writer, put(PROFILES, b"profiles: {}\n"))
     find_module.clear_cache()
 
     found = commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
@@ -691,7 +695,8 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
     assert found["hits"] and asked["hits"]
     assert "warming" not in found and "warming" not in asked
     assert found["lag"]["registry"] == "rebuilding"
-    assert found["lag"]["revision"] < found["lag"]["target"] == read.current_revision(stored)
+    # The target is the overlay's commit; the derivation of its page moved the revision after it.
+    assert found["lag"]["revision"] < found["lag"]["target"] == overlay.revision
     assert found["notice"] in asked["notice"]
     assert (find_lighthouse(stored), find_lighthouse(stored)) == (False, True)
     assert repairs == []
@@ -862,6 +867,10 @@ def test_a_file_that_the_store_does_not_own_is_answered_from_the_rows_that_its_s
 CLAIMED = "Knowledge Base/Notes/Gen/Claimed.md"
 
 
+@pytest.mark.skipif(
+    not vault_module.STAT_GENERATION_TRUSTED,
+    reason="ctime does not move on a write here, so a file-mode read is never remembered",
+)
 @pytest.mark.timeout(300)
 def test_a_container_claim_is_read_from_the_stored_page_though_a_file_mode_read_remembered_none(
     vault, monkeypatch  # noqa: F811
@@ -1078,9 +1087,16 @@ def test_the_terminal_filter_withholds_a_stored_page_under_each_spelling_whateve
     assert released == {"entries": [{"path": visible}]}
 
 
+@pytest.fixture
+def case_sensitive_volume() -> None:
+    """The test builds folders that differ only in case, which a folding volume merges into one."""
+    if sys.platform in {"win32", "darwin"}:
+        pytest.skip("needs a case-sensitive volume: Windows and default macOS volumes fold case")
+
+
 @pytest.mark.parametrize("store", (False, True), ids=("file", "store"))
 def test_a_spelling_that_two_pages_share_once_case_is_folded_is_released_only_when_both_are(
-    vault, store  # noqa: F811
+    vault, store, case_sensitive_volume  # noqa: F811
 ):
     """The terminal filter decided a case-folded spelling against one matching page, the first in
     the directory's order on disk and in name order in the store. With `secret/Ledger.md` withheld
@@ -1184,19 +1200,27 @@ PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
 )
 
 
-class LinkShownByStoredPath(AssertionError):
-    """The store-mode read showed the link by its stored path where file mode showed its title."""
+def test_read_page_does_not_scan_its_parent_to_resolve_the_version_id(stored, monkeypatch):  # noqa: F811
+    parent = (stored / ALPHA).parent
+    scanned = []
+    scandir = os.scandir
+
+    def record(path):
+        if path == parent:
+            scanned.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", record)
+    with capabilities.active_surface(PUBLIC_SHAPE):
+        result = call(stored, "read_memory", path=ALPHA)
+
+    assert result["path"] == ALPHA
+    assert result["id"]
+    assert scanned == []
 
 
 @pytest.mark.timeout(300)
-@pytest.mark.parametrize("resolver", [
-    "evicted",
-    pytest.param("resident", marks=pytest.mark.xfail(
-        strict=True, raises=LinkShownByStoredPath,
-        reason="find.borrow_query_resolver compares the file registry's triple with a resolver "
-        "that store mode keys on the snapshot's revision, so a resident resolver never counts as current",
-    )),
-])
+@pytest.mark.parametrize("resolver", ["evicted", "resident"])
 def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
     vault, resolver  # noqa: F811
 ):
@@ -1217,15 +1241,66 @@ def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolve
 
     file_mode = body()
     shown = "[[Beta]]" if resolver == "resident" else "[[Knowledge Base/Notes/Beta]]"
-    if shown not in file_mode:
-        # Not an assertion: the xfail above names only the store-mode difference.
-        pytest.fail(f"file mode no longer shows {shown}: {file_mode!r}")
+    assert shown in file_mode, f"file mode no longer shows {shown}: {file_mode!r}"
     assert migrate_apply(vault) == 0
 
-    store_mode = body()
-    if store_mode != file_mode and store_mode == file_mode.replace("[[Beta]]", "[[Knowledge Base/Notes/Beta]]"):
-        raise LinkShownByStoredPath(store_mode)
-    assert store_mode == file_mode
+    assert body() == file_mode
+
+
+@pytest.mark.timeout(300)
+def test_a_resolver_built_across_a_commit_shows_a_pinned_restricted_reader_no_withheld_title(
+    stored, writer, monkeypatch  # noqa: F811
+):
+    """A resolver is keyed at the revision whose key it read. Built from a later revision under that
+    key, it lets a reader still pinned at the key's revision borrow it, and the reader's filter,
+    which asks its own revision whether a path is a page, then shows a page that a policy withholds
+    from it as a title."""
+    restrict_external(stored, 'paths: ["Knowledge Base/Notes/Secret/**"]')
+    linker = "Knowledge Base/Notes/Linker.md"
+    secret = "Knowledge Base/Notes/Secret/Plan.md"
+    write.commit(
+        writer,
+        put(
+            linker,
+            b"---\ntitle: Linker\ntype: note\n---\n# Linker\n\n"
+            b"See [[Knowledge Base/Notes/Beta]] and [[Knowledge Base/Notes/Secret/Plan]] soon.\n",
+        ),
+    )
+    find_module.evict_resolver_caches(stored)
+    keyed, committed, errors = threading.Event(), threading.Event(), []
+    real_vault_key = find_module.FreshnessSnapshot.vault
+
+    def vault_key(self):
+        key = real_vault_key(self)
+        if threading.current_thread().name == "resolver-builder":
+            keyed.set()
+            assert committed.wait(60)
+        return key
+
+    def build():
+        try:
+            find_module._get_query_resolver(stored)
+        except BaseException as error:  # noqa: BLE001 - the test thread reports it.
+            errors.append(error)
+            keyed.set()
+
+    monkeypatch.setattr(find_module.FreshnessSnapshot, "vault", vault_key)
+    with read.request_snapshot(stored):  # the reader's revision, before the commit below
+        builder = threading.Thread(target=build, name="resolver-builder")
+        builder.start()
+        assert keyed.wait(60)
+        write.commit(
+            writer,
+            put(secret, b"---\ntitle: Merger Plan Codename\ntype: note\n---\n# Plan\n\nThe plan.\n"),
+        )
+        committed.set()
+        builder.join(60)
+        assert not errors, errors
+        with request_scope(EXTERNAL), capabilities.active_surface(PUBLIC_SHAPE):
+            body = commands.op_read_memory(stored, path=linker)["body"]
+
+    assert "[[Beta]]" in body, f"the read never borrowed the resolver: {body!r}"
+    assert "Merger Plan Codename" not in body
 
 
 #: Who asks, and whether an active policy withholds a page from the external audience. A caller
@@ -1297,6 +1372,42 @@ def test_a_bound_store_decides_whether_a_caller_is_restricted_as_file_mode_does(
 
     assert in_a_bound_store == in_file_mode
     assert read.holds_file(store_root, f"{folders['store']}/One.md") is restricted
+
+
+@pytest.mark.timeout(300)
+@pytest.mark.parametrize("reads", ["the store", "the files"])
+def test_attention_counts_the_capped_contradiction_pairs_for_the_owner_of_a_bound_store(
+    served, monkeypatch, reads  # noqa: F811
+):
+    """A bound store filters every caller's walk, the owner's too, so a summary dropped because a filter
+    exists loses the owner the count of pairs that the contradiction queue capped. Another caller still
+    loses it: the cap counted pairs before any page was decided for that caller."""
+    capped = AuditFinding(
+        category="corpus_contradictions", severity="info", path=managed_join(""),
+        detail="3 more pairs not shown", proposed_fix="raise the cap",
+        meta={"truncated": 3, "shown": 1, "total": 4},
+    )
+    pair = AuditFinding(
+        category="corpus_contradictions", severity="info", path=ALPHA, paths=[ALPHA, BETA],
+        detail="Alpha overlaps Beta", proposed_fix="read both",
+        meta={"cosine": 0.9, "priority": 0.9, "dormancy": 1.0, "same_family": False},
+    )
+    monkeypatch.setattr(
+        attention.audit_module, "audit",
+        lambda *_args, **_kwargs: AuditReport(findings=[pair, capped], summary={"corpus_contradictions": 2}),
+    )
+    if reads == "the files":  # a vault whose collection store is enrolled and whose pages are still files
+        monkeypatch.setattr(vault_store_mode, "store_mode_for_reads", lambda _root: False)
+
+    def upstream_truncated(who):
+        with request_scope(who):
+            return attention.attention(
+                served, categories=["corpus_contradictions"], today=dt.date(2026, 1, 1),
+                record_surfacing=False,
+            ).upstream_truncated
+
+    assert upstream_truncated(owner_principal(surface="mcp")) == 3
+    assert upstream_truncated(EXTERNAL) == 0
 
 
 @pytest.mark.timeout(300)
@@ -1415,8 +1526,6 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
-    # The session past the rollout fence, which refuses a store-mode vault on this build.
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))

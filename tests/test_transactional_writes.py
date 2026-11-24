@@ -641,7 +641,7 @@ def test_batch_atomic_write_replaces_and_creates_on_windows(
     parent.mkdir(parents=True)
     existing = parent / "existing.md"
     created = parent / "created.md"
-    existing.write_text("old\n", encoding="utf-8")
+    existing.write_bytes(b"old\n")  # text mode would write CRLF on Windows and change the hash
     monkeypatch.setattr("exomem.file_watcher.register_self_write", lambda *_: None)
     monkeypatch.setattr(
         "exomem.index_sync.upsert_after_write", lambda *_args, **_kwargs: None
@@ -1275,6 +1275,8 @@ def test_restore_bound_source_timestamps_distinguishes_read_and_write_churn(
     source = vault_module._BatchArtifactGuard.capture(target)
     descriptor = vault_module._open_bound_artifact(source)
     source_info = os.fstat(descriptor)
+    # The snapshot read moved the timestamps; restoring unchanged ones is a no-op that skips utime.
+    os.utime(descriptor, ns=(source_info.st_atime_ns + 10**9, source_info.st_mtime_ns + 10**9))
     real_fstat = os.fstat
     descriptor_observations = 0
 
@@ -1878,9 +1880,30 @@ def test_held_batch_restore_preserves_an_intervening_owned_edit(
     assert pending.read_bytes() == b"pending-old"
 
 
+@pytest.fixture
+def interference_during_rollback_unlink() -> None:
+    """Skip where the OS blocks the interference these tests make while the rollback holds the leaf."""
+    if os.name == "nt":
+        pytest.skip(
+            "Windows refuses a write or replace of a file while the rollback holds a delete-capable "
+            "handle on it, so the interference this test makes cannot happen there"
+        )
+
+
+@pytest.fixture
+def ancestor_swap_above_a_held_parent() -> None:
+    """Skip where the OS refuses to rename a folder that holds a handle the batch keeps open."""
+    if os.name == "nt":
+        pytest.skip(
+            "Windows refuses to rename a folder above a handle the batch holds, "
+            "so the ancestor swap this test makes cannot happen there"
+        )
+
+
 @pytest.mark.parametrize("intervention", ["reopen", "read"])
 def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, intervention: str,
+    interference_during_rollback_unlink: None,
 ) -> None:
     created = tmp_path / "created.txt"
     pending = tmp_path / "pending.txt"
@@ -1933,9 +1956,52 @@ def test_held_batch_unlink_preserves_an_edit_after_reopening_installed_content(
     assert pending.read_bytes() == b"pending-old"
 
 
+def test_held_batch_unlink_leaves_a_different_file_that_replaced_the_leaf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    interference_during_rollback_unlink: None,
+) -> None:
+    """A rollback that removes whichever file sits at the leaf once it has checked the one it created."""
+    created = tmp_path / "created.txt"
+    pending = tmp_path / "pending.txt"
+    pending.write_bytes(b"pending-old")
+    with vault_module.held_fs.acquire(tmp_path).require() as filesystem:
+        filesystem_type = type(filesystem)
+    real_unlink = filesystem_type.unlink
+    rolling_back = False
+    replaced = False
+
+    def fail_pending(destination: Path, *, restoring: bool) -> None:
+        nonlocal rolling_back
+        if destination == pending:
+            rolling_back = True
+            raise OSError("forward publication stopped")
+
+    def replace_the_leaf_then_unlink(self, file):  # noqa: ANN001
+        nonlocal replaced
+        if rolling_back and file.name == created.name:
+            other = tmp_path / "other.tmp"
+            other.write_bytes(b"a different file")
+            os.replace(other, created)
+            replaced = True
+        return real_unlink(self, file)
+
+    monkeypatch.setattr(vault_module, "_before_batch_destination_published", fail_pending)
+    monkeypatch.setattr(filesystem_type, "unlink", replace_the_leaf_then_unlink)
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(created, "installed"), vault_module.PlannedWrite(pending, "pending-new")],
+            vault_root=tmp_path, post_commit_fanout=False,
+        )
+    assert replaced
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert created.read_bytes() == b"a different file"
+    assert pending.read_bytes() == b"pending-old"
+
+
 @pytest.mark.parametrize("guarded", [False, True])
 def test_held_batch_inverse_refuses_a_replaced_ancestor_above_its_retained_parent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guarded: bool,
+    ancestor_swap_above_a_held_parent: None,
 ) -> None:
     ancestor = tmp_path / "outer"
     target = ancestor / "inner/target.txt"
@@ -2651,9 +2717,9 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
         created_workspaces.append(workspace.name)
         return workspace
 
-    def observe_artifact_create(self, name: str, content: bytes):
+    def observe_artifact_create(self, name: str, content: bytes, **options):  # noqa: ANN003
         artifact_workspaces.append((self.name, name))
-        return real_create_artifact(self, name, content)
+        return real_create_artifact(self, name, content, **options)
 
     monkeypatch.setattr(vault_module, "_batch_workspace_token", fixed_token_hex)
     monkeypatch.setattr(
@@ -2693,12 +2759,12 @@ def test_batch_staging_keyboard_interrupt_cleans_created_parents_and_workspaces(
     real_create_artifact = vault_module._BatchWorkspace.create_artifact
     calls = 0
 
-    def interrupt_after_parent(self, name: str, content: bytes):  # noqa: ANN001
+    def interrupt_after_parent(self, name: str, content: bytes, **options):  # noqa: ANN001, ANN003
         nonlocal calls
         calls += 1
         if calls == 1:
             raise KeyboardInterrupt("stop during staging")
-        return real_create_artifact(self, name, content)
+        return real_create_artifact(self, name, content, **options)
 
     monkeypatch.setattr(
         vault_module._BatchWorkspace, "create_artifact", interrupt_after_parent

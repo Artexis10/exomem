@@ -35,10 +35,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from . import __version__, cuda_containment, install_info, process_memory
+from . import __version__, cuda_containment, install_info, media_types, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
-from .kbdir import kb_dirname, kb_prefix
+from .kbdir import managed_join, managed_root, managed_root_rel
 
 if TYPE_CHECKING:
     from .writer_lease import LeaseConfig
@@ -256,6 +256,16 @@ def check_graph_recovery_age(vault_root: Path | None) -> DoctorCheck:
             "No vault selected; graph recovery state not evaluated.",
             details=details,
         )
+    from .vault_store import mode as store_mode
+
+    if store_mode.store_mode_for_reads(vault_root):
+        # A store commit derives its graph rows itself: no checkpoint and no recovery clock exist to read.
+        return _check(
+            "write_path.graph_recovery",
+            "pass",
+            "The vault is in store mode and derives its graph with each commit, so graph recovery does not apply.",
+            details=details,
+        )
     checkpoint = graph_sync.read_checkpoint(vault_root)
     age = graph_sync.recovery_age_seconds(vault_root)
     clock_state = graph_sync.recovery_clock_state(vault_root)
@@ -342,7 +352,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", *media_types.PDF_READERS, "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -470,8 +480,8 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
             "vault.path",
             "fail",
             f"{path} contains no exomem schema contract "
-            f"(looked in .exomem/schema/ and {kb_prefix()}_Schema/).",
-            f"Pass the vault root, not the {kb_dirname()} folder. For a new vault, run "
+            f"(looked in .exomem/schema/ and {managed_join('_Schema/')}).",
+            f"Pass the vault root, not the {managed_root_rel()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
         )
     return path, _check("vault.path", "pass", f"Vault found at {path}.")
@@ -589,12 +599,12 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
         return []
     from .vault import shipped_schema_root
 
-    kb = vault_root / kb_dirname()
+    kb = managed_root(vault_root)
     checks: list[DoctorCheck] = []
     required = [
         ("vault.schema", shipped_schema_root(vault_root) / "SKILL.md", "schema contract"),
-        ("vault.index", kb / "index.md", f"{kb_prefix()}index.md"),
-        ("vault.log", kb / "log.md", f"{kb_prefix()}log.md"),
+        ("vault.index", kb / "index.md", managed_join("index.md")),
+        ("vault.log", kb / "log.md", managed_join("log.md")),
         (
             "vault.project_keys",
             kb / "_Schema" / "project-keys.yaml",
@@ -614,6 +624,80 @@ def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
                 "restore the missing scaffold file from src/exomem/_scaffold/.",
             ))
     return checks
+
+
+def _check_vault_layout(vault_root: Path | None) -> list[DoctorCheck]:
+    """Report the vault's layout, and warn on whatever leaves it unsettled; it never refuses.
+
+    A vault-root schema folder with no layout record is a warning that names the record to
+    write: no other code reads the layout yet, so nothing here may fail on it. A remedy means a
+    person should act, so it is the single test between a pass and a warning.
+    """
+    if vault_root is None:
+        return []
+    from . import layout_report
+
+    found = layout_report.report(vault_root)
+    facts = dict(found)
+    outcome = facts.pop("outcome")
+    remedy = facts.pop("remedy")
+    return [
+        _check(
+            "vault.layout",
+            "warn" if remedy else "pass",
+            outcome,
+            remedy,
+            details=facts,
+        )
+    ]
+
+
+def _check_filename_style(vault_root: Path | None) -> list[DoctorCheck]:
+    """Report the filename style new pages are named in, and where that choice came from.
+
+    An unrecognised value refuses every write that derives a name, and an unparseable file makes
+    each such write take the default style with a warning, so both are failures here rather than
+    something to read out of a write result.
+    """
+    if vault_root is None:
+        return []
+    from .vault import (
+        FILENAME_STYLES,
+        InvalidSlugError,
+        UnparseableFilenameStyleError,
+        filename_style_source,
+    )
+
+    try:
+        style, source = filename_style_source(vault_root)
+    except UnparseableFilenameStyleError as error:
+        return [
+            _check(
+                "vault.filename_style",
+                "fail",
+                f"{error}.",
+                "Fix the YAML in `_Schema/project-keys.yaml`. Until then each write that derives a "
+                "name takes the default style and carries a `FILENAME_STYLE_UNPARSEABLE` warning.",
+            )
+        ]
+    except InvalidSlugError as error:
+        return [
+            _check(
+                "vault.filename_style",
+                "fail",
+                f"{error}.",
+                "Set `EXOMEM_FILENAME_STYLE` or `filename_style` in `_Schema/project-keys.yaml` "
+                f"to one of {', '.join(FILENAME_STYLES)}, or remove it to take the default.",
+            )
+        ]
+    return [
+        _check(
+            "vault.filename_style",
+            "pass",
+            f"New pages are named in the {style} style (from {source}).",
+            details={"style": style, "source": source},
+        )
+    ]
 
 
 def _resolved_embedding_backend() -> str:
@@ -803,6 +887,9 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
         )
     if vault_root is None:
         return _check("dep.fts5-lexical", "pass", "FTS5 + trigram are available.")
+    stored = _check_store_lexical(vault_root)
+    if stored is not None:
+        return stored
     side = lexstore.lexical_path(vault_root)
     if not side.exists():
         return _check(
@@ -825,6 +912,53 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
         "dep.fts5-lexical",
         "pass",
         f"FTS5 lexical sidecar healthy ({n} pages indexed).",
+    )
+
+
+def _check_store_lexical(vault_root: Path) -> DoctorCheck | None:
+    """`dep.fts5-lexical` for a store-mode vault, from the store's own rows; None for a file-mode vault.
+
+    A store-mode vault never reads the file-mode sidecar, which migration left frozen at the page count
+    of the day it was migrated.
+    """
+    from .collection_store.connection import CollectionStoreError
+    from .vault_store import mode, read
+
+    def unreadable_store(reason: str) -> DoctorCheck:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The store's lexical rows could not be read ({reason}).",
+            "Fix the store failure that the vault store checks in this report name.",
+        )
+
+    in_store_mode, unreadable = mode.store_mode_or_unreadable(vault_root)
+    if unreadable is not None:
+        return unreadable_store(unreadable)
+    if not in_store_mode:
+        return None
+    try:
+        with read.request_snapshot(vault_root):
+            state = read.readiness(vault_root)
+            with read.snapshot(vault_root) as view:
+                pages = view.connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0]
+    except (CollectionStoreError, OSError, sqlite3.Error) as error:
+        return unreadable_store(getattr(error, "code", type(error).__name__))
+    details = {"vault_store_revision": state.revision, "registry": state.registry}
+    notice = read.registry_notice(state)
+    if notice is not None:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"The store holds {pages} lexical page row(s), and some may lag. {notice['notice']}",
+            "Keep the service running: the pass finishes there, and this check turns to pass.",
+            details=details,
+        )
+    return _check(
+        "dep.fts5-lexical",
+        "pass",
+        f"The store's lexical rows are healthy ({pages} pages indexed, at store revision {state.revision}).",
+        details=details,
     )
 
 
@@ -853,7 +987,27 @@ def _check_deferred_index_backlog(vault_root: Path | None) -> DoctorCheck:
             details=details,
         )
     from . import index_sync, lexstore
+    from .vault_store import mode as store_mode
 
+    in_store_mode, unreadable = store_mode.store_mode_or_unreadable(vault_root)
+    if unreadable is not None:
+        return _check(
+            "deferred_index_backlog",
+            "warn",
+            f"The vault's mode could not be read ({unreadable}), so its deferred index backlog was not inspected.",
+            "Fix the store failure that the vault store checks in this report name.",
+            details=details,
+        )
+    if in_store_mode:
+        # Migration leaves file mode's queue in place, and a store commit drains nothing from it: the
+        # vectors follow the store's audit trail. A warning here would name `exomem index`, which a
+        # store-mode vault refuses.
+        return _check(
+            "deferred_index_backlog",
+            "pass",
+            "This vault is in store mode, which keeps no file-mode index backlog: its vectors follow the store.",
+            details=details,
+        )
     sidecar = lexstore.lexical_path(vault_root)
     if sidecar.exists():
         try:
@@ -1085,7 +1239,48 @@ def _check_graph_sync_state(vault_root: Path | None) -> DoctorCheck:
             "No vault configured; graph_sync state was not inspected.",
         )
     from . import graph_sync
+    from .vault_store import graph_state
 
+    store_graph = graph_state.read(vault_root)
+    if store_graph is not None:
+        details = {"state": store_graph.state, "vault_store_revision": store_graph.revision}
+        if store_graph.current:
+            from .vault_store import read as store_read
+
+            notice = store_read.request_registry_notice(vault_root)
+            if notice is not None:
+                # The registry pass re-derives the pages in path order: the graph serves, and some rows may lag.
+                details = {**details, "state": notice["lag"]["registry"], "registry": notice["lag"]}
+                return _check(
+                    "graph_sync.state",
+                    "warn",
+                    f"The graph is served from the store at store revision {store_graph.revision}, and its "
+                    f"registry state is {notice['lag']['registry']}. {notice['notice']}",
+                    "Keep the service running: the pass finishes there, and this check turns to pass.",
+                    details=details,
+                )
+            return _check(
+                "graph_sync.state",
+                "pass",
+                f"The graph is served from the store, at store revision {store_graph.revision}.",
+                details=details,
+            )
+        details["reason"] = store_graph.reason
+        if store_graph.reason == graph_state.GRAPH_DISABLED:
+            return _check(
+                "graph_sync.state",
+                "warn",
+                "The graph is disabled, so the store serves no graph rows.",
+                "Unset EXOMEM_DISABLE_GRAPH_INDEX and restart the service to serve the graph.",
+                details=details,
+            )
+        return _check(
+            "graph_sync.state",
+            "fail",
+            f"The store cannot be read for the graph ({store_graph.reason}).",
+            "Fix the store failure that the vault store checks in this report name.",
+            details=details,
+        )
     status = graph_sync.status(vault_root)
     state = status.get("state")
     generation = status.get("generation")
@@ -1255,7 +1450,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "adopt or delete either state authority while the scan is unavailable.",
             details={
                 "state_root": str(state_dir),
-                "in_vault_state_root": str(Path(vault_root) / kb_dirname()),
+                "in_vault_state_root": str(managed_root(Path(vault_root))),
                 "in_vault_scan": "unavailable",
             },
         )
@@ -1335,7 +1530,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 "fail",
                 (
                     "Machine-local state exists both under the vault "
-                    f"({Path(vault_root) / kb_dirname()}: {leftover_names}) and in "
+                    f"({managed_root(Path(vault_root))}: {leftover_names}) and in "
                     f"the external state root ({state_dir})."
                 ),
                 "Stop every writer, then run `exomem maintain --migrate-state "
@@ -1442,7 +1637,7 @@ def _check_rebuild_temp_orphans(vault_root: Path | None) -> DoctorCheck:
     # external state root now; the KB is still scanned for pre-relocation
     # leftovers.
     scan_roots = (
-        Path(vault_root) / kb_dirname(),
+        managed_root(Path(vault_root)),
         state_paths.vault_state_dir(vault_root),
     )
     graph_orphans: list[Path] = []
@@ -1574,6 +1769,7 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
     that backlog will not shrink on its own.
     """
     from . import epistemic_graph, freshness, semantic_contract
+    from .vault_store import mode as store_mode
 
     corpus_cache = semantic_contract.corpus_context_cache_enabled()
     event_indexes = freshness.event_indexes_enabled()
@@ -1584,7 +1780,13 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         "graph_scheduling_enabled": graph_scheduling,
     }
 
-    if not event_indexes and vault_root is not None:
+    in_store_mode, unreadable = (
+        (False, None)
+        if event_indexes or vault_root is None
+        else store_mode.store_mode_or_unreadable(vault_root)
+    )
+    # A store-mode vault drains no file-mode queue, so the queue says nothing about its write path.
+    if not event_indexes and vault_root is not None and not in_store_mode and unreadable is None:
         from . import index_sync
 
         status = index_sync.deferred_work_status(vault_root)
@@ -1612,6 +1814,8 @@ def _check_write_path_env_flags(vault_root: Path | None) -> DoctorCheck:
         notes.append("EXOMEM_DISABLE_CORPUS_CACHE is set (corpus-context cache off).")
     if not event_indexes:
         notes.append("EXOMEM_DISABLE_EVENT_INDEXES is set (no periodic drain).")
+    if unreadable is not None:
+        notes.append(f"The queued index work was not inspected: the vault's mode could not be read ({unreadable}).")
     if not graph_scheduling:
         notes.append("EXOMEM_DISABLE_GRAPH_SCHEDULING is set (no new graph work).")
     if notes:
@@ -3986,6 +4190,8 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         _check_package_import(),
         vault_check,
         *_check_schema_files(vault_root),
+        *_check_vault_layout(vault_root),
+        *_check_filename_style(vault_root),
         _check_repo_env(),
         _check_registry(),
         _check_resource_posture(profile),
@@ -4051,7 +4257,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
             _check_dependency("pillow", "media", import_name="PIL"),
-            _check_dependency("pymupdf", "media", import_name="fitz"),
+            *(_check_dependency(module, "media") for module in media_types.PDF_READERS),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),
             _check_asr_backend(),

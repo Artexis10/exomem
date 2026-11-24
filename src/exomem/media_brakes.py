@@ -391,13 +391,22 @@ def verdict_lifted(recorded: str | None, *, current: str, config: Settings) -> b
 
 def apply_hard_limit(budget: Budget, config: Settings) -> None:
     """Cap this process's data segment for one job. Child processes inherit it."""
+    cap_data_segment(budget.vmdata_bytes + config.margin_bytes)
+
+
+def cap_data_segment(limit: int) -> None:
+    """Cap this process's data segment at `limit` bytes, or at the hard limit when that is lower.
+
+    The process also stops dumping core. PDFium aborts when an allocation fails under the cap, and the
+    dump of that process holds the bytes of the document it was reading.
+    """
     import resource
 
     _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
-    limit = budget.vmdata_bytes + config.margin_bytes
     if hard != resource.RLIM_INFINITY:
         limit = min(limit, hard)
     resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def lift_hard_limit() -> None:

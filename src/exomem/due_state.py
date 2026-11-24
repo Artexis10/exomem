@@ -117,7 +117,9 @@ log = logging.getLogger(__name__)
 # "no candidates", so the bump makes a rolled-back runtime rebuild instead.
 # 5 adds `EPISODE_BACKLOG`, for the same reason as 3.
 # 6 adds `note_cohesion`, for the same reason as 3.
-SCHEMA_VERSION = 6
+# 7 adds `ownership_review`, for the same reason as 3.
+# 8 adds `name_drift`, for the same reason as 3.
+SCHEMA_VERSION = 8
 STATE_FILENAME = ".due-state.json"
 
 #: The family persisted beside the projection rather than in it. Only `reconcile`
@@ -141,6 +143,14 @@ SOURCE_BACKLOG = "unprocessed_source"
 #: it, because recaps are skipped there, and it ships `off` (`review_state.DEFAULT_DISPOSITIONS`).
 EPISODE_BACKLOG = review_state_module.EPISODE_BACKLOG
 
+#: The vault-wide name-drift family: one row while any page's file name differs from its title's
+#: name.
+#: It is recompute-only. A page write does not settle it: the whole drifted set is the row, so the
+#: write path would need a vault scan. `reconcile` rebuilds it, and so does a curation run that
+#: renamed pages, when it ends (`schedule_name_drift_refresh`). After the ownership and cohesion
+#: questions, because a stale name is housekeeping and a page's home is not.
+NAME_DRIFT = "name_drift"
+
 #: The four due-state categories, in the tiebreak preference the attention surface
 #: already uses. `prediction_window` leads because it fires on a date a human wrote
 #: down; `supersession_integrity` follows because it is the only defect among them;
@@ -158,17 +168,27 @@ PROJECTION_CATEGORIES: tuple[str, ...] = (
     "artifact_role_promotion",
     "transient_state_review",
     # Last: backlogs rather than obligations (see `BACKLOG_CATEGORIES`).
+    "ownership_review",
     "note_cohesion",
+    NAME_DRIFT,
     SOURCE_BACKLOG,
     EPISODE_BACKLOG,
 )
 
 #: The backlog families, in served order after every dated obligation; a write's own
-#: due-state block leaves them out. `note_cohesion` reports a size step this system chose,
-#: not an authored date, and it leads because a page that outgrew its subject is nearer to
-#: work than a capture or a recap nobody compiled. The Source backlog leads the episode
-#: backlog. Counts are exact; nothing here is capped.
-BACKLOG_CATEGORIES: tuple[str, ...] = ("note_cohesion", SOURCE_BACKLOG, EPISODE_BACKLOG)
+#: due-state block leaves them out. `ownership_review` and `note_cohesion` report a question
+#: this system chose to ask, not an authored date. Each leads because a page that may sit in
+#: the wrong home, or that outgrew its subject, is nearer to work than a capture or a recap
+#: nobody compiled; ownership leads cohesion because a page's home decides what its size
+#: means. The Source backlog leads the episode backlog. Counts are exact; nothing here is
+#: capped.
+BACKLOG_CATEGORIES: tuple[str, ...] = (
+    "ownership_review",
+    "note_cohesion",
+    NAME_DRIFT,
+    SOURCE_BACKLOG,
+    EPISODE_BACKLOG,
+)
 
 #: The categories a single write can soundly settle in full on its own.
 DELTA_CATEGORIES: tuple[str, ...] = (
@@ -179,6 +199,7 @@ DELTA_CATEGORIES: tuple[str, ...] = (
     "unreflected_observations",
     "artifact_role_promotion",
     "transient_state_review",
+    "ownership_review",
     "note_cohesion",
 )
 
@@ -194,6 +215,7 @@ PAGE_DELTA_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "artifact_role_promotion",
     "transient_state_review",
+    "ownership_review",
     "note_cohesion",
 )
 
@@ -270,6 +292,9 @@ _UNPERSISTED_CAP = 8
 #: itself becomes the durable readiness signal. Entries exist only for the life
 #: of one worker, so the registry cannot grow with the number of vaults served.
 _WARMING: set[str] = set()
+#: The (vault, job) pairs running in a background worker (`_in_background`): the ownership
+#: rotation and the name-drift refresh. One worker per job and vault at a time.
+_BACKGROUND: set[tuple[str, str]] = set()
 
 #: The fallback session key for stdio and CLI, where the transport supplies no
 #: session identity. One key per process lifetime, which is exactly the scope of
@@ -722,9 +747,11 @@ def _entry(vault_root: Path, finding: Any, refs: dict[str, str]) -> dict[str, An
         # WRITER's count, and an audience that may not see a joined record still
         # reads it in the total.
         **({"component": finding.component} if finding.component else {}),
+        # The candidate serve order reads the stored meta, and the review listing rebuilds the
+        # name-drift item from it (`name_drift_reading`) instead of scanning the vault per request.
         **(
             {"meta": dict(finding.meta or {})}
-            if finding.category == "collection_candidate"
+            if finding.category in ("collection_candidate", NAME_DRIFT)
             else {}
         ),
     }
@@ -1361,6 +1388,31 @@ def _observed_claim_counts(
     return counts
 
 
+def routing_visibility(
+    vault_root: Path,
+    *,
+    authorize_path: Any = None,
+    principal: Any = None,
+    purpose: str | None = None,
+) -> Any:
+    """The `keep(path) -> bool` predicate that decides which pages a routed write may name to its caller.
+
+    A write bound to a store decides by that store's own authorization; any other by `authorize_path` or
+    the release plane. Whatever a route names beside the collection, such as its capture method, takes this
+    one predicate, so no page is shown by one rule and withheld by another.
+    """
+    from .governance import egress as egress_module
+
+    root = Path(vault_root)
+    writer = bound_writer(root)
+    keep = (
+        writer._operation.allows_file
+        if writer is not None
+        else authorize_path or egress_module.release_walk_filter(root, principal=principal, purpose=purpose)
+    )
+    return keep if keep is not None else (lambda _path: True)
+
+
 @canonical_read
 def routing_targets(
     vault_root: Path,
@@ -1373,7 +1425,6 @@ def routing_targets(
     """Recompose routing targets after filtering every supporting item."""
     from . import structured_collections as collections_module
     from .collection_store import ownership
-    from .governance import egress as egress_module
 
     root = Path(vault_root)
     writer = bound_writer(root)
@@ -1382,15 +1433,9 @@ def routing_targets(
     if not isinstance(rows, Mapping):
         return []
     try:
-        keep = (writer._operation.allows_file if writer is not None else
-                authorize_path or egress_module.release_walk_filter(
-                    root, principal=principal, purpose=purpose
-                ))
+        keep = routing_visibility(root, authorize_path=authorize_path, principal=principal, purpose=purpose)
     except Exception:  # noqa: BLE001 -- disclosure failure costs the advisory
         return []
-    if keep is None:
-        def keep(_path: str) -> bool:
-            return True
     manifests: dict[str, Any] = {}
     for manifest_path, row in rows.items():
         if type(manifest_path) is not str or not isinstance(row, Mapping):
@@ -1471,6 +1516,7 @@ def _routing_targets(
                 ),
                 natural_key_values=frozenset(natural_values),
                 match=collection_claims.normalize_match(manifest.claim_match),
+                capture_method=manifest.capture_method,
             )
         )
     return targets
@@ -1652,6 +1698,8 @@ def reconcile(
     and never edit it.
     """
     existing = load(vault_root) or _UNPERSISTED.get(str(vault_root))
+    # Before the recompute, so the rebuilt projection already holds today's ownership items.
+    _rotate_ownership(vault_root, today=today or dt.date.today(), deltas=False)
     payload = recompute(vault_root, today=today, now=now)
     # The projection is derived and rebuilt from authored state; the emission
     # ledger is a MEASUREMENT of what this vault has told its callers, and a
@@ -1735,6 +1783,175 @@ def _schedule_reconcile(
             vault_root,
             exc_info=True,
         )
+
+
+@_owner_local
+def _rotate_ownership(vault_root: Path, *, today: dt.date, deltas: bool = True) -> None:
+    """Run today's ownership rotation once, and open the items it asked about.
+
+    Fail-soft: the rotation is advisory, and a failure here must not fail the read or the
+    rebuild that happened to trigger it. `deltas` is False inside a rebuild, whose own
+    recompute reads the asked ledger.
+    """
+    from . import audit as audit_module
+    from . import ownership_rotation
+    from .vault import kb_root
+
+    root = Path(vault_root)
+    if not ownership_rotation.is_due(root, today):
+        return
+    try:
+        pages = audit_module._parse_all(kb_root(root), root)
+        newly = ownership_rotation.rotate(root, pages, today=today)
+        if deltas and newly:
+            asked = set(newly)
+            opened = [
+                page
+                for page in pages
+                if ownership_rotation.page_key(page.rel_path, page.frontmatter) in asked
+            ]
+            apply_ownership_delta(root, opened, today=today)
+    except Exception:  # noqa: BLE001 - advisory work; a later read retries it
+        log.warning("ownership rotation failed for %s", root, exc_info=True)
+
+
+def _schedule_ownership_rotation(vault_root: Path, *, today: dt.date) -> None:
+    """Start today's ownership rotation without delaying the caller, once a day per process."""
+    from . import ownership_rotation
+
+    root = Path(vault_root)
+    if not ownership_rotation.is_due(root, today):
+        return
+    _in_background(root, "ownership-rotation", lambda: _rotate_ownership(root, today=today))
+
+
+def _in_background(root: Path, job: str, work: Callable[[], None]) -> None:
+    """Run owner-local advisory `work` without delaying the caller, one worker per job and vault.
+
+    A job already running for this vault is not started twice: the running one reads the state
+    that the caller's change left. `work` reports its own faults.
+    """
+    if _sync_due_state_warm():
+        # The suite asks for background work inline (see `_schedule_reconcile`).
+        work()
+        return
+    key = (str(root), job)
+    with _LOCK:
+        if key in _BACKGROUND:
+            return
+        _BACKGROUND.add(key)
+
+    def _run() -> None:
+        try:
+            from .foreground_activity import background_scope
+            from .governance.principal import library_scope
+
+            # An owner-local worker: a request's principal does not cross into this thread.
+            with background_scope(root), library_scope():
+                work()
+        finally:
+            with _LOCK:
+                _BACKGROUND.discard(key)
+
+    try:
+        threading.Thread(target=_run, name=f"exomem-{job}", daemon=True).start()
+    except RuntimeError:
+        with _LOCK:
+            _BACKGROUND.discard(key)
+        log.warning("could not start %s for %s", job, root, exc_info=True)
+
+
+def apply_ownership_delta(
+    vault_root: Path, pages: list[Any], *, today: dt.date | None = None
+) -> None:
+    """Replace the `ownership_review` rows of these pages, and nothing else.
+
+    The narrow sibling of `apply_write_deltas`: the rotation asked about these pages, so
+    only this family's rows for them can differ. It bumps no emission counter, because
+    no governed write happened, and it runs no Source half.
+    """
+    from . import audit as audit_module
+
+    today = today or dt.date.today()
+    if not pages or _load_shared(vault_root) is None:
+        return
+    root = Path(vault_root)
+    grouped = _entries_from_findings(root, audit_module._check_ownership_review(root, pages))
+    rows = grouped.get("ownership_review") or {}
+    with _LOCK:
+        current = _load_shared(root)
+        if current is None:
+            return
+        categories = dict(current.get("categories") or {})
+        pages_map = dict(categories.get("ownership_review") or {})
+        for page in pages:
+            entries = rows.get(page.rel_path)
+            if entries:
+                pages_map[page.rel_path] = _bucket(entries, today)
+            else:
+                pages_map.pop(page.rel_path, None)
+        categories["ownership_review"] = pages_map
+        _persist_delta(root, current, categories, today, count_write=False)
+
+
+def schedule_name_drift_refresh(vault_root: Path) -> None:
+    """Rebuild the `name_drift` row off the caller's path, after a run renamed pages.
+
+    A rename changes the drifted set that the row counts, and a page write cannot settle a
+    vault-wide row, so the curation run that renamed pages asks for this when it ends.
+    """
+    root = Path(vault_root)
+    _in_background(root, "name-drift-refresh", lambda: _refresh_name_drift(root))
+
+
+def _refresh_name_drift(root: Path) -> None:
+    try:
+        refresh_name_drift(root)
+    except Exception:  # noqa: BLE001 - advisory work; the next reconcile rebuilds the row
+        log.warning("name-drift refresh failed for %s", root, exc_info=True)
+
+
+def name_drift_reading(vault_root: Path) -> dict[str, Any] | None:
+    """The stored name-drift row's meta: `{}` when the row holds no drift, None when none is stored.
+
+    No audit. A projection written before the row kept its meta also answers None, so the caller
+    scans as before until the next rebuild.
+    """
+    payload = _load_shared(Path(vault_root))
+    rows = ((payload or {}).get("categories") or {}).get(NAME_DRIFT)
+    if not isinstance(rows, dict):
+        return None
+    for bucket in rows.values():
+        for entry in _unbucket(bucket):
+            meta = entry.get("meta")
+            return dict(meta) if isinstance(meta, Mapping) else None
+    return {}
+
+
+def refresh_name_drift(vault_root: Path, *, today: dt.date | None = None) -> None:
+    """Replace the `name_drift` row from one pass over the corpus, and nothing else.
+
+    It bumps no emission counter, because no governed write happened.
+    """
+    from . import audit as audit_module
+    from .vault import kb_root
+
+    today = today or dt.date.today()
+    root = Path(vault_root)
+    if _load_shared(root) is None:
+        return
+    pages = audit_module._parse_all(kb_root(root), root)  # noqa: SLF001 -- the audit's own corpus read
+    findings = audit_module._check_name_drift(root, pages)
+    rows = _entries_from_findings(root, findings).get(NAME_DRIFT) or {}
+    with _LOCK:
+        current = _load_shared(root)
+        if current is None:
+            return
+        categories = dict(current.get("categories") or {})
+        categories[NAME_DRIFT] = {
+            path: _bucket(entries, today) for path, entries in sorted(rows.items())
+        }
+        _persist_delta(root, current, categories, today, count_write=False)
 
 
 def _remember_unpersisted(vault_root: Path, payload: dict[str, Any]) -> None:
@@ -2158,6 +2375,7 @@ def apply_write_deltas(
         findings.extend(
             audit_module._check_question_aging(vault_root, pages, today=_FAR_FUTURE)
         )
+        findings.extend(audit_module._check_ownership_review(vault_root, pages))
         findings.extend(audit_module._check_note_cohesion(vault_root, pages))
         # Page-local half of a split category: these pages' own pointers only.
         findings.extend(_page_local_supersession(vault_root, pages))
@@ -3536,7 +3754,10 @@ def _served_rows(
             vault_root, today=today, now=effective_now, principal=principal, purpose=purpose
         )
         return rows
-    who = principal if principal is not None else principal_module.effective_principal()
+    # The bound principal, or None for a call no surface bound, exactly as the uncached build
+    # above receives it. Resolving an unbound call to the floor principal here made an owner-only
+    # family (`owner_only_aggregate`) appear in a first, uncached answer and vanish from the next.
+    who = principal if principal is not None else principal_module.current_principal()
     key = (
         str(vault_root),
         getattr(who, "audience_id", None),
@@ -3719,7 +3940,7 @@ def _build_served(
     """Build the served rows for `key` and memoise them; the key they were stored under."""
     with call_spans.span("recall.due_state.build", {}):
         try:
-            review_payload = review_state_module.ReviewStateStore(vault_root).load()
+            review_payload = review_state_module.ReviewStateStore(vault_root).load_shared()
         except ValueError:
             return [], None
         # Bind the memo to the review snapshot the build consumes, including a
@@ -4111,7 +4332,7 @@ def _served_entries_uncached(
     role_token: str | None = None
     store = review_state_module.ReviewStateStore(vault_root)
     try:
-        state_payload = store.load() if review_payload is None else review_payload
+        state_payload = store.load_shared() if review_payload is None else review_payload
     except ValueError:
         # Fail closed, exactly as the decision read does — but the carrier's
         # safe direction is SILENCE, not a raise. Every row below is filtered
@@ -4170,11 +4391,14 @@ def _served_entries_uncached(
     # The episode backlog is the owner's compiler queue: its stored rows count lines against the
     # owner's view of the citing pages, so a count served to a restricted caller would move with a
     # page withheld from it. That caller gets the family from its own audit, which reads the page as absent.
-    owner_queue = not categories.get(EPISODE_BACKLOG) or egress_module.owner_only_aggregate(
-        vault_root, principal=principal
-    ) is None
+    owner_queue = (
+        not (categories.get(EPISODE_BACKLOG) or categories.get(NAME_DRIFT))
+        or egress_module.owner_only_aggregate(vault_root, principal=principal) is None
+    )
     for category in PROJECTION_CATEGORIES:
-        if category == EPISODE_BACKLOG and not owner_queue:
+        # Name drift counts every page of the vault, so a count served to a restricted caller would
+        # move with a page withheld from it. That caller gets the item from its own audit instead.
+        if category in (EPISODE_BACKLOG, NAME_DRIFT) and not owner_queue:
             continue
         if category in excluded:
             # A count of things the user asked not to hear about is a nag by
@@ -4506,6 +4730,9 @@ def _page_rechecks() -> dict[str, Callable[..., list[Any]]]:
         "question_aging": lambda root, pages, *, today, now: (
             audit_module._check_question_aging(root, pages, today=today)
         ),
+        "ownership_review": lambda root, pages, *, today, now: (
+            audit_module._check_ownership_review(root, pages)
+        ),
         "note_cohesion": lambda root, pages, *, today, now: (
             audit_module._check_note_cohesion(root, pages)
         ),
@@ -4594,7 +4821,12 @@ def served(
     progress: only finishing the work lowers them. When every outstanding row is
     dismissed or snoozed the block still arrives, with `total` 0 and no
     categories, because the work is still there.
+
+    `ownership_never_asked` reports how many eligible pages the ownership rotation has not
+    asked about yet, with the day it counted them. It is the rotation's own count, taken
+    once a day, and it appears only once the rotation has run.
     """
+    _schedule_ownership_rotation(vault_root, today=today or dt.date.today())
     rows = served_entries(
         vault_root, today=today, principal=principal, purpose=purpose, include_triaged=True
     )
@@ -4612,7 +4844,23 @@ def served(
     if not rows:
         return None
     result = block(rows) or {"total": 0, "categories": {}, "top": []}
-    return {**result, "outstanding_total": len(rows), "outstanding": _counted(rows)}
+    from . import ownership_rotation
+
+    # The count is vault-wide, so no filter can remove what a withheld page contributed to it:
+    # only a caller with whole-vault authority receives it, as with any whole-vault aggregate.
+    from .governance import egress
+
+    never_asked = (
+        ownership_rotation.never_asked_report(Path(vault_root))
+        if egress.owner_only_aggregate(Path(vault_root)) is None
+        else None
+    )
+    return {
+        **result,
+        "outstanding_total": len(rows),
+        "outstanding": _counted(rows),
+        **({"ownership_never_asked": never_asked} if never_asked is not None else {}),
+    }
 
 
 def block_for_write(
