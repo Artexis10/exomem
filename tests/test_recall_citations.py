@@ -9,14 +9,14 @@ import contextlib
 import pytest
 from test_activate_context_maps import _activate
 from test_activate_context_turn_slice import CARGO_SLED, SLED_TURN
-from test_collection_link_values import ALPHA, K1, K2, K3, _ready, append, log_text, page
+from test_collection_link_values import ALPHA, K1, K2, K3, LOG, _ready, append, log_text, page
 from test_collection_row_references import collection_text, path
 from test_collection_store_writer import store as store  # noqa: F401
 from test_context_catalogue import _built
 from test_governance_egress import _external, write_rule, write_scope
 from test_working_set_index import _seed_structure
 
-from exomem import commands, lexstore
+from exomem import commands, lexstore, page_citations
 from exomem.collection_store import connection
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.query_engine import runtime
@@ -139,3 +139,40 @@ def test_a_recall_lead_shows_its_citations_inside_the_packets_budget(world):
     append(world, {"page": SLED_REF}, key=K2)
     (again,) = [item for item in _activate(world.root, turn=SLED_TURN)["turn_slice"]["items"] if item["kind"] == "anchor"]
     assert again["cited_by_count"] == 2
+
+
+def test_a_rule_for_the_declared_purpose_narrows_citations_on_a_page_read_a_search_and_a_recall(world):
+    """A rule that withholds one row only for a purpose drops that row wherever the caller declares the purpose."""
+    append(world, {"page": SLED_REF}, key=K1)
+    append(world, {"page": SLED_REF}, key=K2)
+    _ready(world)
+    write_scope(world.root, paths="Unrelated/**")
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f'refs: ["exomem://record/{LOG}/{K2}"]\n')
+    write_rule(world.root, ceiling=0, extra="purpose: marketing\npurpose_condition: matches\n")
+    outsider = _external()
+    with request_scope(outsider):
+        undeclared = commands.op_read_memory(world.root, CARGO_SLED)["cited_by"]
+        declared = commands.op_read_memory(world.root, CARGO_SLED, purpose="marketing")["cited_by"]
+        found = commands.op_ask_memory(world.root, query="Cargo Sled", mode="keyword", purpose="marketing")["hits"]
+    assert undeclared["count"] == 2
+    assert declared["count"] == 1 and [item["label"] for item in declared["items"]] == ["c1"]
+    assert sled_hit(found)["cited_by_count"] == 1
+    (lead,) = [item for item in _activate(world.root, outsider, turn=SLED_TURN, purpose="marketing")["turn_slice"]["items"]
+               if item["kind"] == "anchor"]
+    assert lead["cited_by_count"] == 1 and [item["label"] for item in lead["cited_by"]] == ["c1"]
+
+
+def test_a_fault_in_the_citation_reader_leaves_the_page_read_and_the_search_whole(world, monkeypatch):
+    append(world, {"page": SLED_REF}, key=K1)
+    _ready(world)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("citation reader fault")
+
+    monkeypatch.setattr(page_citations, "_read", broken)
+    with request_scope(owner_principal()):
+        read = commands.op_read_memory(world.root, CARGO_SLED)
+    assert read["body"] and read["cited_by"] == {"state": "unavailable"}
+    hit = sled_hit(search(world))
+    assert hit["cited_by_state"] == "unavailable" and "cited_by_count" not in hit

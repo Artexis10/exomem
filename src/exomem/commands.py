@@ -7085,7 +7085,9 @@ def op_ask_memory(
         # Inside the measured call, so the whole-call timing covers the shaping too.
         if isinstance(result, (list, dict)):
             result = _agent_search_reply(result, internals=bool(include_timings or explain))
-            _cite_search_hits(vault_root, result["hits"])
+            # The citations are decided under the purpose the search declared, as its hits were.
+            with principal_module.declared_purpose_scope(purpose):
+                _cite_search_hits(vault_root, result["hits"])
             read_next_action.attach(result, search=True)
     return recall_timing_module.completed(result, trace)
 
@@ -7180,7 +7182,12 @@ def _cite_search_hits(vault_root: Path, hits: list) -> None:
     Only a page hit carries them: a row or a plan item that cites a page is never a hit of its own.
     """
     top = [hit for hit in hits[: page_citations_module.RECALL_HITS] if isinstance(hit, dict)]
-    found = page_citations_module.for_hits([hit.get("ref") for hit in top], vault_root)
+    try:
+        found = page_citations_module.for_hits([hit.get("ref") for hit in top], vault_root)
+    except Exception:  # noqa: BLE001 - a citation never breaks a search; each page hit says its count is unknown
+        log.debug("page citations: search hit citations unavailable", exc_info=True)
+        found = {hit["ref"]: {"cited_by_state": "unavailable"} for hit in top
+                 if memory_refs_module.parse_memory_ref(hit.get("ref")) is not None}
     for hit in top:
         hit.update(found.get(hit.get("ref"), {}))
 
@@ -7457,7 +7464,9 @@ def op_activate_context(
                             upkeep_module.for_packet(vault_root, packet, session=session)
                         # Also outside the cache: each resolved anchor page's sensed status.
                         sensed_model.for_packet(vault_root, packet)
-                        _cite_packet_leads(vault_root, packet)
+                        # The citations are decided under the purpose the request declared, as its leads were.
+                        with principal_module.declared_purpose_scope(purpose):
+                            _cite_packet_leads(vault_root, packet)
                         from . import due_state as due_state_module
 
                         # Guarded material supplies relevance; the agent decides whether to raise it.
@@ -8788,7 +8797,10 @@ def read_memory_stored(
 @wraps(read_memory_stored)
 def op_read_memory(vault_root: Path, *args: Any, **kwargs: Any) -> dict:
     result = read_memory_stored(vault_root, *args, **kwargs)
-    result = _with_cited_by(vault_root, result, frontmatter_only=bool(kwargs.get("frontmatter_only")))
+    options = inspect.signature(read_memory_stored).bind(vault_root, *args, **kwargs).arguments
+    # The citations are decided under the purpose the read declared, as the page itself was.
+    with principal_module.declared_purpose_scope(options.get("purpose")):
+        result = _with_cited_by(vault_root, result, frontmatter_only=bool(options.get("frontmatter_only")))
     frontmatter = result.get("frontmatter")
     if (
         isinstance(frontmatter, Mapping)
@@ -8825,8 +8837,12 @@ def _with_cited_by(vault_root: Path, result: dict, *, frontmatter_only: bool) ->
         or not page_citations_module.applies(vault_root)
     ):
         return result
-    return {**result, "cited_by": page_citations_module.inbound_citations(
-        result["ref"], vault_root, limit=_CITED_BY_LIMIT)}
+    try:
+        cited_by = page_citations_module.inbound_citations(result["ref"], vault_root, limit=_CITED_BY_LIMIT)
+    except Exception:  # noqa: BLE001 - a citation never breaks a page read; the read says its citations are unknown
+        log.debug("page citations: page read citations unavailable", exc_info=True)
+        cited_by = {"state": "unavailable"}
+    return {**result, "cited_by": cited_by}
 
 
 def _cited_by_continuation(vault_root: Path, page: str, token: str, *, conflicting: bool) -> dict:
