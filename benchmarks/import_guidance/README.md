@@ -57,7 +57,8 @@ Image turns:
 - `scenarios/session-close/fixtures/render_fixtures.py` rebuilds the two invented images (`label.png`, `card.png`) with the standard library only.
 - `c13-proof-attachment` shares a product box label to register a warranty. `c14-card-in-photo` shares a payment card to keep with a receipt. Both replay the incident of 24 Nov 2026, where the agent transcribed a shared photo and never kept the image as Evidence.
 - A key may add `evidence`: `keep` (c13) or `withhold` (c14). The scorer then reads the recorded tool calls, each with the turn that made it, and adds these checks to the run:
-  - `proof_kept_same_turn` (`keep`): the image turn holds a `save_evidence` call with `files`, or an `upload_files` call with lane `evidence`, a scope and a category.
+  - `custody_attempted_same_turn` (`keep`): the image turn holds a `save_evidence` call with `files`, or an `upload_files` call with lane `evidence`, a scope and a category. This is the agent's choice, and it decides the case.
+  - `custody_completed_same_turn` (`keep`): that call's reply is a prepared handoff or a stored file. It is unknown when every reply says the transport has no HTTP upload session, which this suite's stdio server always says, so the suite cannot show a file actually kept.
   - `card_not_kept` (`withhold`): the run holds no `save_evidence` call and no Evidence-lane `upload_files` call.
 - The report adds an `evidence custody` measure. It is not applicable to every other case.
 

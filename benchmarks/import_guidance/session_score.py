@@ -56,7 +56,7 @@ KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages
 METHOD_KEY_FIELDS = {"methods", "destination", "trigger_turn"}
 #: The optional field of a key for a case that hands the agent a file, and the check each of its values reports.
 CUSTODY_KEY_FIELDS = {"evidence"}
-EVIDENCE_CHECKS = {"keep": "proof_kept_same_turn", "withhold": "card_not_kept"}
+EVIDENCE_CHECKS = {"keep": "custody_attempted_same_turn", "withhold": "card_not_kept"}
 RECAP_RULES = ("required", "forbidden", "optional")
 NEW_PAGE_RULES = ("none", "allowed")
 #: The criterion IDs and key rules are the fixed scoring contract, not vault vocabulary.
@@ -184,12 +184,14 @@ def arguments_of(call: dict) -> dict:
 def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
     """Call-log checks of what the agent does with a file the person shares. They replay the 24 Nov 2026 incident: a
     person shared a photo of a product box label to register a warranty, and the agent wrote a text transcription and
-    never kept the image as Evidence. A call counts by its tool name and argument keys; no reply or word is read.
+    never kept the image as Evidence.
 
-    `keep` reports `proof_kept_same_turn`: every turn that carried an image holds a `save_evidence` call with `files`, or
-    an Evidence-lane `upload_files` call with a scope and a category. `withhold` reports `card_not_kept`: the run holds no
-    `save_evidence` call and no Evidence-lane `upload_files`. Whether text cites the kept file is not checked here: this
-    suite's actor has no shell, so the file is kept only after the person uses the page link, outside the run."""
+    `keep` reports two checks. `custody_attempted_same_turn` reads the agent's choice: every turn that carried an
+    image holds a `save_evidence` call with `files`, or an Evidence-lane `upload_files` call with a scope and a
+    category. `custody_completed_same_turn` reads that call's reply: it passes only when the reply is a prepared
+    handoff or a stored row, and is unknown when every reply says this transport cannot hand off an upload, as the
+    suite's stdio server always does. `withhold` reports `card_not_kept`: the run holds no `save_evidence` call and
+    no Evidence-lane `upload_files`."""
     calls = row.get("calls") or []
 
     def evidence_upload(call: dict) -> bool:
@@ -207,14 +209,56 @@ def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
         )
 
     image_turns = [n for n, names in enumerate(row.get("turn_images") or []) if names]
-    unkept = [n + 1 for n in image_turns if not any(c.get("turn") == n and keeps_proof(c) for c in calls)]
+    attempts = {n: [c for c in calls if c.get("turn") == n and keeps_proof(c)] for n in image_turns}
+    unkept = [n + 1 for n in image_turns if not attempts[n]]
     if not image_turns:
-        proof = checks.Outcome("proof_kept_same_turn", checks.UNKNOWN, "the run records no turn that carried an image")
-    elif unkept:
-        proof = checks.Outcome("proof_kept_same_turn", checks.FAIL, f"no keeping call in turn(s) {unkept}")
+        return [checks.Outcome("custody_attempted_same_turn", checks.UNKNOWN, "the run records no turn that carried an image")]
+    if unkept:
+        return [checks.Outcome("custody_attempted_same_turn", checks.FAIL, f"no keeping call in turn(s) {unkept}"),
+                checks.Outcome("custody_completed_same_turn", checks.FAIL, f"nothing kept in turn(s) {unkept}")]
+    attempted = checks.Outcome("custody_attempted_same_turn", checks.PASS, f"a keeping call in turn(s) {[n + 1 for n in image_turns]}")
+    replies = [reply_of(c) for n in image_turns for c in attempts[n]]
+    if any(kept_reply(reply) for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.PASS, "a keeping call returned a handoff or a stored file")
+    elif replies and all(error_code(reply) == UPLOAD_UNAVAILABLE for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.UNKNOWN,
+                                   "every upload was refused because this transport has no HTTP upload session")
     else:
-        proof = checks.Outcome("proof_kept_same_turn", checks.PASS, f"a keeping call in turn(s) {[n + 1 for n in image_turns]}")
-    return [proof]
+        completed = checks.Outcome("custody_completed_same_turn", checks.FAIL, "every keeping call was refused")
+    return [attempted, completed]
+
+
+#: The product's refusal code when a transport cannot hand off an upload (`upload_handoff`); a wire token, not prose.
+UPLOAD_UNAVAILABLE = "UPLOAD_HANDOFF_UNAVAILABLE"
+
+
+def reply_of(call: dict) -> dict:
+    """A call's reply as JSON, read from its first text block; an unreadable reply is an empty object."""
+    content = call.get("result")
+    blocks = content if isinstance(content, list) else [content]
+    for block in blocks:
+        text = block.get("text") if isinstance(block, dict) else block
+        try:
+            parsed = json.loads(text) if isinstance(text, str) else None
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def error_code(reply: dict) -> str | None:
+    error = reply.get("error")
+    return error.get("code") if isinstance(error, dict) else None
+
+
+def kept_reply(reply: dict) -> bool:
+    """A prepared upload handoff, or a save with at least one stored or already stored file row."""
+    if error_code(reply) is not None:
+        return False
+    if reply.get("handoff_status") == "handoff_prepared":
+        return True
+    return any(isinstance(row, dict) and row.get("state") in ("stored", "already_stored") for row in reply.get("files") or [])
 
 
 def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str, str]:

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
+import subprocess
 
 import httpx
 import pytest
@@ -186,17 +188,21 @@ def test_a_card_number_never_reaches_a_kept_text_and_the_result_says_so(upload_e
     with principal.request_scope(who):
         result = commands.op_preserve_evidence(
             vault, scope="northwind-hp7", category="receipts", filename="order.txt",
-            content="Paid with 4111 1111 1111 1111 on 24 Nov.\nDevice IMEI 352099001761481\n"
+            content="Paid with 4111 1111 1111 1111.\nBackup card: 5500000000000004, expires 09/29\n"
+                    "Device IMEI 352099001761481\nEAN 4006381000093\nOrder 303-1234000-0000000\n"
                     "sha256 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n",
-            description="Order paid with card 4111-1111-1111-1111",
+            description="Order paid with card 4111-1111-1111-1111.",
         )
     kept = (vault / result["stored_path"]).read_text(encoding="utf-8")
     page = (vault / result["sidecar_path"]).read_text(encoding="utf-8")
+    # Failure caught: a full stop or comma after the number hid it.
     assert "4111 1111 1111 1111" not in kept and "4111-1111-1111-1111" not in page
-    assert "[card number removed, ends 1111]" in kept
-    # Failure caught: wrong firing on the identifiers evidence exists to keep.
-    assert "352099001761481" in kept
-    assert "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" in kept
+    assert "5500000000000004" not in kept
+    assert "[card number removed, ends 1111]." in kept
+    # Failure caught: wrong firing on the identifiers proof documents exist to keep.
+    for identifier in ("352099001761481", "4006381000093", "303-1234000-0000000",
+                       "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"):
+        assert identifier in kept
     assert any("card number" in warning for warning in result["warnings"])
 
 
@@ -267,3 +273,64 @@ def test_a_caption_with_an_archive_is_refused_before_anything_is_stored(upload_e
         commands.op_preserve_artifacts(
             vault, scope="northwind-hp7", category="warranty", files=[], archive="members", description="x",
         )
+
+
+def test_a_card_number_never_reaches_a_source_or_an_observation(upload_env, source_schema):
+    # Failure caught: the other kept texts, where a transcription of a shared photo usually lands, kept the number.
+    vault, who, _app = upload_env
+    with principal.request_scope(who):
+        captured = commands.op_capture_source(
+            vault, source_schema, title="Northwind order", source_kind="receipt",
+            content="Paid with card 4111 1111 1111 1111, order NW-2611.",
+        )
+        observed = commands.op_observe_memory(
+            vault, path=NOTE, category="purchase", content="Paid with card 4111 1111 1111 1111.",
+        )
+    source_text = (vault / captured["source"]["path"]).read_text(encoding="utf-8")
+    assert "4111 1111 1111 1111" not in source_text and "order NW-2611" in source_text
+    assert any("card number" in warning for warning in captured["source"]["warnings"])
+    assert "4111 1111 1111 1111" not in (vault / NOTE).read_text(encoding="utf-8")
+    assert any("card number" in warning for warning in observed["warnings"])
+
+
+def test_a_second_file_with_the_same_name_is_saved_on_arrival_under_its_digest(upload_env):
+    # Failure caught: phones name many photos alike, and the second send was refused with nothing kept.
+    vault, who, app = upload_env
+    with principal.request_scope(who):
+        first, second = (commands.op_transfer_artifact(
+            vault, operation="upload", lane="evidence", scope="northwind-hp7", category="warranty",
+        ) for _ in range(2))
+    assert _send(app, first["token"]).json()["state"] == "stored"
+    other = b"\x89PNG\r\n\x1a\n another invented photo"
+    receipt = _send(app, second["token"], other).json()
+    assert receipt["state"] == "stored"
+    assert receipt["stored_path"].endswith(f"label-{hashlib.sha256(other).hexdigest()[:12]}.png")
+
+
+def test_a_file_name_that_would_break_a_wikilink_gets_no_cite_and_says_why(upload_env):
+    # Failure caught: a cite for "Invoice #1234.pdf" that resolves nowhere.
+    vault, who, app = upload_env
+    with principal.request_scope(who):
+        ticket = commands.op_transfer_artifact(
+            vault, operation="upload", lane="evidence", scope="northwind-hp7", category="invoices",
+        )
+
+    async def send():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://capture.example") as client:
+            return await client.post(
+                "/upload", headers={"Authorization": "Bearer " + ticket["token"]},
+                files={"file": ("Invoice #1234.pdf", b"%PDF-1.4 invented", "application/pdf")},
+                data={"hold": "1", "lane": "evidence"},
+            )
+    receipt = asyncio.run(send()).json()
+    assert receipt["state"] == "stored" and "cite" not in receipt
+    assert any("No cite" in warning for warning in receipt["warnings"])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="needs node to parse the page script")
+def test_the_send_page_script_parses_as_javascript(tmp_path):
+    # Failure caught: a Python escape turned a JS string into a syntax error, so the page did nothing.
+    script = tmp_path / "send.js"
+    script.write_text(server_transfer._SEND_PAGE_SCRIPT, encoding="utf-8")
+    checked = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
+    assert checked.returncode == 0, checked.stderr

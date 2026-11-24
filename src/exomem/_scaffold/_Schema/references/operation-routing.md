@@ -105,9 +105,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     caption goes in `description`. Each kept file's result carries `cite`, a wikilink to
     the stored file; put it in the observation or note you write about the file.
   - **Never keep a card number, a security code or a password.** If a file shows one,
-    do not save it: ask for a copy with it covered, and say why. Text you send is
-    checked too: a card number or a labelled credential is removed before saving, and
-    the result's `warnings` say so; tell the user.
+    do not save it: ask for a copy with it covered, and say why. Text you save is
+    checked for card numbers and machine credentials such as API keys: one is
+    removed before saving, and the result's `warnings` say so; tell the user. A
+    short password, PIN or security code is not detected, so never write one.
   - **File handles (ChatGPT attachments):** pass them in `files`, and put your
     transcription in
     **`save_evidence(scope="...", category="...", files=[...], options={"transcriptions": [{"file_id": "...", "text": "..."}]})`**.

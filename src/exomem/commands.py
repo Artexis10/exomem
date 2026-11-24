@@ -9184,6 +9184,11 @@ def op_observe_memory(
         raise ValueError(
             f"INVALID_PATH: observe_memory parent reference resolves outside {managed_join('')}"
         )
+    # Every operation, preview included, sees the same kept text, so a validate token still matches its add.
+    observation_warnings: list[str] = []
+    if content:
+        kept_content, _caption, _text, observation_warnings = _preserve_module().redact_capture_text(content=content)
+        content = content if kept_content is None else kept_content
     try:
         result = observe_memory_module.observe_memory(
             vault_root,
@@ -9217,6 +9222,8 @@ def op_observe_memory(
                 written_path=str(result.get("path") or "") or None,
                 cited_sources=[],
             )
+        if observation_warnings:
+            result["warnings"] = [*observation_warnings, *(result.get("warnings") or [])]
         return result
     except observe_memory_module.ObserveMemoryError as error:
         if error.code == "STALE_PARENT_HASH" and page_ids_module.is_page_id(expected_hash):
@@ -9444,6 +9451,21 @@ def op_capture_source(
             source_capture.verify_sha256(expected_sha256, hashlib.sha256(content.encode("utf-8")).hexdigest())
     if files and content:
         raise ValueError("INVALID_SOURCE: supply content or files, not both")
+    # After the caller's digest is checked against what it sent, and before anything is stored: a kept
+    # Source text never holds a card number or a labelled credential. Passages are redacted one by one so
+    # their keys still name whole passages.
+    source_redaction_warnings: list[str] = []
+    if passages is not None:
+        kept_passages = []
+        for passage in passages:
+            kept, _caption, _text, warned = _preserve_module().redact_capture_text(content=passage["text"])
+            kept_passages.append({**passage, "text": kept})
+            source_redaction_warnings += warned
+        passages = kept_passages
+        content = "\n\n".join(passage["text"] for passage in passages)
+    elif content:
+        kept_content, _caption, _text, source_redaction_warnings = _preserve_module().redact_capture_text(content=content)
+        content = content if kept_content is None else kept_content
     if source_identity is not None:
         if files or adoption is not None:
             raise ValueError("SOURCE_IDENTITY_TEXT_ONLY: source identity is available only for text captures")
@@ -9530,6 +9552,8 @@ def op_capture_source(
             document_form=document_form,
             custody_only=custody_only,
         )
+        if source_redaction_warnings:
+            source["warnings"] = [*source_redaction_warnings, *(source.get("warnings") or [])]
         out = {"source": source, "text_only": True}
         if custody_only is True:
             out["custody_only"] = True

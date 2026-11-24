@@ -884,11 +884,27 @@ def test_each_call_is_attributed_to_the_turn_whose_result_event_follows_it() -> 
 def test_keeping_the_proof_in_the_image_turn_passes_by_a_save_or_by_an_evidence_upload() -> None:
     saved = tool_call("save_evidence", 0, scope="warranty", category="proof", files=[{"file_id": "f1", "download_url": "u"}])
     upload = tool_call("upload_files", 0, lane="evidence", scope="warranty", category="proof")
-    assert custody("keep", [saved])["proof_kept_same_turn"] == checks.PASS
-    assert custody("keep", [upload])["proof_kept_same_turn"] == checks.PASS
+    assert custody("keep", [saved])["custody_attempted_same_turn"] == checks.PASS
+    assert custody("keep", [upload])["custody_attempted_same_turn"] == checks.PASS
 
 
-def test_a_transcription_a_late_keep_or_an_upload_that_lands_nowhere_fails_the_proof_check() -> None:
+def test_completion_reads_the_reply_so_a_refused_upload_never_counts_as_kept() -> None:
+    """A refused call that the attempt check counts must not read as a kept file."""
+
+    def replied(reply: dict) -> dict:
+        return {**tool_call("upload_files", 0, lane="evidence", scope="warranty", category="proof"),
+                "result": [{"type": "text", "text": json.dumps(reply)}]}
+
+    prepared = replied({"handoff_status": "handoff_prepared", "next": [{"step": "page", "url": "https://x/upload/send#t"}]})
+    no_transport = replied({"error": {"code": "UPLOAD_HANDOFF_UNAVAILABLE", "message": "no HTTP session"}})
+    refused = replied({"error": {"code": "INVALID_PRESERVE", "message": "bad scope"}})
+    assert custody("keep", [prepared])["custody_completed_same_turn"] == checks.PASS
+    assert custody("keep", [no_transport])["custody_completed_same_turn"] == checks.UNKNOWN
+    assert custody("keep", [refused])["custody_completed_same_turn"] == checks.FAIL
+    assert custody("keep", [refused])["custody_attempted_same_turn"] == checks.PASS
+
+
+def test_a_transcription_a_late_keep_or_an_upload_that_lands_nowhere_fails_the_attempt_check() -> None:
     """The 24 Nov 2026 incident: a note holding the serial number, and the image never kept."""
     transcription = tool_call("create_note", 0, title="Headphones", content="S/N NW7-2611-0042")
     for calls in (
@@ -898,7 +914,7 @@ def test_a_transcription_a_late_keep_or_an_upload_that_lands_nowhere_fails_the_p
         [tool_call("upload_files", 0, lane="source")],
         [tool_call("save_evidence", 0, scope="warranty", category="proof", name="serial.txt", text="NW7-2611-0042")],
     ):
-        assert custody("keep", calls)["proof_kept_same_turn"] == checks.FAIL
+        assert custody("keep", calls)["custody_attempted_same_turn"] == checks.FAIL
 
 
 def test_a_card_photo_fails_if_the_run_saves_evidence_or_asks_for_an_evidence_upload() -> None:

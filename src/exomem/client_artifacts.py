@@ -2333,10 +2333,19 @@ def preserve_artifacts(
     return _batch_result(outcomes)
 
 
+#: Characters that end or split a wikilink target (`#` heading, `|` alias, brackets), so a path holding one cannot be cited.
+_WIKILINK_DELIMITERS = frozenset("#|[]")
+
+
 def _add_citation(outcome: dict, page_path: object) -> None:
     """Give a kept original the wikilink that text about it carries, as an observation cites a Source."""
-    if isinstance(page_path, str) and page_path.endswith(".md") and isinstance(outcome.get("stored_path"), str):
-        outcome["cite"] = f"[[{page_path[: -len('.md')]}|{Path(outcome['stored_path']).name}]]"
+    if not (isinstance(page_path, str) and page_path.endswith(".md") and isinstance(outcome.get("stored_path"), str)):
+        return
+    if _WIKILINK_DELIMITERS & set(page_path):
+        outcome["warnings"] = [*(outcome.get("warnings") or []),
+                               "No cite: the file name holds a wikilink delimiter; cite its page by its ref."]
+        return
+    outcome["cite"] = f"[[{page_path[: -len('.md')]}|{Path(outcome['stored_path']).name}]]"
 
 
 def _preserve_members(

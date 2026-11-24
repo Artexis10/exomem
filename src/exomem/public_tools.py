@@ -1064,7 +1064,9 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("upload_files", "Upload files",
           "Get a file handoff. Follow its next step. Evidence with scope and category saves on arrival; else held files go to save_source or save_evidence.",
           UploadFiles, "write", _upload_files,
-          [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})]),
+          [Route("transfer_artifact", when={"operation": "upload"}, inverse={"response_detail": "detail"})],
+          # An evidence upload with a destination saves on arrival, so it can land the capture the turn needed.
+          captures=True),
     _tool("download_files", "Download files",
           "Get the original files of pages back out of memory. The reply gives a link or a command that saves each.",
           DownloadFiles, "write", _download_files,

@@ -7,12 +7,17 @@ what it removed so the agent can tell the person.
 
 Two shapes are removed, and nothing else:
 
-- A payment card number: 13 to 19 digits, optionally grouped by single spaces
-  or hyphens, whose issuer prefix and length belong to a card scheme and whose
-  Luhn check digit holds. The last four digits stay, so the page can still say
+- A payment card number: 14 to 19 digits, unbroken or in a grouping that card
+  schemes print, whose issuer prefix and length belong to a card scheme and
+  whose Luhn check digit holds. The last four digits stay, so the page can still say
   which card it was.
-- A labelled credential, in the shapes the egress scrubber already names
-  (`password: ...`, `api_key=...`, a bearer token, a private key block).
+- A machine credential, in the shapes the egress scrubber already names: a
+  bearer token, a private key block, a known provider key prefix, or a
+  labelled value of 16 or more characters (`api_key=...`).
+
+A short human password, a PIN or a card security code has no shape that
+tells it apart from other text, so it stays the agent's judgement, which the
+guidance covers: never keep one, and ask for a covered copy.
 
 The egress scrubber's high-entropy heuristic is left out on purpose: evidence
 often quotes hashes, serial numbers and identifiers, which that heuristic
@@ -29,15 +34,25 @@ from . import scrubber
 #: What replaces a labelled credential in a kept text.
 CREDENTIAL_NOTICE = "[credential removed before saving]"
 
-# A card number as people write it: digits, optionally grouped by one space or hyphen.
-_CARD_CANDIDATE = re.compile(r"(?<![\d.,])\d(?:[ -]?\d){12,18}(?![\d.,])")
+# A card number as people write it: one unbroken run of digits, or the groupings card schemes print
+# (4-4-4-4 with an optional 3-digit tail, 4-6-5 and 4-6-4). Other groupings, such as order numbers, are
+# left alone. A digit, or a decimal or thousands separator between digits, bounds the match on either
+# side, so a sentence's full stop or comma after the number does not hide it.
+_CARD_CANDIDATE = re.compile(
+    r"(?<!\d)(?<!\d[.,])(?:"
+    r"\d{14,19}"
+    r"|\d{4}([ \u00a0-])\d{4}\1\d{4}\1\d{4}(?:\1\d{3})?"
+    r"|\d{4}([ \u00a0-])\d{6}\2\d{4,5}"
+    r")(?!\d|[.,]\d)"
+)
 
 # Issuer prefix ranges and lengths of the major card schemes (ISO/IEC 7812 issuer
 # identification numbers, as each scheme publishes them). This is a closed set
 # fixed by the schemes, not a vocabulary, so it lives in code (registry C6).
 # Each row is (lowest prefix, highest prefix, allowed lengths).
 _SCHEMES: tuple[tuple[int, int, frozenset[int]], ...] = (
-    (4, 4, frozenset({13, 16, 19})),                     # Visa
+    # Visa's retired 13-digit numbers are left out: EAN-13 barcodes that start with 4 would match them.
+    (4, 4, frozenset({16, 19})),                         # Visa
     (51, 55, frozenset({16})),                           # Mastercard
     (2221, 2720, frozenset({16})),                       # Mastercard 2-series
     (34, 34, frozenset({15})),                           # American Express
@@ -86,7 +101,7 @@ def _mask_cards(text: str) -> tuple[str, int]:
 
     def replace(match: re.Match[str]) -> str:
         nonlocal count
-        digits = re.sub(r"[ -]", "", match.group(0))
+        digits = re.sub(r"[ \u00a0-]", "", match.group(0))
         if not _is_card_number(digits):
             return match.group(0)
         count += 1

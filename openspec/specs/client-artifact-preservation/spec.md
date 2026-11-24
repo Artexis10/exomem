@@ -503,7 +503,7 @@ On a personal server, the reply to a destination ticket SHALL include a `page` s
 
 ### Requirement: Kept text never holds a card number
 
-Every capture that keeps caller text, namely a text original, a caption and an extracted text or transcription, SHALL remove each payment card number before the text is hashed or written. A card number has 13 to 19 digits, optionally grouped by single spaces or hyphens. Its issuer prefix and length belong to a card scheme, and its Luhn check digit holds. The kept text SHALL show where the number was, keeping its last four digits.
+Every capture that keeps caller text SHALL remove each payment card number before the text is hashed or written. That covers Evidence text, captions, transcriptions, Source text and observation text. A card number has 14 to 19 digits, unbroken or in a grouping that card schemes print. Its issuer prefix and length belong to a card scheme, and its Luhn check digit holds. The kept text SHALL show where the number was, keeping its last four digits.
 
 #### Scenario: A card number in a text original is removed
 
@@ -511,14 +511,19 @@ Every capture that keeps caller text, namely a text original, a caption and an e
 - **THEN** neither the stored text nor the page holds the number
 - **AND** the result's warnings say a card number was removed
 
+#### Scenario: Punctuation after the number does not hide it
+
+- **WHEN** a kept text ends a sentence with a card number followed by a full stop
+- **THEN** the number is removed
+
 #### Scenario: Identifiers are kept
 
-- **WHEN** a kept text contains an IMEI and a SHA-256 digest
-- **THEN** both are stored unchanged
+- **WHEN** a kept text contains an IMEI, an EAN-13 barcode, a grouped order number and a SHA-256 digest
+- **THEN** all are stored unchanged
 
 ### Requirement: Kept text never holds a labelled credential
 
-The same captures SHALL remove each credential shape that the egress scrubber names explicitly, without the scrubber's high-entropy heuristic. The result SHALL carry a warning that names the field and what was removed.
+The same captures SHALL remove each credential shape that the egress scrubber names explicitly, without the scrubber's high-entropy heuristic. The result SHALL carry a warning that names the field and what was removed. A short human password, PIN or security code has no such shape and stays the agent's judgement.
 
 #### Scenario: A labelled key in a caption is removed
 

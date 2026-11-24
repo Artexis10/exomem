@@ -861,6 +861,12 @@ def _attach_handoff(args, *, transport=None) -> int:
         return _attach_refused(response, payload)
     # A ticket that names its destination saves on arrival and returns the stored receipt instead of a held handle.
     saved = isinstance(descriptor.get("saves_to"), dict)
+    if saved and payload.get("state") == "held" and isinstance(payload.get("save"), dict):
+        # The bytes arrived but the save was refused: the held handle stays redeemable, so hand it over.
+        print(json.dumps(payload, ensure_ascii=False))
+        print(f"attach: the file is held but not saved ({payload['save'].get('code')}); "
+              "pass the printed `file` to save_evidence within the hour", file=sys.stderr)
+        return 1
     if (payload.get("lane") != descriptor["lane"]
             or payload.get("hash_algorithm") != "sha256" or payload.get("hash") != digest
             or type(payload.get("size")) is not int or payload["size"] != len(data)

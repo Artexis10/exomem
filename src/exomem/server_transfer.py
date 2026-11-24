@@ -977,7 +977,7 @@ history.replaceState(null, "", location.pathname);
 const out = document.getElementById("out");
 const form = document.getElementById("f");
 if (!ticket.startsWith("exomem-upload:")) {
-  out.textContent = "This link has no upload ticket. Ask the assistant for a new link.";
+  out.textContent = "This link has no upload ticket. Ask the assistant for a new one.";
   form.hidden = true;
 }
 form.onsubmit = async (event) => {
@@ -993,11 +993,12 @@ form.onsubmit = async (event) => {
   try {
     const reply = await fetch("../upload", {method: "POST", body, headers: {Authorization: "Bearer " + ticket}});
     const receipt = await reply.json();
+    const refusal = (receipt.save && receipt.save.reason) || receipt.reason || "the server refused it";
     out.textContent = receipt.stored_path
-      ? "Saved as " + receipt.stored_path + "\nSHA-256 " + receipt.hash + "\nYou can close this page."
-      : "Not saved: " + (receipt.reason || reply.status) + "\nAsk the assistant for a new link.";
+      ? "Saved: " + receipt.stored_path + " (SHA-256 " + receipt.hash + ")"
+      : "Not saved: " + refusal + ". Tell the assistant.";
   } catch (error) {
-    out.textContent = "Not saved: the server did not answer. Ask the assistant for a new link.";
+    out.textContent = "Not saved: the server did not answer. Tell the assistant.";
   }
 };
 """
@@ -1006,10 +1007,10 @@ SEND_PAGE_HTML = f"""<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Save a file</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
-input,button{{font:inherit;margin-top:1rem}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
+input,button{{font:inherit;margin-top:1rem}}#out{{margin-top:1rem;overflow-wrap:anywhere}}</style>
 <h1>Save a file as evidence</h1>
-<p>Pick the file the assistant asked for. Cover any card number, security code or password first.</p>
-<form id=f><input type=file name=file required><br><button type=submit>Save</button></form>
+<form id=f><label for=file>File. Cover any card number, security code or password first.</label><br>
+<input id=file type=file name=file required><br><button type=submit>Save</button></form>
 <div id=out></div>
 <script>{_SEND_PAGE_SCRIPT}</script>"""
 
@@ -1035,14 +1036,21 @@ def _save_on_arrival(vault_root: Path, held: dict, destination: dict) -> dict:
     from . import commands
     from .cli_ops import OpError
 
-    try:
-        result = commands.op_preserve_artifacts(
-            vault_root, scope=destination["scope"], category=destination["category"],
-            files=[held["file"]], description=destination.get("description"),
-        )
-        row = dict(result["files"][0])
-    except (OpError, ValueError, OSError) as exc:
-        row = {"state": "failed", "code": getattr(exc, "code", type(exc).__name__), "reason": str(exc)[:300]}
+    def save(handle: dict) -> dict:
+        try:
+            result = commands.op_preserve_artifacts(
+                vault_root, scope=destination["scope"], category=destination["category"],
+                files=[handle], description=destination.get("description"),
+            )
+            return dict(result["files"][0])
+        except (OpError, ValueError, OSError) as exc:
+            return {"state": "failed", "code": getattr(exc, "code", type(exc).__name__), "reason": str(exc)[:300]}
+
+    row = save(held["file"])
+    if row.get("code") == "ARTIFACT_EXISTS":
+        # Phones name many photos alike (`image.jpg`); other bytes under the same name get the digest in theirs.
+        name = Path(str(held["file"]["file_name"]))
+        row = save({**held["file"], "file_name": f"{name.stem}-{held['hash'][:12]}{name.suffix}"})
     if row.get("state") not in ("stored", "already_stored"):
         return {**held, "save": {key: row.get(key) for key in ("state", "code", "reason")},
                 "next": "save_evidence with this `file` in `files` keeps it before the hold expires"}
