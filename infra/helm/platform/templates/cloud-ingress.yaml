@@ -25,7 +25,7 @@
 # cellctl.namespace, where the signed registry already delivers the token.
 # Any namespace could name a ClusterIssuer, so exomem-cloud-issuer-scope below
 # admits a Certificate or CertificateRequest naming it only in the edge
-# namespace. The solver stays scoped by selector.dnsNames to the one hostname
+# namespace. The solver stays scoped by selector.dnsNames to the hostnames
 # it is meant to solve for.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -41,6 +41,9 @@ spec:
       - selector:
           dnsNames:
             - {{ .Values.cloudIngress.hostname | quote }}
+            {{- range .Values.cloudGateway.additionalHostnames }}
+            - {{ . | quote }}
+            {{- end }}
         dns01:
           cloudflare:
             apiTokenSecretRef:
@@ -95,6 +98,10 @@ spec:
     kind: ClusterIssuer
   dnsNames:
     - {{ .Values.cloudIngress.hostname | quote }}
+    {{- /* Each additional hostname needs its own DNS-only record and a DNS-01 token that can edit its zone (values.yaml, cloudGateway.additionalHostnames). */}}
+    {{- range .Values.cloudGateway.additionalHostnames }}
+    - {{ . | quote }}
+    {{- end }}
 ---
 # The DNS record for this hostname must be DNS-only (not proxied) in
 # Cloudflare, so the ACME DNS-01 challenge and the direct TLS connection
@@ -155,7 +162,7 @@ spec:
     # The gateway also serves the hosted MCP path, which must stay unreachable
     # through the Cloud hostname.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && (Path(`{{ .Values.cloudGateway.mcpPath }}`) || Path(`/.well-known/oauth-protected-resource{{ .Values.cloudGateway.mcpPath }}`))
+      match: {{ include "exomem.cloudHostMatch" . }} && (Path(`{{ .Values.cloudGateway.mcpPath }}`) || Path(`/.well-known/oauth-protected-resource{{ .Values.cloudGateway.mcpPath }}`))
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:
@@ -164,7 +171,7 @@ spec:
     # The Exomem icon at the conventional site-icon path. Clients that show a site icon for
     # this MCP server read it here; without the route they fall back to the parent domain's.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/favicon.ico`) && (Method(`GET`) || Method(`HEAD`))
+      match: {{ include "exomem.cloudHostMatch" . }} && Path(`/favicon.ico`) && (Method(`GET`) || Method(`HEAD`))
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:
@@ -174,7 +181,7 @@ spec:
     # cell from this host and answers only an authenticated GET, with that credential's cell's
     # document; an older gateway answers 404, so the route is safe before its release.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/.well-known/exomem-cell`) && Method(`GET`)
+      match: {{ include "exomem.cloudHostMatch" . }} && Path(`/.well-known/exomem-cell`) && Method(`GET`)
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:
@@ -187,7 +194,7 @@ spec:
     # The gateway rejects a declared body over 101 MiB, and the cell enforces the ticket's
     # limit on a streamed one.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/upload`) && Method(`POST`)
+      match: {{ include "exomem.cloudHostMatch" . }} && Path(`/upload`) && Method(`POST`)
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:
@@ -196,7 +203,7 @@ spec:
     # The gateway's original download route. It checks the caller's access token and signs a
     # per-request proof before it contacts the cell, and it streams the body back unbuffered.
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/download`) && Method(`GET`)
+      match: {{ include "exomem.cloudHostMatch" . }} && Path(`/download`) && Method(`GET`)
       middlewares:
         - name: exomem-cloud-trusted-ingress
       services:
@@ -205,7 +212,7 @@ spec:
 {{- end }}
 {{- if .Values.cloudIngress.functionalHealthEnabled }}
     - kind: Rule
-      match: Host(`{{ .Values.cloudIngress.hostname }}`) && Path(`/healthz`) && Method(`GET`)
+      match: {{ include "exomem.cloudHostMatch" . }} && Path(`/healthz`) && Method(`GET`)
       middlewares:
         - name: exomem-cloud-functional-health
         - name: exomem-cloud-trusted-ingress
