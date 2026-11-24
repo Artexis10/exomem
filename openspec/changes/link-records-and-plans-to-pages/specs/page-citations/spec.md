@@ -18,12 +18,17 @@ Exomem SHALL answer which Records rows and Planning items cite a page through on
 
 ### Requirement: A read counts row-decided citations up to a configured limit
 
-A citing row that a row-level policy releases on its own SHALL be counted only until the read has counted `EXOMEM_CITATION_COUNT_LIMIT` visible such rows (default 1,000; a batch shares the limit equally among its pages). The count SHALL then be a lower bound marked `count_complete: false`, and exact otherwise. A continuation SHALL still reach every visible citation. Where the count stops SHALL depend on visible rows only.
+A citing row that a row-level policy releases on its own SHALL be counted up to `EXOMEM_CITATION_COUNT_LIMIT` visible such rows (default 1,000; a batch shares the limit equally among its pages). When more visible such rows cite the page, the count SHALL be the limit, marked `count_complete: false`; otherwise it SHALL be exact. A continuation SHALL still reach every visible citation. Where the count stops SHALL depend on visible rows only.
 
 #### Scenario: Past the limit the count is a lower bound
 
 - **WHEN** a row-level policy decides each row of a collection, and more of its visible rows cite a page than the limit
 - **THEN** the reply counts the limit with `count_complete: false`, and following `more` lists every visible citing row
+
+#### Scenario: Exactly the limit is an exact count
+
+- **WHEN** a row-level policy decides each row of a collection, and exactly the limit of its visible rows cite a page
+- **THEN** the reply counts the limit with `count_complete: true`
 
 #### Scenario: A withheld row never moves the cut
 
@@ -42,7 +47,12 @@ A citing row that a row-level policy releases on its own SHALL be counted only u
 
 ### Requirement: Citations are visible only when both ends are visible
 
-A citation SHALL be returned and counted only when the caller may read the citing row's collection and field and also the cited page. A withheld page SHALL produce the same answer as a missing one. A withheld row SHALL be absent from the items and from the count.
+A citation SHALL be returned and counted only when the caller may read the citing row's collection and field and also the cited page. A withheld page SHALL produce the same answer as a missing one. A withheld row SHALL be absent from the items and from the count, and the number of withheld rows that cite a page SHALL NOT change the reply's state.
+
+#### Scenario: Thousands of withheld citing rows leave the reply ready
+
+- **WHEN** under the shipped query deadline, a page is cited by three visible rows and 5,000 rows withheld from the caller, and its twin by three visible rows only
+- **THEN** both replies are `ready` with the count 3 and `count_complete: true`
 
 #### Scenario: A withheld collection stays invisible
 

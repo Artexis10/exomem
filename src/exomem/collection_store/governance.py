@@ -12,7 +12,7 @@ import sqlite3
 import sys
 import time
 from collections import Counter, OrderedDict
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing
 from dataclasses import dataclass, replace
 from itertools import islice
@@ -41,6 +41,9 @@ from .summary import SUMMARY
 
 #: Row decisions one summary release may stream when policy varies by row; past it, a typed refusal.
 MAX_SUMMARY_ROW_DECISIONS = 100_000
+#: The distinct row metadata values that one `RowFilter` decides, a decision each; a collection whose
+#: rows carry more is decided row by row instead, so a filter's cost stays within one read's budget.
+MAX_FILTER_METADATA = 1_000
 RELEASE_LIMIT = "COLLECTION_RELEASE_LIMIT"
 #: The owner's refusal on a connection whose write the host's connector boundary limits. Its words
 #: depend only on the collection's manifest, so they show the connection no hidden row.
@@ -256,6 +259,20 @@ def subject_policy(basis, scope_ids, effective):
             scope_ids = (default,)
         effective = replace(effective, scopes=scopes)
     return scope_ids, effective
+
+
+@dataclass(frozen=True, slots=True)
+class RowFilter:
+    """Which rows of one collection a read releases, in a form that one statement tests for each row.
+
+    A row is released when ``released`` holds its id, or when ``named`` does not hold its id and
+    ``metadata`` holds its ``governance_json``. ``decisions`` counts the decisions that built it.
+    """
+
+    released: frozenset[int]
+    named: frozenset[int]
+    metadata: frozenset[str]
+    decisions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,6 +531,27 @@ def subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, ident
     return tuple(iter_subjects(conn, cid, logical_vault_id, identity=identity, view_path=view_path))
 
 
+#: The ``items`` columns that a row's subject is built from (`_row_subject`), in its order.
+_ROW_COLUMNS = "row_id,item_key,row_version,payload_hash,view_path,governance_json"
+
+
+def _row_subject(cid: str, contract, row) -> CanonicalSubject:
+    """The subject of one row, from its collection's `subject_factory` ``contract`` and its `_ROW_COLUMNS`."""
+    manifest_meta, declared, make = contract[4:7]
+    row_id, key, row_version, payload, view_path, raw_metadata = row
+    # Projects are inherited from the exact current manifest contract.
+    if _metadata(raw_metadata)["projects"] != manifest_meta["projects"]:
+        raise ValueError("canonical row project differs from its manifest")
+    return make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, _row_policy_path(contract, view_path),
+                declared.item_type, raw_metadata, row_version, payload, "row")
+
+
+def _row_policy_path(contract, view_path: str) -> str:
+    """The path that places a row in policy: its manifest's for a summary, its log's, or its own view's."""
+    path, source_path, layout, view_mode = contract[:4]
+    return path if view_mode == "summary" else source_path if layout == "markdown-log" else view_path
+
+
 def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
     """Load one canonical contract for streamed or selected subject construction."""
     row = conn.execute(
@@ -564,9 +602,9 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
     if sum(selector is not None for selector in (identity, view_path, row_key, row_ids)) > 1:
         raise ValueError("canonical subject lookup must have one selector")
+    contract = subject_factory(conn, cid, logical_vault_id)
     (path, source_path, layout, view_mode, manifest_meta, declared, make,
-     metadata, version, content_hash) = subject_factory(conn, cid, logical_vault_id)
-    summary = view_mode == "summary"
+     metadata, version, content_hash) = contract
     if identity in (None, path) and row_key is None and row_ids is None:
         yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
@@ -586,19 +624,13 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
     # without a sorter whose spill files escape the private TEMP-table quota.
     item_order = "item_key" if query_order else "row_id"
     with closing(conn.execute(
-        "SELECT row_id,item_key,row_version,payload_hash,view_path,governance_json "
+        f"SELECT {_ROW_COLUMNS} "
         "FROM " + ("item_rows" if retained else "items") + " WHERE collection_id=?" + item_filter + " ORDER BY " + item_order,
         (cid, *item_args),
     )) as cursor:
         while batch := cursor.fetchmany(batch_size):
-            for row_id, key, row_version, payload, view_path, raw_metadata in batch:
-                # Projects are inherited from the exact current manifest contract.
-                meta = _metadata(raw_metadata)
-                if meta["projects"] != manifest_meta["projects"]:
-                    raise ValueError("canonical row project differs from its manifest")
-                policy_path = path if summary else source_path if layout == "markdown-log" else view_path
-                yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
-                           declared.item_type, raw_metadata, row_version, payload, "row")
+            for row in batch:
+                yield _row_subject(cid, contract, row)
     if not include_held or row_key is not None or row_ids is not None:
         return
     # Legacy summary corrections have no persisted floor; canonical source ownership supplies the same held basis.
@@ -1066,6 +1098,7 @@ class OperationAuthorization:
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
+        self._scope_ref_lists = None
         # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
         self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
@@ -1453,10 +1486,13 @@ class OperationAuthorization:
         """Whether this reader may read every summary row however the ``varying`` scopes place it.
 
         A row's decision reads its scopes only through the meet of each scope's own decision and the
-        connector's denial of any of them; every other input is the same for every row. So when the
-        first row is released, and so are each varying scope alone and a row in no scope, every row is.
-        A rule that names a row for another audience then costs this reader no row decision. A write
-        reads its capture membership as a whole, so only a read is decided this way.
+        connector's denial of any of them; every other input is the same for every row. A meet of
+        released decisions is released unless their options differ, which lowers it, so a scope whose
+        own decision carries an option makes this proof fail. A row lies in the first row's scopes that
+        no row varies, in varying ones, or in the residual scope alone. So when the first row is
+        released, and each of those scopes alone and a row in no scope are released with no option,
+        every row is. A rule that names a row for another audience then costs this reader no row
+        decision. A write reads its capture membership as a whole, so only a read is decided this way.
         """
         if self.mutation:
             return False
@@ -1467,15 +1503,94 @@ class OperationAuthorization:
         sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
         if self.decision(sample).level < 6:
             return False
+        residual = self.policy.residual_scope_id
+        alone = sorted({*self.cache.scopes(sample, self.policy), *varying, *((residual,) if residual else ())})
         return all(self._scopes_released(sample.basis, scope_ids)
-                   for scope_ids in ((), *((scope_id,) for scope_id in varying)))
+                   for scope_ids in ((), *((scope_id,) for scope_id in alone)))
 
     def _scopes_released(self, basis, scope_ids: tuple[str, ...]) -> bool:
-        """Whether a read of a subject with ``basis`` in exactly ``scope_ids`` is released, as `_subject_decision` decides."""
+        """Whether a read of a subject with ``basis`` in exactly ``scope_ids`` is released with no option to meet."""
         try:
-            return self._scopes_decision(basis, scope_ids).level >= 6
+            decision = self._scopes_decision(basis, scope_ids)
         except connector_boundary.UNDECIDED:
             return False
+        return decision.level >= 6 and not decision.option_values and not decision.option_ambiguities
+
+    def released_rows(self, cid: str, row_ids: Iterable[int]) -> set[int]:
+        """The rows of ``row_ids`` that this operation releases, with one decision for each set of rows decided alike.
+
+        A decision reads a row through its subject: its policy path, its projects, tags and classes, and
+        its ref. A scope reads the ref only as a member of its ``refs`` or ``exclude_refs``, and a tombstone
+        only as an exact value. Rows equal in those inputs are decided alike, so the first of them decides
+        the rest; a row whose subject cannot be built is withheld, and so is each row equal to it. A
+        session grant binds a row's own version, so a row that one names is decided alone.
+        """
+        self._load_grants()
+        contract = subject_factory(self.conn, cid, self.logical_vault_id)
+        prefix = f"exomem://{contract[5].item_type}/{cid}/"
+        lists = self._ref_lists()
+        # Only a tombstone that holds the collection's id can name one of its rows.
+        marked = any(cid in tombstone for tombstone in self.tombstones)
+        alike: dict[tuple, list[tuple]] = {}
+        with closing(self.conn.execute(
+                f"SELECT {_ROW_COLUMNS} FROM items WHERE collection_id=? AND row_id IN (SELECT value FROM json_each(?))",
+                (cid, json.dumps(sorted(set(row_ids)))))) as cursor:
+            for row in cursor:
+                ref = prefix + row[1]
+                inputs = (_row_policy_path(contract, row[4]), row[5],
+                          tuple(index for index, refs in enumerate(lists) if ref in refs),
+                          marked and lifecycle.is_tombstoned_in(self.tombstones, ref),
+                          row[0] if ref in self.grants else None)
+                alike.setdefault(inputs, []).append(row)
+        released: set[int] = set()
+        for rows in alike.values():
+            try:
+                admitted = self.decision(_row_subject(cid, contract, rows[0])).level >= 6
+            except (ValueError, TypeError):
+                admitted = False
+            if admitted:
+                released.update(row[0] for row in rows)
+        return released
+
+    def row_filter(self, cid: str) -> RowFilter | None:
+        """The rows of a summary or log collection that this read releases, decided once per kind of row, or None.
+
+        Such rows share their policy path, so a row's decision reads only its ``governance_json`` and its
+        ref (`released_rows`). A row that no scope list names is decided as every such row with equal
+        metadata is, and the rows that a list names are decided in their own groups. A collection whose
+        rows a grant or a tombstone names, or whose rows carry more than MAX_FILTER_METADATA metadata
+        values, answers None, and so does a write.
+        """
+        if self.mutation:
+            return None
+        self._load_grants()
+        contract = subject_factory(self.conn, cid, self.logical_vault_id)
+        if contract[3] != "summary" and contract[2] != "markdown-log":
+            return None  # each row's own view path places it in policy
+        prefix = f"exomem://{contract[5].item_type}/{cid}/"
+        if (any(identity.startswith(prefix) for identity in self.grants)
+                or any(cid in tombstone for tombstone in self.tombstones)):
+            return None
+        keys = sorted({ref[len(prefix):] for refs in self._ref_lists() for ref in refs if ref.startswith(prefix)})
+        named = [row_id for (row_id,) in self.conn.execute(
+            "SELECT row_id FROM items WHERE collection_id=? AND item_key IN (SELECT value FROM json_each(?))",
+            (cid, json.dumps(keys)))]
+        kinds = self.conn.execute(
+            "SELECT governance_json, min(row_id) FROM items WHERE collection_id=? "
+            "AND row_id NOT IN (SELECT value FROM json_each(?)) GROUP BY governance_json LIMIT ?",
+            (cid, json.dumps(named), MAX_FILTER_METADATA + 1)).fetchall()
+        if len(kinds) > MAX_FILTER_METADATA:
+            return None
+        released = self.released_rows(cid, [*named, *(row_id for _, row_id in kinds)])
+        return RowFilter(frozenset(released.intersection(named)), frozenset(named),
+                         frozenset(raw for raw, row_id in kinds if row_id in released), len(named) + len(kinds))
+
+    def _ref_lists(self) -> tuple[frozenset[str], ...]:
+        """Every non-empty ``refs`` and ``exclude_refs`` list of the policy's scopes, in one fixed order."""
+        if self._scope_ref_lists is None:
+            self._scope_ref_lists = tuple(frozenset(refs) for scope in self.policy.scopes.values()
+                                    for refs in (scope.refs, scope.exclude_refs) if refs)
+        return self._scope_ref_lists
 
     def manifest_subject(self, cid: str) -> CanonicalSubject:
         """The collection's manifest subject, from one point read per read operation.

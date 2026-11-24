@@ -10,9 +10,12 @@ and a ``more`` cursor. ``warming`` says the citation index of a collection the c
 building, and ``unavailable`` says the read could not be answered; neither carries a list, so a partial
 index never reads as an empty one. Both depend on the vault, never on the page asked about.
 
-A row that a row-level policy releases on its own costs one governance decision, so a read counts such rows
-only until it has seen ``EXOMEM_CITATION_COUNT_LIMIT`` of them visible (`count_limit`). The count is then
-a lower bound and ``count_complete`` is false; ``more`` still pages through every visible citation. The
+A collection whose rows release alike for the caller is counted from the index. Another collection's rows
+are tested inside the read's statement against a row filter that governance builds once per read
+(`reference_resolution.row_filter`), so a withheld row costs an index entry test and never moves the
+reply's state. A row that no filter describes needs its own governance decision, so a read counts such
+rows up to ``EXOMEM_CITATION_COUNT_LIMIT`` visible ones (`count_limit`). When it finds one more, the count
+is a lower bound and ``count_complete`` is false; ``more`` still pages through every visible citation. The
 limit counts visible rows, never decided ones: a withheld row could otherwise change where the count stops.
 
 A citation is visible when the caller may read the citing collection, the link field and the row, and
@@ -53,9 +56,9 @@ _WARMING = {"state": "warming"}
 _UNAVAILABLE = {"state": "unavailable"}
 
 # One statement serves each round of a read. Its first part counts the entries of each link field whose
-# collection releases its rows whole, for every asked key at once. Its second part reads each asked window
-# (`_Window`): per link field, the next entries past a row, walked one index seek at a time, so a window
-# costs its own size and never the length of the field it reads.
+# collection releases its rows whole or by a row filter, for every asked key at once. Its second part reads
+# each asked window (`_Window`): per link field, the next entries past a row, walked one index seek at a
+# time, so a window costs its own size and never the length of the field it reads.
 _CITATIONS = """
 WITH RECURSIVE windows(wid, match, cid, field, after_row, size) AS (
     SELECT json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]'),
@@ -63,22 +66,32 @@ WITH RECURSIVE windows(wid, match, cid, field, after_row, size) AS (
     FROM json_each(:windows)),
 walk(wid, match, cid, field, row_id, taken, size) AS (
     SELECT wid, match, cid, field,
-           (SELECT min(q.row_id) FROM item_references q WHERE q.collection_id = x.cid
-                AND q.field_path = x.field AND q.match = x.match AND q.row_id > x.after_row), 1, size
+           (SELECT q.row_id FROM item_references q WHERE q.collection_id = x.cid AND q.field_path = x.field
+                AND q.match = x.match AND q.row_id > x.after_row AND {q} ORDER BY q.row_id LIMIT 1), 1, size
     FROM windows x
     UNION ALL
     SELECT wid, match, cid, field,
-           (SELECT min(q.row_id) FROM item_references q WHERE q.collection_id = w.cid
-                AND q.field_path = w.field AND q.match = w.match AND q.row_id > w.row_id), taken + 1, size
+           (SELECT q.row_id FROM item_references q WHERE q.collection_id = w.cid AND q.field_path = w.field
+                AND q.match = w.match AND q.row_id > w.row_id AND {q} ORDER BY q.row_id LIMIT 1), taken + 1, size
     FROM walk w WHERE w.row_id IS NOT NULL AND w.taken < w.size)
 SELECT 0, r.match, r.collection_id, r.field_path, count(*), NULL
 FROM json_each(:counted) f CROSS JOIN json_each(:matches) a CROSS JOIN item_references r
      ON r.collection_id = json_extract(f.value, '$[0]') AND r.field_path = json_extract(f.value, '$[1]')
     AND r.match = a.value
+WHERE {r}
 GROUP BY r.match, r.collection_id, r.field_path
 UNION ALL
 SELECT 1, w.wid, w.cid, w.field, w.row_id, i.item_key FROM walk w JOIN items i ON i.row_id = w.row_id
 """
+# An entry of a collection that a row filter covers is read only when the filter releases its row, as
+# `governance.RowFilter` defines it; an entry of any other collection is read as it is.
+_FILTERED = """({e}.collection_id NOT IN (SELECT value FROM json_each(:filtered))
+    OR {e}.row_id IN (SELECT value FROM json_each(:released))
+    OR ({e}.row_id NOT IN (SELECT value FROM json_each(:named))
+        AND (SELECT g.collection_id || ':' || g.governance_json FROM items g WHERE g.row_id = {e}.row_id)
+            IN (SELECT value FROM json_each(:metadata))))"""
+_STATEMENTS = (_CITATIONS.format(q="1", r="1"),
+               _CITATIONS.format(q=_FILTERED.format(e="q"), r=_FILTERED.format(e="r")))
 
 
 def inbound_citations(ref: str, caller: Path, limit: int = DEFAULT_LIMIT, more: str | None = None) -> dict[str, Any]:
@@ -246,24 +259,32 @@ def _answer(session, root: Path, keys: dict[str, str | None], limit: int,
     if not visible:
         return answers
     budget = max(1, count_limit() // len(keys))
+    filters = _filters(session, visible)
     whole = sorted((collection_id, d.dotted) for collection_id, (lookup, fields) in visible.items()
-                   if lookup.uniform for d in fields)
+                   if lookup.uniform or collection_id in filters["filtered"] for d in fields)
     decided = sorted((collection_id, d.dotted) for collection_id, (lookup, fields) in visible.items()
-                     if not lookup.uniform for d in fields)
+                     if not (lookup.uniform or collection_id in filters["filtered"]) for d in fields)
     tallies = {key: _Tally(budget, limit, whole, decided, after) for key in sorted(asked)}
-    pending = {key: [tally.shown, tally.counting, tally.paging] for key, tally in tallies.items()}
+    pending = {key: [window for window in (tally.shown, tally.counting, tally.paging) if window is not None]
+               for key, tally in tallies.items()}
     counted = whole
+    # A row that a round decided keeps its answer for the rest of the read, which windows overlap.
+    answered: set[int] = set()
+    released: set[int] = set()
     while pending:
         windows = [(key, window) for key, own in pending.items() for window in own]
         counts, entries = _query(session, counted, sorted(pending) if counted else [],
-                                 [read for wid, (key, window) in enumerate(windows) for read in window.ranges(wid, key)])
+                                 [read for wid, (key, window) in enumerate(windows) for read in window.ranges(wid, key)],
+                                 filters)
         counted = []
         for key, n in counts:
             tallies[key].count += n
         taken = {window: window.take(entries.get(wid, [])) for wid, (_, window) in enumerate(windows)}
-        to_decide = {entry[0] for key, window in windows if window is not tallies[key].shown for entry in taken[window]}
+        to_decide = {entry[0] for key, window in windows if window is not tallies[key].shown
+                     for entry in taken[window] if entry[0][2] not in answered}
         session.charge_visits(len(to_decide))
-        released = _released(session, visible, to_decide)
+        released |= _released(session, visible, to_decide)
+        answered.update(row_id for _, _, row_id in to_decide)
         reading, pending = pending, {}
         for key, own in reading.items():
             widened = tallies[key].settle({window: taken[window] for window in own}, released)
@@ -321,12 +342,14 @@ class _Window:
 class _Tally:
     """One asked page's citations, as the rounds of a read find them.
 
-    A field of a collection that releases its rows whole is counted from the index and paged in the first
-    round (`shown`). A row of any other collection is released by its own decision, so two windows read
-    those fields until they hold enough visible rows: `counting` from the first entry, until ``budget``
-    visible rows are counted or none are left, and `paging` past the cursor, until the page and its
-    continuation are full or none are left. Both stop on visible rows only, so a withheld row moves
-    neither the count nor the page.
+    A field of a collection that releases its rows whole or by a row filter is counted from the index and
+    paged in the first round (`shown`). A row of any other collection is released by its own decision, so
+    two windows read those fields until they hold enough visible rows: `counting` from the first entry,
+    until ``budget`` visible rows are counted and one more is found or none are left, and `paging` past
+    the cursor, until the page and its continuation are full or none are left. Both stop on visible rows
+    only, so a withheld row moves neither the count nor the page. Without a cursor, the page holds the
+    first visible rows that the count finds, so unless the page outgrows the count, `counting` alone
+    serves both.
     """
 
     def __init__(self, budget: int, limit: int, whole: list, decided: list, after):
@@ -335,25 +358,32 @@ class _Tally:
         self.complete = True
         self.candidates: list[tuple] = []
         self.shown = _Window(whole, after, limit + 1)
-        self.counting = _Window(decided, None, budget)
-        self.paging = _Window(decided, after, limit + 1)
+        self.counting = _Window(decided, None, budget + 1)
+        self.paging = _Window(decided, after, limit + 1) if after is not None or budget < limit else None
 
     def settle(self, found: dict[_Window, list], released: set[int]) -> list[_Window]:
         """Take one round's entries; the windows the next round must read, widened."""
         self.candidates += found.get(self.shown, [])
-        for (_, _, row_id), _ in found.get(self.counting, []):
-            if self.complete and row_id in released:
+        for entry in found.get(self.counting, []):
+            if not self.complete or entry[0][2] not in released:
+                continue
+            if self.governed < self.budget:
                 self.governed += 1
-                self.complete = self.governed < self.budget
-        for entry in found.get(self.paging, []):
-            if self.paged <= self.limit and entry[0][2] in released:
+            else:
+                self.complete = False  # a visible row past the limit: the count is a lower bound
+            if self.paging is None and self.paged <= self.limit:
                 self.paged += 1
                 self.candidates.append(entry)
+        if self.paging is not None:
+            for entry in found.get(self.paging, []):
+                if self.paged <= self.limit and entry[0][2] in released:
+                    self.paged += 1
+                    self.candidates.append(entry)
         widened = []
         if self.complete and self.counting.more:
-            self.counting.widen(self.budget - self.governed, self.governed)
+            self.counting.widen(self.budget + 1 - self.governed, self.governed)
             widened.append(self.counting)
-        if self.paged <= self.limit and self.paging.more:
+        if self.paging is not None and self.paged <= self.limit and self.paging.more:
             self.paging.widen(self.limit + 1 - self.paged, self.paged)
             widened.append(self.paging)
         return widened
@@ -436,10 +466,27 @@ def _visible_targets(session, root: Path, keys: dict[str, str | None]) -> set[st
     return readable
 
 
-def _query(session, counted: list, matches: list[str], reads: list[list]) -> tuple[list, dict[int, list]]:
+def _filters(session, visible) -> dict[str, Any]:
+    """The row filters of the collections that release their rows by one (`reference_resolution.row_filter`).
+
+    The answer holds the statement parameters of `_FILTERED`, and ``filtered`` holds those collections' ids.
+    """
+    found = {collection_id: row_filter for collection_id, (lookup, _) in sorted(visible.items())
+             if (row_filter := reference_resolution.row_filter(session, lookup)) is not None}
+    return {"filtered": sorted(found),
+            "released": sorted(row_id for row_filter in found.values() for row_id in row_filter.released),
+            "named": sorted(row_id for row_filter in found.values() for row_id in row_filter.named),
+            "metadata": sorted(f"{collection_id}:{metadata}" for collection_id, row_filter in found.items()
+                               for metadata in row_filter.metadata)}
+
+
+def _query(session, counted: list, matches: list[str], reads: list[list],
+           filters: dict[str, Any]) -> tuple[list, dict[int, list]]:
     """One round: the entry count of each ``counted`` field per asked key, and each window's entries by its id."""
-    with closing(session.connection.execute(_CITATIONS, {
-            "counted": json.dumps(counted), "matches": json.dumps(matches), "windows": json.dumps(reads)})) as cursor:
+    statement = _STATEMENTS[bool(filters["filtered"])]
+    parameters = {"counted": json.dumps(counted), "matches": json.dumps(matches), "windows": json.dumps(reads),
+                  **({name: json.dumps(value) for name, value in filters.items()} if filters["filtered"] else {})}
+    with closing(session.connection.execute(statement, parameters)) as cursor:
         rows = cursor.fetchall()
     counts = [(key, n) for kind, key, _, _, n, _ in rows if kind == 0]
     entries: dict[int, list] = {}

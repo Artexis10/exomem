@@ -71,9 +71,11 @@ def row_released(session, lookup, item_key: str) -> bool:
 def rows_released(session, lookup, row_ids: Iterable[int]) -> set[int]:
     """The rows of ``row_ids`` the caller may read in an admitted collection, each decided as `row_released` decides it.
 
-    One subject read serves every row, so the cost is the rows asked for, never a statement a row. A row
-    whose basis cannot be built is not released: when one stops the shared read, the rows it left are
-    decided one by one, so that row alone reads like a withheld one.
+    One read serves every row, so the cost is the rows asked for, never a statement a row. Rows of the
+    store whose decision inputs are equal share one decision (`OperationAuthorization.released_rows`), so a
+    policy that names thousands of rows costs a lookup a row. A row whose basis cannot be built is not
+    released: when one stops the shared read, the rows it left are decided one by one, so that row alone
+    reads like a withheld one.
     """
     wanted = sorted(set(row_ids))
     if lookup.uniform or not wanted:
@@ -84,10 +86,38 @@ def rows_released(session, lookup, row_ids: Iterable[int]) -> set[int]:
         return _rows_released(session, lookup, wanted)
 
 
+def row_filter(session, lookup) -> governance.RowFilter | None:
+    """Which rows of an admitted collection the caller may read, as one statement tests each row, or None.
+
+    None leaves each row to `rows_released`: a uniform collection needs no filter, and one whose rows
+    are outside the store, or that `OperationAuthorization.row_filter` cannot describe, is decided by row.
+    The decisions that build a filter are charged as row visits.
+    """
+    if lookup.uniform or lookup.source is not derived_rows.STORE:
+        return None
+    session.check()
+    try:
+        with state_paths.resolution_scope():
+            found = session._authorization.row_filter(lookup.collection_id)
+    except (ValueError, TypeError, collections.CollectionError):
+        return None
+    if found is not None:
+        session.charge_visits(found.decisions)
+    return found
+
+
 def _rows_released(session, lookup, wanted: list[int]) -> set[int]:
     operation = session._authorization
     released, decided = set(), set()
     session.check()
+    if lookup.source is derived_rows.STORE:
+        try:
+            released = operation.released_rows(lookup.collection_id, wanted)
+        except (ValueError, TypeError, collections.CollectionError):
+            pass  # each row is decided by itself below, so a row that cannot be read alone stays withheld
+        else:
+            session.check()
+            return released
     try:
         with closing(governance.iter_subjects(session.connection, lookup.collection_id,
                                               operation.logical_vault_id, row_ids=wanted,
