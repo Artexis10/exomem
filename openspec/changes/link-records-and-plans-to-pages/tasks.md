@@ -112,12 +112,15 @@
 
 ## 2. Related pages, overlap and duplicates (Batch C)
 
-- [ ] 2.1 Row creation returns `related_pages` through one batched entity and title lookup per write. Update the capture skill's Records guidance in the scaffold and the shipped plugin skills.
+- [x] 2.1 Row creation returns `related_pages` through one batched entity and title lookup per write. Update the capture skill's Records guidance in the scaffold and the shipped plugin skills.
+  - Evidence: `src/exomem/collection_store/related_pages.py` runs one `WorkingSetIndex.resolve_names` call per write (the activation index's title, stem and alias table, read as stored) and keeps the pages the writer may read, at most three per row and 30 per reply. `record_inputs.append` and `bulk_inputs.detach` call it at prepare time, and the reply tail adds `related_pages` for the created keys only. Updates, Planning writes and import batches skip it: an update names no new subject, a plan item names work, and an import job's receipt reports the job, not each batch (the records spec says so). A failed or never-built index adds a `RELATED_PAGES_UNAVAILABLE` warning, never an empty list (spec scenario added). The reuse is the page-name index behind entity and title resolution, not `resolve_entity_candidate`, which globs the Entities tree on every call and cannot batch.
+  - Guidance: the scaffold sources `references/planning-records.md` and `workflow-skills/exomem-capture/SKILL.md` carry the "read the related pages before an unknown or a placeholder" rule; `scripts/refresh-skill-contract.py`, `exomem package-skills --plugin-root plugins/claude-code` and `scripts/cloud-plugin.py build` regenerated the stamp, the plugin skills and the cloud packages, and `scripts/cloud-plugin.py check` reports `ok`.
 - [ ] 2.2 Collection creation returns `similar_collections` with the existing reshape route and `merge_into`. Its thresholds are configuration, and the check never refuses.
 - [ ] 2.3 The duplicate-fact maintenance job: resolved row-to-page pairs only, incremental, and one `duplicates` review item per candidate. It writes no page or row.
 - [ ] 2.4 Restructure `retype_field` accepts `link` with `relation`, lossless and undoable within the restructure bounds. This lands after #3131 merges.
 - [ ] 2.5 Tests:
-  - one batched lookup for a bulk seed;
+  - [x] one batched lookup for a bulk seed;
+    - Evidence: `test_a_bulk_seed_resolves_every_row_in_one_lookup_and_lists_at_most_thirty_pages` in `tests/test_collection_related_pages.py` (40 rows, 160 matching pages: exactly one `resolve_names` call holding 40 names, and 30 pages in the reply). Withheld pages: `test_a_withheld_page_is_listed_exactly_as_a_missing_one`; no index: `test_an_index_that_was_never_built_is_reported_not_read_as_no_pages`; update lists none: `test_a_new_row_lists_the_visible_pages_that_name_it_and_an_update_lists_none`.
   - hidden collections are neither compared nor named;
   - the detector opens one item and writes nothing else;
   - a retype refuses on one unresolved value;

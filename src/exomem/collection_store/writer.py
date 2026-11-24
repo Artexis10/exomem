@@ -3058,9 +3058,12 @@ class CollectionWriter:
                     previous=None if before is None or _revived(before) else json.loads(before["values_json"]))
         result = {"due_state": advisory, **result} if advisory else result
         result = self._reference_check(result, manifest, [values for _, values, *_ in plans])
-        return link_values.with_notes(result, prepared.link_notes)
+        created = [outcome["item_key"] for outcome in outcomes if outcome["outcome"] == "inserted"]
+        related = prepared.related.notes(created) if prepared.related is not None else {}
+        return link_values.with_notes(result, prepared.link_notes, related)
 
-    def _item_carriers(self, result, manifest, *, path, key, values, previous=None, link_notes=None):
+    def _item_carriers(self, result, manifest, *, path, key, values, previous=None, link_notes=None,
+                       related_notes=None):
         """Refresh derived state only after a new item write has committed."""
         if result["outcome"] != "committed":
             return result
@@ -3074,7 +3077,7 @@ class CollectionWriter:
         result = self._reference_check(result, manifest, [values] if values is not None else [])
         if manifest.semantic_profile == "planning" and previous is not None and values is not None:
             result = {**result, **planning.completion_advisory(self.root, manifest, previous, values)}
-        return link_values.with_notes(result, link_notes or {})
+        return link_values.with_notes(result, link_notes or {}, related_notes or {})
 
     def _reference_check(self, result, manifest, rows: list):
         """Report unresolved declared references of the committed rows; never fails the write."""
@@ -3246,6 +3249,7 @@ class CollectionWriter:
         if isinstance(result, collections.CollectionError):
             raise result
         return self._item_carriers(result, manifest, key=key, values=values, link_notes=candidate.link_notes,
+                                   related_notes=candidate.related_notes,
                                    path=result["affected_paths"][0] if manifest.view_mode == "items" else manifest.path)
 
     @source_dependencies.record_operation

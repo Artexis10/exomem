@@ -65,6 +65,8 @@ def paired(tmp_path, monkeypatch):
 
     monkeypatch.setattr("exomem.records._capture_sweep_carrier", lambda *a, **kw: None)
     monkeypatch.setattr("exomem.records._due_state_carrier", lambda *a, **kw: None)
+    # A replay answers from the ledger and looks up no pages, so the wire pairs compare without the lookup.
+    monkeypatch.setattr("exomem.collection_store.related_pages.for_write", lambda *a, **kw: None)
     roots = [tmp_path / "files", tmp_path / "store"]
     for root in roots:
         (root / "Knowledge Base").mkdir(parents=True)

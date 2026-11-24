@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from .. import origin_bindings, planning, provenance, record_formats, records
 from .. import structured_collections as collections
-from . import connection, edit_back, link_values, views
+from . import connection, edit_back, link_values, related_pages, views
 
 
 @dataclass
@@ -40,6 +40,7 @@ class PreparedRecord:
     request_hash: str | None = None
     recheck_in_leaf: bool = False
     link_notes: dict = field(default_factory=dict)
+    related_notes: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -192,6 +193,10 @@ def append(writer, row, manifest, declared, arguments):
         candidate.adoption = writer._admit_detached_resume(manifest, resumed)
     except collections.CollectionError as error:
         candidate.error = error
+    if candidate.error is None and candidate.before is None:
+        # A new row only: a replay of an existing row, and every update, create nothing to look up.
+        found = related_pages.for_write(writer, manifest, [(key, candidate.values)])
+        candidate.related_notes = found.notes() if found is not None else {}
     candidate.hold_candidate = {"action": "append", "item": dict(candidate.values), "item_key": item_key,
         "body": candidate.body, "guards": {"expected_container_hash": arguments["expected_container_hash"]}}
     return candidate

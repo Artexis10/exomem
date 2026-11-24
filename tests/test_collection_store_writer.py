@@ -279,7 +279,7 @@ def test_commit_survives_lost_transport_ledger_and_retry_after_reopen(store):
     ).fetchone()[0]
     # Session-local advisories accompany the first response, not durable replay.
     canonical_receipt = {key: value for key, value in receipt.items()
-                         if key not in {"due_state", "capture_sweep"}}
+                         if key not in {"due_state", "capture_sweep", "related_pages", "warnings"}}
     assert json.loads(stored) == canonical_receipt
     store.handle.close()
     from exomem.collection_store.writer import CollectionWriter

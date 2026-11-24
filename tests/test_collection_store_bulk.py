@@ -144,7 +144,9 @@ def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store):
     operational = retried["diagnostics"]["operational"]
     assert operational["status"] == "replayed"
     assert operational["terminal"] is True and operational["mutated"] is False
-    leaf = lambda reply: {k: v for k, v in reply["diagnostics"].items() if k != "operational"}  # noqa: E731
+    # A replay does no page lookup, so the first reply's `related_pages` and its lookup warning are reply-only.
+    reply_only = {"operational", "related_pages", "warnings"}
+    leaf = lambda reply: {k: v for k, v in reply["diagnostics"].items() if k not in reply_only}  # noqa: E731
     assert leaf(retried) == leaf(first)
     assert "due_state" not in retried and "capture_sweep" not in retried
     assert tuple(store.connection.iterdump()) == before

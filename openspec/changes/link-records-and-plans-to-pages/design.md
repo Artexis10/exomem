@@ -103,7 +103,7 @@ The single-store owner accepted this seam on 2026-11-24 with four conditions, ea
 
 ### D5. Row creation returns related pages
 
-- A write that creates rows resolves each new row's natural-key values and its presentation title field against visible entities and page titles. It reuses the entity resolution behind `connections.resolve_entity`. A bulk write resolves all its new rows in one batch.
+- A write that creates rows resolves each new row's natural-key values and its presentation title field against visible entities and page titles. It reads the activation index's page-name table (title, stem and aliases of every page, entities included) through `WorkingSetIndex.resolve_names`, which batches. `connections.resolve_entity` globs the Entities tree on every call and cannot batch, so the lookup does not use it. The index is read as stored: an unreadable index adds a `RELATED_PAGES_UNAVAILABLE` warning, and a page captured moments ago may not be listed. A bulk write resolves all its new rows in one batch. Planning writes and import batches skip the lookup, because a plan item names work and an import job's receipt reports the job, not each batch.
 - The reply carries `related_pages`: at most three per row and at most 30 per reply, each with its title and ref.
 - The capture skill's Records guidance says: before writing an unknown or a placeholder, read the related pages.
 - The server does not decide what counts as "unknown".
