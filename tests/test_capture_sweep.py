@@ -634,10 +634,13 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
     # is not read as one (+7 bytes), giving 1488/1473. A real-model round then showed agents
     # reading "structural change" as a list reshape and asking first, so the rule names page
     # curation, the scope of `restructure_execution` (-4 bytes), giving 1484/1469.
-    assert sizes == {"maximal": 1484, "balanced": 1469}, sizes
+    # 2026-11-24: the product rename made both mentions in each block "Evermatter"
+    # (+8 bytes), giving 1492/1477.
+    assert sizes == {"maximal": 1492, "balanced": 1477}, sizes
     # The maximal block keeps real headroom under the cap: the additive
-    # entity-creation wording (ruling R1) was folded in, not appended.
-    assert 1500 - sizes["maximal"] >= 11, sizes
+    # entity-creation wording (ruling R1) was folded in, not appended. The rename
+    # took 8 of the 16 bytes this rule kept, and the exact pin above catches any growth.
+    assert 1500 - sizes["maximal"] >= 8, sizes
     assert all(1500 - size < 100 for size in sizes.values()), sizes
 
 
