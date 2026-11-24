@@ -44,9 +44,11 @@ def owner():
         yield
 
 
-def _correct(root: Path, value: str, reason: str, *, index: int = 0) -> dict:
+def _correct(root: Path, value: str, reason: str, *, anchor: str | None = None) -> dict:
     current = semantic_index.current_parent_index_state(root, PAGE)
-    unit = current.document.units[index]
+    # By anchor: promoting a compact unit to `claim` moves its block to the body's end.
+    units = current.document.units
+    unit = next(unit for unit in units if unit.anchor == anchor) if anchor else units[0]
     return commands.op_observe_memory(
         root,
         path=PAGE,
@@ -367,9 +369,9 @@ def test_a_sparse_unit_read_is_capped_and_pages_on_to_its_old_revision(
     )
     units = semantic_index.current_parent_index_state(tmp_path, PAGE).document.units
     never, rare = units[0].unit_ref, units[2].unit_ref
-    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", index=2)
+    _correct(tmp_path, "Rare 1.", "The rare unit changed once.", anchor="rare")
     for index in range(1, 13):
-        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.", index=1)
+        _correct(tmp_path, f"Busy {index}.", "The busy unit keeps changing.", anchor="busy")
     files = _entry_files_oldest_first(tmp_path)
     assert len(files) == 13
     broken = {files[position].stem for position in range(4, 8)}  # None touches the rare unit.
