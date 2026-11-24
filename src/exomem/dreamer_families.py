@@ -15,11 +15,14 @@ before, so nothing here needs a vault-wide snapshot.
 Families never write the vault, never take the writer lease, never enqueue graph
 debt, never build or repair an index and never load a model. They hold no
 writer handle; the route each proposal carries names an existing governed leaf
-the agent calls under that leaf's own authority.
+the agent calls under that leaf's own authority. The duplicate-fact family also
+reads Records rows, read-only and as the owner, and serves each of them as the
+caller may read it.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import sqlite3
@@ -61,7 +64,13 @@ class Deferred(Exception):
 
 #: Closed Deferred.reason protocol: why a page is held, as status reports it.
 DEFERRAL_REASONS = frozenset(
-    {"graph_unavailable", "identity_cache_cold", "identity_unavailable", "status_unavailable"}
+    {
+        "graph_unavailable",
+        "identity_cache_cold",
+        "identity_unavailable",
+        "records_unavailable",
+        "status_unavailable",
+    }
 )
 #: The reasons that hold every page, not just the one that met them.
 VAULT_WIDE_DEFERRALS = frozenset({"graph_unavailable"})
@@ -2590,6 +2599,195 @@ def _curation_subjects(ctx: Context, rel_path: str) -> list[str]:
 CURATION = _subject_family(CURATION_FAMILY, CURATION_KIND, _curation_view, subjects_of=_curation_subjects)
 
 
+# ----------------------------------------------------------------------
+# duplicate facts: `upkeep_duplicate`
+# ----------------------------------------------------------------------
+#
+# A Records row that links a page may state, in a text field, what one unit of that page already says.
+# The proposal is the registry's relation for "states the same thing twice" between the row and the unit.
+# No accept route exists yet: a relation between a row and a unit needs a relationship row, which the
+# design leaves out (D10), so the owner can dismiss or snooze an item and read both values to decide.
+# The family writes no page and no row. The sidecar holds the row's ref, field and unit ref, never a
+# value: `release` reads both values again as the caller, so a row the caller may not read answers as a
+# row that does not exist.
+
+DUPLICATE_FAMILY = "upkeep_duplicate"
+DUPLICATE_KIND = "fact.duplicate"
+
+#: The last store transaction whose rows the worker has queued pages for.
+_DUPLICATE_TXN_META = "duplicate_txn"
+
+#: Characters of the unit shown beside the two values.
+_DUPLICATE_UNIT_CHARS = 240
+
+
+def _duplicate_page(ctx: Context, rel_path: str) -> tuple[Any, str] | None:
+    """The parsed page and its memory ref, or None for a page no row can link (it has no identity)."""
+    from . import memory_refs
+
+    page = ctx.page(rel_path)
+    identity = memory_refs.normalize_id(page.frontmatter.get(memory_refs.ID_FIELD)) if page is not None else None
+    return None if identity is None else (page, memory_refs.memory_ref(identity))
+
+
+def _duplicate_views(ctx: Context, rel_path: str) -> dict[str, dict[str, Any]]:
+    """The page's candidates as `{proposal_key: upsert arguments}` for the current principal, with both values.
+
+    The stored row drops the values (`_duplicate_stored`). Raises `Deferred` when the rows cannot be read now.
+    """
+    from . import duplicate_facts
+
+    found = _duplicate_page(ctx, rel_path)
+    relation = duplicate_facts.proposed_relation()
+    if found is None or relation is None:
+        return {}
+    page, ref = found
+    memo = ctx.shared.setdefault("duplicates", {})
+    if rel_path not in memo:
+        memo[rel_path] = duplicate_facts.candidates(ctx.vault_root, rel_path, ref)
+    candidates = memo[rel_path]
+    if candidates is None:
+        raise Deferred("records_unavailable")
+    return {
+        item.key: {
+            "family": DUPLICATE_FAMILY,
+            "kind": DUPLICATE_KIND,
+            "subject_path": rel_path,
+            "subject_ref": ref,
+            "proposal_key": item.key,
+            "evidence": [
+                {"path": rel_path, "ref": ref, "sig": _sig(ctx, rel_path), "role": "subject", "origin": "", "title": page.title}
+            ],
+            "evidence_count": 1,
+            "route": {"tool": "read_memory", "args": {"identifier": rel_path}},
+            "reason_code": "row_value_restated",
+            "signal_version": item.signal,
+            "measures": {
+                "collection": item.collection,
+                "row_id": item.row_id,
+                "row_ref": item.row_ref,
+                "field": item.field,
+                "unit_ref": item.unit_ref,
+                "relation": relation,
+                "label": item.label,
+                "row_value": item.row_value,
+                "unit_text": item.unit_text[:_DUPLICATE_UNIT_CHARS],
+            },
+        }
+        for item in candidates
+    }
+
+
+#: The measures that name a value. They reach a caller only through `release`, never the sidecar.
+_DUPLICATE_VALUES = ("label", "row_value", "unit_text")
+
+
+def _duplicate_stored(kwargs: dict[str, Any]) -> dict[str, Any]:
+    measures = {name: value for name, value in kwargs["measures"].items() if name not in _DUPLICATE_VALUES}
+    return {**kwargs, "measures": measures}
+
+
+def _duplicate_refresh(ctx: Context, rel_path: str) -> None:
+    """Recompute one page's candidates as the owner, write each, and resolve the ones that no longer hold."""
+    from .governance import principal
+
+    with principal.owner_local_producer(ctx.vault_root, "duplicate_facts"):
+        views = _duplicate_views(ctx, rel_path)
+    stale = _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path)
+    for key, kwargs in views.items():
+        stale.discard(dreamer_store.candidate_id(DUPLICATE_KIND, rel_path, key))
+        ctx.store.upsert_proposal(
+            ctx.conn, producer=PRODUCER, now=ctx.now, parked=ctx.parked, **_duplicate_stored(kwargs)
+        )
+    _resolve_all(ctx, stale)
+
+
+def _duplicate_on_delete(ctx: Context, rel_path: str) -> None:
+    _resolve_all(ctx, _open_for_subject(ctx, DUPLICATE_FAMILY, rel_path))
+
+
+def _duplicate_revalidate(ctx: Context, row: dict[str, Any]) -> None:
+    _duplicate_refresh(ctx, str(row.get("subject_path") or ""))
+
+
+def _duplicate_view(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    """One stored candidate as the current principal may read it, or None when it no longer holds."""
+    return _duplicate_views(ctx, str(row.get("subject_path") or "")).get(str(row.get("proposal_key") or ""))
+
+
+def _duplicate_propose(ctx: Context, row: dict[str, Any]) -> dict[str, Any] | None:
+    view = _duplicate_view(ctx, row)
+    if view is None:
+        return None
+    view = _duplicate_stored(view)
+    view["fingerprint"] = dreamer_store.proposal_fingerprint(
+        family=view["family"],
+        subject_ref=view["subject_ref"],
+        signal_version=view["signal_version"],
+        evidence=view["evidence"],
+    )
+    return view
+
+
+def _duplicate_release(ctx: Context, row: dict[str, Any], keep) -> dict[str, Any] | None:
+    return _released(_duplicate_view(ctx, row), row)
+
+
+DUPLICATE = Family(
+    name=DUPLICATE_FAMILY,
+    kinds=(DUPLICATE_KIND,),
+    on_page=_duplicate_refresh,
+    on_delete=_duplicate_on_delete,
+    revalidate=_duplicate_revalidate,
+    propose=_duplicate_propose,
+    release=_duplicate_release,
+)
+
+
+def _queue_changed_rows(ctx: Context) -> None:
+    """Queue the pages that rows changed since the last tick link, and the pages whose candidates rested on those rows.
+
+    A row write is no page change, so the page watcher cannot see it. The store's transaction log can: the
+    worker keeps the last transaction it has queued for and reads the next few. Nothing is queued, and the mark
+    stays, when the store or the graph cannot be read now.
+    """
+    from . import duplicate_facts
+
+    mark = ctx.store.get_meta(ctx.conn, _DUPLICATE_TXN_META)
+    scan = duplicate_facts.changed_rows(ctx.vault_root, mark if type(mark) is int else None)
+    if scan is None:
+        return
+    through, linked = scan
+    queue: set[str] = set()
+    if linked:
+        for subject, measures in ctx.conn.execute(
+            "SELECT subject_path, measures_json FROM candidates WHERE family=? AND state='open'",
+            (DUPLICATE_FAMILY,),
+        ):
+            if json.loads(measures).get("row_id") in linked:
+                queue.add(str(subject))
+        identities = sorted({identity for found in linked.values() for identity in found})
+        if identities:
+            try:
+                queue.update(
+                    str(row[0])
+                    for row in ctx.graph().execute(
+                        "SELECT path FROM graph_nodes WHERE kind='file' "
+                        "AND exomem_id IN (SELECT value FROM json_each(?))",
+                        (json.dumps(identities),),
+                    )
+                )
+            except (sqlite3.Error, Deferred):
+                # The graph is not readable now; the mark stays and the next tick asks again.
+                return
+            finally:
+                ctx.close()
+    with ctx.store.write(ctx.conn):
+        if queue:
+            ctx.store.pending_add(ctx.conn, sorted(queue))
+        ctx.store.set_meta(ctx.conn, _DUPLICATE_TXN_META, through)
+
+
 def _queue_profiles_daily(ctx: Context) -> None:
     """Queue every profile page once a day: its `until` and `check_by` dates change a line's currency with no write."""
     today = date.fromtimestamp(ctx.now).isoformat()
@@ -2616,11 +2814,13 @@ def tick_start(ctx: Context) -> None:
     report incomplete until that drains. A category row's signal is anchored
     on the registry's content hash, which no page change reports, so its
     pages are queued again when the hash moves. Profile pages are queued
-    again once a day, because a date passing is no write. Writes only on
-    those changes.
+    again once a day, because a date passing is no write. Pages that linked rows
+    changed since the last tick are queued again, because a row write is no page
+    change. Writes only on those changes.
     """
     store, conn = ctx.store, ctx.conn
     _queue_profiles_daily(ctx)
+    _queue_changed_rows(ctx)
     if store.get_meta(conn, CAPACITY_BEHIND_META) and not store.capacity_exceeded(conn):
         with store.write(conn):
             store.pending_add(conn, sorted(store.seen_map(conn)))
@@ -2680,7 +2880,7 @@ def release(
 
 
 #: The families this build implements, in registry order.
-REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE, CURATION]
+REGISTRY: list[Family] = [LINK, HYDRATION, ALIAS, CONVENTION, FOLD, PROFILE, CURATION, DUPLICATE]
 
 
 def family_names() -> tuple[str, ...]:

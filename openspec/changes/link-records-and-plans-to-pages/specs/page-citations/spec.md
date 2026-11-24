@@ -149,12 +149,21 @@ A `link` field in a Records or Planning manifest MAY declare `relation`, naming 
 
 ### Requirement: The duplicate-fact detector compares only linked pairs
 
-A maintenance job SHALL compare each string field value of a row with the units of the page that the row's link field resolves to. It SHALL consider only resolved row-to-page links, and it SHALL run incrementally when a row or a page changes.
+A maintenance job SHALL compare each free-text field value of a row (a string field that is no natural-key or title field and has no enum or reference) with the units of the page that the row's link field resolves to. It SHALL consider only resolved row-to-page links, and it SHALL run incrementally when a row or a page changes.
 
 #### Scenario: A row with no resolved link is not compared
 
 - **WHEN** a row's link value is an unresolved title
 - **THEN** the job does not compare that row
+
+### Requirement: A duplicate-fact item names only what its reader may read
+
+The detector SHALL build its shared proposals as the owner and SHALL store no row value. It SHALL serve each item by comparing again as its reader, so a row, field, collection or page that the reader may not read SHALL be neither compared nor named, and the item SHALL read like one that does not exist.
+
+#### Scenario: A collection the caller cannot read
+
+- **WHEN** a row of a collection that the caller may not read restates a unit of a page that the caller may read
+- **THEN** the caller's item list holds no item for that row, and no reply names its values
 
 ### Requirement: The duplicate-fact detector proposes, and the owner decides
 

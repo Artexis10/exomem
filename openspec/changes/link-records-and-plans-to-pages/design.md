@@ -121,11 +121,12 @@ The single-store owner accepted this seam on 2026-11-24 with four conditions, ea
 
 ### D7. Duplicate-fact detector
 
-- A maintenance job walks resolved row-to-page links only. Its work is bounded by the number of links, not by the size of the vault. It runs incrementally when a row or a page changes.
-- For each pair, it compares the row's string field values, normalised for Unicode and whitespace, with the units of the linked page. It addresses units as #3143 does.
-- A unit that contains a field value and mentions the row's label is a candidate.
-- Each candidate opens one review item that proposes `duplicates` between the row and the unit. The item names the field, the unit and both values.
-- The owner decides per page: keep both, move the fact to the row, or move it to the page. Only an accepted decision changes anything.
+- A maintenance job walks resolved row-to-page links only. Its work is bounded by the number of links, not by the size of the vault: it reads at most 50 citing rows of one page per pass. It runs incrementally when a row or a page changes. The dreamer's worker reads the store's next 64 transactions on each tick and queues the pages that the changed rows link.
+- For each pair, it compares the row's free-text fields, normalised for Unicode, case and whitespace, with the units of the linked page. A free-text field is a string field that is not a natural-key or title field, has no enum and holds no reference. It addresses units as #3143 does. A value shorter than four characters after normalisation is not compared, because any unit holds it by chance.
+- A unit that contains a field value and mentions the row's label is a candidate. The label is any natural-key value or the presentation title value, as in D5: the joined key of a composite natural key does not occur in prose. Both matches are literal, and neither may touch a letter or a digit.
+- Each candidate opens one review item in the upkeep queue (family `upkeep_duplicate`) that proposes the registry's `duplication`-family relation (`duplicates`) between the row and the unit. The item names the field, the unit and both values. The queue lists items only when the dreamer setting is on, which is its default off.
+- The shared proposal stores the row, the field and the unit, never a value. Each served item is computed again as its reader, so a row, field, collection or page that the reader may not read is neither compared nor named.
+- The owner decides per page: keep both, move the fact to the row, or move it to the page. Until D10 gives a row and a unit a relationship row, the item has no accept route, so the owner can dismiss or snooze it and edit the row or page by hand. Only an accepted decision changes anything, and the job itself never does.
 - Matching is literal value matching, not a word list. It finds the same value written twice, which is the defect the owner described.
 
 ### D8. Retype to `link` stays lossless

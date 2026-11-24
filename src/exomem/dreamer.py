@@ -31,7 +31,9 @@ before the next page on the first foreground request or the first vault change.
 
 What it reads. The freshness registry's delta, or an exact diff of the live
 signature map against its persisted `seen` map (`dreamer_delta`). Never a
-filesystem walk, and no vault-wide snapshot to lose to a concurrent write.
+filesystem walk, and no vault-wide snapshot to lose to a concurrent write. The
+duplicate-fact family also reads the Records store read-only, through the
+store's read sessions, for the pages that rows link.
 
 Controls. `EXOMEM_DREAMER` (a kill switch that overrides the file), else the
 config key `dreamer` in the per-machine config file: `off` (default: no thread,
@@ -62,9 +64,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_delta, dreamer_families, dreamer_store, foreground_activity, freshness
+from . import (
+    dreamer_delta,
+    dreamer_families,
+    dreamer_store,
+    foreground_activity,
+    freshness,
+    sensed_model,
+    sensor_worker,
+)
 from . import dreamer_policy as policy
-from . import sensed_model, sensor_worker
 
 log = logging.getLogger(__name__)
 
