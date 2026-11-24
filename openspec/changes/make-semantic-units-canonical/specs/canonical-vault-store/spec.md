@@ -73,13 +73,17 @@ The canonical transaction SHALL write no unit record. It SHALL log one pending v
 - **THEN** the unit derivation applies the first commit's declaration to its own bytes and then matches the second commit's bytes
 - **AND** the unit keeps its unit id
 
-### Requirement: Pending versions stay bounded without changing ids
-A page SHALL keep at most 16 pending versions. A version older than the page's newest declared version SHALL NOT merge. Past the bound, the commit SHALL merge the oldest newer version that is not declared, a removal or a hand-over into the next version. With none to merge, the commit SHALL refuse with `UNITS_BUSY` and a retry hint.
+### Requirement: Only a unit operation refuses for pending versions
+A unit operation on a page that keeps 16 or more pending versions SHALL refuse with `UNITS_BUSY` and a retry hint. No other commit SHALL refuse, merge or drop a version because of pending versions. The unit derivation SHALL apply at most 16 versions of a page per transaction.
 
-#### Scenario: A declared version keeps the versions it depends on
-- **WHEN** a unit operation declares an id that an earlier pending version minted, and later writes push the page past 16 pending versions
-- **THEN** that earlier version stays
-- **AND** the declared unit keeps its unit id
+#### Scenario: Page writes never refuse for pending versions
+- **WHEN** page writes commit one page 20 times before any unit derivation runs
+- **THEN** every commit succeeds
+- **AND** the unit derivation applies all 20 versions in order
+
+#### Scenario: A unit operation waits for a long backlog
+- **WHEN** an agent updates a unit on a page that keeps 16 pending versions
+- **THEN** the update refuses with `UNITS_BUSY` and a retry hint
 
 ### Requirement: Units derive from every page version in order
 The store thread SHALL select pages for the unit derivation from the version log only, never from stored pages, the derivation queue or the audit trail, up to 32 pages per transaction in revision order. It SHALL apply each page's versions in revision order before the rows, delete them in the same transaction, and not advance the store revision. A new unit id SHALL hash the store's id, page key, revision and ordinal.
@@ -103,7 +107,7 @@ The store thread SHALL select pages for the unit derivation from the version log
 - **THEN** the unit derivation takes them in transactions of at most 32 pages
 
 ### Requirement: Unit identity follows the light rule
-For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by its target's page key as the vault stood at the version's revision, keeping fragment and alias. It SHALL NOT match across pages or by similarity.
+For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes after link normalisation; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by its target's page key as the vault stood at the version's revision, keeping fragment and alias. It SHALL NOT match across pages or by similarity.
 
 #### Scenario: A typo keeps the unit
 - **WHEN** a person fixes one letter in a unit that has no anchor
@@ -124,7 +128,7 @@ For each page version, the unit derivation SHALL give each unit the id of an unm
 - **AND** a link's fragment and alias take part in the comparison
 
 ### Requirement: A declaration takes the place of the light rule
-A writer SHALL be able to send, with a page's bytes, a declaration of the unit id that each unit it wrote keeps, adds, retires, moves or folds. A move or fold SHALL declare its whole effect on each page's version. A declaration that fits its version's split SHALL replace the light rule. One that does not SHALL fall back to the light rule and be recorded as `UNIT_DECLARATION_INVALID` in status and the audit trail.
+A writer SHALL be able to send, with a page's bytes, a declaration of the unit id that each unit it wrote keeps, adds, retires, moves or folds. A move or fold SHALL declare its whole effect on each page's version. A declaration that fits its version's split SHALL replace the light rule. One that does not SHALL fall back to the light rule and be recorded as `UNIT_DECLARATION_INVALID` in an owner mismatch table that status reads, not in the audit trail.
 
 #### Scenario: An added unit's id is in the writer's reply
 - **WHEN** an agent adds a unit through a unit operation
@@ -134,7 +138,7 @@ A writer SHALL be able to send, with a page's bytes, a declaration of the unit i
 #### Scenario: An invalid declaration does not freeze the page
 - **WHEN** a writer's declaration names a unit that its bytes do not hold
 - **THEN** the page's identity and rows still derive, by the light rule
-- **AND** status counts one declaration mismatch and the audit trail names the page
+- **AND** status counts one declaration mismatch and names the page
 
 ### Requirement: A retired referenced unit keeps its references
 When a derivation retires a unit that a stored relationship, an embed or a unit-level link names, or keeps such a unit without its anchor, the store SHALL keep those references and open one review item. The repair tool SHALL resolve it by restoring the anchor, attaching the references to a named unit, or retiring them. Retiring SHALL leave embeds and links as text.
@@ -227,7 +231,7 @@ A trash SHALL keep its page's page key, set its unit records to `trashed` and ke
 - **THEN** the trash's result names that unit and its relationship count
 
 ### Requirement: The registry job settles units after a registry or parser change
-After a change to a registry source or the parser version, the registry job SHALL split each page again by the light rule in its unit step, in its bounded batches, and blame the change in its review items. A record that retires while its page's split version is behind SHALL name the change, and also the write unless the record's bytes still stand in the new body.
+After a change to a registry source or the parser version, the registry job SHALL split each page again by the light rule in its unit step, in its bounded batches, and blame the change in its review items. A record that retires while its page's split version is behind SHALL name the change, and also the write unless the record's normalised form still stands in the new body.
 
 #### Scenario: A new category turns bullets into units
 - **WHEN** a registry change adds a category that existing bullets use
@@ -242,7 +246,7 @@ The importer SHALL import a changed file of a page that holds units only after t
 - **THEN** the importer commits once, after the saves stop
 
 ### Requirement: Unit records stay in parity with the page bytes
-The store SHALL keep four invariants: live placements lie in the body in order, without overlap, and hold their records' bytes; a parse of the body at its split version gives the live placements; each derived unit reference maps to one live record; derived rows equal a cold derivation of the bodies. A failed check SHALL show in status and refuse unit operations on the page until `store-mode resplit` fixes it.
+The store SHALL keep four invariants: live placements lie in the body in order, without overlap, and hash to their records' hashes; a parse of the body at its split version gives the live placements; each derived unit reference maps to one live record; derived rows equal a cold derivation of the bodies. A failed check SHALL show in status and refuse unit operations on the page until `store-mode resplit` fixes it.
 
 #### Scenario: The upgrade leaves derived rows unchanged
 - **WHEN** the upgrade pass completes on a store
