@@ -54,7 +54,7 @@ MAX_MOTIVATION = 16
 #: A well-formed `exomem://memory/<uuid>` is 52 characters. The cap only stops
 #: a directly-edited item from making the reader echo an unbounded string.
 MAX_MOTIVATION_REFERENCE = 128
-ROLES = ("progress", "completion")
+ROLES = planning.EVIDENCE_ROLES
 UNAVAILABLE_REASONS = (
     "collection_unavailable",
     "profile_mismatch",

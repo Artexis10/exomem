@@ -159,6 +159,23 @@ class CollectionError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
+#: A listed name set past this many characters is summarised, so the public Planning
+#: message cap (512) never cuts a name in half.
+LISTED_BUDGET = 300
+
+
+def listed_within(names: Iterable[str]) -> str:
+    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET`."""
+    names = list(names)
+    shown: list[str] = []
+    for name in names:
+        if len(", ".join([*shown, name])) > LISTED_BUDGET:
+            break
+        shown.append(name)
+    more = f" and {len(names) - len(shown)} more" if len(shown) < len(names) else ""
+    return f"{', '.join(shown)}{more}"
+
+
 def sqlite_store_required() -> CollectionError:
     """The refusal for a sqlite manifest that no collection store holds: no file reader stands in for it."""
     return CollectionError(

@@ -1622,10 +1622,6 @@ def query_collection(
         return result
 
 
-# Names past this many characters are summarised, so the public Planning message cap never cuts mid-name.
-_READABLE_COLUMNS_BUDGET = 300
-
-
 def _with_readable_columns(
     error: collections.CollectionError,
     readable: collections.CollectionManifest,
@@ -1639,16 +1635,8 @@ def _with_readable_columns(
     """
     if query.get("expand_children") or query.get("expand_child") is not None:
         return collections.CollectionError(error.code, error.reason)
-    names = record_formats.query_columns(readable)
-    shown: list[str] = []
-    for name in names:
-        if len(", ".join([*shown, name])) > _READABLE_COLUMNS_BUDGET:
-            break
-        shown.append(name)
-    more = f" and {len(names) - len(shown)} more" if len(shown) < len(names) else ""
-    return collections.CollectionError(
-        error.code, f"{error.reason}; readable columns: {', '.join(shown)}{more}"
-    )
+    names = collections.listed_within(record_formats.query_columns(readable))
+    return collections.CollectionError(error.code, f"{error.reason}; readable columns: {names}")
 
 
 def _authorize_saved_view(

@@ -29,7 +29,7 @@ def _nested(tool: str, arguments: Mapping[str, Any]) -> tuple[str, dict[str, Any
             if parsed is None:
                 continue
             kind, fields = parsed
-            fields = rendering.leaf_fields(fields)
+            fields = rendering.leaf_fields(kind, fields)
             variant = rendering.variant_for(kind, fields)
             if variant is not None:
                 return command, {**rendering.selected_arguments(variant, fields), **tool_arguments}

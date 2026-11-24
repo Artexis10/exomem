@@ -162,11 +162,16 @@ class Rendering:
         if any(synonym in fields for synonym, _ in self.field_synonyms):
             raise ValueError("a field synonym collides with a leaf field")
 
-    def leaf_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
-        """Translate wire fields without allowing an alias to overwrite a raw leaf field."""
+    def leaf_fields(self, kind: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        """Translate wire fields without allowing an alias to overwrite a raw leaf field.
+
+        A synonym renames only for an operation whose own fields take the leaf; any other
+        operation keeps the name the caller sent, so its refusal names that field.
+        """
         result = dict(fields)
+        taken = set().union(*(variant.fields for variant in self.variants if variant.kind == kind))
         for synonym, leaf in self.field_synonyms:
-            if synonym in result:
+            if synonym in result and leaf in taken:
                 if leaf in result:
                     raise ValueError(f"conflicting fields {synonym!r} and {leaf!r}; send one")
                 result[leaf] = result.pop(synonym)
@@ -931,8 +936,15 @@ def _maintenance_rows():
     return "mode", tuple(rows)
 
 
-def register_operations(command: str, parameters: Iterable[Any] | None = None) -> CommandOperations | None:
-    """Read source metadata, completing and retaining signature fields when supplied."""
+def register_operations(
+    command: str,
+    parameters: Iterable[Any] | None = None,
+    field_synonyms: tuple[tuple[str, str], ...] = (),
+) -> CommandOperations | None:
+    """Read source metadata, completing and retaining signature fields when supplied.
+
+    `field_synonyms` is the command spec's `(synonym, leaf)` pairs; see `Rendering.leaf_fields`.
+    """
     if command in OPERATIONS:
         return OPERATIONS[command]
     if command == "schema_memory":
@@ -966,12 +978,9 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
         if any(p.name == "response_detail" for p in parameters) and variants[0].effect == "write":
             tool_arguments += ("response_detail",)
         aliases = (("unit_kind", "kind"),) if command == "observe_memory" else (("file_kind", "kind"),) if command == "manage_memory_file" else ()
-        # Typed tools page with `more`; a schema operation that pages takes it too, beside `continuation`.
-        synonyms = (("more", "continuation"),) if command == "schema_memory" and any(
-            "continuation" in entry.fields for entry in variants) else ()
         specs.append(RenderingSpec(name, variants[0].effect, title,
                                    description + " Select one operation.kind.", tool_arguments, aliases,
-                                   synonyms))
+                                   field_synonyms))
     capture_write = _REMAINING.get(command, ())[2:] == (True,)
     result = CommandOperations(command, selector, tuple(entries), tuple(specs), capture_write)
     if retain:
