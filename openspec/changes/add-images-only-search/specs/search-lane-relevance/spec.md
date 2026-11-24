@@ -2,7 +2,7 @@
 
 ### Requirement: The CLIP Lane Admits Only Matches Above Chance
 
-The CLIP lane in `find` SHALL admit an image or video keyframe only when its similarity to the query clears the chance maximum of the similarities of every row of the CLIP index. The population is the whole index, before the request's filters, so a filter does not change the chance maximum. The chance maximum SHALL be computed from the population's median and median absolute deviation, as the working set computes its vector band, so no cosine value is fixed in code. The band's alpha and minimum population SHALL be ranking settings, and an alpha outside the open interval (0, 1) SHALL mean no band. When the population is too small or too uniform to calibrate, or no band is set, the lane SHALL rank as it did before this requirement. A search restricted to pictures is outside the band. The governed projected CLIP lane is outside this requirement.
+The CLIP lane in `find` SHALL admit an image or video keyframe only when its similarity to the query clears the chance maximum of every row of the CLIP index, measured before the request's filters. The chance maximum SHALL come from the population's median and median absolute deviation, so no cosine is fixed in code. Its alpha and minimum population SHALL be ranking settings. A search restricted to pictures and the governed projected CLIP lane are outside this requirement.
 
 #### Scenario: A text question collects no noise-level images
 
@@ -31,7 +31,7 @@ The CLIP lane in `find` SHALL admit an image or video keyframe only when its sim
 
 ### Requirement: A Search Restricted To Pictures Ranks By Picture Match
 
-A search SHALL be restricted to pictures when the caller's own filters are active and every page they admit is the sidecar of an image or a video, the kinds the CLIP index embeds. In such a search the CLIP lane SHALL rank without the chance band, and fusion SHALL give the CLIP lane the ranking setting `clip_media_restricted_weight` in place of its intent weight. The other lanes SHALL keep their weights. A search whose filters admit any other page, and a search without filters, SHALL rank exactly as it does without this requirement. The CLIP lane trace SHALL report `media_restricted`.
+A search SHALL be restricted to pictures when the caller's own filters are active and every page they admit is an image or video sidecar. Such a search SHALL rank the CLIP lane without the chance band and SHALL give it the ranking setting `clip_media_restricted_weight` in place of its intent weight; the other lanes keep their weights. Every other search SHALL rank as it does without this requirement.
 
 #### Scenario: A weak picture match is ranked among pictures
 
