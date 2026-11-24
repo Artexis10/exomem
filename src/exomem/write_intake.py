@@ -365,6 +365,9 @@ class _Replay:
     #: Opened before the dispatcher runs, so the commit gate's marker is one commit on an open
     #: connection, not an open, a coordination and a close under the vault boundary.
     conn: sqlite3.Connection | None = None
+    #: The drainer's stop. Once set, the dispatcher's waits end, so a stop never waits out a busy
+    #: boundary or a warm-up, and a refusal that proves nothing committed requeues the save.
+    stop: threading.Event | None = None
 
 
 _REPLAY: contextvars.ContextVar[_Replay | None] = contextvars.ContextVar("exomem_intake_replay", default=None)
@@ -374,6 +377,21 @@ _WAIT_CAP: contextvars.ContextVar[float | None] = contextvars.ContextVar("exomem
 def busy_wait_cap() -> float | None:
     """The deadline (monotonic) by which an eligible save stops waiting and is queued, if any."""
     return _WAIT_CAP.get()
+
+
+def replay_stop_event() -> threading.Event | None:
+    """The drainer's stop when this thread replays a queued save, else ``None``.
+
+    The dispatcher's waits end once it is set, so stopping the drainer never waits for them.
+    """
+    replay = _REPLAY.get()
+    return None if replay is None else replay.stop
+
+
+def replay_stopping() -> bool:
+    """Whether this thread replays a queued save whose drainer is stopping; every dispatcher wait ends then."""
+    stop = replay_stop_event()
+    return stop is not None and stop.is_set()
 
 
 def mark_replay_reached_commit() -> None:
@@ -539,6 +557,11 @@ class Drainer:
     @property
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
+
+    @property
+    def alive(self) -> bool:
+        """Whether the drainer thread still runs, a stopped drainer's replay in flight included."""
+        return self._thread is not None and self._thread.is_alive()
 
     def start(self) -> None:
         try:
@@ -771,7 +794,7 @@ class Drainer:
             return math.inf
         if isinstance(claimed, float):
             return claimed
-        _apply(self.vault_root, claimed)
+        _apply(self.vault_root, claimed, stop=self._stop)
         self._refresh_open()
         return None
 
@@ -874,13 +897,13 @@ def _command_named(name: str) -> Any:
     return None
 
 
-def _apply(vault_root: Path, claim: _Claim) -> None:
+def _apply(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = None) -> None:
     """Replay one claimed save in a fresh context and record its outcome."""
-    contextvars.Context().run(_apply_in_context, vault_root, claim)
+    contextvars.Context().run(_apply_in_context, vault_root, claim, stop)
 
 
-def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
-    outcome = _replay(vault_root, claim)
+def _apply_in_context(vault_root: Path, claim: _Claim, stop: threading.Event | None = None) -> None:
+    outcome = _replay(vault_root, claim, stop=stop)
     if outcome[0] == APPLIED:
         _with_store_retry(lambda: _finish_applied(vault_root, claim, outcome[1]))
     elif outcome[0] == QUEUED:
@@ -889,7 +912,7 @@ def _apply_in_context(vault_root: Path, claim: _Claim) -> None:
         _with_store_retry(lambda: _finish_failed(vault_root, claim, outcome[1], outcome[2]))
 
 
-def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
+def _replay(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = None) -> tuple[Any, ...]:
     """Run one replay; return ``(applied, result)``, ``(queued, code)`` or ``(failed, code, refusal)``.
 
     Every step from the command lookup to the dispatcher sits in one try, so any error ends
@@ -898,7 +921,7 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
     from . import auth_sessions, capabilities, cli_ops, writer_lease
     from .governance import principal as principal_module
 
-    replay = _Replay(vault_root, claim)
+    replay = _Replay(vault_root, claim, stop=stop)
     token = _REPLAY.set(replay)
     stack = ExitStack()
     try:
@@ -950,6 +973,13 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
             if code in UNCERTAIN_REFUSALS:
                 # Before the replay closes: its work may still commit late, and must find the mark.
                 _mark_uncertain(replay)
+            return (QUEUED, code)
+        if (
+            stop is not None and stop.is_set() and refusal is not None
+            and refusal.get("committed") is False and refusal.get("status") == "retryable"
+        ):
+            # The stop ended a wait the save needed, such as episode reference re-planning: the
+            # refusal proves nothing committed, so the save stays queued for the next process.
             return (QUEUED, code)
         if refusal is None:
             log.warning("write intake replay of %s failed", claim.command, exc_info=True)

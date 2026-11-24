@@ -153,6 +153,110 @@ def test_a_save_during_a_long_hold_comes_back_queued_and_lands_once_after_it(
     assert len(_pages_titled(vault, "Queued save 1")) == 1
 
 
+def test_a_stop_during_a_replay_that_waits_on_a_busy_boundary_ends_promptly_and_loses_nothing(
+    vault: Path, managers, drainer
+) -> None:
+    """Defect: a replay waited up to 40 s for the boundary, so a stop spent the supervisor's whole 10 s allowance."""
+    _writer, holder = managers
+    with _Hold(holder, vault):
+        ref = _send(_command("remember"), vault, _remember_kwargs(vault, 30))["queued_write"]["ref"]
+        _wait_for_state(vault, ref, "applying")
+        started = time.monotonic()
+        write_intake.stop(vault)
+        elapsed = time.monotonic() - started
+        assert not drainer.alive
+        assert elapsed < 3.0, elapsed
+        assert write_intake.read(vault, ref=ref)["queued_write"]["state"] == "queued"
+    write_intake.start(vault)
+    _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 30")) == 1
+
+
+def test_a_stop_during_a_replay_that_waits_out_a_warm_up_ends_promptly_and_loses_nothing(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a replay waited up to 40 s for the warm-up to end, so a stop during start-up overran its allowance."""
+    from exomem import readiness
+
+    warming = threading.Event()
+    warming.set()
+    real_defer = readiness.should_defer
+    monkeypatch.setattr(
+        readiness, "should_defer",
+        lambda component: (component == "graph_handoff" and warming.is_set()) or real_defer(component),
+    )
+    ref = _send(_command("remember"), vault, _remember_kwargs(vault, 31))["queued_write"]["ref"]
+    _wait_for_state(vault, ref, "applying")
+    started = time.monotonic()
+    write_intake.stop(vault)
+    elapsed = time.monotonic() - started
+    assert not drainer.alive
+    assert elapsed < 3.0, elapsed
+    assert write_intake.read(vault, ref=ref)["queued_write"]["state"] == "queued"
+    warming.clear()
+    write_intake.start(vault)
+    _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 31")) == 1
+
+
+def test_a_stop_ends_a_store_route_replay_that_waits_for_the_store_thread(
+    vault: Path, managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: in a store-mode vault a replay waited out a busy store thread, past the stop allowance."""
+    from types import SimpleNamespace
+
+    from exomem.collection_store import runtime as store_runtime
+
+    writer, _holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "10")
+    # Its thread does nothing, so it never takes the request: a store thread busy for the whole wait.
+    monkeypatch.setattr(store_runtime.StoreServer, "_run", lambda _server: None)
+    server = store_runtime.StoreServer(vault, writer)
+    stop = threading.Event()
+    token = write_intake._REPLAY.set(write_intake._Replay(vault, SimpleNamespace(), stop=stop))
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpError) as refused:
+            writer._attempt_store_write(
+                lambda *_args, **_kwargs: pytest.fail("the store ran a write it never took"),
+                _command("remember"), (vault,), {"mutation_request_id": "replay-store-wait"}, server,
+            )
+    finally:
+        write_intake._REPLAY.reset(token)
+    assert refused.value.code in write_intake.ACCEPTED_REFUSALS
+    assert time.monotonic() - started < 3.0
+
+
+def test_a_refusal_that_a_stop_caused_keeps_the_save_queued(
+    vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: a stop that cut episode reference re-planning short failed the queued save for good."""
+    _writer, holder = managers
+    real_claim, real_invoke = write_intake._claim_head, writer_lease.invoke_command
+    paused = threading.Event()
+    paused.set()
+    monkeypatch.setattr(write_intake, "_claim_head", lambda root: 0.05 if paused.is_set() else real_claim(root))
+    with _Hold(holder, vault):
+        ref = _send(_command("remember"), vault, _remember_kwargs(vault, 32))["queued_write"]["ref"]
+    stop = threading.Event()
+
+    def stopped_while_planning(*_args, **_kwargs):
+        stop.set()
+        # What episode re-planning raises when its wait ends before the references are proved.
+        raise OpError("REFERENCE_PREPARATION_UNAVAILABLE", "Reference ownership could not be validated; nothing was written.",
+                      details={"status": "retryable", "committed": False})
+
+    monkeypatch.setattr(writer_lease, "invoke_command", stopped_while_planning)
+    write_intake._apply(vault, real_claim(vault), stop=stop)
+    assert write_intake.read(vault, ref=ref)["queued_write"]["state"] == "queued"
+
+    monkeypatch.setattr(writer_lease, "invoke_command", real_invoke)
+    paused.clear()
+    _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 32")) == 1
+
+
 def test_a_resend_while_queued_returns_the_same_receipt_and_commits_once(
     vault: Path, managers, drainer
 ) -> None:

@@ -149,6 +149,7 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.vault_projector: Any | None = None
         self.derived_drain: Any | None = None
+        self.write_intake: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
         self.catalogue_recovery: threading.Thread | None = None
@@ -537,6 +538,9 @@ class LocalRuntimeActivation:
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
+        if self.write_intake is not None and self.write_intake.alive:
+            # A replay still running may commit, so the lease stays with this process.
+            raise RuntimeError("write intake is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
@@ -642,7 +646,7 @@ class LocalRuntimeActivation:
             return
         from . import write_intake
 
-        write_intake.start(vault_root)
+        self.write_intake = write_intake.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""

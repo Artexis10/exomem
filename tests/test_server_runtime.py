@@ -1785,6 +1785,41 @@ def test_shutdown_reports_a_live_owned_graph_producer(tmp_path, monkeypatch):
         graph_drain.stop()
 
 
+def test_shutdown_reports_a_write_intake_replay_that_outlived_its_stop(tmp_path, monkeypatch):
+    """Defect: a replay still running after the stop's join had the writer lease handed back under it."""
+    from exomem import write_intake
+
+    _quiet_starters(monkeypatch, [])
+    entered = threading.Event()
+    release = threading.Event()
+
+    def replay_that_outlives_the_stop(_drainer):
+        entered.set()
+        release.wait(10)
+
+    monkeypatch.setattr(write_intake.Drainer, "_drain_one", replay_that_outlives_the_stop)
+    real_stop = write_intake.stop
+    # A short join keeps the test fast; the stop's real join is longer but just as finite.
+    monkeypatch.setattr(write_intake, "stop", lambda root, timeout=10.0: real_stop(root, timeout=0.1))
+    activation = server_runtime.LocalRuntimeActivation(tmp_path, fallback_seconds=60)
+    activation.serves_upload_sessions = True
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match="write intake is still running"):
+            async with activation.lifespan()(SimpleNamespace()):
+                activation.start()
+                await asyncio.to_thread(activation._thread.join, 5)
+                assert entered.wait(1)
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        release.set()
+        if activation.write_intake is not None:
+            activation.write_intake.stop(timeout=5)
+        readiness.reset()
+
+
 def test_shutdown_while_vocabulary_watcher_starts_does_not_crash_or_orphan_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

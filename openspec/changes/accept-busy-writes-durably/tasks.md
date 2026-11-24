@@ -3,7 +3,8 @@
 - [x] 1.1 Add `write_intake.py`: the `.write-intake.sqlite` store under the private-state ceremony (WAL, `synchronous=FULL`), accept with origin-key de-duplication, claim, finish, list, read, dismiss and pruning of applied rows after 7 days.
 - [x] 1.2 Add the drainer thread: acceptance-order application through `invoke_command` as the stored principal with the `intake:<id>` identity, contention back-off from 1 s to 30 s, failure recording, owner liveness for rows left applying by a dead process, a sticky commit-reached marker per replay identity written at the commit gate (fail closed), a fresh identity for a replay that stopped before its commit, a login recheck before each replay, an in-memory origin index, and no polling while idle.
 - [x] 1.3 Register the store in `reserved_paths` and start and stop the drainer in the serving HTTP runtime.
-- [x] 1.4 Start the drainer first in activation, before its start-up waits, so a save that meets a busy boundary while a new or promoted worker still warms up is queued too.
+- [x] 1.4 Start the drainer before activation's start-up waits (after a cloud cell's staged catalogue adoption), so a save that meets a busy boundary while a new or promoted worker still warms up is queued too.
+- [x] 1.5 End a replay's waits for a busy boundary, a warm-up or its own preparation when the drainer stops; keep the save queued when the refusal proves nothing committed; keep the writer lease while a replay still runs at the end of the stop.
 
 ## 2. Acceptance in the dispatcher
 
