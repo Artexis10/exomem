@@ -2789,6 +2789,7 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     if catch_up is None:
         return False
     try:
+        _heal_adopted_catalog_before_catch_up(vault_root, store)
         if not catch_up():
             # A round that writes outran still advanced the stored checkpoint,
             # which is progress and not a decline: queue a lag-only catch-up for
@@ -2827,6 +2828,27 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         # The traceback stays local: a hosted cell strips exc_info.
         log.debug("lexical catch-up raised", exc_info=True)
         return _log_catch_up_decline(store, CatchUpDecline.ERROR, error=type(error).__name__)
+
+
+def _heal_adopted_catalog_before_catch_up(vault_root: Path, store) -> None:
+    """Give an adopted standby catalogue this registry's lineage before a catch-up reads it.
+
+    A detached build stamps a lineage no registry bridges, so the catch-up
+    declines it for its instance and the worker pays a whole pass. The warm's
+    handoff heal is the designed owner, but a lag repair can reach the catalogue
+    first, and the warm skips the heal while a whole pass runs. With both
+    scopes live the same single-use heal blesses the live checkpoints; the
+    catch-up then replays any write since and admits.
+    """
+    from . import freshness as freshness_module
+
+    if getattr(store, "_adopted_rows", None) is None:
+        return
+    if not all(
+        freshness_module.recall_is_live(vault_root, scope) for scope in freshness_module.SCOPES
+    ):
+        return
+    log.info("adopted lexical catalogue heal before catch-up healed=%s", store.heal_adopted_catalog())
 
 
 def _log_catch_up_decline(store, reason: CatchUpDecline, **detail: int | str) -> bool:

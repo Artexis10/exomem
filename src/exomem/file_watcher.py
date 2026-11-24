@@ -2822,12 +2822,20 @@ class FileWatcher:
         """Wait for the startup seed's terminal result.
 
         ``False`` means either the wait timed out or at least one recall scope
-        failed to become authoritative.  Callers must then keep retrieval
-        unadmitted; they must never turn the failed seed into reader-thread
-        fallback work.
+        failed to become authoritative; `seed_outcome` tells the two apart.
+        Callers must then keep retrieval unadmitted; they must never turn the
+        failed seed into reader-thread fallback work.
+        """
+        return self.seed_outcome(timeout) is True
+
+    def seed_outcome(self, timeout: float | None = None) -> bool | None:
+        """The startup seed's terminal result, or None while it is still running.
+
+        A seed can outlast any wait while its catch-up flush queues behind the
+        catalogue barrier; only a finished seed may retire the registry.
         """
         if not self._seed_complete.wait(timeout):
-            return False
+            return None
         return self._seed_succeeded
 
     def _runs_reconcile(self) -> bool:
