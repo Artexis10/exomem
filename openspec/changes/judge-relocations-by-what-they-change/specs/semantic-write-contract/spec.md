@@ -35,7 +35,7 @@ Older pages lacking the relation/category contract SHALL stay readable and edita
 ## ADDED Requirements
 
 ### Requirement: The Activation Manifest Records The Pre-Existing Corpus
-On first activation, the system SHALL create one portable vault-managed manifest of the contract version and the identities and source hashes of pre-existing governed compiled pages, without rewriting them. A page with a stable memory ID SHALL match by that ID; a legacy page by path and source hash, or through governed moves in its lineage if it alone left that path. Pages first seen after the boundary, including out-of-band creations, SHALL be new pages with current-contract posthoc findings.
+On first activation, the system SHALL create a portable vault-managed manifest of the contract version, identities and source hashes of pre-existing governed compiled pages, rewriting none. A page with a stable memory ID SHALL match by it; a legacy page by path and source hash, or through governed moves in its lineage if it alone left that path. The hash SHALL omit a valid `exomem_id` line. Pages first seen later, including out-of-band ones, SHALL be new, with current-contract posthoc findings.
 
 #### Scenario: A legacy page keeps its baseline through governed moves
 - **WHEN** a pre-existing page without a stable memory ID is moved twice by governed moves and then edited without worsening
@@ -45,6 +45,11 @@ On first activation, the system SHALL create one portable vault-managed manifest
 #### Scenario: A copy inherits no baseline
 - **WHEN** a page created after activation names a legacy page's path in its lineage, and the legacy page still stands at that path or another page also claims it
 - **THEN** the edit and a posthoc audit judge the copy as a new page
+
+#### Scenario: Stamping an ID keeps a legacy page's baseline
+- **WHEN** the id backfill adds an `exomem_id` line to a pre-existing page that had none
+- **THEN** a posthoc audit treats the page as grandfathered
+- **AND** any other change to its bytes ends that baseline
 
 ### Requirement: Only A Real Commit Installs The Activation Manifest
 Validate-only and preliminary blockers SHALL NOT create the activation manifest. When the manifest is missing, a real first commit SHALL atomically install or observe the immutable activation-boundary winner after preliminary validation and SHALL then repeat evaluation before any other mutation. If the installed race winner changes membership and repeated evaluation blocks, that immutable manifest SHALL be the sole side effect.

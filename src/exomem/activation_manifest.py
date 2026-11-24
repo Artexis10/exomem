@@ -21,11 +21,12 @@ from typing import Any
 
 import yaml
 
-from . import access, activation, lifecycle_statuses, note_types
+from . import access, activation, episode_capture, lifecycle_statuses, note_types
 from . import find as find_module
 from .kbdir import managed_root, managed_split_parts
 from .memory_refs import ID_FIELD, normalize_id
 from .vault import (
+    _FM_PATTERN,
     PathGuardError,
     PlannedWrite,
     VaultLockError,
@@ -404,6 +405,31 @@ def ensure_manifest(
         return written
 
 
+def baseline_hash(raw: str, frontmatter: Mapping[str, Any] | None = None) -> str:
+    """The hash that the baseline records and compares: the page's bytes without its id line.
+
+    Stamping an `exomem_id` (the id backfill) is a system write, not an owner edit,
+    so it must not end a page's grandfathering. Every other byte still counts. The line goes at
+    the span the frontmatter parser reports, so each other byte stays as written; a page whose
+    frontmatter cannot be spliced that way hashes as it is.
+    The id is the only key dropped: `type` and `updated` are owner-visible content, and a
+    governed move's `moved_from` entry has its own check (`semantic_writes._grandfathered`).
+    `frontmatter` is the caller's parse of the same page; without it the page is parsed here.
+    """
+    match = _FM_PATTERN.match(raw)
+    # The membership test only skips the parse for a page that has no id line to drop.
+    if match is not None and ID_FIELD in match.group(1):
+        if frontmatter is None:
+            frontmatter = parse_frontmatter(raw)[0]
+        # A stamp writes a valid id; an empty or malformed value is the owner's, so it stays in
+        # the hash, as the manifests that recorded such a page with its line included expect.
+        if normalize_id(frontmatter.get(ID_FIELD)) is not None:
+            block = episode_capture.rewrite_fields(match.group(1), {ID_FIELD: None})
+            if block is not None:
+                raw = raw[: match.start(1)] + block + raw[match.end(1) :]
+    return content_hash(raw)
+
+
 def new_manifest(vault_root: Path) -> str | None:
     """The manifest that ``ensure_manifest`` would establish, or None when the vault holds one.
 
@@ -413,6 +439,21 @@ def new_manifest(vault_root: Path) -> str | None:
     if load_manifest(vault_root) is not None:
         return None
     return _serialize(_snapshot(Path(vault_root)))
+
+
+def stable_entry(manifest: ActivationManifest, exomem_id: object) -> ActivationPage | None:
+    """The entry that matches a page by its id wherever it lives, else None."""
+    normalized_id = normalize_id(exomem_id)
+    return next(
+        (
+            page
+            for page in manifest.pages
+            if normalized_id is not None
+            and page.identity_kind == "exomem_id"
+            and page.identity == normalized_id
+        ),
+        None,
+    )
 
 
 def is_grandfathered(
@@ -457,21 +498,12 @@ def is_grandfathered(
         except (OSError, UnicodeDecodeError, PathGuardError):
             return False
         if current_hash is None:
-            current_hash = content_hash(raw)
+            current_hash = baseline_hash(raw)
         if not id_supplied:
             frontmatter, _, _ = parse_frontmatter(raw)
             normalized_id = normalize_id(frontmatter.get(ID_FIELD))
 
-    stable = next(
-        (
-            page
-            for page in loaded.pages
-            if normalized_id is not None
-            and page.identity_kind == "exomem_id"
-            and page.identity == normalized_id
-        ),
-        None,
-    )
+    stable = stable_entry(loaded, normalized_id)
     if stable is not None:
         if identity_census is not None:
             from .semantic_contract import StableIdentityCensus, identity_owners_match
@@ -666,7 +698,7 @@ def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
             candidates.append(
                 ActivationCandidate(
                     rel_path=rel_path,
-                    source_hash=content_hash(raw),
+                    source_hash=baseline_hash(raw, frontmatter),
                     normalized_id=normalize_id(frontmatter.get(ID_FIELD)),
                     status=recorded_status(frontmatter.get("status")),
                 )

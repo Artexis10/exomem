@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import multiprocessing
 import shutil
 from pathlib import Path
@@ -165,8 +166,8 @@ def test_nonempty_baseline_captures_only_active_writable_compiled_pages(
         by_path[legacy.relative_to(tmp_path).as_posix()].identity
         == legacy.relative_to(tmp_path).as_posix()
     )
-    assert by_path[stable.relative_to(tmp_path).as_posix()].source_hash == vault.content_hash(
-        stable.read_text(encoding="utf-8")
+    assert by_path[stable.relative_to(tmp_path).as_posix()].source_hash == (
+        activation_manifest.baseline_hash(stable.read_text(encoding="utf-8"))
     )
     assert len(by_path[stable.relative_to(tmp_path).as_posix()].source_hash) == 64
     assert by_path["Knowledge Base/Notes/Insights/malformed-id.md"].identity_kind == (
@@ -278,6 +279,53 @@ def test_stable_id_survives_move_but_legacy_membership_requires_original_path_an
         encoding="utf-8",
     )
     assert not activation_manifest.is_grandfathered(tmp_path, legacy, manifest=manifest)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_stamping_an_exomem_id_keeps_a_legacy_page_grandfathered(
+    tmp_path: Path, newline: str
+) -> None:
+    # The id backfill is a system write, not an owner edit. It must not end the page's baseline.
+    legacy = tmp_path / "Knowledge Base/Notes/Insights/legacy.md"
+    legacy.parent.mkdir(parents=True)
+    original = newline.join(
+        ["---", "type: insight", "status: active", "---", "", "# Legacy", "", "Body.", ""]
+    ).encode()
+    legacy.write_bytes(original)
+    manifest = activation_manifest.ensure_manifest(tmp_path)
+    recorded = manifest.pages[0]
+    # A manifest written before any stamp already holds the plain-bytes hash; it must stay valid.
+    assert recorded.source_hash == hashlib.sha256(original).hexdigest()
+
+    memory_refs.backfill_ids(tmp_path, dry_run=False)
+
+    assert b"exomem_id:" in legacy.read_bytes()
+    census = activation_manifest.build_census(tmp_path)
+    assert activation_manifest.is_grandfathered(tmp_path, legacy, manifest=manifest)
+    assert activation_manifest.is_grandfathered(
+        tmp_path, legacy, manifest=manifest, census=census
+    )
+    legacy.write_bytes(legacy.read_bytes() + b"Edited.\n")
+    assert not activation_manifest.is_grandfathered(tmp_path, legacy, manifest=manifest)
+
+
+def test_a_page_with_an_empty_id_keeps_the_baseline_that_recorded_its_id_line(
+    tmp_path: Path,
+) -> None:
+    # Only a stamp is exempt from the hash, and a stamp writes a valid id. A manifest written
+    # before the stamp rule recorded this page by path, with its `exomem_id:` line in the bytes.
+    page = tmp_path / "Knowledge Base/Notes/Insights/blank-id.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(b"---\nexomem_id:\ntype: insight\nstatus: active\n---\n\n# Blank\n\nBody.\n")
+    rel = page.relative_to(tmp_path).as_posix()
+    recorded = hashlib.sha256(page.read_bytes()).hexdigest()
+    manifest = activation_manifest.ActivationManifest(
+        schema_version=activation_manifest.SCHEMA_VERSION,
+        contract_version=activation_manifest.CONTRACT_VERSION,
+        pages=(activation_manifest.ActivationPage("path_source_hash", rel, rel, recorded),),
+    )
+
+    assert activation_manifest.is_grandfathered(tmp_path, page, manifest=manifest)
 
 
 def test_duplicate_ids_fall_back_but_sync_conflicts_do_not_create_ambiguity(

@@ -262,6 +262,8 @@ class SemanticPageState:
     identity_kind: str
     identity: str
     source_hash: str
+    # `source_hash` without the id line: what the activation baseline records and compares.
+    baseline_hash: str
     language_registry_hash: str
     relation_registry_hash: str
     review_fingerprint: str | None
@@ -1749,6 +1751,7 @@ def _parse_page_state(
         identity_kind=identity_kind,
         identity=identity,
         source_hash=vault.content_hash(raw_source),
+        baseline_hash=activation_manifest.baseline_hash(raw_source, frontmatter),
         language_registry_hash=(f"{language.schema_version}:{language.content_hash}"),
         relation_registry_hash=(f"{registry.core_version}:{registry.extension_hash}"),
         review_fingerprint=(
@@ -5156,7 +5159,7 @@ _PAGE_DELTA_LIMIT = 64
 def _activation_candidate(state: SemanticPageState) -> activation_manifest.ActivationCandidate:
     return activation_manifest.ActivationCandidate(
         state.path,
-        state.source_hash,
+        state.baseline_hash,
         state.identity if state.identity_kind == "exomem_id" else None,
         activation_manifest.recorded_status(state.frontmatter.get("status")),
     )
