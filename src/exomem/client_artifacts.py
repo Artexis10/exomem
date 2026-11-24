@@ -2090,12 +2090,16 @@ def preserve_artifacts(
     transcriptions: list[Mapping[str, object]] | tuple = (),
     raw_protection: bool = False,
     archive: str | None = None,
+    description: str | None = None,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
     A transcription is written only with its original: as the extracted text
     of the original's own page, in the same write that stores the bytes. An
     original that is already stored or that fails records no transcription.
+
+    `description` is one caption for every file in the call. Like a
+    transcription, it is written only with a newly stored original.
 
     With `archive="members"` each file is a held zip, kept as its members
     exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
@@ -2116,6 +2120,20 @@ def preserve_artifacts(
             "Preserve the held zip with archive alone, or drop archive to keep the zip as one file.",
             details={"field": "archive", "accepted_form": "archive with scope, category and held files"},
         )
+    if (archive is not None or adoption is not None) and description is not None:
+        # Either would drop it silently: an adoption commits the handed file's own page,
+        # and a members preservation has no original page to carry a caption.
+        raise OpError(
+            "INVALID_PRESERVE",
+            "a caption is not accepted with an adoption or archive=members",
+            "Drop the caption, or save the file without adoption or archive.",
+            details={"field": "description"},
+        )
+    caption_warnings: list[str] = []
+    if description is not None:
+        from .preserve import redact_capture_text
+
+        _content, description, _text, caption_warnings = redact_capture_text(description=description)
     if adoption is not None:
         if transcriptions:
             _refuse_transcriptions("transcriptions are not accepted with an adoption")
@@ -2220,7 +2238,7 @@ def preserve_artifacts(
                     # that stores a miss.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename,
+                        filename=artifact.filename, description=description,
                     )
                     if held.duplicate is None:
                         with artifact.path.open("rb") as stream:
@@ -2235,6 +2253,7 @@ def preserve_artifacts(
                                 raw_protection=raw_protection,
                                 media_pending=True,
                                 diarize=artifact.diarize,
+                                description=description,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -2258,6 +2277,12 @@ def preserve_artifacts(
                             "state": "not_recorded",
                             "reason": "the original was already preserved; its page is unchanged",
                         }
+                    if description is not None:
+                        outcomes[index]["caption"] = {
+                            "state": "not_recorded",
+                            "reason": "the original was already preserved; its page is unchanged",
+                        }
+                    _add_citation(outcomes[index], held.duplicate.sidecar_path)
                     continue
                 payload = result.as_dict()
                 warnings = list(payload.get("warnings") or [])
@@ -2289,6 +2314,10 @@ def preserve_artifacts(
                         "state": "recorded",
                         "page": payload.get("sidecar_path"),
                     }
+                if description is not None:
+                    outcomes[index]["caption"] = {"state": "recorded", "page": payload.get("sidecar_path")}
+                    outcomes[index]["warnings"] = [*caption_warnings, *outcomes[index]["warnings"]]
+                _add_citation(outcomes[index], payload.get("sidecar_path"))
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except OpError as error:
@@ -2302,6 +2331,21 @@ def preserve_artifacts(
         # Nothing began, so the call stays retryable under its own key instead of recording a failure.
         raise refusals[0]
     return _batch_result(outcomes)
+
+
+#: Characters that end or split a wikilink target (`#` heading, `|` alias, brackets), so a path holding one cannot be cited.
+_WIKILINK_DELIMITERS = frozenset("#|[]")
+
+
+def _add_citation(outcome: dict, page_path: object) -> None:
+    """Give a kept original the wikilink that text about it carries, as an observation cites a Source."""
+    if not (isinstance(page_path, str) and page_path.endswith(".md") and isinstance(outcome.get("stored_path"), str)):
+        return
+    if _WIKILINK_DELIMITERS & set(page_path):
+        outcome["warnings"] = [*(outcome.get("warnings") or []),
+                               "No cite: the file name holds a wikilink delimiter; cite its page by its ref."]
+        return
+    outcome["cite"] = f"[[{page_path[: -len('.md')]}|{Path(outcome['stored_path']).name}]]"
 
 
 def _preserve_members(

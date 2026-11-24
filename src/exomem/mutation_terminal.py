@@ -977,6 +977,18 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     unverified.append("transcription")
                 else:
                     row["transcription"] = recorded
+            if "caption" in item:
+                # A caption is recorded, or not, exactly as a transcription is.
+                if (recorded := transcription(item["caption"])) is None:
+                    unverified.append("caption")
+                else:
+                    row["caption"] = recorded
+            if "cite" in item:
+                # The wikilink that text about the kept original carries to cite it.
+                if string(item["cite"], limit=2048):
+                    row["cite"] = item["cite"]
+                else:
+                    unverified.append("cite")
             if "adoption" in item:
                 if (receipt := adoption_receipt(item["adoption"], item)) is None:
                     unverified.append("adoption")

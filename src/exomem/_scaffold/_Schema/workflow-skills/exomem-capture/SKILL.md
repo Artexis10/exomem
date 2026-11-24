@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 8b33ea6ff8229ea45347c6d3861799323324cffac43fd6b40d57779bba065d45
+  skill_contract: 1d440f440ef9cf5c72e44e2822b1b93ec861d701e6a567847911b4ceb55cd878
   version: "0.1.0"
 ---
 
@@ -129,7 +129,7 @@ carry transient progress; capture reusable decisions and verified milestones.
    two open axes: `source_kind` (what it is, required) and `domain` (what it is
    about), plus `projects` for the work it serves. Name the closest known kind
    or a new one; there is no catch-all.
-3. Pick the lane before the transport. Raw material stays with `save_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `save_evidence` for factual text, `save_evidence` when file handles are available, and `upload_files` only as the binary-upload fallback.
+3. Pick the lane before the transport. Raw material stays with `save_source`, which takes `files` for attachments as well as `content` for text. Proof-bearing material takes `save_evidence` for factual text, `save_evidence` when file handles are available, and `upload_files(lane="evidence", scope=..., category=...)` when they are not: its send saves on arrival. Keep a proof file the user shares in the turn it arrives, and put the returned `cite` wikilink in the text you write about it. Never keep a card number, code or password; ask for a covered copy.
 4. Draft distilled conclusions as: `research-note`, `insight`, `failure`, or `pattern`. Pass any path captured in steps 2-3 as `sources:` so the conclusion links to its provenance and the source leaves the unprocessed queue.
 5. Reuse known meaningful connections; use `inspect_memory(operation="connections.suggest_links")`
    when candidates are still missing. Then write with

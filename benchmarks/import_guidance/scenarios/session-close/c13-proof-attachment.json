@@ -1,0 +1,14 @@
+{
+  "id": "c13-proof-attachment",
+  "title": "A photo of a product box label is shared to register a warranty",
+  "suite": "session-close",
+  "seed": "c01",
+  "engagement": "balanced",
+  "turns": [
+    {
+      "text": "Can you register the warranty on my new headphones? Here's the box label.",
+      "images": ["fixtures/label.png"]
+    },
+    "That's all for today, thanks."
+  ]
+}

@@ -12,7 +12,7 @@ import os
 import secrets
 import shlex
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -163,6 +163,20 @@ def _import_steps(token: str, endpoint: str) -> list[dict]:
     ]
 
 
+def _destination_steps(endpoint: str, page_url: str | None) -> list[dict]:
+    """The steps after an evidence ticket that names its destination: the send saves the file, so nothing follows it."""
+    steps = [{**_send_step(endpoint, "evidence", "the file", "<file>"),
+              "text": "From a shell, send the file once; the server saves it as Evidence on arrival and returns "
+                      "its stored_path, hash and `cite` wikilink. Replace <token> with this reply's `token` and <file> with "
+                      "its path. A refused send also uses up this upload."}]
+    if page_url is not None:
+        steps.append({"step": "page", "url": page_url,
+                      "text": "With no shell, give the person this link. They open it on the device that holds the "
+                              "file, pick the file, and the server saves it as Evidence. The link works once, "
+                              "for this upload's lifetime."})
+    return steps
+
+
 def _file_steps(endpoint: str, lane: str) -> list[dict]:
     """The two steps after a source or evidence ticket: send the file once, then save the held handle."""
     from . import operation_entries
@@ -209,17 +223,23 @@ async def _check_source_authority(root: Path, who: principal.RequestPrincipal) -
 
 
 def prepare_upload(
-    vault_root: Path, *, lane: str, expected_sha256: str,
+    vault_root: Path, *, lane: str, expected_sha256: str | None,
     base_url: str | None = None, max_bytes: int | None = None, import_identity: str | None = None,
-    size_bytes: int | None = None, held_only: bool = False,
+    size_bytes: int | None = None, held_only: bool = False, destination: Mapping[str, str | None] | None = None,
 ) -> dict:
-    """Issue one upload handoff; the caller's current session owns its result."""
+    """Issue one upload handoff; the caller's current session owns its result.
+
+    A `destination` (`scope`, `category` and an optional `description`) makes an evidence ticket save on
+    arrival: the send stores the file there and returns its receipt, so no second call redeems a hold. Such
+    a ticket may omit `expected_sha256`, because a person who picks the file on a page has no digest to give.
+    """
     async def prepare():
         from . import source_imports
         from .client_artifacts import fetch_budget
         from .source_capture import validate_sha256
 
-        expected = validate_sha256(expected_sha256)
+        saved_to, destination_warnings = _destination(lane, destination)
+        expected = None if expected_sha256 is None and saved_to is not None else validate_sha256(expected_sha256)
         import_key = None
         if import_identity is not None:
             if lane != "source":
@@ -287,6 +307,10 @@ def prepare_upload(
         if resumable:
             steps = [{"step": "send", "text": "Use exomem attach with this handoff file and the Source original. "
                       "The client resumes the upload and returns the verified Source receipt."}]
+        elif saved_to is not None:
+            # A Cloud cell's byte route sits behind the gateway, which serves no page, so only a personal server offers one.
+            page_url = None if route is not None else page_endpoint(endpoint) + "#" + token
+            steps = _destination_steps(endpoint, page_url)
         elif lane == held_uploads.IMPORT_LANE:
             steps = _import_steps(token, endpoint)
         else:
@@ -320,12 +344,15 @@ def prepare_upload(
                 "expected_sha256": expected, "max_bytes": limit,
                 **({"import_key": import_key} if import_key is not None else {}),
                 **({"size_bytes": size_bytes} if resumable else {}),
+                **({"destination": saved_to} if saved_to is not None else {}),
             }, temp_suffix=".part")
         return {
             "token": token, "upload_url": endpoint,
             "ttl_seconds": ttl, "hold": not resumable, "lane": lane,
             "expected_sha256": expected, "max_bytes": limit,
             "handoff_status": "handoff_prepared", "committed": False, "next": steps,
+            **({"saves_to": saved_to} if saved_to is not None else {}),
+            **({"warnings": destination_warnings} if destination_warnings else {}),
             **({"size_bytes": size_bytes, "resumable": upload_sessions.handoff(endpoint.removesuffix("/upload"), lane=lane)} if resumable else {}),
         }
 
@@ -337,6 +364,29 @@ def prepare_upload(
     context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(context.run, lambda: asyncio.run(prepare())).result()
+
+
+def _destination(
+    lane: str, destination: Mapping[str, str | None] | None,
+) -> tuple[dict[str, str | None] | None, list[str]]:
+    """The checked Evidence destination a ticket saves to on arrival, and any redaction warning for its caption."""
+    if destination is None:
+        return None, []
+    from . import preserve
+
+    if lane != "evidence":
+        raise ValueError("INVALID_UPLOAD_HANDOFF: scope and category save an evidence upload on arrival; use lane evidence")
+    for field in ("scope", "category"):
+        reason = preserve.destination_segment_refusal(destination.get(field), field=field)
+        if reason is not None:
+            raise ValueError(f"INVALID_PRESERVE: {reason}")
+    _content, caption, _text, warnings = preserve.redact_capture_text(description=destination.get("description"))
+    return {"scope": destination["scope"], "category": destination["category"], "description": caption}, warnings
+
+
+def page_endpoint(upload_url: str) -> str:
+    """The page a person opens to send one file with a ticket, beside the upload route it posts to."""
+    return upload_url.rstrip("/") + "/send"
 
 
 async def claim_upload(
@@ -356,7 +406,9 @@ async def claim_upload(
 
             record = json.loads(path.read_text(encoding="utf-8"))
             who = upload_tokens._principal_from_values(dict(record["principal"]))
-            validate_sha256(record["expected_sha256"])
+            # Only a ticket that saves on arrival may go without a digest: a person picks its file on a page.
+            if record["expected_sha256"] is not None or "destination" not in record:
+                validate_sha256(record["expected_sha256"])
             bound_size = record["max_bytes"]
             if resumable:
                 if (record["lane"] != "source" or record["size_bytes"] != bound_size or size_bytes != bound_size
