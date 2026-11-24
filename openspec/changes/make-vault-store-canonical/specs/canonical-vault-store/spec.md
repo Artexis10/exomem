@@ -338,7 +338,7 @@ In store mode, once stage 2 ships, a governed operation SHALL be able to add, re
 - **AND** when the caller may not see that page, the answer is the same as for an absent far end
 
 ### Requirement: A stored relationship keeps its history and two-ended visibility
-Each stored relationship SHALL record who added it, when and why, and what retired or superseded it. A caller SHALL see a stored relationship only when it may see both of its ends.
+Each stored relationship SHALL record who added it, when and why, and what retired or superseded it. A caller SHALL see a stored relationship only when it may see both of its ends, and an operation SHALL answer a far end the caller may not see exactly as an absent one.
 
 #### Scenario: A restricted caller sees only relationships between visible ends
 - **WHEN** a restricted caller reads a unit whose relationship points at a page withheld from it
@@ -377,6 +377,18 @@ From stage 2, a page's projection MAY add one managed relations block, the one e
 - **THEN** the reverted pages carry no relations block and the relationship history is exported
 - **AND** after the re-migration every current stored relationship is present again
 
+### Requirement: Held relations items resolve without leaking or storing the block
+Keep-mine on a held page whose relations block is not valid SHALL remove the block by its markers, and SHALL refuse and name keep-store when the markers are not intact. A held relations file SHALL be listed to, and resolved by, the owner with unrestricted access only. Migration verification SHALL remove one relations block before it compares a projection with its source.
+
+#### Scenario: Keep mine on an edited relations block keeps the block out
+- **WHEN** an agent resolves with keep-mine a held page whose person's file has an edited relations block with intact markers
+- **THEN** the stored page equals the person's file with the block removed by its markers
+- **AND** the next projection carries exactly one relations block
+
+#### Scenario: A restricted caller cannot see a held relations file
+- **WHEN** a caller without unrestricted access lists held items while a relations file is held
+- **THEN** the listing leaves that item out without a count
+
 ### Requirement: Originals record their canonicity
 In store mode, once stage 2 ships, every stored file SHALL carry a canonicity record with its origin, content hash, size, format and derivation: either original, or derived from a named content hash by a named transform. A governed write SHALL be able to supersede a file recorded as original with the true original. After it, the earlier file SHALL remain stored as derived from the true original, citations SHALL resolve to the true original, and the audit trail SHALL record the change.
 
@@ -395,7 +407,7 @@ Exomem SHALL migrate a file-mode vault into store mode offline. The migration SH
 
 #### Scenario: Migration preserves every page byte
 - **WHEN** a vault is migrated and then fully projected to an empty directory
-- **THEN** every projected file is byte-identical to the file it was migrated from
+- **THEN** every projected file is byte-identical to the file it was migrated from, apart from one managed relations block
 
 #### Scenario: Reverting rebuilds file mode from the projection
 - **WHEN** an operator reverts a store-mode vault with no queued intents and no held items to file mode
