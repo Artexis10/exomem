@@ -99,6 +99,12 @@ class PlatformConfig:
     # Selects the local domain (design D1): new cells run on TopoLVM, their volume capped at this size.
     local_storage_cell_gib: int | None = None
     operator_restore_abort: bool = False
+    # The release mode's rollout settings (automate-cloud-releases D4, D5): cellctl's idle and force
+    # minutes, and the gateway's hold budget. None leaves the chart's values, which are five and ten
+    # minutes and a budget of 0, the value that turns the hold off.
+    upgrade_idle_minutes: int | None = None
+    upgrade_force_minutes: int | None = None
+    gateway_hold_budget_seconds: int | None = None
     catalogue_prewarm: CataloguePrewarm | None = None
 
     @property
@@ -164,6 +170,10 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
     # window lands, so the render carries the complement.
     upgrade_start, upgrade_end = upgrade_default_range(config.backup_window)
     cellctl["upgradeWindow"] = {"defaultHourStart": upgrade_start, "defaultHourEnd": upgrade_end}
+    if config.upgrade_idle_minutes is not None:
+        cellctl["upgradeWindow"]["idleMinutes"] = config.upgrade_idle_minutes
+    if config.upgrade_force_minutes is not None:
+        cellctl["upgradeWindow"]["forceMinutes"] = config.upgrade_force_minutes
     if (prewarm := config.catalogue_prewarm) is not None:
         cellctl["cataloguePrewarm"] = True
         cellctl["upgradeWindow"] |= {"idleMinutes": prewarm.idle_minutes, "forceMinutes": prewarm.force_minutes}
@@ -197,6 +207,8 @@ def _render(stack: Stack, config: PlatformConfig) -> Platform:
             else {"domain": "hetzner", "local": {"enabled": config.local_storage_coexistence}}
         ),
     }
+    if config.gateway_hold_budget_seconds is not None:
+        values["cloudGateway"]["hold"] = {"budgetSeconds": config.gateway_hold_budget_seconds}
     show_only = (
         "templates/cellctl.yaml", "templates/cloud-gateway.yaml", "templates/cloud-storage-class.yaml",
         "templates/namespaces.yaml",
@@ -557,9 +569,18 @@ def _kubectl_apply(stack: Stack, documents: list[dict[str, Any]]) -> None:
     stack.k3s.kubectl("apply", "--server-side", "--field-manager=rehearsal", "--filename=-", input_text=payload)
 
 
-def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: str, image: str) -> None:
-    leaf = pki.leaves[tls.MCP_HOST]
-    dynamic = {
+def gateway_idle_conn_timeout() -> str:
+    """The chart's `cloudIngress.gatewayIdleConnTimeout`, which its ServersTransport gives every route to the gateway."""
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.yaml").read_text(encoding="utf-8"))
+    return values["cloudIngress"]["gatewayIdleConnTimeout"]
+
+
+def ingress_routing(ingress_source_value: str) -> dict[str, Any]:
+    """The stand-in Traefik's file-provider routing: the chart's route to the gateway, with its trusted-ingress
+    header and its ServersTransport, which closes an idle backend connection before the gateway's Node server does."""
+
+    return {
         "http": {
             "middlewares": {
                 "trusted-ingress": {"headers": {"customRequestHeaders": {TRUSTED_INGRESS_HEADER: ingress_source_value}}}
@@ -573,17 +594,24 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
                     "tls": {},
                 }
             },
+            "serversTransports": {"gateway": {"forwardingTimeouts": {"idleConnTimeout": gateway_idle_conn_timeout()}}},
             "services": {
                 "gateway": {
                     "loadBalancer": {
                         "servers": [{"url": f"http://exomem-cloud-gateway.{CLOUD_NAMESPACE}.svc.cluster.local:8080"}],
                         "passHostHeader": True,
+                        "serversTransport": "gateway",
                     }
                 }
             },
         },
         "tls": {"certificates": [{"certFile": "/tls/tls.crt", "keyFile": "/tls/tls.key"}]},
     }
+
+
+def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: str, image: str) -> None:
+    leaf = pki.leaves[tls.MCP_HOST]
+    dynamic = ingress_routing(ingress_source_value)
     labels = {"app.kubernetes.io/name": "rehearsal-traefik", "exomem.io/ingress": "traefik"}
     documents = [
         {
@@ -625,6 +653,12 @@ def _apply_ingress(stack: Stack, pki: tls.RehearsalPki, ingress_source_value: st
                                     "--entryPoints.websecure.address=:8443",
                                     "--providers.file.filename=/config/dynamic.json",
                                     "--log.level=WARN",
+                                    # Traefik logs the cause of a 502 only at debug level, which would also print the
+                                    # trusted-ingress header's value. Its access log, filtered to the 5xx it returned,
+                                    # names each failure's time, path and status, and drops request headers by default.
+                                    "--accesslog=true",
+                                    "--accesslog.format=json",
+                                    "--accesslog.filters.statuscodes=500-599",
                                     # No call home: nothing in the run may reach a real server.
                                     "--global.checkNewVersion=false",
                                     "--global.sendAnonymousUsage=false",

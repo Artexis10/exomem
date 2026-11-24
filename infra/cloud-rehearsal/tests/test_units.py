@@ -732,3 +732,12 @@ def test_final_kernel_witness_uses_retained_stdout_and_rejects_loss_or_duplicate
     else:
         with pytest.raises(report.StepFailure, match="expected one final kernel witness"):
             observer_record(stdout)
+
+
+def test_the_stand_in_traefik_routes_the_gateway_through_a_transport_that_closes_idle_connections() -> None:
+    """The chart's route to the gateway names a ServersTransport that closes idle connections before the gateway
+    does, so the stand-in must too: without it the rehearsal fails on a race that the product has fixed."""
+
+    http = platform.ingress_routing("ingress-source")["http"]
+    transport = http["services"]["gateway"]["loadBalancer"]["serversTransport"]
+    assert http["serversTransports"][transport]["forwardingTimeouts"]["idleConnTimeout"]
