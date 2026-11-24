@@ -684,14 +684,18 @@ jobs:
         if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cloud-build.outcome == 'success' }}
         env:
           IMAGE: ghcr.io/substrate-systems/evermatter@${{ steps.cloud-build.outputs.digest }}
-        run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
+          PLATFORM: linux/${{ matrix.arch }}
+        # The digest names an index with one platform; trivy reads linux/amd64 unless told otherwise.
+        run: .release-tools/scripts/check-image-licences.sh --platform "$PLATFORM" "$IMAGE"
 
       - name: Check the Python distribution licences of the native cellctl image
         id: cellctl-licences
         if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cellctl-build.outcome == 'success' }}
         env:
           IMAGE: ghcr.io/substrate-systems/evermatter-cellctl@${{ steps.cellctl-build.outputs.digest }}
-        run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
+          PLATFORM: linux/${{ matrix.arch }}
+        # The digest names an index with one platform; trivy reads linux/amd64 unless told otherwise.
+        run: .release-tools/scripts/check-image-licences.sh --platform "$PLATFORM" "$IMAGE"
 
       - name: Retain successful native image digests
         id: digests
