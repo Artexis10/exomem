@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
+  skill_contract: 5be91f8358457057f717c3eadd329cf8ef6cd7e4c55e1ae9a3f59dc2a3565fd3
   version: "0.1.0"
 ---
 
@@ -40,8 +40,10 @@ the structured error. For warming, busy, pending, or
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
-Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+Tell the user the user_summary. Speak of the user's things in their words, never of
+collections, Records, Planning, schemas, entities or paths. A change with no
+user_summary needs no mention unless asked. Give codes, ids, hashes, retries and
+sync state only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
 
 Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
@@ -100,8 +102,8 @@ stays in Notes. Follow `references/planning-records.md`: list the collections, r
 compatible one and update rows by natural key, else `add_record` with `new_collection`
 creates a minimal collection and adds the first row, under the served disposition. A later
 fact that has no field is added with `new_fields`, never put into another field. Backfill
-what the conversation established with dates and attribution, and report the collection and
-the rows in the reply.
+what the conversation established with dates and attribution, and report what you kept in the
+user's words.
 
 When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
 the same payload, or read the collection and the row by natural key before submitting that write again.

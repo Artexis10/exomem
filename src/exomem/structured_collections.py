@@ -36,6 +36,9 @@ RECORDS_READER_VERSION = 2
 RECORD_REF_PREFIX = "exomem://record/"
 PLAN_REF_PREFIX = "exomem://plan/"
 _SUPPORTED_PROFILES = frozenset({"records", "planning"})
+#: `lifecycle` is a free string in the manifest. These two values are the ones `retire` and `restore` move between,
+#: and the one flag every surface reads to leave a retired collection out: `CollectionManifest.retired`.
+LIFECYCLE_ACTIVE, LIFECYCLE_RETIRED = "active", "retired"
 #: The collection store holds the rows; storage.source names the folder of its bounded summary pages.
 SQLITE_STORAGE = "sqlite"
 # The manifest schema fixes this closed set; each value names an adapter or the store, not a vocabulary.
@@ -194,6 +197,14 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
         "properties": {
             "type": {"enum": field_types},
             "required": {"type": "boolean", "default": False},
+            "retired": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "A retired field keeps its stored values and refuses new ones; a query returns it only "
+                    "when it names the field in `columns`. A `restructure` `restore_field` clears it."
+                ),
+            },
             "enum": {
                 "type": "array",
                 "maxItems": 64,
@@ -921,6 +932,8 @@ class FieldSpec:
     properties: Mapping[str, FieldSpec] = field(default_factory=lambda: MappingProxyType({}))
     depends_on: tuple[str, ...] = ()
     references: FieldReference | None = None
+    #: Set aside by `retire_field`: the values stay, the schema agents read omits it, and a write may not supply it.
+    retired: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1098,6 +1111,13 @@ class CollectionManifest:
     #: How the store derives this collection's item keys. It is store state, not manifest text: the store
     #: records it at creation and the writer overlays it on every manifest it hands out.
     item_key_scheme: str = item_keys.HASHED_V1
+    #: The collection a merge moved this one's rows into, by its exomem_id; None when nothing merged it away.
+    successor: str | None = None
+
+    @property
+    def retired(self) -> bool:
+        """The one flag that takes a collection out of recall, routing, the inventory and every new write."""
+        return self.lifecycle == LIFECYCLE_RETIRED
 
 
 def ignored_recipes_diagnostic(manifest: CollectionManifest) -> CollectionDiagnostic | None:
@@ -2038,6 +2058,7 @@ def _manifest_from_frontmatter(
             },
         )
     lifecycle = _nonempty_string(frontmatter.get("lifecycle"), "lifecycle")
+    successor = _parse_successor(frontmatter.get("successor"))
     schema_version = frontmatter.get("schema_version")
     if type(schema_version) is not int or schema_version < 1:
         raise CollectionError(
@@ -2109,6 +2130,7 @@ def _manifest_from_frontmatter(
         semantic_profile=profile,
         collection_version=version,
         lifecycle=lifecycle,
+        successor=successor,
         path=manifest_rel,
         manifest_version=manifest_version,
         storage=storage,
@@ -2920,6 +2942,8 @@ def _parse_schema(version: int, value: object) -> ItemSchema:
     natural_key = tuple(natural_raw)
     if len(natural_key) > 16 or any(name not in fields for name in natural_key):
         raise CollectionError("INVALID_NATURAL_KEY", "natural key must name declared fields")
+    if any(fields[name].retired for name in natural_key):
+        raise CollectionError("INVALID_NATURAL_KEY", "a natural key field cannot be retired: it identifies every row")
     return ItemSchema(version, MappingProxyType(fields), natural_key)
 
 
@@ -3237,6 +3261,10 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     required = raw.get("required", False)
     if type(required) is not bool:
         raise CollectionError("INVALID_ITEM_SCHEMA", "required must be boolean")
+    retired = raw.get("retired", False)
+    if type(retired) is not bool or (retired and (depth or required)):
+        # A retired field is a whole top-level field that no write must supply, so it is never a required one.
+        raise CollectionError("INVALID_ITEM_SCHEMA", "retired must be boolean, on an optional top-level field")
     enum_raw = raw.get("enum", [])
     if enum_raw is None:
         enum_raw = []
@@ -3278,7 +3306,23 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
                      MappingProxyType({name: _parse_field_spec(spec, depth + 1, f"{at}.properties.{name}")
                                        for name, spec in properties.items()}),
-                     tuple(dependencies), references=_parse_field_reference(raw.get("references"), at))
+                     tuple(dependencies), references=_parse_field_reference(raw.get("references"), at),
+                     retired=retired)
+
+
+def _parse_successor(value: object) -> str | None:
+    """Read `successor`: the exomem_id of the collection a merge moved this one's rows into, or None when it names none."""
+    if value is None:
+        return None
+    target = memory_refs.normalize_id(value) if type(value) is str else None
+    if target is None:
+        raise CollectionError(
+            "INVALID_COLLECTION_MANIFEST",
+            "successor must be the exomem_id of another collection",
+            {"field": "successor", "received": value, "expected": "UUID string",
+             "example": "successor: 15dd81cd-9ae2-488c-bd9e-14771d86343e"},
+        )
+    return target
 
 
 def _parse_field_reference(value: object, at: str) -> FieldReference | None:

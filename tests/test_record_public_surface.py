@@ -28,6 +28,7 @@ RECORD_ACTIONS = (
     "update",
     "retract",
     "revise",
+    "restructure",
     "rebaseline",
     "discard",
     "import",

@@ -89,7 +89,7 @@ an object field count too; it declares only the keys of a minimal manifest, so n
 references, rollups, templates or governance; and the vault has created fewer than three collections
 automatically in the last 24 hours. A vault with a collection store and a vault of plain
 files both qualify. The limits live in `exomem.automatic_collection`. Every other creation,
-every Planning collection and every schema change other than adding fields, merge or deletion still needs your
+every Planning collection and every restructure outside the bounds below still needs your
 confirmation. The inventory shows `created_automatically` for each collection, so you can
 review what the agent created. A file collection whose create the inventory cannot place in
 the recent activity log shows `null`.
@@ -109,6 +109,7 @@ Use `query_records`, `add_record` and `edit_record`, and the `records` operation
 | `history` | Read retained prior payloads for one authorized item, with bounded pagination and explicit missing legacy content. |
 | `revise` | Change a collection declaration with current manifest and container guards. |
 | `rebaseline` | Acknowledge an exact, positively established imported audit gap. |
+| `restructure` | Reshape a collection in one lossless, undoable call: field steps, rekey, merge, split, retitle, retire and restore. An agent passes `automatic` inside the bounds that [Agent-initiated collections](#agent-initiated-collections) lists (fewer than three in 24 hours, at most 12 fields, nothing you chose or designed); otherwise it needs your confirmation. `inspect` pages the shape history, and the inventory shows the 5 newest entries and the total. |
 | `bulk_upsert` | Import a bounded batch of observations from preserved source references. |
 | `import` | Manage a resumable collection import. |
 | `discard` | Discard a held candidate with a reason. |

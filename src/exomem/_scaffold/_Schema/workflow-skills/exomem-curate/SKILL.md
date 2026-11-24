@@ -2,7 +2,7 @@
 name: exomem-curate
 description: Improve Exomem note quality by adding links, clarifying compiled notes, and organizing safely without editing the content of raw Sources or Evidence.
 metadata:
-  skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
+  skill_contract: 5be91f8358457057f717c3eadd329cf8ef6cd7e4c55e1ae9a3f59dc2a3565fd3
   version: "0.2.0"
 ---
 
@@ -40,8 +40,10 @@ the structured error. For warming, busy, pending, or
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
-Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+Tell the user the user_summary. Speak of the user's things in their words, never of
+collections, Records, Planning, schemas, entities or paths. A change with no
+user_summary needs no mention unless asked. Give codes, ids, hashes, retries and
+sync state only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
 
 Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a

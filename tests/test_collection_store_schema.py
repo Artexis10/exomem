@@ -60,6 +60,7 @@ EXPECTED_TABLES = {
     "rollup_members",
     "item_references",
     "item_reference_state",
+    "collection_shape_history",
     "store_mode",
     "store_mode_objects",
     "store_pages",
@@ -79,6 +80,7 @@ APPEND_ONLY = (
     "collection_type_versions",
     "import_members",
     "store_audit",
+    "collection_shape_history",
 )
 
 
@@ -227,6 +229,12 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
                 "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
                 " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, '2026-11-08T00:00:00Z')",
                 (H,),
+            )
+        if schema.schema_version(conn) >= 21:  # an older store has no shape-history table
+            conn.execute(
+                "INSERT INTO collection_shape_history(entry_id, collection_id, txn_id, committed_at, origin,"
+                " undoes, adds_only, entry_json) VALUES (?, ?, 1, '2026-09-30T00:00:00Z', 'user_choice', NULL, 0, '{}')",
+                ("0" * 24, COLLECTION_ID),
             )
     return {"row_id": row_id}
 

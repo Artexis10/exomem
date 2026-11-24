@@ -25,6 +25,7 @@ from . import (
     query_compat,
     query_data,
     record_formats,
+    restructure,
     state_paths,
     structure_promotion,
     vault,
@@ -85,6 +86,7 @@ _INSPECTION_KEYS = frozenset(
         "coverage",
         "references",
         "inbound",
+        "shape_history",
     }
 )
 _INSPECTION_VIEW_QUERY_KEYS = frozenset(
@@ -281,7 +283,7 @@ def is_routing_target(
     manifest: collections.CollectionManifest, claims: Iterable[str]
 ) -> bool:
     """Active, and claiming enough vocabulary or declaring `claims.match` membership."""
-    return manifest.lifecycle == "active" and (
+    return manifest.lifecycle == collections.LIFECYCLE_ACTIVE and (
         len(frozenset(claims)) >= MIN_CLAIM_TERMS or bool(manifest.claim_match)
     )
 
@@ -588,6 +590,10 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         return None
     if references is not None and normalized_references is None:
         return None
+    history = payload.get("shape_history")
+    normalized_history = restructure.normalized_page(history) if history is not None else None
+    if history is not None and normalized_history is None:
+        return None
     presentation = payload.get("presentation")
     if presentation is not None and (
         not isinstance(presentation, Mapping)
@@ -699,6 +705,8 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans",
             "claims",
             "capture",
+            "retired",
+            "successor",
         } or not {
             "collection_id",
             "path",
@@ -756,6 +764,10 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         capture = _inspection_declared_capture(contract.get("capture")) if "capture" in contract else None
         if "capture" in contract and capture is None:
             return None
+        retired = contract.get("retired") is True
+        successor = _inspection_identifier(contract.get("successor")) if "successor" in contract else None
+        if ("retired" in contract and not retired) or ("successor" in contract and (successor is None or not retired)):
+            return None
         normalized_contract: dict[str, Any] | None = {
             "collection_id": collection_id,
             "path": path,
@@ -766,6 +778,8 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
             "plans": [plan for plan in normalized_plans if plan is not None],
             **({"claims": claims} if claims is not None else {}),
             **({"capture": capture} if capture is not None else {}),
+            **({"retired": True} if retired else {}),
+            **({"successor": successor} if successor is not None else {}),
         }
         normalized_legacy: dict[str, Any] | None = None
         if status == "not_applicable":
@@ -851,6 +865,7 @@ def _validate_record_inspection(payload: Mapping[str, Any]) -> dict[str, Any] | 
         **({"coverage": normalized_coverage} if normalized_coverage is not None else {}),
         **({"references": normalized_references} if normalized_references is not None else {}),
         **({"inbound": normalized_inbound} if normalized_inbound is not None else {}),
+        **({"shape_history": normalized_history} if normalized_history is not None else {}),
     }
     return result
 
@@ -957,6 +972,8 @@ egress.register_projector(
         "source_versions",
         "view",
         "agent_history",
+        "retired",
+        "successor",
     ),
 )
 egress.register_projector(
@@ -977,6 +994,7 @@ egress.register_projector(
         "coverage",
         "references",
         "inbound",
+        "shape_history",
     ),
     validator=_validate_record_inspection,
 )
@@ -1748,8 +1766,11 @@ def _saved_view_filter_links_are_authorized(
 def inspect_collection(
     vault_root: Path,
     collection: str | Path | collections.CollectionManifest,
+    *,
+    history_limit: int | None = None,
+    history_after: str | None = None,
 ) -> dict[str, Any]:
-    """Return bounded, report-only evidence for one fully released collection."""
+    """Return bounded, report-only evidence for one fully released collection, with a page of its shape history."""
     root = Path(vault_root)
     # `records` already imports this governance boundary for mutations.
     from . import records
@@ -1853,6 +1874,10 @@ def inspect_collection(
                 # Store inspection lists declared-reference state; the file mode has no
                 # store database to report against, so it reports the empty list.
                 "references": [], "inbound": {"declarations": [], "truncated": False, "total": 0},
+                "shape_history": restructure.page(
+                    records.shape_history(root, manifest.collection_id),
+                    limit=history_limit, after=history_after, collection=manifest.collection_id,
+                ),
                 "lifecycle_guards": guards,
                 "coverage": _collection_coverage(
                     root,
@@ -2079,8 +2104,12 @@ def released_manifest_paths(vault_root: Path, paths: Iterable[str]) -> tuple[str
 
 
 @canonical_read(receipt_boundary="record_inspection")
-def inventory_collections(vault_root: Path, *, semantic_profile: str = "records") -> dict[str, Any]:
+def inventory_collections(
+    vault_root: Path, *, semantic_profile: str = "records", include_retired: bool = False
+) -> dict[str, Any]:
     """Return a bounded authorized inventory with a per-collection census.
+
+    A retired collection is counted under `retired_collections` and listed only when `include_retired` asks.
 
     It returns no item contents and parses no legacy item grammar, but the
     committed count is a real census: each releasable first-class collection's
@@ -2094,10 +2123,56 @@ def inventory_collections(vault_root: Path, *, semantic_profile: str = "records"
     """
     root = Path(vault_root)
     with authorization_pass(root):
-        return _inventory_collections(root, semantic_profile=semantic_profile)
+        return _inventory_collections(root, semantic_profile=semantic_profile, include_retired=include_retired)
 
 
-def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, Any]:
+#: The newest shape-history entries that the inventory shows for each collection, beside its total.
+INVENTORY_HISTORY = 5
+
+
+def _inventory_shape_history(root: Path, released: Sequence[tuple[Any, Any]]) -> Callable[[Any, Any], dict[str, Any] | None]:
+    """Each listed collection's newest shape-history entries and total, from one read per storage mode.
+
+    A store answers for all its collections in one statement. The file collections share one read of the activity
+    log, which stops after `automatic_collection.INVENTORY_ARCHIVES` archives, so the inventory's cost stays flat as
+    history grows; a total then counts only what that read covered, and `complete` says so. None is a history that
+    could not be read, never an empty one.
+    """
+    by_store: dict[int, tuple[Any, list[str]]] = {}
+    for manifest, store_writer in released:
+        if store_writer is not None:
+            by_store.setdefault(id(store_writer), (store_writer, []))[1].append(manifest.collection_id)
+    stored = {
+        key: writer.newest_shape_history(ids, limit=INVENTORY_HISTORY) for key, (writer, ids) in by_store.items()
+    }
+    files: tuple[dict[str, list[dict[str, Any]]], bool] | None = None
+    if any(store_writer is None for _, store_writer in released):
+        try:
+            lines, complete = vault.operation_log_lines(
+                root, restructure.SHAPE_LINE_PREFIX, max_archives=automatic_collection.INVENTORY_ARCHIVES
+            )
+            files = restructure.entries_by_collection(lines), complete
+        except (vault.PathGuardError, OSError, ValueError):
+            files = None
+
+    def newest(manifest: Any, store_writer: Any) -> dict[str, Any] | None:
+        cid = manifest.collection_id
+        if store_writer is not None:
+            held = stored[id(store_writer)][cid]
+            return {"entries": restructure.shown(held["entries"], cid), "total": held["total"]}
+        if files is None:
+            return None
+        grouped, complete = files
+        entries = grouped.get(cid, [])
+        return {
+            "entries": restructure.shown(entries[:INVENTORY_HISTORY], cid), "total": len(entries),
+            **({} if complete else {"complete": False}),
+        }
+
+    return newest
+
+
+def _inventory_collections(root: Path, *, semantic_profile: str, include_retired: bool = False) -> dict[str, Any]:
     """Read every inventory path under the caller's single authorization pass."""
     from .governance import artifact_census
 
@@ -2130,6 +2205,10 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
                                            f"this release has not enabled {capability.RECORDS_SUMMARY_V1}",
                                            m.semantic_profile)
             for m in dark))
+    # The one retirement flag splits the sweep before any coverage read, so the default inventory pays nothing for them.
+    retired_count = sum(1 for manifest, _ in released if manifest.retired)
+    if not include_retired:
+        released = [(manifest, store_writer) for manifest, store_writer in released if not manifest.retired]
     from . import due_state
 
     with call_spans.span("records.inventory_observations"):
@@ -2163,6 +2242,7 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         ids, complete = file_automatic
         return True if manifest.collection_id in ids else (False if complete else None)
 
+    recent_shape = _inventory_shape_history(root, released)
     for manifest, store_writer in released:
         coverage, selection, items = _inventory_coverage(
             root, manifest, authorize, observations=observations[str(manifest.path)],
@@ -2174,10 +2254,12 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
             "manifest_path": manifest.path,
             "semantic_profile": manifest.semantic_profile,
             "lifecycle": manifest.lifecycle,
+            **({"successor": manifest.successor} if manifest.successor is not None else {}),
             "storage_strategy": manifest.storage.strategy,
             "natural_key": list(manifest.schema.natural_key),
             # Planning has no automatic create. None is unknown, never False.
             **({"created_automatically": created_automatically(manifest, store_writer)} if semantic_profile == "records" else {}),
+            "shape_history": recent_shape(manifest, store_writer),
             **coverage,
         })
         if selection is not None:
@@ -2199,10 +2281,14 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
                 root, authorize_path=authorize, accounted_paths=owned_views | accounted, listing=listing
             )
     describe_route = capabilities.active_call_route("record_memory", {"action": "describe"})
+    reshape_route = capabilities.active_call_route(
+        "record_memory" if semantic_profile == "records" else "plan_memory", {"action": "restructure"})
     payload = {
         "kind": f"{semantic_profile}_inventory",
         "report_only": True,
         "collections": inventory,
+        # What the caller may see, retired or not: the default list omits them, and the count says so.
+        "retired_collections": retired_count,
         # A manifest this sweep could not read is listed under every profile
         # unless the store's marker records its profile: whichever inventory
         # was asked for, an unread file of unknown profile is a hole in the
@@ -2234,6 +2320,8 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
             **({"legacy_trackers": legacy_truncated} if semantic_profile == "records" else {}),
         },
         "contract_route": {"tool": describe_route["tool"], "arguments": describe_route["args"]},
+        "reshape_route": {"tool": reshape_route["tool"], "arguments": reshape_route["args"],
+                          "say": restructure.RESHAPE_CUE},
     }
     if selections:
         writer = bound_writer(root)
@@ -2283,6 +2371,7 @@ def _inspection_contract(manifest: collections.CollectionManifest) -> dict[str, 
             "format_version": manifest.storage.format_version,
         },
         "plans": [],
+        **retirement_mark(manifest),
         **(
             {"claims": {name: list(values) for name, values in manifest.claims.items()}}
             if manifest.claims is not None
@@ -2812,10 +2901,18 @@ def project_query_result(
             ],
             "view": typed.view,
             **({"agent_history": dict(agent_history)} if agent_history is not None else {}),
+            **retirement_mark(manifest),
             "rendered": rendered,
         }
     )
     return egress.project(payload, egress.LEVEL_FULL, kind="record_query") or {}
+
+
+def retirement_mark(manifest: collections.CollectionManifest) -> dict[str, Any]:
+    """What a read by identity adds for a retired collection: the mark, and the successor when a merge retired it."""
+    if not manifest.retired:
+        return {}
+    return {"retired": True, **({"successor": manifest.successor} if manifest.successor is not None else {})}
 
 
 def _cursor_query(

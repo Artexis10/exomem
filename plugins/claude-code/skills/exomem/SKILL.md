@@ -2,7 +2,7 @@
 name: exomem
 description: Use Exomem for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Exomem, KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Exomem's to govern.
 metadata:
-  skill_contract: 9879524d076eac1257218e78a2bfc61415da3b024bc26554ea61d9dba0322407
+  skill_contract: 5be91f8358457057f717c3eadd329cf8ef6cd7e4c55e1ae9a3f59dc2a3565fd3
   version: "0.32.0"
 ---
 
@@ -124,8 +124,10 @@ the structured error. For warming, busy, pending, or
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
-Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
+Tell the user the user_summary. Speak of the user's things in their words, never of
+collections, Records, Planning, schemas, entities or paths. A change with no
+user_summary needs no mention unless asked. Give codes, ids, hashes, retries and
+sync state only if asked. State a blocker plainly. Working on Exomem does not make an unrelated
 conversation diagnostic.
 
 Bootstrap's `store` names the Exomem this connector reaches. When the user asks for a
@@ -213,8 +215,11 @@ with its uncertainty, never as fact), a question left open (as an open question,
 including whether something happened), and settled values (in full, not file pointers).
 Mid-thought exploration and incidental names get no note, and no write mentions them.
 Capture unambiguous landings under the current disposition and existing scope
-approval, then report the write; ask only for missing decisions or confirmation
-required by the envelope. Raw capture is not automatic compilation. At a
+approval, then report what you kept, in the user's words; ask only for missing decisions
+or confirmation required by the envelope. A list that changes shape takes one lossless,
+undoable `restructure` call; ask the user at most one plain question about it, and only when
+several shapes fit and the choice changes what they get
+([Planning and Records](references/planning-records.md)). Raw capture is not automatic compilation. At a
 conversation's decision or stopping point, record one bounded recap with
 `save_episode` only when requested or permitted by the live proactive-capture
 disposition; it is what the next session on any client sees first.
@@ -309,10 +314,10 @@ Its **disposition** comes from prominence, a fixed rule, or the user's explicit 
 | Action class | Ceiling | What it covers |
 |---|---|---|
 | `hygiene_writes` | silent | index, log and back-reference upkeep riding a governed write |
-| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, the owner's type, category or relation save, one minimal Records collection within the server's automatic-creation bounds, and fields added to a Records collection (an automatic one holds at most 12) |
+| `proactive_capture` | silent-capable | capture, record and plan writes you start yourself, including a new entity after resolve-before-create, your own typed edge, the owner's type, category or relation save, one minimal Records collection within the server's automatic-creation bounds, fields added to a Records collection (an automatic one holds at most 12), and a lossless restructure of a collection within the server's automatic-restructure bounds |
 | `link_acceptance` | confirm | accepting a relation that the relation queue suggested |
 | `structural_suggestions` | advisory | structural advice on any channel — surface only |
-| `restructure_execution` | confirm-required | restructure application, supersession commit, entity merge, deletion, edge removal, promotion revert, a collection created outside the automatic-creation bounds or in Planning, and any collection schema change other than adding fields, merge or migration |
+| `restructure_execution` | confirm-required | a restructure outside the automatic-restructure bounds, supersession commit, entity merge, deletion, edge removal, promotion revert, and a collection created outside the automatic-creation bounds or in Planning |
 | `disclosure` | governed by the governance plane | no disposition; not envelope-configurable |
 
 Registry promotion covers additive entries only. Changes to existing meanings,

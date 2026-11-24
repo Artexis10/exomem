@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import memory_refs, published_admission, request_budget, state_paths
 from .. import structured_collections as collections
-from .connection import CollectionStoreError, SnapshotHandle, WriterConnection
+from .connection import CollectionStoreError, SnapshotHandle, WriterConnection, busy
 
 if TYPE_CHECKING:
     from .writer import CollectionWriter
@@ -647,6 +647,38 @@ def _mutate(vault_root, method, *args, **kwargs):
         return method(*args, **kwargs)
 
 
+def _admit_split(vault_root, profile, args, collection_id, path, text):
+    """Make a split's new collection on an enrolled store through its admitted create, before the moves commit.
+
+    The create commits on its own, under a request id derived from the restructure's, and the moves follow in one
+    transaction. A failure between them leaves the new collection empty, and a retry of the same split takes it over.
+    Returns the create's warnings, which the restructure's reply carries.
+    """
+    from .. import restructure, writer_lease
+    from .admission import require_new_store_manifest
+    from .runtime import served_create
+
+    automatic = restructure.call_origin(
+        args.get("origin"), automatic=bool(args.get("automatic")), allowed=restructure.ORIGINS) == "automatic"
+    with writer_lease.mutation_step(f"split_out:{collection_id}"):
+        created = served_create(vault_root, {
+            "manifest_path": path, "manifest_text": text, "why": args["why"], "scaffold": False,
+            "origin": None if automatic else args.get("origin"), "automatic": automatic}, facade_profile=profile)
+    if created is None:
+        # Only a summary collection joins an enrolled store; the store's own refusal says so.
+        require_new_store_manifest(vault_root, path, text)
+        raise restructure.creation_unavailable()
+    if created.get("status") == "pending":
+        raise busy(
+            "the split's new collection is created and the service is finishing its publication; nothing moved yet, "
+            "so retry the same restructure shortly to move its rows")
+    if created.get("status") != "marker_admitted":
+        raise CollectionStoreError(
+            created.get("reason") or "COLLECTION_STORE_UNAVAILABLE",
+            "the split's new collection was not admitted; nothing moved, so retry the same restructure")
+    return created.get("warnings", ())
+
+
 def _validate_create(writer, profile, args):
     """Refuse a new manifest for what the store's create refuses; the file-mode preflight still builds the result."""
     if "manifest_path" in args and "manifest_text" in args:
@@ -755,10 +787,11 @@ def dispatch(
         return True, (current, text, writer.created_automatically(current.collection_id))
     # Records inspection is generic in file mode; only its mutations require
     # the Records profile. Planning inspection retains its profile guard.
+    history = {"history_limit": args.get("limit"), "history_after": args.get("continuation")}
     if action == "inspect" and profile == "records":
-        return True, writer.inspect_collection(args["collection"], facade_profile=profile)
+        return True, writer.inspect_collection(args["collection"], facade_profile=profile, **history)
     if action == "inspect":
-        return True, writer.inspect_collection(args["collection"])
+        return True, writer.inspect_collection(args["collection"], **history)
     if action == "query" and "view" in args:
         # A version-1 saved view runs on the query engine, on any facade profile.
         from .. import structured_collections as _collections
@@ -856,6 +889,18 @@ def dispatch(
                 if current.view_mode == SUMMARY:
                     require_summary_manifest(vault_root, current.path, args["manifest_text"])
         return True, _mutate(vault_root, writer.revise_collection, collection, **args)
+    if action == "restructure":
+        if args.pop("preview", False):
+            return True, writer.preview_restructure(collection, **args)
+        warnings = []
+        if binding[2] and proof.marker is not None:
+            for created in writer.restructure_creations(collection, **args):
+                warnings.extend(_admit_split(vault_root, profile, args, *created))
+                writer._require_operation_context()  # The create lends the checkout; the moves run on a new one.
+                writer._facade_profile = profile
+        reply = _mutate(vault_root, writer.restructure_collection, collection, **args)
+        warnings = list(dict.fromkeys([*warnings, *reply.get("warnings", ())]))
+        return True, {**reply, "warnings": warnings} if warnings else reply
     if action == "rebaseline":
         return True, _mutate(vault_root, writer.rebaseline_collection, collection, **args)
     if action == "retract" and profile == "records":

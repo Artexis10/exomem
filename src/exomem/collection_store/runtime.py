@@ -1307,7 +1307,8 @@ def served_create(vault_root, arguments, facade_profile=None):
             session, server.manager, arguments["manifest_path"], arguments["manifest_text"],
             why=arguments["why"], request_id=writer_lease.active_mutation_request_id(),
             fence_client=session.fence_client, scaffold=arguments.get("scaffold", True),
-            facade_profile=facade_profile, automatic=bool(arguments.get("automatic")))
+            facade_profile=facade_profile, automatic=bool(arguments.get("automatic")),
+            origin=arguments.get("origin"))
         if (receipt := result.get("receipt")) and receipt.get("warnings"):
             # The create's own warnings lead, where the tool result shows them.
             result = {**result, "warnings": [*receipt["warnings"], *result.get("warnings", ())]}

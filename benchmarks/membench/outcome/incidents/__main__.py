@@ -41,6 +41,10 @@ arm's own writer, sends one user turn to Claude Code in print mode (or to the Op
   agent's next call on that collection was that same write (same arguments, same replay identity) or a read of the
   collection, so the uncertain write was reconciled and not repeated as a new one. It reads the unit's wire log
   (``withhold.py``), not the actor's account of its calls, and the unit records which of the two the agent did.
+- ``restructure``, ``rows_preserved``, ``plain_reply``: what an agent-managed restructure left in the vault and what
+  the user was told (``structure.py``). They read the shape history, rows and lifecycle of the seeded collections, and
+  of the collections the session made, through the arm's own inspection and query (``arm_side.py shape``). An arm
+  that reports no shape history holds no entry, so a case that expects one fails there and passes on the arm that has it.
 
 A case gives ``prompt`` (one user turn) or ``turns`` (several, played in order in one session, ``turns.py``). A
 ``follow_up`` is one more user turn that a new session plays on the same vault after the main session ends; its
@@ -59,7 +63,9 @@ the only transport over which an agent can send a file's bytes (a case with ``fi
 tools). Stdio is the default. ``"remote_owner": true`` makes the loopback sign-in act as the vault's owner,
 which the arm needs to serve a routed collection's declared method to it. ``"store": true`` (an http case) gives the unit
 a vault whose collection store is enrolled and served, as the personal service has it (``store.py``): a lease
-coordinator of the unit's own, and one more collection that the unit's seed never counts as the session's. ``"git": true`` makes the work
+coordinator of the unit's own, and one more collection that the unit's seed never counts as the session's.
+``"store_collections": true`` (with ``store``) makes the case's own ``seed_collections`` store collections too,
+created after the enrolment in a process that serves the store, so a restructure runs on the store's writer. ``"git": true`` makes the work
 directory a repository with every fixture committed, so a case can ask the agent to work on a repository file
 without that counting as a handed file. ``"withhold_first_write_ack": true`` (an http case, with ``pending_reconciled``)
 puts a transport between the actor and the unit's server that commits the main session's first write that the arm
@@ -146,6 +152,7 @@ from ..isolation import (
 from ..judging import Judge, JudgeSpec, grade_item
 from ..record import checkout_state
 from . import openai_actor, warmup
+from . import structure as agent_structure
 from .fixtures import KINDS, build_files
 from .server import lay_exomem_command, loopback_mcp
 from .store import StoreUnit, store_unit
@@ -155,11 +162,19 @@ from .withhold import Withholder, proxied
 CASES_DIR = Path(__file__).parent / "cases"
 ARM_SIDE = Path(__file__).with_name("arm_side.py")
 ARM_SIDE_TIMEOUT_SECONDS = 300
+#: The arm-side reads that write nothing, and so may run again (`run_arm_side`).
+ARM_SIDE_READS = ("collections", "records", "sources")
+ARM_SIDE_READ_ATTEMPTS = 3
+#: The arm's store refusals that a read before or after the session meets for a moment under load: a run of
+#: 2026-11-23 lost 2 of 16 store units to them before their sessions started. They are the arm's own error codes.
+STORE_TRANSIENT_CODES = ("COLLECTION_STORE_BUSY", "COLLECTION_STORE_LEASE_REQUIRED", "COLLECTION_STORE_FLUSH_PENDING")
 SESSION_TIMEOUT_SECONDS = 900
 #: A handed-file custody turn costs 5-6 tool calls and a 2026-11-17 unit hit the 12-turn cap.
 INCIDENT_MAX_TURNS = 20
 JUDGE_TIMEOUT_SECONDS = 300
 SOURCE_CHECKS = ("source_saved", "source_count", "current_source", "compiled_with_backlinks")
+#: The checks of agent-managed structure (``structure.py``): the shape history, the rows kept, the reply's words, and the turn a step may first come in.
+STRUCTURE_CHECKS = ("restructure", "rows_preserved", "plain_reply", "step_order")
 #: The checks this runner implements; a case's `pass` names a subset.
 CHECKS = (
     "seed_corrected",
@@ -173,6 +188,7 @@ CHECKS = (
     "no_write",
     "pending_reconciled",
     "follow_up_judge",
+    *STRUCTURE_CHECKS,
     *SOURCE_CHECKS,
 )
 #: What a `new_collection` condition on the collection itself can read: the collection's own manifest facts.
@@ -283,6 +299,7 @@ def validate_case(case: dict) -> None:
     if "git" in case and type(case["git"]) is not bool:
         raise SystemExit(f"case {case['id']}: `git` must be true or false")
     validate_collections(case)
+    agent_structure.validate(case)
 
 
 def validate_turns(case: dict) -> None:
@@ -504,20 +521,29 @@ def run_arm_side(
     stdin: str | None = None,
     arm_env: Mapping[str, str] | None = None,
 ) -> dict:
-    """Run ``arm_side.py`` as the arm's own product code under the session's pins and the arm's ``arm_env``; its one JSON line."""
-    done = subprocess.run(  # noqa: S603 - fixed argv
-        [sys.executable, str(ARM_SIDE), *args],
-        input=stdin,
-        env=child_env(root, arm, arm_env),
-        # The unit root holds no `.env`; the caller's directory may, and product code loads it over `env`.
-        cwd=root,
-        capture_output=True,
-        text=True,
-        timeout=ARM_SIDE_TIMEOUT_SECONDS,
-    )
-    if done.returncode != 0:
-        raise RuntimeError(f"arm_side {args[0]} failed: {done.stderr.strip()[-300:]}")
-    return json.loads(done.stdout.strip().splitlines()[-1])
+    """Run ``arm_side.py`` as the arm's own product code under the session's pins and the arm's ``arm_env``; its one JSON line.
+
+    A read that the store refuses for a moment, as a store just seeded under load does, runs again a bounded number
+    of times; a write never does, because seeding twice would change the case.
+    """
+    for attempt in range(1, ARM_SIDE_READ_ATTEMPTS + 1):
+        done = subprocess.run(  # noqa: S603 - fixed argv
+            [sys.executable, str(ARM_SIDE), *args],
+            input=stdin,
+            env=child_env(root, arm, arm_env),
+            # The unit root holds no `.env`; the caller's directory may, and product code loads it over `env`.
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=ARM_SIDE_TIMEOUT_SECONDS,
+        )
+        if done.returncode == 0:
+            return json.loads(done.stdout.strip().splitlines()[-1])
+        transient = args[0] in ARM_SIDE_READS and any(code in done.stderr for code in STORE_TRANSIENT_CODES)
+        if not transient or attempt == ARM_SIDE_READ_ATTEMPTS:
+            break
+        time.sleep(attempt * 2)
+    raise RuntimeError(f"arm_side {args[0]} failed: {done.stderr.strip()[-300:]}")
 
 
 def seed_corrected(before: dict, after: dict) -> bool | None:
@@ -993,7 +1019,7 @@ def init_repo(work: Path) -> None:
 
 def reads_collections(case: dict) -> bool:
     """Whether the case's checks need the vault's collections as they stand before and after the session."""
-    return bool({"new_collection", "no_new_collection"} & set(case["pass"]))
+    return bool({"new_collection", "no_new_collection", *STRUCTURE_CHECKS} & set(case["pass"]))
 
 
 def collection_paths(rule: dict) -> list[str]:
@@ -1036,18 +1062,34 @@ def seed_unit(
     seeded = arm_side("seed", str(vault), str(work), stdin=json.dumps(case.get("seed")))
     if case.get("seed_sources"):
         arm_side("seed_sources", str(vault), str(work), stdin=json.dumps(case["seed_sources"]))
-    if case.get("seed_collections"):
+    # A store collection is made where the store is served, so a case that wants them waits for the enrolment.
+    in_store = bool(case.get("store_collections"))
+
+    def seed_collections() -> None:
         record["collections"] = arm_side(
-            "seed_collections", str(vault), stdin=json.dumps(case["seed_collections"])
+            "seed_collections",
+            str(vault),
+            *(["store"] if in_store else []),
+            stdin=json.dumps(case["seed_collections"]),
         )
         # One property of the arm, read once by its own code: whether its manifest carries `capture`.
         record["capture_supported"] = record["collections"][0]["capture_supported"]
-    # A real vault has its indexes built, the typed graph included; without them recall serves no
-    # connections. The arm's own classes build them, the same way for every arm and every case.
-    record["index_build_seconds"] = arm_side("build_indexes", str(vault))["seconds"]
+
+    def build_indexes() -> None:
+        # A real vault has its indexes built, the typed graph included; without them recall serves no
+        # connections. The arm's own classes build them, the same way for every arm and every case.
+        record["index_build_seconds"] = arm_side("build_indexes", str(vault))["seconds"]
+
+    if case.get("seed_collections") and not in_store:
+        seed_collections()
+    if not in_store:
+        build_indexes()
     if store:
         record["store"] = store.enrol(vault, arm_env)
         arm_side = partial(run_arm_side, arm, root, arm_env=store.environment(arm_env))
+    if in_store:
+        seed_collections()
+        build_indexes()
     if reads_sources(case):
         before = arm_side("sources", str(vault))
         record["sources_before"] = [row["path"] for row in before["sources"]]
@@ -1066,6 +1108,15 @@ def seed_unit(
             )
         record["rows_before"] = {
             name: [row["record_id"] for row in rows["rows"]] for name, rows in listed.items()
+        }
+    named = case["pass"].get("restructure", {}).get("collections")
+    if named:
+        shaped = arm_side("shape", str(vault), *named)
+        # A collection that cannot be read before the session has no history or shape to tell the session's from.
+        if any("error" in read for read in shaped.values()):
+            raise RuntimeError(f"a seeded collection could not be read: {json.dumps(shaped)[:300]}")
+        record["shape_before"] = {
+            path: agent_structure.shape_facts(read) for path, read in shaped.items()
         }
     return seeded, record, work
 
@@ -1226,6 +1277,7 @@ def play_claude(
         "answers": [turn["answer"] for turn in main],
         "tools": [name for turn in main for name in turn["tools"]],
         "calls": [call for turn in main for call in turn["calls"]],
+        "turn_calls": [turn["calls"] for turn in main],
         "follow_up": (
             {
                 "answer": results[1][0]["answer"],
@@ -1298,28 +1350,46 @@ def judge_answer(
     if not answer:
         return False, "the answer is empty"
     spec = case["pass"][name]
-    # The first verdict keeps its file and item id; the follow-up's get a suffix, so the two never overwrite.
-    suffix = "" if name == "judge" else f".{name.removesuffix('_judge').replace('_', '-')}"
-    row = grade_item(
+    verdict, reason = grade_verdict(
         judge,
-        root.name + suffix,
+        root,
+        name,
         JUDGE_PROMPT.format(
             turn=case["prompt"] if turn is None else turn,
             answer=answer,
             extra=judge_context(spec, saved, rows, calls),
         ),
         spec["schema"],
+        spec["require"],
+    )
+    if verdict is None:
+        return None, reason
+    return all(verdict.get(k) == v for k, v in spec["require"].items()), None
+
+
+def grade_verdict(
+    judge: Judge, root: Path, name: str, prompt: str, schema: dict, required: object
+) -> tuple[dict | None, str | None]:
+    """The judge's verdict on one prompt, or None with the reason when it gave no usable one.
+
+    ``name`` is the check; the first check's verdict keeps its file and item id, and each other check's gets a suffix,
+    so the verdicts of one unit never overwrite each other. ``required`` are the fields the verdict must hold.
+    """
+    suffix = "" if name == "judge" else f".{name.removesuffix('_judge').replace('_', '-')}"
+    row = grade_item(
+        judge,
+        root.name + suffix,
+        prompt,
+        schema,
         out_dir=root,
         pass_name="verdicts",
         timeout=JUDGE_TIMEOUT_SECONDS,
-        problem=lambda v: (
-            None if set(spec["require"]) <= set(v) else "the verdict lacks a required field"
-        ),
+        problem=lambda v: None if set(required) <= set(v) else "the verdict lacks a required field",
     )
     (root / f"verdict{suffix}.json").write_text(json.dumps(row, indent=2))
     if row["verdict"] is None:
         return None, f"judge error: {row['errors'][-1][:300]}"
-    return all(row["verdict"].get(k) == v for k, v in spec["require"].items()), None
+    return row["verdict"], None
 
 
 def run_unit(
@@ -1341,6 +1411,95 @@ def run_unit(
         return play_unit(
             case, arm, root, store, judge=judge, actor=actor, arm_env=arm_env, **session
         )
+
+
+def structure_outcome(
+    case: dict,
+    arm: Path,
+    root: Path,
+    vault: str,
+    record: dict,
+    played: dict,
+    vault_collections: dict,
+    *,
+    judge: Judge,
+    arm_env: Mapping[str, str] | None,
+) -> dict:
+    """The structure checks of a played unit (``structure.py``), with their reasons and what the record keeps.
+
+    The vault is read as the whole unit leaves it: the seeded collections and the ones the session made, each by the
+    arm's own inspection (``arm_side.py shape``). A vault whose collections could not be listed has no session
+    collections to tell apart, so every structure check is unknown.
+    """
+    rule = case["pass"]
+    wanted = [name for name in STRUCTURE_CHECKS if name in rule]
+    if "error" in vault_collections:
+        return {
+            "checks": dict.fromkeys(wanted),
+            "reasons": ["the arm could not list the collections"],
+            "extra": {},
+        }
+    gained = gained_collections(vault_collections, record["collections_before"])
+    seeded = case.get("seed_collections", [])
+    paths = [*(c["manifest_path"] for c in seeded), *(c["kb_path"] for c in gained if c["kb_path"])]
+    checks, reasons, extra = {}, [], {}
+    reads = run_arm_side(arm, root, "shape", vault, *paths, arm_env=arm_env) if paths else {}
+    extra["shape_after"] = reads
+    if "restructure" in rule:
+        spec = rule["restructure"]
+        named = spec.get("collections") or [c["kb_path"] for c in gained if c["kb_path"]]
+        befores = (
+            [record["shape_before"][path] for path in named]
+            if "collections" in spec
+            else [{"entry_ids": []} for _ in named]
+        )
+        checks["restructure"] = agent_structure.restructure(
+            [reads[path] for path in named], befores, spec
+        )
+        if checks["restructure"] is None:
+            reasons.append(
+                "the arm could not read a collection whose shape history the check reads"
+            )
+    if "rows_preserved" in rule:
+        checks["rows_preserved"] = agent_structure.rows_preserved(
+            reads, seeded, agent_structure.refs_of(reads), rule["rows_preserved"]
+        )
+        if checks["rows_preserved"] is None:
+            reasons.append(
+                "the arm could not read where a seeded collection's rows went, or a merge named a target it could not find"
+            )
+    if "step_order" in rule:
+        checks["step_order"] = agent_structure.step_order(played["turn_calls"], rule["step_order"])
+    if "plain_reply" in rule:
+        answers = played.get("answers") or [played["answer"]]
+        made = record.get("collections", [])
+        known = [
+            *(
+                {"path": c["path"], "kb_path": spec["manifest_path"]}
+                for c, spec in zip(made, seeded, strict=True)
+            ),
+            *({"path": c["path"], "kb_path": c["kb_path"]} for c in gained),
+        ]
+        leaked = agent_structure.leaked_paths(answers, agent_structure.path_forms(vault, known))
+        # An answer that is empty from a session that ran is a product failure and is not judged.
+        if not answers[-1]:
+            checks["plain_reply"], problems = False, ["the answer is empty"]
+        else:
+            turn, text = transcript(user_turns(case), answers)
+            verdict, reason = grade_verdict(
+                judge,
+                root,
+                "plain_reply",
+                agent_structure.PLAIN_REPLY_PROMPT.format(turn=turn, answer=text),
+                agent_structure.PLAIN_REPLY_SCHEMA,
+                agent_structure.PLAIN_REPLY_SCHEMA["required"],
+            )
+            checks["plain_reply"], problems = agent_structure.plain_reply(
+                leaked, verdict, rule["plain_reply"]
+            )
+            problems = problems or ([reason] if reason else [])
+        reasons += problems
+    return {"checks": checks, "reasons": reasons, "extra": extra}
 
 
 def play_unit(
@@ -1484,6 +1643,13 @@ def play_unit(
                         if isinstance(c["rows"], list)
                     },
                 }
+    if set(STRUCTURE_CHECKS) & set(rule):
+        outcome = structure_outcome(
+            case, arm, root, vault, record, played, vault_collections, judge=judge, arm_env=arm_env
+        )
+        checks |= outcome["checks"]
+        reasons += outcome["reasons"]
+        extra |= outcome["extra"]
     if "sources_before" in record:
         facts = run_arm_side(arm, root, "sources", vault, arm_env=arm_env)
         saved = session_sources(facts, record["sources_before"])

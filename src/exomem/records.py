@@ -27,6 +27,7 @@ from . import (
     automatic_collection,
     record_formats,
     record_governance,
+    restructure,
     state_paths,
     vault,
     writer_lease,
@@ -179,6 +180,17 @@ class _PresentationRevision:
     guard: vault.PathGuard
 
 
+@dataclass(frozen=True, slots=True)
+class _Revision:
+    """What a structured change hands the lifecycle mutation: the manifest, row rewrites and shape entry, or a result."""
+
+    manifest_text: str = ""
+    proposed: collections.CollectionManifest | None = None
+    row_writes: tuple[_PresentationRevision, ...] = ()
+    shape: Callable[[str], dict[str, Any]] | None = None
+    result: dict[str, Any] | None = None
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, allow_nan=False
@@ -249,6 +261,52 @@ def lifecycle_guards(
     }
 
 
+def retired_message(title: str, successor_title: str | None = None) -> str:
+    """The refusal of a row write to a merged collection, naming the successor by title or, unreleased, as "its successor"."""
+    target = f"collection {successor_title!r}" if successor_title else "its successor"
+    return f"collection {title!r} was merged into {target} and takes no new rows: write the row there"
+
+
+def refuse_retired(manifest: collections.CollectionManifest) -> None:
+    """Refuse a row write to a retired collection, pointing to its successor or to `restore`.
+
+    Reads, `restructure` and `revise` do not call this: a retired collection stays readable and restorable.
+    The message holds no id: the successor's id rides in `successor` and `remediation`, and a caller that may read
+    the successor's title gets it at the public boundary through `reply_names.retired_reason`.
+    """
+    if not manifest.retired:
+        return
+    details = {"collection_id": manifest.collection_id, "title": manifest.title}
+    if manifest.successor is not None:
+        raise collections.CollectionError(
+            "COLLECTION_RETIRED",
+            retired_message(manifest.title),
+            {**details, "successor": manifest.successor,
+             "remediation": f"write the row to collection {manifest.successor}"},
+        )
+    raise collections.CollectionError(
+        "COLLECTION_RETIRED",
+        f"collection {manifest.title!r} is retired and takes no new rows: "
+        "restore it with a restructure step restore, then write the row",
+        {**details, "remediation": "restore the collection with a restructure step restore, then write the row"},
+    )
+
+
+def keep_retired(
+    manifest: collections.CollectionManifest, stored: Mapping[str, Any] | None, values: Mapping[str, Any]
+) -> dict[str, Any]:
+    """A whole-row write's values, carrying forward each retired field's stored value that the write omits.
+
+    A retired field keeps its values until a restore; a write that does not carry one does not delete it.
+    """
+    kept = {
+        name: stored[name]
+        for name, spec in manifest.schema.fields.items()
+        if spec.retired and stored is not None and name in stored and name not in values
+    }
+    return {**values, **kept}
+
+
 def validate_new_row(
     manifest: collections.CollectionManifest, item: Mapping[str, Any], *, body: str | None = None
 ) -> None:
@@ -292,6 +350,7 @@ def append_record(
     overrides: Mapping[str, Any] = {} if item is None else item
     _refuse_excluded_authored_names(overrides)
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
+    refuse_retired(supplied_manifest)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("append")
     key = (
@@ -319,6 +378,7 @@ def append_record(
     warnings: list[str] = []
     with _write_boundary(root, "record_append"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        refuse_retired(manifest)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
             item = overrides
@@ -1336,12 +1396,14 @@ def bulk_upsert_records(
     if source is not None and type(source) is not str:
         raise collections.CollectionError("INVALID_BULK_ROWS", "source must be a string")
     supplied_manifest = record_governance.resolve_collection_for_mutation(root, collection)
+    refuse_retired(supplied_manifest)
     if supplied_manifest.storage.strategy == "dataset":
         record_formats.load_adapter(root, supplied_manifest).refuse_mutation("bulk_upsert")
     batch_id = uuid.uuid4().hex[:12]
     total = len(rows)
     with _write_boundary(root, "record_bulk_upsert"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        refuse_retired(manifest)
         record_governance.require_mutation_visibility(root, manifest)
         adapter = record_formats.load_adapter(root, manifest)
         if not adapter.mutable:
@@ -1468,6 +1530,8 @@ def bulk_upsert_records(
                 )
                 continue
             current_record = existing[0] if existing else None
+            if current_record is not None:
+                values = keep_retired(manifest, current_record.values, values)
             effective_body = (
                 body
                 if body is not None
@@ -1890,6 +1954,7 @@ def update_record(
     warnings: list[str] = []
     with _write_boundary(root, "record_update"):
         manifest, manifest_text, manifest_guard = _load_guarded_manifest(root, collection)
+        refuse_retired(manifest)
         resumed = _load_held_candidate(root, manifest, held_id) if held_id else None
         if resumed is None:
             changes = overrides
@@ -2193,9 +2258,11 @@ def _plan_create_audit(
     transition_id: str,
     why: str,
     automatic: bool = False,
+    shape_line: str | None = None,
 ) -> tuple[str | None, str, vault.LogWritePlan]:
     """A file create's after item and container hashes, and the log writes of its event, the
-    archive of a rotation it makes due included. An automatic create adds its marker line to the event.
+    archive of a rotation it makes due included. An automatic create adds its marker line to the event,
+    and `shape_line` adds the collection's first shape-history entry.
 
     ``proposed_manifest_hash`` is the hash of the caller's manifest before the commit marks it.
     It names that archive, so validation and the commit name the same one.
@@ -2239,11 +2306,22 @@ def _plan_create_audit(
     )
     if automatic:
         audit = f"{audit}\n{automatic_collection.create_line(manifest.collection_id)}"
+    if shape_line is not None:
+        audit = f"{audit}\n{shape_line}"
     return (
         after_item_hash,
         after_container_hash,
         _plan_required_audit(root, manifest, "collection", audit, token),
     )
+
+
+def create_origin(origin: str | None, *, automatic: bool) -> str:
+    """Who designed a new collection's shape: `automatic` for the server's own create, else the caller's origin."""
+    if automatic:
+        if origin is not None:
+            raise restructure.refuse("INVALID_RESTRUCTURE", "an automatic create names no origin")
+        return "automatic"
+    return restructure.parse_origin(origin, allowed=restructure.CREATE_ORIGINS)
 
 
 def create_collection(
@@ -2254,14 +2332,17 @@ def create_collection(
     why: str,
     scaffold: bool = True,
     automatic: bool = False,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     """Create a new collection only when its manifest and canonical source are absent.
 
     `automatic` marks an agent-initiated create: the daily bound is checked under the mutation lock,
-    and the create's log entry records it, for the next count and the inventory.
+    and the create's log entry records it, for the next count and the inventory. The create also writes
+    the collection's first shape-history entry, with origin `automatic` or the caller's `origin`.
     """
     root = Path(vault_root)
     _validate_why(why)
+    origin = create_origin(origin, automatic=automatic)
     path = root / manifest_path
     if not isinstance(manifest_text, str) or not manifest_text:
         raise collections.CollectionError(
@@ -2330,6 +2411,12 @@ def create_collection(
             transition_id=audit_correlation,
             why=why,
             automatic=automatic,
+            shape_line=restructure.log_line(
+                restructure.creation_entry(
+                    transition_id=audit_correlation, collection_id=manifest.collection_id,
+                    at=automatic_collection.now_stamp(), origin=origin, why=why,
+                )
+            ),
         )
         record_governance.precommit_authorize_mutation(
             root,
@@ -2486,13 +2573,20 @@ def _validate_collection_create_for_profile(
         # Only a file create appends its event to the log; the store creates a sqlite collection.
         # Its rationale is a commit input, so validation plans the largest event: a rotation that
         # any commit's event could make due adds its archive here as it would at the commit.
+        transition_id = _transition_id()
         *_after_hashes, audit = _plan_create_audit(
             root,
             manifest,
             proposed_manifest_hash=manifest.manifest_version.hash,
             scaffold=scaffold,
-            transition_id=_transition_id(),
+            transition_id=transition_id,
             why=_LARGEST_WHY,
+            shape_line=restructure.log_line(
+                restructure.creation_entry(
+                    transition_id=transition_id, collection_id=manifest.collection_id,
+                    at=automatic_collection.now_stamp(), origin="user_design", why=_LARGEST_WHY,
+                )
+            ),
         )
         # The commit's own authorization of every planned write, a due rotation's archive
         # included, so validation refuses a withheld write as the commit does, without naming it.
@@ -2670,6 +2764,129 @@ def rebaseline_collection(
         why=why,
         semantic_profile="records",
     )
+
+
+def shape_history(vault_root: Path, collection_id: str) -> list[dict[str, Any]]:
+    """The shape-history entries of a file collection, newest first, read from the live activity log and its archives."""
+    lines, _complete = vault.operation_log_lines(Path(vault_root), restructure.SHAPE_LINE_PREFIX)
+    return restructure.entries_from_lines(lines, collection_id)
+
+
+def restructure_collection(
+    vault_root: Path,
+    collection: str | Path | collections.CollectionManifest,
+    *,
+    why: str,
+    semantic_profile: str,
+    steps: Sequence[Mapping[str, Any]] | None = None,
+    undo: str | None = None,
+    origin: str | None = None,
+    preview: bool = False,
+    automatic: bool = False,
+) -> dict[str, Any]:
+    """Apply `steps` (or the recorded inverse of entry `undo`) to a file collection in one guarded revision.
+
+    The manifest and every row it changes are written in one batch with one audit event and one shape-history
+    entry. `restructure.plan` proves the change lossless before anything is written; `origin` `declined` records
+    the proposal and leaves the manifest and rows as they are. `automatic` marks a change the agent starts on its
+    own: it records origin `automatic` and refuses, before anything is written, unless the bounds of
+    `automatic_collection` hold.
+    """
+    origin = restructure.call_origin(origin, automatic=automatic, allowed=restructure.ORIGINS)
+    root = Path(vault_root)
+
+    def revision_for(
+        current: collections.CollectionManifest,
+        current_text: str,
+        snapshot: record_formats.AdapterSnapshot,
+        _chain: _AuditChain,
+    ) -> _Revision:
+        rows = {record.identity.key: dict(record.values) for record in snapshot.records}
+        resolved = restructure.resolve(
+            current_text, steps=steps, undo=undo, origin=origin,
+            history=lambda: shape_history(root, current.collection_id), rows=lambda: rows,
+            titles=lambda: frozenset(
+                other.title
+                for other in collections.discover_collections(root, reject_duplicates=False)
+                if other.collection_id != current.collection_id
+            ),
+            automatic=None if not automatic else partial(
+                automatic_collection.require_restructure_bounds, vault_root=root, collection_id=current.collection_id,
+                path=current.path,
+            ),
+        )
+        run, undoes, planned = resolved.run, resolved.undoes, resolved.planned
+        run_inverse = planned.inverse
+        restructure.require_one_call(planned)
+        if planned.changed_rows and current.storage.strategy != "markdown-items":
+            raise restructure.refuse(
+                "RESTRUCTURE_ROWS_UNSUPPORTED",
+                "this collection keeps its rows in one log file, so a step that rewrites row values is not applied to it",
+            )
+        if planned.changed_rows and (current.record_presentation or current.item_presentation):
+            raise restructure.refuse(
+                "RESTRUCTURE_DEPENDENT_BROKEN",
+                "the collection's presentation recipe renders row values, so a step that rewrites them is not applied to it",
+                dependents=["record_presentation" if current.record_presentation else "item_presentation"],
+            )
+        try:
+            proposed = _validate_revision_manifest(
+                root, current, current_text, planned.text, snapshot, semantic_profile=semantic_profile,
+                rows=planned.rows if planned.changed_rows else None,
+            )
+        except collections.CollectionError as error:
+            raise restructure.dependent_refusal(planned.text, run, error) from error
+        if preview:
+            return _Revision(result={
+                "valid": True, "preview": True, "collection_id": current.collection_id, "origin": origin,
+                "steps": list(run), "inverse": list(run_inverse), "rows_changed": len(planned.changed_rows),
+                "rows_total": len(rows),
+            })
+        return _Revision(
+            manifest_text=planned.text,
+            proposed=proposed,
+            row_writes=_restructure_row_writes(root, current, snapshot, rows, planned),
+            shape=lambda transition_id: restructure.entry(
+                transition_id=transition_id, collection_id=current.collection_id, at=automatic_collection.now_stamp(),
+                origin=origin, why=why, steps=run, inverse=run_inverse, undoes=undoes,
+            ),
+        )
+
+    return _lifecycle_mutation(
+        root, collection, action="revise", manifest_text=None, expected_manifest_hash="", expected_container_hash="",
+        acknowledged_gap_codes=(), why=why, semantic_profile=semantic_profile, revision_for=revision_for,
+    )
+
+
+def _restructure_row_writes(
+    root: Path,
+    current: collections.CollectionManifest,
+    snapshot: record_formats.AdapterSnapshot,
+    before: Mapping[str, Mapping[str, Any]],
+    planned: restructure.Plan,
+) -> tuple[_PresentationRevision, ...]:
+    """The item files a plan rewrites, each keeping its audit marker and body and changing only the fields that moved."""
+    source_bytes = dict(snapshot.source_bytes)
+    guards = {guard.target: guard for guard in snapshot.path_guards if isinstance(guard, vault.PathGuard)}
+    by_key = {record.identity.key: record for record in snapshot.records}
+    writes = []
+    for key in planned.changed_rows:
+        record = by_key[key]
+        data, guard = source_bytes.get(record.source.path), guards.get(record.source.path)
+        if data is None or guard is None:
+            raise collections.CollectionError("SOURCE_NOT_FOUND", "a record item to restructure is unavailable")
+        old, new = before[key], planned.rows[key]
+        changes = {name: value for name, value in new.items() if name not in old or old[name] != value}
+        _refuse_excluded_authored_names(changes)
+        text = record_formats.render_markdown_item_update(
+            data.decode("utf-8"), changes, _structural_audit_marker(current, data, record),
+            semantic_profile=current.semantic_profile, delete_fields=tuple(name for name in old if name not in new),
+        )
+        writes.append(_PresentationRevision(
+            path=record.source.path, text=text, hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            guard=_write_guard(root, guard, data),
+        ))
+    return tuple(writes)
 
 
 def _refresh_manifest_due_state(root: Path, manifest: Any, *, snapshot: Any = None) -> None:
@@ -2858,6 +3075,7 @@ def _lifecycle_mutation(
     acknowledged_gap_codes: tuple[str, ...],
     why: str,
     semantic_profile: str,
+    revision_for: Callable[..., _Revision] | None = None,
 ) -> dict[str, Any]:
     root = Path(vault_root)
     _validate_why(why)
@@ -2883,10 +3101,23 @@ def _lifecycle_mutation(
         for record in snapshot.records:
             _validate_values(current, record.values, written=())
         guards = lifecycle_guards(current, snapshot)
-        _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
-        _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
+        # A restructure reads the state it changes under this lock, so it carries no caller guards.
+        if revision_for is None:
+            _expect_hash(expected_manifest_hash, guards["expected_manifest_hash"], "manifest")
+            _expect_hash(expected_container_hash, guards["expected_container_hash"], "container")
         chain = _lifecycle_audit_chain(root, current, revise=action == "revise")
-        if action == "revise":
+        shape: Callable[[str], dict[str, Any]] | None = None
+        if action == "revise" and revision_for is not None:
+            revision = revision_for(current, current_text, snapshot, chain)
+            if revision.result is not None:
+                return revision.result
+            proposed, presentation_revisions = revision.proposed, revision.row_writes
+            candidate_text, shape = revision.manifest_text, revision.shape
+            codes: tuple[str, ...] = ()
+            continuity = True
+            gap_fingerprint = None
+            checkpoint_fingerprint = None
+        elif action == "revise":
             assert manifest_text is not None
             proposed = _validate_revision_manifest(
                 root,
@@ -2898,7 +3129,7 @@ def _lifecycle_mutation(
             )
             presentation_revisions = _plan_presentation_revision(root, current, proposed, snapshot)
             candidate_text = manifest_text
-            codes: tuple[str, ...] = ()
+            codes = ()
             continuity = True
             gap_fingerprint = None
             checkpoint_fingerprint = None
@@ -2929,6 +3160,7 @@ def _lifecycle_mutation(
                 tuple((version.path, version.hash) for version in snapshot.source_versions)
             )
         transition_id = _transition_id()
+        shape_entry = None if shape is None else shape(transition_id)
         marked_text = record_formats.render_manifest_audit_head(
             candidate_text,
             transition_id,
@@ -2957,6 +3189,7 @@ def _lifecycle_mutation(
             acknowledged_gap_codes=codes,
             gap_fingerprint=gap_fingerprint,
             checkpoint_snapshot_hash=checkpoint_fingerprint,
+            extra_line=None if shape_entry is None else restructure.log_line(shape_entry),
         )
         # The activity plan pins the exact log bytes it will replace.  Re-read
         # the chain after planning so an out-of-band fork between the initial
@@ -3009,7 +3242,7 @@ def _lifecycle_mutation(
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         _refresh_manifest_due_state(root, after, snapshot=snapshot)
-        return _lifecycle_result(
+        result = _lifecycle_result(
             operation=action,
             manifest=current,
             before_manifest_hash=guards["expected_manifest_hash"],
@@ -3027,6 +3260,9 @@ def _lifecycle_mutation(
                 *(revision.path for revision in presentation_revisions),
             ),
         )
+        if shape_entry is not None:
+            result["shape"] = shape_entry
+        return result
 
 
 def _validate_revision_manifest(
@@ -3037,7 +3273,9 @@ def _validate_revision_manifest(
     snapshot: record_formats.AdapterSnapshot,
     *,
     semantic_profile: str,
+    rows: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> collections.CollectionManifest:
+    """The proposed manifest, once it and every row validate; `rows` are the values to check in place of the stored ones."""
     if not isinstance(manifest_text, str) or not manifest_text:
         raise collections.CollectionError(
             "INVALID_COLLECTION_MANIFEST", "manifest text is required"
@@ -3074,11 +3312,12 @@ def _validate_revision_manifest(
     record_governance.require_proposed_manifest_visibility(root, proposed)
     newly_required = _newly_required(current, proposed)
     for record in snapshot.records:
-        _validate_values(proposed, record.values, written=newly_required)
+        values = record.values if rows is None else rows[record.identity.key]
+        _validate_values(proposed, values, written=newly_required)
         if proposed.record_presentation is not None:
-            record_formats._presentation_payload(proposed, record.values)
+            record_formats._presentation_payload(proposed, values)
         if proposed.item_presentation is not None:
-            record_formats._item_presentation_digests(proposed, record.values)
+            record_formats._item_presentation_digests(proposed, values)
     _plan_presentation_revision(root, current, proposed, snapshot)
     return proposed
 
@@ -3290,6 +3529,7 @@ def _plan_lifecycle_audit(
     acknowledged_gap_codes: tuple[str, ...],
     gap_fingerprint: str | None,
     checkpoint_snapshot_hash: str | None,
+    extra_line: str | None = None,
 ) -> tuple[str, vault.LogWritePlan]:
     """A lifecycle request's payload hash and the log writes of its event, the archive of a
     rotation it makes due included. The request's before state names that archive, so a
@@ -3319,6 +3559,8 @@ def _plan_lifecycle_audit(
         gap_fingerprint=gap_fingerprint,
         checkpoint_snapshot_hash=checkpoint_snapshot_hash,
     )
+    if extra_line is not None:
+        event = f"{event}\n{extra_line}"
     token = _collection_archive_token(
         root,
         current.collection_id,
@@ -4697,6 +4939,17 @@ def _collect_schema_issues(
                     received="null",
                 )
             )
+        if spec.retired and name in value and supplied:
+            # Its stored values stay; only a new one is refused, so a restore finds every value as it was.
+            issues.append(
+                _Issue(
+                    field=name,
+                    code="SCHEMA_RETIRED_FIELD",
+                    reason=f"field is retired and takes no new value: {name}; restore it with a restructure step restore_field",
+                    received=_value_class(value[name]),
+                )
+            )
+            continue
         if name in value:
             _collect_field_issues(name, name, value[name], spec, issues, non_null=supplied)
     return value

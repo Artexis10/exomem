@@ -190,7 +190,7 @@ class _ProducerSession:
 
 
 def create_new(session, manager, manifest_path, manifest_text, *, why, request_id,
-               fence_client, scaffold=True, facade_profile=None, automatic=False):
+               fence_client, scaffold=True, facade_profile=None, automatic=False, origin=None):
     if session.production:
         # The first create enrols the vault in the store, irreversibly; only a release that
         # enables records-summary-v1 may do that, whatever the manifest's view mode.
@@ -222,7 +222,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                 with writer._authorization(), writer.read_snapshot():
                     _, _, replay = writer._identity(
                         "create", manifest_path,
-                        writer.create_arguments(manifest_text, why, scaffold, automatic), request_id,
+                        writer.create_arguments(manifest_text, why, scaffold, automatic, origin), request_id,
                     )
                     if replay is not None:
                         result = _replay_create(writer, request_id, replay)
@@ -248,7 +248,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
                             prepared = _prepare_new(writer, manifest_path, manifest_text, why=why,
                                                     request_id=request_id, scaffold=scaffold,
                                                     fence_client=fence_client, facade_profile=facade_profile,
-                                                    automatic=automatic)
+                                                    automatic=automatic, origin=origin)
                     finally:
                         # A rejected prepare cannot revoke admission; a durable intent must gate reports.
                         runtime = manager._collection_store
@@ -260,7 +260,7 @@ def create_new(session, manager, manifest_path, manifest_text, *, why, request_i
 
 
 def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaffold, fence_client,
-                 facade_profile=None, automatic=False):
+                 facade_profile=None, automatic=False, origin=None):
     from . import ownership
 
     sid = writer.connection.execute("SELECT value FROM store_meta WHERE key='store_id'").fetchone()[0]
@@ -281,7 +281,7 @@ def _prepare_new(writer, manifest_path, manifest_text, *, why, request_id, scaff
     return _prepare_create(writer, manifest_path, manifest_text, why=why, request_id=request_id,
                            scaffold=scaffold, expected_marker=expected,
                            target_marker=json.dumps(target, sort_keys=True, separators=(",", ":")).encode(),
-                           facade_profile=facade_profile, automatic=automatic)
+                           facade_profile=facade_profile, automatic=automatic, origin=origin)
 
 
 def target_marker(root, old, sid, entries, *, fence, supersede=False):
@@ -1679,12 +1679,12 @@ class _CreateAdmission:
 
 
 def _prepare_create(writer, manifest_path, manifest_text, *, why, request_id,
-                    expected_marker, target_marker, scaffold=True, facade_profile=None, automatic=False):
+                    expected_marker, target_marker, scaffold=True, facade_profile=None, automatic=False, origin=None):
     admission = _CreateAdmission(writer, expected_marker, target_marker)
     # The calling tool's profile: the create requires it and applies that profile's scaffold.
     writer._facade_profile = facade_profile
     receipt = writer._create_collection(manifest_path, manifest_text, why=why, request_id=request_id,
-                                        scaffold=scaffold, admission=admission, automatic=automatic)
+                                        scaffold=scaffold, admission=admission, automatic=automatic, origin=origin)
     try:
         return _recover_create(writer)
     except (CollectionStoreError, collections.CollectionError, chain.StoreChainError, sqlite3.Error, OpError) as error:

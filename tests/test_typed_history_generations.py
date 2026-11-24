@@ -18,6 +18,7 @@ from exomem.collection_store import (
     history,
     index_migrations,
     schema,
+    shape_history,
     snapshot,
     source_dependencies,
     tables,
@@ -29,6 +30,24 @@ from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
 
 
+def before_shape_history(patch):
+    """Let the maintained writer seed a store from before schema 21, which has no shape-history table to read.
+
+    A create then commits no entry and its event carries no digest, as a create did before that schema.
+    """
+    patch.setattr(shape_history, "entries", lambda conn, collection_id: [])
+    patch.setattr(shape_history, "page", lambda conn, collection_id, **keywords: {"entries": [], "total": 0})
+    patch.setattr(shape_history, "write", lambda *arguments, **keywords: None)
+    patch.setattr(shape_history, "bound_digest", lambda conn, txn_id: None)
+    txn = writer.CollectionWriter._txn
+
+    def without_a_shape_effect(self, *arguments, effects=None, **keywords):
+        shapeless = isinstance(effects, dict) and set(effects) == {"shape"}
+        return txn(self, *arguments, effects=None if shapeless else effects, **keywords)
+
+    patch.setattr(writer.CollectionWriter, "_txn", without_a_shape_effect)
+
+
 def before_retractable_rows(patch):
     """Let the maintained writer seed a store from before schema 19, whose ``items`` is the one table of rows.
 
@@ -36,6 +55,7 @@ def before_retractable_rows(patch):
     leaves, the store itself and each snapshot of it, gets its old name back. The upgrade then opens the
     shape a release before schema 19 wrote.
     """
+    before_shape_history(patch)  # a store from before schema 19 is also from before schema 21
     ensure_schema, close = schema.ensure_schema, connection.WriterConnection.close
     backup_fill, collection_fill = snapshot._backup_fill, snapshot._collection_fill
 

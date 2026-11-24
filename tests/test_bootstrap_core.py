@@ -213,7 +213,7 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
     ),
     "delegation-ceiling": (
         prominence.CANON,
-        lambda core: "restructure application" in core["engagement"]["envelope"]["confirm_required"]
+        lambda core: "out-of-bounds restructure" in core["engagement"]["envelope"]["confirm_required"]
         and "founder" in core["engagement"]["envelope"]["founder_gate"],
     ),
     "unclassified-action-has-no-authority": (

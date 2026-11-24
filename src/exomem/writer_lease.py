@@ -7561,8 +7561,13 @@ class LeaseManager:
             )
         from .command_surface import outcome_verb_of
 
+        names = None
+        if receipt_vault_root is not None and response_detail != "legacy":
+            from . import reply_names
+
+            names = reply_names.resolve(receipt_vault_root, result, kwargs)
         projected = project_terminal(
-            result, response_detail, outcome_verb=outcome_verb_of(command, kwargs)
+            result, response_detail, outcome_verb=outcome_verb_of(command, kwargs), names=names
         )
         from .governance import scrubber as governance_scrubber
 

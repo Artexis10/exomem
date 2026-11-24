@@ -406,6 +406,8 @@ def test_one_add_record_call_creates_the_collection_and_adds_the_row_on_a_file_o
     assert [(row["title"], row["count"], row["seen_on"], row["score"], row["done"]) for row in rows] == [
         ("first", 2, "2026-11-20", 4.5, False)
     ]
+    (created,) = commands.op_record_memory(vault, "inspect", collection="Ledger")["shape_history"]["entries"]
+    assert created["origin"] == "automatic" and created["steps"] == []
 
 
 # A store vault is served: its collections are written only on the service's store thread, which is where `route`
@@ -425,6 +427,56 @@ def served_inventory(service) -> dict[str, dict]:
     return {row["title"]: row for row in served_call(service.root, "record_memory", action="inspect")["collections"]}
 
 
+def test_a_collection_the_user_described_records_their_design_on_a_served_store_vault(service):
+    """A list whose details the user named is theirs: recorded as their design, a later automatic reshape cannot
+    change what they chose, and no automatic-creation bound applies to it."""
+    receipt = served_call(
+        service.root, "record_memory", action="append", collection="Ledger", item=ROW, why=WHY,
+        new_collection={**NEW, "origin": "user_design"},
+    )
+
+    (created,) = served_call(service.root, "record_memory", action="inspect", collection="Ledger")["shape_history"][
+        "entries"]
+    assert receipt["automatic"] is False and created["origin"] == "user_design"
+    assert served_inventory(service)["Ledger"]["created_automatically"] is False
+
+
+def test_a_records_write_reply_tells_the_agent_to_answer_in_the_users_words(service):
+    """Agents that narrated a write's receipt told the person how the list is stored (its collection, fields and
+    key). The person never needs that, and nothing they read every turn has room to say so."""
+    from exomem import mutation_terminal
+
+    receipt = served_call(service.root, "record_memory", action="append", collection="Ledger", item=ROW, why=WHY,
+                          new_collection=NEW)
+
+    assert receipt["outcome"] == "committed" and receipt["say"] == mutation_terminal.PLAIN_REPLY
+
+
+def test_each_inventory_names_the_reshape_of_its_own_kind_of_list(file_vault):
+    """A session that never loads bootstrap learns from the inventory, read before a write, that a list can be
+    reshaped and with which call. A Planning inventory that pointed at the Records reshape would send it astray."""
+    from exomem.plan_memory import plan_memory
+
+    records = commands.op_record_memory(file_vault, "inspect")["reshape_route"]
+    plans = plan_memory(file_vault, "inspect")["reshape_route"]
+
+    assert (records["tool"], records["arguments"]) == ("record_memory", {"action": "restructure"})
+    assert (plans["tool"], plans["arguments"]) == ("plan_memory", {"action": "restructure"})
+    assert "merge_into" in records["say"] and "rekey" in records["say"]
+
+
+def test_a_further_occurrence_under_a_taken_key_is_refused_with_the_reshape_that_keeps_both(service):
+    """A list keyed by item alone cannot hold the item's second occurrence. The refusal names the reshape that keeps
+    both rows, where the code's own remedy (update the stored row) would replace the first occurrence."""
+    with pytest.raises(OpError) as refused:
+        served_call(service.root, "record_memory", action="append", collection=CID,
+                    item={"title": "Canonical", "count": 7}, why=WHY)
+
+    stored = served_call(service.root, "record_memory", action="query", collection=CID)["rows"]
+    assert "records.restructure" in refused.value.remediation and "rekey" in refused.value.remediation
+    assert [(row["title"], row.get("count")) for row in stored] == [("Canonical", None)]
+
+
 def test_one_call_creates_the_collection_and_appends_the_row_on_a_served_store_vault(service):
     receipt = served_ledger(service)
 
@@ -434,6 +486,8 @@ def test_one_call_creates_the_collection_and_appends_the_row_on_a_served_store_v
     assert [(row["title"], row["count"], row["seen_on"], row["score"], row["done"]) for row in rows] == [
         ("first", 2, "2026-11-20", 4.5, False)
     ]
+    (created,) = served_call(service.root, "record_memory", action="inspect", collection="Ledger")["shape_history"]["entries"]
+    assert created["origin"] == "automatic" and created["steps"] == []
 
 
 def test_a_refused_creation_on_a_served_store_vault_creates_nothing_and_returns_the_collection_it_would_have_created(

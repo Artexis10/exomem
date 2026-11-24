@@ -231,8 +231,8 @@ envelope maps the caller-authored link, reported-reference, and verification
 fields; it creates no schema and sets no item values. Reported remote identity
 is unverified unless matching platform proof establishes remote byte equality.
 A missing collection is created under the bounded Records rule, as one minimal
-collection under `proactive_capture`; any other creation, and any schema change,
-remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+collection under `proactive_capture`, and a lossless restructure inside its own bounds follows `proactive_capture` too; any other creation,
+and any restructure outside those bounds, remains confirmed `restructure_execution`; an independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Compile evidence
 
@@ -390,7 +390,7 @@ Without a loaded skill, call read_instructions(profile="compact") once per sessi
 
 Search for prior projects, decisions, sources, failures, experiments, or domains; skip unrelated chit-chat/control and answered follow-ups. Cite hits. Empty is a scoped miss; retry terms or scope="vault" when absence matters.
 
-Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; merge or structural change: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
+Save durable conclusions on your own: decisions, solved problems, diagnosed failures, reusable patterns/context, or a method actually carried out with a reported reusable result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet; else one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. Concise observation, narrow Entity facet, new Entity or own edge: `proactive_capture`; accepting a queued relation: `link_acceptance`; Entity merge or page curation: confirmed `restructure_execution`. Save compiled notes, not transcripts; keep raw sources/evidence separate. Use `edit_note` for small corrections, `supersede_note` for supersession.
 ```
 
 ## Codex CLI

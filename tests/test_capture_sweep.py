@@ -630,7 +630,11 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
     # 2026-11-22: the Records route replaced "Records only for a compatible measurement"
     # (+17 bytes), giving 1488/1473. Later that day the route became its own sentence,
     # "Items compared or tracked: Records rows, not a note." (-7 bytes), giving 1481/1466.
-    assert sizes == {"maximal": 1481, "balanced": 1466}, sizes
+    # 2026-11-23: the confirmed merge rule names an Entity merge, so a list reshape
+    # is not read as one (+7 bytes), giving 1488/1473. A real-model round then showed agents
+    # reading "structural change" as a list reshape and asking first, so the rule names page
+    # curation, the scope of `restructure_execution` (-4 bytes), giving 1484/1469.
+    assert sizes == {"maximal": 1484, "balanced": 1469}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.
     assert 1500 - sizes["maximal"] >= 11, sizes

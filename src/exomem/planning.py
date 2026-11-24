@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -27,6 +27,7 @@ from .collection_store import ownership
 from .collection_store.preview import QUERY_RECEIPT_BOUNDARY
 from .governance import egress
 from .planning_values import PlanningValues, Unavailable
+from .restructure import normalized_page
 from .structured_collections import CollectionError, parse_plan_ref
 
 _LIFECYCLES = frozenset({"active", "archived"})
@@ -48,6 +49,18 @@ _OPTIONAL = frozenset(
         "motivation",
     }
 )
+_REQUIRED_TYPES = {
+    "title": "string",
+    "kind": "string",
+    "status": "string",
+    "lifecycle": "string",
+    "priority": "string",
+    "commitment": "string",
+    "horizon": "string",
+    "health": "string",
+}
+#: The fields the Planning profile defines. A restructure step applies only to a field a collection declares beyond them.
+CORE_FIELDS = frozenset(_REQUIRED_TYPES) | _OPTIONAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,17 +174,7 @@ def require_planning_profile(
         )
     if not manifest.storage.item_rows:
         raise CollectionError("INVALID_PLAN", "Planning requires sqlite or markdown-items storage")
-    required_types = {
-        "title": "string",
-        "kind": "string",
-        "status": "string",
-        "lifecycle": "string",
-        "priority": "string",
-        "commitment": "string",
-        "horizon": "string",
-        "health": "string",
-    }
-    for name, field_type in required_types.items():
+    for name, field_type in _REQUIRED_TYPES.items():
         field = manifest.schema.fields.get(name)
         if field is None or field.type != field_type or (name == "title" and not field.required):
             raise CollectionError("INVALID_PLAN", "Planning manifest has incompatible core fields")
@@ -179,7 +182,8 @@ def require_planning_profile(
 
 
 def create_collection(
-    vault_root: Path, manifest_path: str, manifest_text: str, *, why: str, scaffold: bool = True
+    vault_root: Path, manifest_path: str, manifest_text: str, *, why: str, scaffold: bool = True,
+    origin: str | None = None,
 ) -> dict[str, Any]:
     """Create one Planning collection through the shared guarded writer."""
     _validate_public_text(why, "why")
@@ -196,7 +200,7 @@ def create_collection(
         require_planning_profile(manifest)
     record_governance.require_proposed_manifest_visibility(root, manifest)
     return records.create_collection(
-        vault_root, manifest_path, manifest_text, why=why, scaffold=scaffold
+        vault_root, manifest_path, manifest_text, why=why, scaffold=scaffold, origin=origin
     )
 
 
@@ -281,6 +285,24 @@ def revise(
         acknowledged_gap_codes=(),
         why=why,
         semantic_profile="planning",
+    )
+
+
+def restructure(
+    vault_root: Path,
+    collection: str | collections.CollectionManifest,
+    *,
+    why: str,
+    steps: Sequence[Mapping[str, Any]] | None = None,
+    undo: str | None = None,
+    origin: str | None = None,
+    preview: bool = False,
+    automatic: bool = False,
+) -> dict[str, Any]:
+    """Restructure a Planning collection through the shared substrate."""
+    return records.restructure_collection(
+        vault_root, collection, why=why, semantic_profile="planning",
+        steps=steps, undo=undo, origin=origin, preview=preview, automatic=automatic,
     )
 
 
@@ -692,6 +714,7 @@ def query(
                     if include_agent_history
                     else None
                 ),
+                **record_governance.retirement_mark(manifest),
                 },
                 manifest,
             )
@@ -740,6 +763,8 @@ _QUERY_EGRESS_KEYS = frozenset(
         "agent_history",
     }
 )
+#: A retired collection's read adds these two, taken from the manifest (`record_governance.retirement_mark`).
+_RETIRED_KEYS = frozenset({"retired", "successor"})
 _QUERY_DESCRIPTOR_KEYS = frozenset(
     {
         "filters",
@@ -765,7 +790,8 @@ _PLANNING_SYSTEM_FIELDS = frozenset(
 def _valid_query_payload(
     payload: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> bool:
-    if set(payload) != _QUERY_EGRESS_KEYS:
+    mark = record_governance.retirement_mark(manifest)
+    if set(payload) != _QUERY_EGRESS_KEYS | set(mark) or any(payload[name] != value for name, value in mark.items()):
         return False
     if (
         payload["collection_id"] != manifest.collection_id
@@ -1132,15 +1158,23 @@ def _value_debt(
     return diagnostics
 
 
-def inspect(vault_root: Path, collection: str | collections.CollectionManifest) -> dict[str, Any]:
-    """Report the current Planning contract without repairing canonical files."""
+def inspect(
+    vault_root: Path,
+    collection: str | collections.CollectionManifest,
+    *,
+    history_limit: int | None = None,
+    history_after: str | None = None,
+) -> dict[str, Any]:
+    """Report the current Planning contract, with a page of its shape history, without repairing canonical files."""
     manifest = record_governance.resolve_collection(vault_root, collection)
     if manifest.semantic_profile != "planning":
         raise CollectionError(
             "PLANNING_PROFILE_REQUIRED", "Planning actions require a planning semantic profile"
         )
     authorize_path = record_governance.full_release_filter(vault_root)
-    result = record_governance.inspect_collection(vault_root, manifest)
+    result = record_governance.inspect_collection(
+        vault_root, manifest, history_limit=history_limit, history_after=history_after
+    )
     diagnostics = result["diagnostics"]
     assert isinstance(diagnostics, list)
     try:
@@ -1161,7 +1195,7 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
                         "schema_version",
                         "storage",
                     )
-                },
+                } | record_governance.retirement_mark(manifest),
                 "snapshot": result.get("snapshot"),
                 "source_versions": result.get("source_versions"),
                 "diagnostics": diagnostics[:64],
@@ -1195,7 +1229,7 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
                 "schema_version",
                 "storage",
             )
-        },
+        } | record_governance.retirement_mark(manifest),
         "snapshot": result.get("snapshot"),
         "source_versions": result.get("source_versions"),
         "diagnostics": diagnostics,
@@ -1207,6 +1241,7 @@ def inspect(vault_root: Path, collection: str | collections.CollectionManifest) 
         **({"presentation": result["presentation"]} if "presentation" in result else {}),
         **({"references": result["references"]} if "references" in result else {}),
         **({"inbound": result["inbound"]} if "inbound" in result else {}),
+        **({"shape_history": result["shape_history"]} if "shape_history" in result else {}),
     }
     return _project_inspection(payload, manifest)
 
@@ -1245,6 +1280,7 @@ def _valid_inspection(payload: Mapping[str, Any], manifest: collections.Collecti
     contract = payload["contract"]
     # A summary collection's inspection names its view mode and its page bounds.
     summary = manifest.view_mode == "summary"
+    mark = record_governance.retirement_mark(manifest)
     if not isinstance(contract, Mapping) or set(contract) != {
         "collection_id",
         "path",
@@ -1253,7 +1289,10 @@ def _valid_inspection(payload: Mapping[str, Any], manifest: collections.Collecti
         "schema_version",
         "storage",
         *(("view_mode",) if summary else ()),
-    } or ("capacity" in payload) != summary or (summary and contract["view_mode"] != "summary"):
+        *mark,
+    } or ("capacity" in payload) != summary or (summary and contract["view_mode"] != "summary") or any(
+        contract[name] != value for name, value in mark.items()
+    ):
         return False
     storage = contract["storage"]
     if (
@@ -1411,7 +1450,7 @@ def _valid_audit_discontinuity(value: Any) -> bool:
 
 
 def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
-    if set(value) != _QUERY_EGRESS_KEYS or not _json_value(value):
+    if not _QUERY_EGRESS_KEYS <= set(value) <= _QUERY_EGRESS_KEYS | _RETIRED_KEYS or not _json_value(value):
         return None
     hierarchy = value.get("hierarchy")
     if hierarchy is not None and (
@@ -1428,7 +1467,9 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 #: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
-_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "inbound")
+_OPTIONAL_INSPECTION_KEYS = (
+    "presentation", "lifecycle_guards", "capacity", "references", "inbound", "shape_history",
+)
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1469,6 +1510,10 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
     if "inbound" in value:
         result["inbound"] = record_governance.inspection_inbound(value["inbound"])
         if result["inbound"] is None:
+            return None
+    if "shape_history" in value:
+        result["shape_history"] = normalized_page(value["shape_history"])
+        if result["shape_history"] is None:
             return None
     return result
 
@@ -2074,7 +2119,7 @@ def _invalid(reason: str) -> Never:
     raise CollectionError("INVALID_PLAN", reason)
 
 
-egress.register_projector("planning_query", _QUERY_EGRESS_KEYS, validator=_validate_query_egress)
+egress.register_projector("planning_query", _QUERY_EGRESS_KEYS | _RETIRED_KEYS, validator=_validate_query_egress)
 egress.register_projector(
     "planning_inspection",
     (

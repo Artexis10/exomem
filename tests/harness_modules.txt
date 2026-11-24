@@ -54,6 +54,7 @@ tests/test_hosted_bws_source.py
 tests/test_hosted_platform_operations.py
 tests/test_hosted_secret_handoff.py
 tests/test_hosted_terraform_contract.py
+tests/test_incident_agent_managed_structure.py
 tests/test_incident_collection_checks.py
 tests/test_incident_interrupted_write.py
 tests/test_incident_regressions.py

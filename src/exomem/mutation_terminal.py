@@ -7,6 +7,7 @@ import logging
 import re
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, cast
 
 from . import (
@@ -16,6 +17,7 @@ from . import (
     operation_entries,
     page_ids,
     relation_registry,
+    restructure,
     source_result_attribution,
 )
 from . import curation as curation_module
@@ -66,6 +68,8 @@ _RECORD_RECEIPT_FIELDS = (
     "automatic",
     "created_collection",
     "added_fields",
+    # Only a restructure of a collection's shape carries this: the shape-history entry that the owner can undo.
+    "shape",
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
@@ -112,6 +116,7 @@ _PLAN_RECEIPT_FIELDS = (
     "payload_hash",
     "outcome",
     "audit_correlation",
+    "shape",
 )
 
 #: The closed mutation state machine. A client may branch on exactly these values and
@@ -168,8 +173,10 @@ MEDIA_REQUEUE_OPERATIONS = frozenset({"retry", "reprocess"})
 #: `canonical_loop` and by the shipped SKILL.md; `tests/test_plain_write_outcomes.py`
 #: keeps both copies equal to this one.
 NARRATION_RULE = (
-    "Tell the user the user_summary. Give codes, ids, hashes, retries and sync state "
-    "only if asked. State a blocker plainly."
+    "Tell the user the user_summary. Speak of the user's things in their words, never of "
+    "collections, Records, Planning, schemas, entities or paths. A change with no "
+    "user_summary needs no mention unless asked. Give codes, ids, hashes, retries and sync "
+    "state only if asked. State a blocker plainly."
 )
 
 #: Keys a client may branch on. Everything else in a response is advisory.
@@ -250,6 +257,14 @@ _OPERATIONAL_KEYS = frozenset(
 CAPTURE_SWEEP_NEXT = (
     "Check the recent conversation once for anything else worth keeping, save what is missing "
     "from memory, and stay silent if nothing qualifies."
+)
+
+#: The sentence a Records or Planning write reply carries in `say`. Agents that narrate the receipt tell the
+#: user how a list is stored, which the person never needs; it rides on the write because no always-loaded
+#: text has room for it (prominence's rules and blocks sit at their caps).
+PLAIN_REPLY = (
+    "Tell the user what was kept in their own words, as user_summary does, and leave out how it is stored: "
+    "collections, fields, keys, rows and warnings."
 )
 
 #: What the agent tells the user when a write saved the page but a background update failed.
@@ -2452,14 +2467,50 @@ def _unfiled_record_step(records_routing: Mapping[str, Any] | None) -> str | Non
     return step if isinstance(step, str) and step else None
 
 
+@dataclass(frozen=True, slots=True)
+class UserNames:
+    """What a Records or Planning write reply may call the user's things.
+
+    `collection` is the title of the collection the write touched. `row` is the label of the row it wrote,
+    or None where the caller may not read the row or the request did not carry it. `titles` holds the title of each
+    other collection a restructure names, by id, for those the caller may read.
+    """
+
+    collection: str
+    row: str | None = None
+    titles: Mapping[str, str] | None = None
+
+
+def _plain_summary(head: str, leaf: Any, names: UserNames) -> str | None:
+    """The sentence for a Records or Planning write, in the user's words and with no path.
+
+    A restructure states its effect on what the person keeps, or says nothing when none of its steps
+    changes what they get (a declined one changed nothing). A row write names the row and its collection;
+    a create, revise or rebaseline carries no row and names the collection alone.
+    """
+    shape = leaf.get("shape") if isinstance(leaf, Mapping) else None
+    if isinstance(shape, Mapping):
+        if shape.get("origin") == "declined":
+            return None
+        return restructure.summary(shape["steps"], names.collection, (names.titles or {}).get)
+    if isinstance(leaf, Mapping) and not isinstance(leaf.get("item_key") or leaf.get("plan_id"), str):
+        return f"{head} {names.collection}"
+    return f"{head} {names.row or 'an entry'} in {names.collection}"
+
+
 def _user_summary(
-    result: Mapping[str, Any], verb: OutcomeVerb | None, batch: Sequence[tuple[str, str]] = ()
+    result: Mapping[str, Any],
+    verb: OutcomeVerb | None,
+    batch: Sequence[tuple[str, str]] = (),
+    names: UserNames | None = None,
 ) -> str | None:
     """One plain sentence for the person, built only from fields the terminal stores.
 
     A replay stores the same `path` or `paths`, so it yields the same sentence. A batch
     passes its per-file states (`batch`, from the projected rows) so that a file which
     failed or was already there is never reported as saved.
+    A Records or Planning write passes `names`, read where the reply is composed, and says
+    them in place of the path.
     A refusal, a call that awaits review, or a write that declares no verb has no outcome to state.
     """
     if verb is None or result.get("ok") is not True:
@@ -2475,6 +2526,8 @@ def _user_summary(
         head = f"Already {verb}"
     else:
         return None
+    if names is not None:
+        return _plain_summary(head, result.get("leaf_result"), names)
     path = result.get("path")
     paths = result.get("paths")
     if isinstance(path, str):
@@ -2541,7 +2594,11 @@ def _stated_outcome(leaf: Any) -> str | None:
 
 
 def project_terminal(
-    result: Any, detail: ResponseDetail = "compact", *, outcome_verb: OutcomeVerb | None = None
+    result: Any,
+    detail: ResponseDetail = "compact",
+    *,
+    outcome_verb: OutcomeVerb | None = None,
+    names: UserNames | None = None,
 ) -> Any:
     """Project a canonical terminal, preserving unversioned legacy results."""
     if not isinstance(detail, str) or detail not in _RESPONSE_DETAILS:
@@ -2599,7 +2656,7 @@ def project_terminal(
         None
         if unread_media_batch
         else _user_summary(
-            result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection)
+            result, outcome_verb, _batch_rows(leaf, artifact_receipt, media_projection), names
         )
     )
     stated_outcome = _stated_outcome(leaf)
@@ -2681,8 +2738,10 @@ def project_terminal(
                 }
             )
         compact.update({key: leaf[key] for key in _RECORD_RECEIPT_FIELDS if key in leaf})
+        compact["say"] = PLAIN_REPLY
     elif valid_planning_receipt(leaf):
         compact.update({key: leaf[key] for key in _PLAN_RECEIPT_FIELDS if key in leaf})
+        compact["say"] = PLAIN_REPLY
     elif isinstance(leaf, Mapping) and leaf.get("operation") == "episode_workflow":
         # The agent resumes by leaf id and must see which leaves ran, which
         # reconciled and which are blocked; every list is bounded by the
@@ -3229,8 +3288,28 @@ def _valid_discard_receipt(value: Mapping[str, Any]) -> bool:
     )
 
 
+# nosemgrep: ep-word-set -- the receipt keys that only a restructure's lifecycle receipt adds, a closed protocol.
+_RESTRUCTURE_EXTRAS = frozenset({"shape", "warnings"})
+
+
+def _valid_shape(value: Mapping[str, Any]) -> bool:
+    """A restructure's receipt may carry its shape-history entry, with exactly the entry's keys; no other receipt may.
+
+    It may also carry the warnings of the transactions it wrote, which publication adds after the commit.
+    """
+    from . import restructure
+
+    if "shape" not in value:
+        return "warnings" not in value
+    shape, warnings = value["shape"], value.get("warnings", [])
+    return (
+        isinstance(shape, Mapping) and set(shape) == restructure.ENTRY_KEYS and value.get("operation") == "revise"
+        and isinstance(warnings, list) and all(isinstance(text, str) and text for text in warnings)
+    )
+
+
 def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
-    if set(value) != {
+    if not _valid_shape(value) or set(value) - _RESTRUCTURE_EXTRAS != {
         "_record_receipt",
         "receipt_version",
         "operation",
@@ -3279,9 +3358,8 @@ def _valid_lifecycle_record_receipt(value: Mapping[str, Any]) -> bool:
     codes = value.get("acknowledged_gap_codes")
     if not (
         isinstance(paths, list)
-        and len(paths) == 1
-        and isinstance(paths[0], str)
-        and 0 < len(paths[0]) <= 1024
+        and 1 <= len(paths) <= restructure.MAX_REWRITTEN_ROWS + 1
+        and all(isinstance(path, str) and 0 < len(path.encode("utf-8")) <= 1024 for path in paths)
         and value.get("outcome") == "committed"
         and isinstance(correlation, str)
         and len(correlation) == 24
@@ -3318,7 +3396,9 @@ def valid_planning_receipt(value: Any) -> bool:
     if (
         value.get("_plan_receipt") != _PLAN_RECEIPT_MARKER
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
-        or operation not in {"create", "add", "update", "triage"}
+        # nosemgrep: ep-word-membership -- the closed Planning receipt operations. `retract` is the store's own: a
+        # restructure that moves an item out of a collection retracts it there, and no Planning action returns it.
+        or operation not in {"create", "add", "update", "triage", "retract"}
         or not _normalized_uuid(value.get("collection_id"))
         or not isinstance(value.get("affected_paths"), list)
         or len(value["affected_paths"]) > 16
@@ -3366,7 +3446,8 @@ def valid_planning_receipt(value: Any) -> bool:
     return (
         value.get("outcome") == "committed"
         and _hash(value.get("before_item_hash"))
-        and _hash(value.get("after_item_hash"))
+        # A retraction leaves no after-version.
+        and (value.get("after_item_hash") is None if operation == "retract" else _hash(value.get("after_item_hash")))
         and _hash(value.get("before_container_hash"))
         and _hash(value.get("after_container_hash"))
         and value.get("payload_hash") is None
@@ -3396,7 +3477,7 @@ def _valid_lifecycle_planning_receipt(value: Mapping[str, Any]) -> bool:
         "checkpoint_snapshot_hash",
         "minimum_reader_version",
     }
-    if set(value) != expected:
+    if not _valid_shape(value) or set(value) - _RESTRUCTURE_EXTRAS != expected:
         return False
     if not (
         value.get("_plan_receipt") == _PLAN_RECEIPT_MARKER
@@ -3423,7 +3504,7 @@ def _valid_lifecycle_planning_receipt(value: Mapping[str, Any]) -> bool:
     codes = value.get("acknowledged_gap_codes")
     if not (
         isinstance(paths, list)
-        and 1 <= len(paths) <= 513
+        and 1 <= len(paths) <= restructure.MAX_REWRITTEN_ROWS + 1
         and all(isinstance(path, str) and 0 < len(path.encode("utf-8")) <= 1024 for path in paths)
         and value.get("outcome") == "committed"
         and isinstance(correlation, str)

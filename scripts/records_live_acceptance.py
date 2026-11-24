@@ -70,6 +70,9 @@ _COMPACT_MUTATION_OPTIONAL = frozenset(
         # nudge is one), `notice` when the result is partial, unknown or stale.
         "next_action",
         "notice",
+        # How the agent answers after a Records or Planning write: in the person's words, not the storage's.
+        # Optional because a server before it does not send it.
+        "say",
     }
 )
 _COMPACT_V1_RECEIPT = frozenset(

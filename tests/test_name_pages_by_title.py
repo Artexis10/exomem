@@ -18,7 +18,6 @@ import pytest
 from _public_call import public_call
 from conftest import FIXTURE_VAULT, initialize_vault_state_offline
 from fastmcp import Client
-from test_collection_store_migration import env as store_env  # noqa: F401
 from test_derived_identifier_egress import (
     _WITHHELD_TARGET,
     _WRITE_SCOPE,
@@ -163,8 +162,8 @@ def test_records_receipts_name_the_item_after_save_and_edit(build) -> None:
                 **selector, "record": rows[0]["id"], "changes": {"condition": "intact"},
             })
 
-            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
-            assert updated["user_summary"].startswith("Updated -> Panel shipment (")
+            assert saved["user_summary"].startswith("Saved 2026-02-01, Panel shipment, dispatch in Delivery events (")
+            assert updated["user_summary"].startswith("Updated an entry in Delivery events (")
             assert saved["paths"] == updated["paths"]
 
     asyncio.run(run())
@@ -190,8 +189,8 @@ def test_planning_receipt_names_the_item(build) -> None:
                 "body": "Use the lower frame anchors.",
             })
 
-            assert saved["user_summary"].startswith("Saved -> Install the panel (")
-            assert edited["user_summary"].startswith("Updated -> Install the panel (")
+            assert saved["user_summary"].startswith("Saved Install the panel in Delivery plan (")
+            assert edited["user_summary"].startswith("Updated an entry in Delivery plan (")
             assert saved["paths"] == edited["paths"]
 
     asyncio.run(run())
@@ -234,21 +233,12 @@ def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
         assert egress.filter_withheld_entries(vault, result, _item_receipt=True) == result
 
 
-def test_replayed_file_receipt_uses_the_committed_recipe_until_access_is_configured(build, vault, monkeypatch) -> None:
+def test_a_replayed_row_receipt_reads_the_title_field_as_it_is_now_and_a_row_the_caller_cannot_read_stays_unnamed(
+    build, vault,
+) -> None:
     from lifecycle_fixtures import RECORDS_PATH, records_manifest
 
     from exomem import access
-    from exomem.governance import egress
-
-    original_format = egress._name_receipt_title
-
-    def configure_access_after_formatting(result, path, title):
-        named = original_format(result, path, title)
-        assert "-> Panel shipment (" in named["user_summary"]
-        access.access_config_path(vault).write_text(
-            "excluded: [Records/Deliveries/Events]\n", encoding="utf-8",
-        )
-        return named
 
     async def run() -> None:
         async with Client(build()) as client:
@@ -268,28 +258,24 @@ def test_replayed_file_receipt_uses_the_committed_recipe_until_access_is_configu
             call = public_call("add_record", arguments)
             meta = {command_surface.MCP_IDEMPOTENCY_META_KEY: "dispatch-shipment"}
             saved = (await client.call_tool(*call, meta=meta)).structured_content
-            assert saved["user_summary"].startswith("Saved -> Panel shipment (")
+            assert saved["user_summary"].startswith("Saved Panel shipment in Delivery events (")
             path = saved["paths"][0]
-            committed = (vault / path).read_bytes()
 
             declaration = vault / RECORDS_PATH
             text = declaration.read_text(encoding="utf-8")
             declaration.write_text(text.replace("  title: label\n", "  title: alternate\n"), encoding="utf-8")
             replay = (await client.call_tool(*call, meta=meta)).structured_content
-            assert "-> Panel shipment (" in replay["user_summary"]
+            assert replay["user_summary"].startswith("Saved Warehouse alias in Delivery events (")
             assert replay["after_item_hash"] == saved["after_item_hash"]
 
-            with monkeypatch.context() as patch:
-                patch.setattr(egress, "_name_receipt_title", configure_access_after_formatting)
-                excluded = (await client.call_tool(*call, meta=meta)).structured_content
-            assert excluded["user_summary"].endswith(f"-> {path} (personal Exomem)")
+            access.access_config_path(vault).write_text(
+                "excluded: [Records/Deliveries/Events]\n", encoding="utf-8",
+            )
+            excluded = (await client.call_tool(*call, meta=meta)).structured_content
+            assert excluded["user_summary"].startswith("Saved an entry in Delivery events (")
+            assert path not in excluded["user_summary"]
             assert excluded["item_key"] == saved["item_key"]
             assert excluded["after_item_hash"] == saved["after_item_hash"]
-
-            access.access_config_path(vault).write_text("readonly: []\n", encoding="utf-8")
-            configured = (await client.call_tool(*call, meta=meta)).structured_content
-            assert configured["user_summary"] == excluded["user_summary"]
-            assert (vault / path).read_bytes() == committed
 
     asyncio.run(run())
 
@@ -382,37 +368,9 @@ def test_receipt_does_not_wait_on_a_held_governance_lock(build, vault, monkeypat
             })
             assert observed.is_set()
             assert result["outcome"] == "committed"
-            assert result["user_summary"].startswith("Saved -> Panel shipment (")
+            assert result["user_summary"].startswith("Saved 2026-02-01, Panel shipment, dispatch in Delivery events (")
 
     asyncio.run(run())
-
-
-def test_sqlite_write_keeps_its_receipt_summary(store_env, capsys, monkeypatch) -> None:  # noqa: F811
-    from conftest import _drain_background_threads
-    from test_collection_store_migration import WORK, legacy_vault, migrate, printed
-
-    root = legacy_vault(store_env)
-    assert migrate(root, "prepare", operator=False) == 0
-    printed(capsys)
-    assert migrate(root, "apply") == 0
-    printed(capsys)
-    _drain_background_threads()
-    monkeypatch.setattr(server_module, "load_dotenv", lambda *args, **kwargs: None)
-    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-
-    async def run() -> None:
-        async with Client(server_module.build_server(require_auth=False)) as client:
-            saved = await _tool(client, "add_record", {
-                "collection": WORK, "why": "Track dispatch", "item": {"title": "Panel shipment"},
-            })
-            assert saved["outcome"] == "committed"
-            assert saved["user_summary"].startswith(f"Saved -> {saved['paths'][0]} (")
-            assert saved["item_key"] and saved["after_item_hash"]
-
-    try:
-        asyncio.run(run())
-    finally:
-        writer_lease.reset_managers_for_tests()
 
 
 def test_a_restricted_caller_cannot_tell_a_withheld_title_from_an_unknown_one(

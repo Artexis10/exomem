@@ -55,13 +55,24 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
 # The door operation `curation.relocate`, which derives and seals the plan that moves or renames a set of pages,
 # added 20 B to the write door's enum on 2026-11-22 (relocate-pages-in-one-curation-call).
-TOTAL_BUDGET = 29_910
+# The door operations `records.restructure` and `plans.restructure`, the closed-step change to a collection's shape,
+# added 39 B to the wire on 2026-11-23 (let-agents-manage-structure), 37 B of it in `manage_memory`. The wire
+# measures 29,879 B and `manage_memory` 2,587 B. Their fields ride the door's free-form `arguments` object.
+# `add_record` says to report what it kept in the user's words, added 42 B on 2026-11-23 (let-agents-manage-structure):
+# its reply now names the row and the collection in plain words, and the description is the one text an agent reads
+# when it picks the tool. The wire measures 29,921 B and `add_record` 979 B.
+# Both together, merged on 2026-11-23, measure 29,934 B on the wire.
+# `new_collection` says how to mark a collection whose fields the user chose (`origin: "user_design"`), added 65 B
+# to `add_record` on 2026-11-23 (let-agents-manage-structure): a user-designed collection keeps the width the user
+# chose, and the hint is where an agent learns to say so. Merged with relocate-pages-in-one-curation-call on
+# 2026-11-24, the wire measures 30,028 B, `add_record` 1,044 B and `manage_memory` 2,607 B.
+TOTAL_BUDGET = 30_028
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
     "add_observation": 1650,
     "add_plan_item": 500,
-    "add_record": 940,
+    "add_record": 1050,
     "cancel_uploads": 600,
     "create_note": 1850,
     "decide_review_item": 1000,
@@ -71,7 +82,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "edit_record": 850,
     "inspect_memory": 2200,
     "list_review_items": 750,
-    "manage_memory": 2570,
+    "manage_memory": 2620,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

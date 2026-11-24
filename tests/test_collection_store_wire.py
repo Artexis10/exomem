@@ -45,6 +45,10 @@ def normalized(value):
             mask(view, ("identity",), "<identity>")
         for held in result.get("coverage", {}).get("held_refs", []):
             mask(held, ("held_at",), "<identity>")
+        # Each mode's creation entry has its own random id and wall-clock stamp.
+        for entry in result.get("shape_history", {}).get("entries", []):
+            mask(entry, ("id", "at"), "<identity>")
+            mask(entry.get("undo_call", {}), ("undo",), "<identity>")
     return result
 
 

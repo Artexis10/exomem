@@ -6,15 +6,17 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, Never
 
-from . import collection_refs, operation_entries, planning
+from . import collection_refs, operation_entries, planning, reply_names, restructure
 from .cli_ops import OpError, action_argument_contract
 from .query_compat import public_filter_annotation
+from .restructure import CREATE_ORIGINS, parse_origin
 from .structured_collections import CollectionError, collection_remediation
 
 _QueryFilters = public_filter_annotation()
 
 #: The Planning spec caps every Planning refusal message at 512 UTF-8 bytes.
 _REFUSAL_MESSAGE_MAX_BYTES = 512
+_REFUSAL_PREFIX = "arguments do not match the selected Planning action"
 
 # The operation entries are the one table of what each action accepts and requires.
 ACTIONS = operation_entries.PLANS.actions()
@@ -47,6 +49,7 @@ def plan_memory(
         "update",
         "triage",
         "revise",
+        "restructure",
         "rebaseline",
         "history",
     ],
@@ -71,6 +74,7 @@ def plan_memory(
     hierarchy_limit: int | None = None,
     continuation: str | None = None,
     include_agent_history: bool | None = None,
+    include_retired: bool | None = None,
     output_format: Literal["json", "markdown", "csv"] | None = None,
     item: dict[str, Any] | None = None,
     plan_id: str | None = None,
@@ -82,6 +86,11 @@ def plan_memory(
     transition: dict[str, Any] | None = None,
     expected_item_version: str | None = None,
     item_id: str | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    undo: str | None = None,
+    origin: str | None = None,
+    preview: bool | None = None,
+    automatic: bool | None = None,
 ) -> dict[str, Any]:
     """Manage intent; record_memory holds outcomes.
 
@@ -92,6 +101,7 @@ def plan_memory(
     Args:
         collection: Vault-relative manifest path, collection UUID or memory reference. Omit to list.
         plan_id: row plan_id; on query, that item and its body.
+        include_retired: Inventory inspect only: also list retired collections; the count is always reported.
         expected_container_hash: Returned snapshot.
         expected_item_version: row item_version.
         changes: Update.
@@ -99,8 +109,15 @@ def plan_memory(
         item_id: update and triage: the item `id` a query returned. It stands for plan_id,
             expected_item_version and expected_container_hash, which the call reads under
             the writer lease. A stale id is refused with the current one.
+        steps: Restructure: 1-16 {step: add_field|rename_field|retype_field|retire_field|restore_field|rekey|merge_into|split_out|retitle|retire|restore, ...}; committed only when applying the inverse restores manifest and rows.
+        undo: Restructure: shape-history entry id whose inverse to apply, instead of steps.
+        origin: Create: user_choice (default) or user_design, the collection's first shape-history entry. Restructure: user_choice (default), user_design, or declined (records the proposal, changes nothing).
+        preview: Restructure: true checks and returns the result without writing.
+        automatic: Restructure: true for a change you start under silent proactive_capture, with no origin; refused with the failed bound named.
     """
     collection = collection_refs.resolve_collection(vault_root, collection, profile="planning")
+    steps = restructure.resolve_targets(
+        steps, lambda title: collection_refs.resolve_collection(vault_root, title, profile="planning"))
     guards = _bound_item(
         vault_root, action, collection, item_id, (plan_id, expected_container_hash, expected_item_version)
     )
@@ -120,15 +137,20 @@ def plan_memory(
         if action == "inspect" and collection is None:
             from .record_governance import inventory_collections
 
-            return inventory_collections(vault_root, semantic_profile="planning")
-        from .collection_store import preview
+            return inventory_collections(vault_root, semantic_profile="planning", include_retired=include_retired is True)
+        from .collection_store import preview as store
 
-        selected, result = preview.dispatch(vault_root, "planning", action, values)
+        if action == "restructure":
+            # The facade is where a caller's origin is checked: the server sets `automatic` for a call that carries the flag.
+            values["origin"] = origin = restructure.call_origin(origin, automatic=bool(automatic))
+        if action == "create" and origin is not None:
+            values["origin"] = origin = parse_origin(origin, allowed=CREATE_ORIGINS)
+        selected, result = store.dispatch(vault_root, "planning", action, values)
         if selected:
             return result
         if action == "inspect":
             assert collection is not None
-            return planning.inspect(vault_root, collection)
+            return planning.inspect(vault_root, collection, history_limit=limit, history_after=continuation)
         if action == "validate":
             assert manifest_text is not None
             return planning.validate(
@@ -146,6 +168,7 @@ def plan_memory(
                 manifest_text,
                 why=why,
                 scaffold=True if scaffold is None else scaffold,
+                origin=origin,
             )
         if action == "history":
             assert collection is not None and plan_id is not None
@@ -206,6 +229,12 @@ def plan_memory(
                 expected_container_hash=expected_container_hash,
                 why=why,
             )
+        if action == "restructure":
+            assert collection is not None and why is not None
+            return planning.restructure(
+                vault_root, collection, why=why, steps=steps, undo=undo, origin=origin,
+                preview=bool(preview), automatic=bool(automatic),
+            )
         if action == "rebaseline":
             assert collection is not None and acknowledged_gap_codes is not None
             assert expected_manifest_hash is not None and expected_container_hash is not None
@@ -225,7 +254,7 @@ def plan_memory(
         # surface drops the rest of `details` but must not drop that.
         raise OpError(
             code,
-            _public_error_message(code, error.reason),
+            _public_error_message(code, reply_names.retired_reason(vault_root, error)),
             collection_remediation(error),
         ) from error
 
@@ -293,10 +322,11 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
     surplus = supplied - _ACTION_FIELDS[action]
     if missing or surplus:
         parts = []
+        absent = f"missing for {action}: " + ", ".join(sorted(missing)) if missing else ""
         if surplus:
-            parts.append(f"unexpected for {action}: " + ", ".join(sorted(surplus)))
+            parts.append(f"unexpected for {action}: " + _bounded_names(sorted(surplus), action, absent))
         if missing:
-            parts.append(f"missing for {action}: " + ", ".join(sorted(missing)))
+            parts.append(absent)
         _invalid_arguments(
             "; ".join(parts),
             accepted=action_argument_contract(
@@ -317,13 +347,26 @@ def _validate_arguments(action: object, values: dict[str, Any]) -> None:
                            "remove " + ", ".join(sorted(supplied - {"collection", "plan_id"})))
 
 
+def _bounded_names(names: list[str], action: str, absent: str) -> str:
+    """`names` as one list that leaves the refusal inside the message cap, cut at a name with a count of the rest."""
+    room = _REFUSAL_MESSAGE_MAX_BYTES - len(f"{_REFUSAL_PREFIX}: unexpected for {action}: ; {absent}".encode())
+    kept: list[str] = []
+    for name in names:
+        rest = len(names) - len(kept) - 1
+        tail = f", and {rest} more" if rest else ""
+        if len((", ".join([*kept, name]) + tail).encode()) > room:
+            break
+        kept.append(name)
+    return ", ".join(kept) + (f", and {len(names) - len(kept)} more" if len(kept) < len(names) else "")
+
+
 def refuse_arguments(detail: str) -> Never:
     """Raise this command's own argument refusal with `detail` as its explanation."""
     _invalid_arguments(detail)
 
 
 def _invalid_arguments(detail: str | None = None, *, accepted: str | None = None) -> Never:
-    message = "arguments do not match the selected Planning action"
+    message = _REFUSAL_PREFIX
     if detail:
         message = f"{message}: {detail}"
     # The accepted-argument list is help, not the refusal itself: drop it

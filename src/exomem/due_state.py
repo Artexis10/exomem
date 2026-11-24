@@ -1463,6 +1463,8 @@ def _routing_targets(
         writer = selected_writer(root, manifest)
         if (
             manifest.semantic_profile != "records"
+            # A retired collection routes nothing, so its rows are never read for visibility.
+            or manifest.retired
             or manifest.manifest_version.hash != row.get("manifest_hash")
             or (writer is None and not keep(manifest.storage.source))
         ):

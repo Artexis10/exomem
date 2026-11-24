@@ -1492,36 +1492,39 @@ def op_bootstrap(
                 ),
             },
             "capture_examples": (
-                "Route durable measurements, completed sessions, transactions, maintenance "
-                "events, and current state here without waiting for a magic save or log verb. "
+                "Route durable measurements, sessions, transactions and current state here. "
                 "Resolve one compatible collection before append or update; if none fits and the "
-                "identity, type and scope are clear, call add_record with new_collection under "
-                "silent capture to create the minimal collection from the row; under advisory "
-                "capture propose it, then records.create once confirmed. "
+                "identity, type and scope are clear, call add_record with new_collection (silent "
+                "capture) to create the minimal collection from the row. "
                 "A passing mention gets no collection. "
+                "Report what you kept in the user's words. Reshape with one restructure call, "
+                "lossless and undoable; origin user_design when the user described the shape. "
+                "Under silent capture pass automatic true and mention a reshape only if it alters "
+                "what they get; under advisory propose one that does, then apply it once confirmed. "
+                "Ask one plain question, recommended answer first, only when several shapes fit "
+                "and the choice changes what they get. "
                 "A recorded outcome never closes Planning automatically; propose or perform "
                 "a guarded transition only with explicit user intent."
             ),
             "review_rule": (
-                "Review may compare planned intent with recorded reality; it must not make "
-                "Records silently infer goals, success, failure, or personal judgments."
+                "Review may compare planned intent with recorded reality; it never infers "
+                "goals, success, failure, or personal judgments."
             ),
             "manual_first": (
                 "Canonical Records remain ordinary editable files; manual edits without "
                 "Exomem are a supported path."
             ),
             "template_rule": (
-                "Templates are ordinary editable entry scaffolds; collection schema and "
-                "validation remain independent of template content."
+                "Templates are ordinary editable entry scaffolds; schema and validation do "
+                "not depend on them."
             ),
             "activation_rule": (
-                "Bootstrap and knowledge-pack guidance does not create collections, folders, "
-                "templates, migrations, or canonical data."
+                "Guidance does not create collections, folders, templates, migrations, or "
+                "canonical data."
             ),
             "software_rule": (
-                "Exomem Planning owns durable intent and prioritisation; a resolved workflow "
-                "contract may declare companion-owned execution artifacts without asserting "
-                "their availability or state."
+                "Planning owns durable intent; a resolved workflow contract may declare "
+                "companion-owned execution artifacts."
             ),
         }
     else:
@@ -1575,12 +1578,12 @@ def op_bootstrap(
             "After a stale refusal, inspect/query again before retrying."
         ),
         "evidence_execution_boundary": (
-            "Progress evidence is an opaque Records pointer and execution is a thin opaque pointer; "
-            "neither resolves, evaluates, or updates Planning automatically."
+            "Progress evidence and execution are opaque pointers; neither resolves or updates "
+            "Planning automatically."
         ),
         "execution_truth_boundary": (
-            "Planning owns durable intent and prioritisation. A resolved workflow contract "
-            "may declare companion ownership, while external execution truth remains opaque."
+            "A resolved workflow contract may declare companion ownership; external execution "
+            "truth stays opaque."
         ),
     }
     # The doctrine every client tier has to receive. The shipped skill scaffold
@@ -1876,8 +1879,7 @@ def op_bootstrap(
                     f"{suggest_links}"
                 ),
                 (
-                    "Tell the user the reply's user_summary; follow next_action when present; "
-                    "relay notice in one sentence; never repeat a saved write."
+                    "Relay user_summary and notice in one sentence; never repeat a saved write."
                     if profile == "compact" else
                     "tell the user the write reply's user_summary. Follow `next_action` when it is "
                     "present and relay `notice` in one sentence: it appears only when the "
@@ -1927,13 +1929,13 @@ def op_bootstrap(
             "preflight": {
                 tools_text("connect_memory", "read"): "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": (
-                    "if they fire, prefer edit or replace over a parallel page; a write advisory "
-                    "carries a review ref and fingerprint so an exact dismissed or unexpired snoozed "
-                    "signal stays quiet until "
+                    "if they fire, prefer edit or replace over a parallel page"
                     + (
-                        "it changes"
+                        ""  # due_state_handling already says that a dismissed or snoozed fingerprint awaits change
                         if profile == "compact"
-                        else "the counterpart changes or the written page changes the detected signal class"
+                        else "; a write advisory carries a review ref and fingerprint so an exact dismissed "
+                        "or unexpired snoozed signal stays quiet until the counterpart changes or the "
+                        "written page changes the detected signal class"
                     )
                 ),
             },
@@ -1992,8 +1994,7 @@ def op_bootstrap(
                     "Never poll or interrupt. Dismissed/snoozed fingerprints await change. "
                     "Absent advice proves nothing; prefer silence. "
                     "Backlog: review a batch of the largest category, group by topic, "
-                    "write each group with the usual writers, check outstanding fell. "
-                    "Dismissal is not completion."
+                    "write each group, check outstanding fell; dismissal is not completion."
                     if profile == "compact"
                     else
                     "Read counts; do not poll or interrupt. Consult review when useful and judge semantic relevance. "
@@ -14712,6 +14713,7 @@ def op_record_memory(
         "update",
         "retract",
         "revise",
+        "restructure",
         "rebaseline",
         "discard",
         "import",
@@ -14736,6 +14738,7 @@ def op_record_memory(
     expand_child: str | None = None,
     continuation: str | None = None,
     include_agent_history: bool | None = None,
+    include_retired: bool | None = None,
     output_format: Literal["json", "markdown", "csv"] | None = None,
     item: dict[str, Any] | None = None,
     item_key: str | None = None,
@@ -14758,6 +14761,10 @@ def op_record_memory(
     automatic: bool | None = None,
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    undo: str | None = None,
+    origin: str | None = None,
+    preview: bool | None = None,
 ) -> dict[str, Any]:
     """Read or update observed state; Planning uses plan_memory; originals use Sources/Evidence.
 
@@ -14775,6 +14782,7 @@ def op_record_memory(
         expected_manifest_hash: Current manifest hash for revise/rebaseline.
         expected_item_version: Queried item version.
         acknowledged_gap_codes: Inspect-reported rebaseline gaps.
+        include_retired: Inventory inspect: also list retired collections; the count always shows.
         why: Audit reason.
         delivery: Append receipt envelope; never sets values or creates collections.
         held: Resume append/update; item/changes override, null removes; discard deletes.
@@ -14785,9 +14793,13 @@ def op_record_memory(
         on_reject: bulk_upsert: abort writes nothing; skip commits the rest.
         query: v1 query object; grammar via describe.
         item_id: Update or retract: the row `id` a query returned; stands for item_key and both guards, read under the writer lease.
-        automatic: Create only: true for a minimal collection you start under silent proactive_capture; refused with the failed bound named.
+        automatic: Create: true for a minimal collection you start under silent proactive_capture. Restructure: true for a change you start the same way, with no origin. Refused with the failed bound named.
         new_collection: Append only, {"natural_key": [item fields]}: a title that names no collection is created from the row under the automatic bounds, then the row is appended.
         new_fields: Append or update: names in item/changes the collection does not declare; under silent proactive_capture they are added, typed from the values, then the row is written.
+        steps: Restructure: 1-16 {step: add_field|rename_field|retype_field|retire_field|restore_field|rekey|merge_into|split_out|retitle|retire|restore, ...}; committed only when applying the inverse restores manifest and rows.
+        undo: Restructure: shape-history entry id whose inverse to apply, instead of steps.
+        origin: Restructure: user_choice (default), user_design, or declined (records the proposal, changes nothing).
+        preview: Restructure: true checks and returns the result without writing.
     """
     result = record_memory_module.record_memory(
         vault_root,
@@ -14811,6 +14823,7 @@ def op_record_memory(
         expand_child=expand_child,
         continuation=continuation,
         include_agent_history=include_agent_history,
+        include_retired=include_retired,
         output_format=output_format,
         item=item,
         item_key=item_key,
@@ -14833,6 +14846,10 @@ def op_record_memory(
         automatic=automatic,
         new_collection=new_collection,
         new_fields=new_fields,
+        steps=steps,
+        undo=undo,
+        origin=origin,
+        preview=preview,
     )
     # An item write answers `outcome: committed`; a bulk upsert answers `committed: true`. An import starts a job whose
     # batches commit later, outside this call, so the write log does not attribute them (method-use-evidence spec).

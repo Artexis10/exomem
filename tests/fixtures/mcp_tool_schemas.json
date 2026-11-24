@@ -128,7 +128,7 @@
     }
   },
   "add_record": {
-    "description": "Add a Records row. Outcomes go here; intentions go to Planning. If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, your proposals and outside claims each get a field; `options.new_fields` adds one.",
+    "description": "Add a Records row. Outcomes go here; intentions go to Planning. If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, your proposals and outside claims each get a field; `options.new_fields` adds one. Report what you kept in the user's words.",
     "inputSchema": {
       "properties": {
         "collection": {
@@ -143,7 +143,7 @@
         },
         "new_collection": {
           "type": "object",
-          "description": "{natural_key: [item fields that identify a row]}"
+          "description": "{natural_key: [item fields that identify a row], origin: \"user_design\" when the user named the details to keep}"
         },
         "body": {
           "type": "string"
@@ -784,10 +784,12 @@
             "records.bulk_upsert",
             "records.discard",
             "records.revise",
+            "records.restructure",
             "records.rebaseline",
             "records.import",
             "plans.create",
             "plans.revise",
+            "plans.restructure",
             "plans.rebaseline",
             "settings.set",
             "settings.clear",

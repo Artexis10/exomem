@@ -581,6 +581,7 @@ def test_a_revision_13_store_upgrades_its_derived_collection_as_hashed_without_t
     before = _rows_file(file)
     writer.handle.close()
     with closing(sqlite3.connect(path, isolation_level=None)) as raw:
+        raw.execute("DROP TABLE collection_shape_history")  # schema 21 added it, with its index and triggers
         # Schema 19 put a view of the current rows under the name of the table of all rows, which it renamed.
         raw.execute("DROP VIEW items")
         raw.execute("DROP INDEX item_rows_current")

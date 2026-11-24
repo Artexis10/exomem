@@ -25,7 +25,7 @@ def require_targets(operation, proposed: collections.CollectionManifest,
             _require_target(operation, declaration)
 
 
-def _readable(operation, cid: str) -> collections.CollectionManifest | None:
+def readable(operation, cid: str) -> collections.CollectionManifest | None:
     """The target's manifest when the author may read it and all of its natural key, else None."""
     try:
         # A read decision, because a write decision would also withhold a collection that the author
@@ -51,9 +51,18 @@ def _require_target(operation, declaration: collections.ReferenceDeclaration) ->
     # A missing collection, one the author cannot read and one whose key the author cannot read
     # all raise the same error, so the error shows nothing the author could not read.
     row = operation.conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()
-    target = None if row is None else _readable(operation, cid)
+    target = None if row is None else readable(operation, cid)
     if target is None:
         raise generic
+    require_supported(field, target, derived=bool(row[0]))
+
+
+def require_supported(field: str, target: collections.CollectionManifest, *, derived: bool) -> None:
+    """Refuse a target whose rows a reference cannot find, for the declaration at ``field``.
+
+    A reference finds a row by one text value, so the target keeps a natural key of one string, date or datetime
+    field, and keeps its rows in the store. A restructure of the target checks its proposed manifest here too.
+    """
     key = target.schema.natural_key
     unsupported = {"field": field, "expected": "a collection whose natural key is one field of type "
                    f"{', '.join(collections.REFERENCE_KEY_TYPES[:-1])} or {collections.REFERENCE_KEY_TYPES[-1]}",
@@ -71,7 +80,7 @@ def _require_target(operation, declaration: collections.ReferenceDeclaration) ->
             "a reference matches text, so the target's natural-key field must be a string, date or datetime",
             {**unsupported, "received": key_type},
         )
-    if row[0]:
+    if derived:
         raise collections.CollectionError(
             "UNSUPPORTED_REFERENCE_TARGET",
             "a derived collection keeps its rows outside the store, so a reference cannot resolve through it",

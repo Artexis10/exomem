@@ -116,7 +116,8 @@ field change only the pointers of a Source or Evidence page, never its content.
 `query_records`, `add_record` and `edit_record` are the public product tools for human-owned
 observed state: `query` reads a collection, `append` adds an event, `update` changes one item. The
 `records` operations of `inspect_memory` (`records.describe`, `records.validate`, `records.inspect`,
-`records.history`) and `manage_memory` (`records.create`, `records.revise`, `records.rebaseline`) cover a
+`records.history`) and `manage_memory` (`records.create`, `records.revise`, `records.rebaseline`,
+`records.restructure`) cover a
 collection's contract. Do not replace them with storage-specific tools. `describe` returns the complete contract;
 `validate` is read-only preflight; `inspect` is report-only; `query` returns a
 bounded current view; `create` explicitly creates a reviewed collection contract;
@@ -130,7 +131,7 @@ maintenance job with the preview's `plan_id` and a `why` (see vault care).
 Route durable observed events, current state and recurring structured work here without
 waiting for a magic verb. When exactly one compatible existing collection accepts a
 sufficiently identified observation, the active engagement policy may append or update it
-and the agent reports the mutation. If collections compete or identity, date, provenance,
+and the agent reports what it kept, in the user's words. If collections compete or identity, date, provenance,
 or ownership is unclear, ask one focused question. If no collection fits and the work's
 identity, type and scope are clear, create a minimal collection under the served
 `proactive_capture` disposition: when it is `silent`, `add_record` with `new_collection`
@@ -139,8 +140,12 @@ with `create` after one inline confirmation of your named proposal. When a bound
 minimal collection does not hold, the server refuses `AUTOMATIC_CREATION_REFUSED`, names the
 bound, creates nothing and returns the create call to make after the user confirms. A later
 fact that needs its own field is added with `new_fields` on `add_record` or `edit_record`
-under the same disposition, never put into another field.
-[Records and Planning](planning-records.md) has the whole procedure. For a collection you
+under the same disposition, never put into another field. A change of shape (a retitled,
+retired, restored or reshaped collection) is one lossless, undoable `records.restructure` call,
+which you start with `automatic: true` under the same disposition.
+[Records and Planning](planning-records.md) has the whole procedure, including the one plain
+question to ask, when to tell the user about a reshape, and how to design a shape the user
+described. For a collection you
 design yourself use `describe -> validate -> create -> inspect -> append`; for maintenance
 use `validate -> revise` or `inspect -> rebaseline`.
 
@@ -713,7 +718,7 @@ schema. A verified remote identity additionally requires
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
 collection or fields is created only under the bounded collection-creation rule; a
-change to an existing collection's fields needs confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+change to an existing collection's fields is a `restructure`, automatic within its bounds, else confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.
