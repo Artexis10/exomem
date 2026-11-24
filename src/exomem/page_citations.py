@@ -13,7 +13,7 @@ index never reads as an empty one. Both depend on the vault, never on the page a
 A citation is visible when the caller may read the citing collection, the link field and the row, and
 the cited page or row. A target the caller may not read answers exactly as one that does not exist, and a
 withheld row is absent from both ``items`` and ``count``. The admission is the one the Records read
-paths use (`ReadSession`, `FieldPlan`, `reference_resolution.row_released`); this module decides nothing by itself.
+paths use (`ReadSession`, `FieldPlan`, `reference_resolution.rows_released`); this module decides nothing by itself.
 """
 
 from __future__ import annotations
@@ -81,8 +81,12 @@ def inbound_citations(ref: str, caller: Path, limit: int = DEFAULT_LIMIT, more: 
     ``caller`` is the vault root; the reader is the principal of the current request scope. ``limit``
     is 1 to 100. ``more`` is the cursor an earlier reply returned, and a malformed one raises ValueError.
     """
-    limit = _limit(limit)
-    return _read([ref], Path(caller), limit, _decode(more))[ref]
+    limit, after = _limit(limit), _decode(more)
+    key = reference_index.link_match(ref)
+    # Only a page or a row has citations here; a ref of any other kind is not an answer this reader can give.
+    if key is None:
+        return dict(_UNAVAILABLE)
+    return _read({ref: key}, Path(caller), limit, after)[ref]
 
 
 #: A recall response cites for its first ten hits, three citations each, so the addition stays a few hundred bytes a hit.
@@ -116,10 +120,14 @@ def for_hits(refs: Sequence[str | None], caller: Path) -> dict[str, dict[str, An
     return found
 
 
-def without_page(more: str | None = None) -> dict[str, Any]:
-    """The answer for a page that has no memory ref: the one a page that does not exist gets, for the same cursor check."""
-    _decode(more)
-    return _empty()
+def without_page(caller: Path, more: str | None = None) -> dict[str, Any]:
+    """The answer for a page that has no memory ref: the one a page that does not exist gets, in every state.
+
+    It reads the same vault and index state that a page's read does, so a page the caller may not read
+    and a page that does not exist answer alike while the index warms or cannot be read, too.
+    """
+    after = _decode(more)
+    return _read({"": None}, Path(caller), DEFAULT_LIMIT, after)[""]
 
 
 def inbound_citations_batch(refs: Sequence[str], caller: Path, per_ref: int = 5) -> dict[str, dict[str, Any]]:
@@ -129,7 +137,12 @@ def inbound_citations_batch(refs: Sequence[str], caller: Path, per_ref: int = 5)
     """
     if len(refs) > MAX_BATCH:
         raise ValueError(f"a batch asks for at most {MAX_BATCH} pages")
-    return _read(list(dict.fromkeys(refs)), Path(caller), _limit(per_ref), None) if refs else {}
+    limit = _limit(per_ref)
+    keys = {ref: reference_index.link_match(ref) for ref in refs}
+    # Only a page or a row has citations here; a ref of any other kind is not an answer this reader can give.
+    if any(key is None for key in keys.values()):
+        return {ref: dict(_UNAVAILABLE) for ref in keys}
+    return _read(keys, Path(caller), limit, None) if keys else {}
 
 
 def _empty() -> dict[str, Any]:
@@ -164,95 +177,128 @@ def applies(caller: Path) -> bool:
     return connection.store_path(Path(caller)).exists()
 
 
-def _read(refs: list[str], root: Path, limit: int, after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
-    keys = {ref: reference_index.link_match(ref) for ref in refs}
-    # Only a page or a row has citations here; a ref of any other kind is not an answer this reader can give.
-    if any(key is None for key in keys.values()):
-        return {ref: dict(_UNAVAILABLE) for ref in refs}
+def _read(keys: dict[str, str | None], root: Path, limit: int,
+          after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
+    """Each asked ref's reply, from its index match key; a key of None is a page that does not exist."""
     store = connection.store_path(root)
     if not store.exists():
-        return {ref: dict(_UNAVAILABLE) for ref in refs}
+        return {ref: dict(_UNAVAILABLE) for ref in keys}
     try:
         with runtime.read_session(root, store) as session:
             return _answer(session, root, keys, limit, after)
     except QueryError:
-        return {ref: dict(_UNAVAILABLE) for ref in refs}
-
-
-def _answer(session, root: Path, keys: dict[str, str], limit: int,
-            after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
-    visible = _visible_fields(session)
-    if visible is None:
         return {ref: dict(_UNAVAILABLE) for ref in keys}
-    if not _ready(session, visible):
+
+
+def _answer(session, root: Path, keys: dict[str, str | None], limit: int,
+            after: tuple[str, str, int] | None) -> dict[str, dict[str, Any]]:
+    """Every reply of one read. The state comes first and from the vault alone; only then does an asked page count.
+
+    A read admits only the collections whose index holds a citation of a page the caller may read, and
+    decides their rows in one batch each, so its cost follows the citations, not the collections or their rows.
+    """
+    declared = reference_index.link_fields(session.connection)
+    answers = {ref: _empty() for ref in keys}
+    if not declared:
+        return answers
+    if _warming(session, declared):
         return {ref: dict(_WARMING) for ref in keys}
-    if not visible:
-        return {ref: _empty() for ref in keys}
-    readable = _visible_targets(session, root, next(iter(visible.values()))[0], keys)
+    readable = _visible_targets(session, root, keys)
     if readable is None:
         return {ref: dict(_UNAVAILABLE) for ref in keys}
-    asked = {key: ref for ref, key in keys.items() if ref in readable}
-    answers = {ref: _empty() for ref in keys}
+    asked = {key: ref for ref, key in keys.items() if key is not None and ref in readable}
     if not asked:
         return answers
+    visible = {}
+    for collection_id, fields in sorted(_cited_fields(session, declared, asked).items()):
+        found = _readable_fields(session, collection_id, declared[collection_id], fields)
+        if found is not None:
+            visible[collection_id] = found
+    if not visible:
+        return answers
+    rows = _query(session, visible, asked, limit, after)
+    released = _released(session, visible, rows)
     groups: dict[str, list] = {key: [] for key in asked}
-    for row in _query(session, visible, asked, limit, after):
+    for row in rows:
         groups[row[0]].append(row)
-    for key, rows in groups.items():
-        answers[asked[key]] = _assemble(session, visible, rows, limit, after)
+    for key, group in groups.items():
+        answers[asked[key]] = _assemble(session, visible, group, released, limit, after)
     return answers
 
 
-def _visible_fields(session) -> dict[str, tuple[Any, tuple]] | None:
-    """The collections the caller may read, each with its admission and the link fields it may read, or None."""
-    visible: dict[str, tuple[Any, tuple]] = {}
-    for collection_id, declarations in sorted(reference_index.link_fields(session.connection).items()):
-        try:
-            lookup = session.admit_lookup(collection_id)
-        except QueryError as error:
-            if error.code == "COLLECTION_NOT_FOUND":
-                continue  # a collection the caller may not read is omitted, never reported
-            return None
-        if lookup.plan.item_key_withheld:
-            continue  # a row's ref and key would spell a natural key the caller may not read
-        readable = {d.dotted: d for d in collections.declared_links(lookup.manifest.schema)
-                    if lookup.plan.admits_member_path(d.path)}
-        fields = tuple(readable[d.dotted] for d in declarations if d.dotted in readable)
-        if fields:
-            visible[collection_id] = (lookup, fields)
-    return visible
+def _pairs(declared: dict[str, tuple]) -> str:
+    return json.dumps([[collection_id, d.dotted] for collection_id, fields in declared.items() for d in fields])
 
 
-def _ready(session, visible) -> bool:
-    """Whether every visible link field's index is built; a field with no state row is still warming."""
-    pairs = [[collection_id, d.dotted] for collection_id, (_, fields) in visible.items() for d in fields]
-    if not pairs:
-        return True
-    built = session.connection.execute(
-        "SELECT count(*) FROM json_each(?) w JOIN item_reference_state s ON s.collection_id=json_extract(w.value,'$[0]')"
-        " AND s.field_path=json_extract(w.value,'$[1]') AND s.target_id=? AND s.ready=1",
-        (json.dumps(pairs), collections.LINK_TARGET)).fetchone()[0]
-    return built == len(pairs)
+def _warming(session, declared: dict[str, tuple]) -> bool:
+    """Whether the index of a link field the caller may read is still building; a field with no state row is.
+
+    Only a collection with a field still building is admitted, so a built index costs one statement.
+    """
+    pending: dict[str, set[str]] = {}
+    for collection_id, field in session.connection.execute(
+            "SELECT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w WHERE NOT EXISTS ("
+            "SELECT 1 FROM item_reference_state s WHERE s.collection_id=json_extract(w.value,'$[0]')"
+            " AND s.field_path=json_extract(w.value,'$[1]') AND s.target_id=? AND s.ready=1)",
+            (_pairs(declared), collections.LINK_TARGET)).fetchall():
+        pending.setdefault(collection_id, set()).add(field)
+    return any(_readable_fields(session, collection_id, declared[collection_id], fields) is not None
+               for collection_id, fields in sorted(pending.items()))
 
 
-def _visible_targets(session, root: Path, lookup, keys: dict[str, str]) -> set[str] | None:
+def _cited_fields(session, declared: dict[str, tuple], asked: dict[str, str]) -> dict[str, set[str]]:
+    """The link fields whose index holds an asked key, by collection, from one probe of the index's leading columns."""
+    found: dict[str, set[str]] = {}
+    for collection_id, field in session.connection.execute(
+            "SELECT DISTINCT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w"
+            " CROSS JOIN json_each(?) a WHERE EXISTS (SELECT 1 FROM item_references r"
+            " WHERE r.collection_id=json_extract(w.value,'$[0]') AND r.field_path=json_extract(w.value,'$[1]')"
+            " AND r.match=a.value)", (_pairs(declared), json.dumps(sorted(asked)))).fetchall():
+        found.setdefault(collection_id, set()).add(field)
+    return found
+
+
+def _readable_fields(session, collection_id: str, declarations: tuple, fields: set[str]) -> tuple[Any, tuple] | None:
+    """A collection's admission and those of ``fields`` the caller may read, or None when it shows the caller none.
+
+    The admission never visits the collection's rows: a row the read returns is decided by itself (`_released`).
+    """
+    try:
+        lookup = session.admit_lookup(collection_id, visit_rows=False)
+    except QueryError as error:
+        if error.code == "COLLECTION_NOT_FOUND":
+            return None  # a collection the caller may not read is omitted, never reported
+        raise
+    if lookup.plan.item_key_withheld:
+        return None  # a row's ref and key would spell a natural key the caller may not read
+    readable = {d.dotted: d for d in collections.declared_links(lookup.manifest.schema)
+                if lookup.plan.admits_member_path(d.path)}
+    chosen = tuple(readable[d.dotted] for d in declarations if d.dotted in fields and d.dotted in readable)
+    return (lookup, chosen) if chosen else None
+
+
+def _visible_targets(session, root: Path, keys: dict[str, str | None]) -> set[str] | None:
     """The asked refs whose page or row the caller may read, or None when no page can be resolved at all.
 
     A page or row the caller may not read, one that does not exist and an identity that two readable pages
-    hold are the same answer, so the reply never says which. Pages resolve through the projector reads use
-    and rows through the row reader that `reference_resolution` owns.
+    hold are the same answer, so the reply never says which. The page index is consulted whatever is asked,
+    so its state never depends on the page. The read never walks the vault: with no published corpus to
+    borrow, it cannot resolve a page and says so. Rows resolve through the row reader that
+    `reference_resolution` owns.
     """
+    operation = session._authorization
+    projector = _LinkProjector.create(root, None, policy=operation.policy, allow_cold_index=False,
+                                      authorize_path=operation.allows_file)
+    if not projector.index_available():
+        return None
     readable = set()
-    pages = {ref: key.removeprefix("memory:") for ref, key in keys.items() if key.startswith("memory:")}
-    if pages:
-        operation = session._authorization
-        projector = _LinkProjector.create(root, lookup.manifest, policy=operation.policy,
-                                          authorize_path=operation.allows_file)
-        if not projector.index_available():
-            return None
-        readable |= {ref for ref, identity in pages.items() if projector.page_with_identity(identity) is not None}
-    for ref in keys.keys() - pages.keys():
-        if reference_resolution.resolve_row(session, collections.parse_row_ref(ref)) is not None:
+    for ref, key in keys.items():
+        if key is None:
+            continue
+        if key.startswith("memory:"):
+            if projector.page_with_identity(key.removeprefix("memory:")) is not None:
+                readable.add(ref)
+        elif reference_resolution.resolve_row(session, collections.parse_row_ref(ref)) is not None:
             readable.add(ref)
     return readable
 
@@ -269,7 +315,19 @@ def _query(session, visible, asked: dict[str, str], limit: int, after) -> list[t
     return rows
 
 
-def _assemble(session, visible, rows: Iterable[tuple], limit: int, after) -> dict[str, Any]:
+def _released(session, visible, rows: Iterable[tuple]) -> set[int]:
+    """The returned rows of collections that release rows one by one which the caller may read, in one batch each."""
+    wanted: dict[str, list[int]] = {}
+    for _, collection_id, _, row_id, uniform, *_ in rows:
+        if not uniform:
+            wanted.setdefault(collection_id, []).append(row_id)
+    released: set[int] = set()
+    for collection_id, row_ids in sorted(wanted.items()):
+        released |= reference_resolution.rows_released(session, visible[collection_id][0], row_ids)
+    return released
+
+
+def _assemble(session, visible, rows: Iterable[tuple], released: set[int], limit: int, after) -> dict[str, Any]:
     """One page's reply: its exact visible count and the first ``limit`` visible citations past the cursor."""
     count, candidates = 0, []
     counted: set[tuple[str, str]] = set()
@@ -279,7 +337,7 @@ def _assemble(session, visible, rows: Iterable[tuple], limit: int, after) -> dic
                 counted.add((collection_id, field))
                 count += n
         else:
-            if not reference_resolution.row_released(session, visible[collection_id][0], item_key):
+            if row_id not in released:
                 continue
             count += 1
         key = (collection_id, field, row_id)

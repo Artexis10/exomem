@@ -4,12 +4,17 @@
 
 ### Requirement: One read seam answers which rows and plan items cite a page
 
-Exomem SHALL answer which Records rows and Planning items cite a page through one function, `inbound_citations(ref, caller, limit, more)`. It SHALL read the derived `item_references` index in one indexed range read on the target ref. It SHALL return at most `limit` citations (default 20, maximum 100), the exact count the caller may see, and a continuation when more remain. No other code path SHALL compute inbound citations.
+Exomem SHALL answer which Records rows and Planning items cite a page through one function, `inbound_citations(ref, caller, limit, more)`. It SHALL read the derived `item_references` index in a fixed number of indexed reads, never one per page, per collection or per citing row. It SHALL return at most `limit` citations (default 20, maximum 100), the exact count the caller may see, and a continuation when more remain. No other code path SHALL compute inbound citations.
 
 #### Scenario: A page cited by two rows and a plan item
 
 - **WHEN** two inventory rows link to a page and one plan item's `results` link to it
 - **THEN** `inbound_citations` for that page returns the three citations and the count 3
+
+#### Scenario: Many citing rows cost the reads of a few
+
+- **WHEN** a row-level policy decides each row of a collection, and 40 of its rows cite a page instead of 3
+- **THEN** the read runs the same statements, deciding the citing rows in one batch for the collection
 
 ### Requirement: Citations are visible only when both ends are visible
 
@@ -23,7 +28,7 @@ A citation SHALL be returned and counted only when the caller may read the citin
 #### Scenario: A withheld page answers like a missing one
 
 - **WHEN** a caller asks for the citations of a page that it may not read, and its twin asks for a page id that does not exist
-- **THEN** both replies are identical
+- **THEN** both replies are identical, while the index warms as well as once it is built
 
 ### Requirement: Each citation names its row, field and declared relation
 
@@ -84,10 +89,10 @@ A `link` field in a Records or Planning manifest MAY declare `relation`, naming 
 - **WHEN** recall returns a page that two rows cite
 - **THEN** the hit carries `cited_by_count` 2 and both rows
 
-#### Scenario: Ten hits cost one query
+#### Scenario: Ten hits cost the reads of one
 
 - **WHEN** a recall response holds ten page hits
-- **THEN** exactly one citation query runs for that response
+- **THEN** one probe and one range read of the citation index run for that response, as for a response with one hit
 
 ### Requirement: The duplicate-fact detector compares only linked pairs
 

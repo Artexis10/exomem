@@ -18,6 +18,7 @@ from test_collection_link_values import (
 )
 from test_collection_row_references import path
 from test_collection_store_writer import store as store  # noqa: F401
+from test_page_citations import publish
 
 from exomem import commands
 from exomem.collection_store import connection
@@ -27,9 +28,10 @@ ALPHA_REF = f"exomem://memory/{ALPHA}"
 
 
 @pytest.fixture
-def world(store, monkeypatch):
+def world(store, monkeypatch, corpus_cache_on):
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     page(store.root, "Notes/Alpha.md", "Alpha", ALPHA)
+    publish(store.root)
     store.create_collection(path("Log"), log_text(), why="declare", scaffold=False)
     return store
 
@@ -72,14 +74,20 @@ def test_a_scan_of_frontmatter_and_a_vault_without_a_store_carry_no_citations(wo
 
 
 def test_a_continuation_for_a_withheld_page_answers_exactly_like_one_for_a_missing_page(world):
+    """They answer alike while the index warms too: the state of either reply comes from the vault alone."""
     page(world.root, "Private/Secret.md", "Secret", HIDDEN)
+    publish(world.root)
     append(world, {"page": f"exomem://memory/{HIDDEN}"})
-    _ready(world)
     (world.root / "Knowledge Base/_access.yaml").write_text('excluded: ["Private/Secret.md"]\n')
     cursor = commands.page_citations_module._encode((LOG, "page", 1))
-    withheld = read(world, "Knowledge Base/Private/Secret.md", continuation=cursor)
-    missing = read(world, "Knowledge Base/Private/Nothing.md", continuation=cursor)
-    assert withheld == missing == {"cited_by": {"state": "ready", "items": [], "count": 0, "more": None}}
+
+    def withheld_and_missing():
+        return (read(world, "Knowledge Base/Private/Secret.md", continuation=cursor),
+                read(world, "Knowledge Base/Private/Nothing.md", continuation=cursor))
+
+    assert withheld_and_missing() == ({"cited_by": {"state": "warming"}},) * 2
+    _ready(world)
+    assert withheld_and_missing() == ({"cited_by": {"state": "ready", "items": [], "count": 0, "more": None}},) * 2
 
 
 def test_a_continuation_that_is_no_citation_cursor_is_refused_as_every_continuation_is(world):

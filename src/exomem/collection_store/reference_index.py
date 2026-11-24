@@ -13,6 +13,7 @@ names no collection (``collections.LINK_TARGET``); `link_match` spells its entri
 from __future__ import annotations
 
 import json
+import threading
 from collections import OrderedDict
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -319,6 +320,8 @@ def _vault():
 
 _link_cache: OrderedDict = OrderedDict()
 _LINK_CACHE = 256
+# Request threads share the cache; an OrderedDict reordered and trimmed from two threads at once can raise.
+_link_cache_lock = threading.Lock()
 
 
 def link_fields(conn) -> dict[str, tuple]:
@@ -332,7 +335,10 @@ def link_fields(conn) -> dict[str, tuple]:
             "SELECT c.collection_id, m.manifest_hash FROM collections c JOIN collection_manifests m "
             "ON m.collection_id=c.collection_id AND m.manifest_version=c.manifest_version").fetchall():
         key = (collection_id, digest)
-        links = _link_cache.get(key)
+        with _link_cache_lock:
+            links = _link_cache.get(key)
+            if links is not None:
+                _link_cache.move_to_end(key)
         if links is None:
             text, schema_json = conn.execute(
                 "SELECT m.manifest_text, m.schema_json FROM collections c JOIN collection_manifests m "
@@ -344,11 +350,10 @@ def link_fields(conn) -> dict[str, tuple]:
                 schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
                 links = tuple(d for d in collections.indexed_fields(schema, derived=data.get("derived") is True)
                               if isinstance(d, collections.LinkDeclaration))
-            if len(_link_cache) >= _LINK_CACHE:
-                _link_cache.popitem(last=False)
-            _link_cache[key] = links
-        else:
-            _link_cache.move_to_end(key)
+            with _link_cache_lock:
+                if len(_link_cache) >= _LINK_CACHE:
+                    _link_cache.popitem(last=False)
+                _link_cache[key] = links
         if links:
             found[collection_id] = links
     return found

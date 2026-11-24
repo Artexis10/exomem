@@ -12,6 +12,7 @@ cannot read the target collection gets the refusal for a collection that does no
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import closing
@@ -64,6 +65,38 @@ def row_released(session, lookup, item_key: str) -> bool:
         return subject is not None and operation.decision(subject).level >= 6
     except (ValueError, TypeError, collections.CollectionError):
         return False
+
+
+def rows_released(session, lookup, row_ids: Iterable[int]) -> set[int]:
+    """The rows of ``row_ids`` the caller may read in an admitted collection, each decided as `row_released` decides it.
+
+    One subject read serves every row, so the cost is the rows asked for, never a statement a row. A row
+    whose basis cannot be built is not released: when one stops the shared read, the rows it left are
+    decided one by one, so that row alone reads like a withheld one.
+    """
+    wanted = sorted(set(row_ids))
+    if lookup.uniform or not wanted:
+        return set(wanted)
+    operation = session._authorization
+    released, decided = set(), set()
+    session.check()
+    try:
+        with closing(governance.iter_subjects(session.connection, lookup.collection_id,
+                                              operation.logical_vault_id, row_ids=wanted,
+                                              include_held=False)) as subjects:
+            for subject in subjects:
+                session.check()
+                decided.add(subject.row_id)
+                if operation.decision(subject).level >= 6:
+                    released.add(subject.row_id)
+        return released
+    except (ValueError, TypeError, collections.CollectionError):
+        pass
+    left = [row_id for row_id in wanted if row_id not in decided]
+    keys = dict(session.connection.execute(
+        f"SELECT row_id, item_key FROM {lookup.source.items} WHERE row_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(left),)).fetchall())
+    return released | {row_id for row_id in left if row_id in keys and row_released(session, lookup, keys[row_id])}
 
 
 @dataclass(frozen=True, slots=True)

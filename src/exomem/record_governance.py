@@ -1131,7 +1131,8 @@ class LinkResolution:
 @dataclass(slots=True)
 class _LinkProjector:
     root: Path
-    manifest: collections.CollectionManifest
+    # None for a projector that only resolves pages (`page_with_identity`) and projects no row.
+    manifest: collections.CollectionManifest | None
     resolver: vault.WikilinkResolver
     memory_targets: Mapping[str, tuple[str, ...]]
     admitted: dict[str, bool]
@@ -1168,7 +1169,7 @@ class _LinkProjector:
     def create(
         cls,
         root: Path,
-        manifest: collections.CollectionManifest,
+        manifest: collections.CollectionManifest | None,
         *,
         policy: Any | None = None,
         allow_cold_index: bool = True,
@@ -1365,6 +1366,8 @@ class _LinkProjector:
         return complete
 
     def __call__(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        if self.manifest is None:
+            raise TypeError("a page-only link projector projects no row")
         projected = dict(values)
         for name, spec in self.manifest.schema.fields.items():
             if name not in projected:

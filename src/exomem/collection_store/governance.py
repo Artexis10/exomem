@@ -551,21 +551,23 @@ def subject_factory(conn: sqlite3.Connection, cid: str, logical_vault_id: str):
 
 
 def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, identity=None,
-                  view_path=None, row_key=None, include_held=True, batch_size=128,
+                  view_path=None, row_key=None, row_ids=None, include_held=True, batch_size=128,
                   query_order=False, retained=False) -> Iterator[CanonicalSubject]:
-    """Stream canonical metadata; a row key selects no manifest or held candidate.
+    """Stream canonical metadata; a row key or a set of row ids selects no manifest or held candidate.
 
+    ``row_ids`` selects the rows of a set from one statement, so a reader that decides many known rows
+    reads their subjects once instead of once a row.
     ``retained`` also yields a retracted row, which only a reader that judges that row's history or holds
     may ask for; every other caller sees the current rows of the ``items`` view.
     """
     if type(batch_size) is not int or not 1 <= batch_size <= 128:
         raise ValueError("canonical subject batches must contain 1 to 128 rows")
-    if sum(selector is not None for selector in (identity, view_path, row_key)) > 1:
+    if sum(selector is not None for selector in (identity, view_path, row_key, row_ids)) > 1:
         raise ValueError("canonical subject lookup must have one selector")
     (path, source_path, layout, view_mode, manifest_meta, declared, make,
      metadata, version, content_hash) = subject_factory(conn, cid, logical_vault_id)
     summary = view_mode == "summary"
-    if identity in (None, path) and row_key is None:
+    if identity in (None, path) and row_key is None and row_ids is None:
         yield make(path, None, path, "collection", metadata, version, content_hash, "manifest")
     item_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://{declared.item_type}/{cid}/") else None
     held_key = identity.rsplit("/", 1)[-1] if identity and identity.startswith(f"exomem://collection-held/{cid}/") else None
@@ -578,6 +580,8 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
         item_args = held_args = (view_path,)
     elif row_key is not None:
         item_filter, item_args = " AND item_key=?", (row_key,)
+    elif row_ids is not None:
+        item_filter, item_args = " AND row_id IN (SELECT value FROM json_each(?))", (json.dumps(list(row_ids)),)
     # Admission needs no result ordering; item keys follow the existing index
     # without a sorter whose spill files escape the private TEMP-table quota.
     item_order = "item_key" if query_order else "row_id"
@@ -595,7 +599,7 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                 policy_path = path if summary else source_path if layout == "markdown-log" else view_path
                 yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
                            declared.item_type, raw_metadata, row_version, payload, "row")
-    if not include_held or row_key is not None:
+    if not include_held or row_key is not None or row_ids is not None:
         return
     # Legacy summary corrections have no persisted floor; canonical source ownership supplies the same held basis.
     with closing(conn.execute(
@@ -1310,6 +1314,18 @@ class OperationAuthorization:
         if head is None:
             return None
         return self._materialize_summary_release(cid, self._summary_policy_release(cid, head), memo)
+
+    def summary_uniform(self, cid: str) -> bool:
+        """Whether one decision releases every row of a summary collection whole, proven without visiting its rows.
+
+        False for an items collection and wherever a policy can vary by row: the caller then decides
+        each row it reads, which costs what it reads instead of the collection's row count.
+        """
+        head = self.summary_manifest(cid)
+        if head is None:
+            return False
+        selection = self._summary_policy_release(cid, head)
+        return bool(selection.uniform_rows_complete) and all(decision.level >= 6 for _s, decision in selection.held)
 
     def _summary_policy_release(self, cid, head):
         """Share row variation, held decisions and representative admission with reporting."""

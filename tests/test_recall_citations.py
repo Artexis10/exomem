@@ -14,6 +14,7 @@ from test_collection_row_references import collection_text, path
 from test_collection_store_writer import store as store  # noqa: F401
 from test_context_catalogue import _built
 from test_governance_egress import _external, write_rule, write_scope
+from test_page_citations import publish
 from test_working_set_index import _seed_structure
 
 from exomem import commands, lexstore, page_citations
@@ -26,7 +27,7 @@ SLED_REF = f"exomem://memory/{ALPHA}"
 
 
 @pytest.fixture
-def world(store, monkeypatch):
+def world(store, monkeypatch, corpus_cache_on):
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     _seed_structure(store.root)
@@ -35,6 +36,7 @@ def world(store, monkeypatch):
     _built(store.root).close()
     lexstore.ensure_fresh(store.root)
     store.create_collection(path("Log"), log_text(), why="declare", scaffold=False)
+    publish(store.root)
     return store
 
 
@@ -87,6 +89,7 @@ def test_a_row_in_a_collection_the_caller_cannot_read_leaves_a_page_as_if_no_row
     """The cited page and a page nothing cites answer alike, on a page read and on a recall hit."""
     spare = "Notes/Cargo Sled Spare.md"
     page(world.root, spare, "Cargo Sled Spare", "00000000-0000-4000-8000-000000000199")
+    publish(world.root)
     world.create_collection(path("Other"), collection_text(OTHER_LOG, "Other", "label", "    label: {type: string, required: true}\n"
                                                            "    page: {type: link}\n"),
                             why="declare", scaffold=False)
@@ -107,9 +110,10 @@ def test_a_row_in_a_collection_the_caller_cannot_read_leaves_a_page_as_if_no_row
     assert "cited_by" not in sled_hit(hits) and "cited_by" not in uncited_hit
 
 
-def test_a_response_makes_one_citation_query_however_many_page_hits_it_has(world, monkeypatch):
+def test_a_response_reads_the_index_twice_however_many_page_hits_it_has(world, monkeypatch):
     for number in range(12):
         page(world.root, f"Notes/Sled {number:02}.md", f"Sled {number:02}", f"00000000-0000-4000-8000-0000000001{number:02}")
+    publish(world.root)
     append(world, {"page": "exomem://memory/00000000-0000-4000-8000-000000000105"}, key=K1)
     _ready(world)
     statements = []
@@ -124,7 +128,7 @@ def test_a_response_makes_one_citation_query_however_many_page_hits_it_has(world
     monkeypatch.setattr(runtime, "read_session", traced)
     hits = search(world, query="Sled")
     assert len(hits) > 10
-    assert sum("item_references r" in sql for sql in statements) == 1
+    assert sum("item_references r" in sql for sql in statements) == 2  # one probe and one read for every hit
     assert sum("cited_by_count" in hit for hit in hits) == 10
 
 

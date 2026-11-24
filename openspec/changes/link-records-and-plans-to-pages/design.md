@@ -67,7 +67,7 @@ Alternative rejected: a new `page` field type. `link` already exists, renders th
   - the existing backfill rebuilds it;
   - `item_reference_state` reports it as warming until it is built.
 - Title and path values are not indexed. The resolution that would index them can change with every page rename, and a derived index must be rebuildable from the rows alone.
-- `inbound_citations(ref, caller, limit, more)` is the only reader. It runs one indexed range read on `match`, filters by two-ended visibility, and returns at most `limit` citations (default 20, maximum 100) with an exact visible count and a continuation.
+- `inbound_citations(ref, caller, limit, more)` is the only reader. It probes the index once for the link fields that cite the asked refs, admits only those collections, and reads their entries in one indexed range read on `match`. Rows that need a row decision are decided in one batch per collection. It filters by two-ended visibility, and returns at most `limit` citations (default 20, maximum 100) with an exact visible count and a continuation.
   - Two-ended visibility: the caller must be able to read the row's collection and field, and the page.
   - Each citation carries the profile (`records` or `planning`), the collection title, the row's canonical ref and label, and the field.
   - It also carries the field's declared `relation`, when the manifest names one.
@@ -82,7 +82,8 @@ The single-store owner accepted this seam on 2026-11-24 with four conditions, ea
 
 ### D4. Backlinks and recall context
 
-- `read_page` returns `cited_by: {items, count, more, state}` from `inbound_citations`. `state` is `ready`, `warming` or `unavailable`. While the index warms, it reports `warming`, never an empty list.
+- `read_page` returns `cited_by: {items, count, more, state}` from `inbound_citations`. `state` is `ready`, `warming` or `unavailable`. While the index warms, it reports `warming`, never an empty list. The state comes from the vault alone, never from the page asked about.
+- A citation read never walks the vault to find a page. It borrows the published corpus generation, and with none to borrow it reports `unavailable`.
 - Page hits in `recall_context` and `search_memory` carry `cited_by_count` and at most three citing items. One `inbound_citations_batch(refs, caller)` call serves them, with one query for the whole hit list, never one per hit. The hits involved are the top 10 page hits of the response.
 - Rows and plan items reach their pages through the resolved link projection (`related` expansion and resolved titles).
 - A new Planning requirement clarifies the existing "Motivation is queryable and never becomes a relation or recall edge". It leaves that requirement unchanged and says:
@@ -126,8 +127,9 @@ The single-store owner accepted this seam on 2026-11-24 with four conditions, ea
 
 ## Risks / Trade-offs
 
-- **Recall gets heavier.** Each recall adds one indexed query. The proof is a query-count test (exactly one citation query per response) and a before/after latency run on a generated vault of 100,000 rows and 10,000 pages. The bounds are the Records load target and warm public p95 under 1 s.
+- **Recall gets heavier.** Each recall adds one index probe and one indexed range read. The proof is a query-count test (the same two citation statements per response, however many hits) and a before/after latency run on a generated vault of 100,000 rows and 10,000 pages. The bounds are the Records load target and warm public p95 under 1 s.
 - **Canonicalising on write changes stored bytes.** A title the agent wrote becomes a ref. The reply shows the resolved title, and history keeps the value as written.
+- **A page that many rows cite under a policy that varies by row costs one decision per citing row.** The rows are decided in one batch per collection, so the statement count stays fixed, but each decision costs what governance's decision costs. At 20,000 citing rows on one page the read takes about 1.3 s (tasks 1.9).
 - **Legacy title values stay unindexed until someone converts them.** Inspect reports how many there are, and D8 converts them on request.
 - **The literal detector misses paraphrases.** The candidate rule is precise enough that its review items stay small. A semantic pass would need a model call per pair, and an evaluation has to show it pays before it is added.
 

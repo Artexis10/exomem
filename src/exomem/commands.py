@@ -8860,7 +8860,7 @@ def _cited_by_continuation(vault_root: Path, page: str, token: str, *, conflicti
             get_page_module.spellings(page_names_module.resolve_page(vault_root, page, serve_stale=True)))).values()
         if ref), None)
     try:
-        answer = (page_citations_module.without_page(token) if ref is None
+        answer = (page_citations_module.without_page(vault_root, token) if ref is None
                   else page_citations_module.inbound_citations(ref, vault_root, limit=_CITED_BY_LIMIT, more=token))
     except ValueError as error:
         raise context_views_module.invalid_continuation() from error

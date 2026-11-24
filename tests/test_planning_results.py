@@ -12,6 +12,7 @@ from test_collection_row_references import path
 from test_collection_store_writer import CID as PLAN
 from test_collection_store_writer import KEY, manifest_path, manifest_text
 from test_collection_store_writer import store as store  # noqa: F401
+from test_page_citations import publish
 
 from exomem import page_citations
 from exomem import structured_collections as collections
@@ -24,9 +25,10 @@ PLAN_REF = f"exomem://plan/{PLAN}/{KEY}"
 
 
 @pytest.fixture
-def world(store, monkeypatch):
+def world(store, monkeypatch, corpus_cache_on):
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     page(store.root, "Notes/Alpha.md", "Alpha", ALPHA)
+    publish(store.root)
     store.create_collection(path("Log"), log_text(), why="declare", scaffold=False)
     declared = manifest_text("planning").replace(
         "    area: {type: string}\n",

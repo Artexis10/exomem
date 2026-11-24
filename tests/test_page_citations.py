@@ -23,11 +23,12 @@ from test_collection_row_references import collection_text, path
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import _external, write_rule, write_scope
 
-from exomem import page_citations
+from exomem import freshness, page_citations, record_governance, semantic_contract
 from exomem import structured_collections as collections
 from exomem.collection_store import connection
 from exomem.governance.principal import owner_principal, request_scope
 from exomem.query_engine import runtime
+from exomem.vault import walk_vault_md
 
 OTHER_LOG = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 ALPHA_REF = f"exomem://memory/{ALPHA}"
@@ -36,12 +37,22 @@ AWAY = "exomem://memory/99999999-9999-4999-8999-999999999999"
 
 
 @pytest.fixture
-def world(store, monkeypatch):
+def world(store, monkeypatch, corpus_cache_on):
     monkeypatch.setattr(connection, "store_path", lambda root: store.handle.path)
     page(store.root, "Notes/Alpha.md", "Alpha", ALPHA)
     page(store.root, "Notes/Beta.md", "Beta", BETA)
     store.create_collection(path("Log"), log_text(), why="declare", scaffold=False)
+    publish(store.root)
     return store
+
+
+def publish(root):
+    """Publish the corpus generation that a running service keeps current; a citation read borrows it to find pages.
+
+    The watcher's seed comes first, as a service's does, so the generation counts as live.
+    """
+    freshness.seed(root, "vault", ((str(found), freshness.stat_signature(found)) for found in walk_vault_md(root)))
+    semantic_contract.build_corpus_context(root)
 
 
 def cited(store, who=None, **arguments):
@@ -73,8 +84,11 @@ def test_a_warming_index_never_reads_as_an_empty_list(world):
 
 def test_a_withheld_page_answers_exactly_like_a_missing_one(world):
     page(world.root, "Private/Secret.md", "Secret", HIDDEN)
+    publish(world.root)
     append(world, {"page": f"exomem://memory/{HIDDEN}"})
     _ready(world)
+    with request_scope(owner_principal()):
+        assert page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)["count"] == 1
     (world.root / "Knowledge Base/_access.yaml").write_text('excluded: ["Private/Secret.md"]\n')
     with request_scope(owner_principal()):
         withheld = page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)
@@ -110,11 +124,9 @@ def test_a_withheld_row_of_a_collection_the_caller_can_read_is_absent_from_items
     assert seen["count"] == 1 and [item["label"] for item in seen["items"]] == ["c1"]
 
 
-def test_a_batch_reads_the_index_once_for_all_its_pages(world, monkeypatch):
-    append(world, {"page": ALPHA_REF}, key=K1)
-    append(world, {"page": BETA_REF, "pages": [ALPHA_REF]}, key=K2)
-    _ready(world)
-    statements = []
+def traced_statements(monkeypatch) -> list[str]:
+    """The statements every citation read runs from now on, in order."""
+    statements: list[str] = []
     opened = runtime.read_session
 
     @contextlib.contextmanager
@@ -124,10 +136,59 @@ def test_a_batch_reads_the_index_once_for_all_its_pages(world, monkeypatch):
             yield session
 
     monkeypatch.setattr(runtime, "read_session", traced)
+    return statements
+
+
+def test_a_batch_reads_the_index_twice_for_all_its_pages(world, monkeypatch):
+    """One probe finds the fields that cite any asked page, and one read lists their entries, however many pages."""
+    append(world, {"page": ALPHA_REF}, key=K1)
+    append(world, {"page": BETA_REF, "pages": [ALPHA_REF]}, key=K2)
+    _ready(world)
+    statements = traced_statements(monkeypatch)
     with request_scope(owner_principal()):
         replies = page_citations.inbound_citations_batch([ALPHA_REF, BETA_REF, AWAY], world.root, per_ref=5)
-    assert sum("item_references r" in sql for sql in statements) == 1
+    assert sum("item_references r" in sql for sql in statements) == 2
     assert {ref: reply["count"] for ref, reply in replies.items()} == {ALPHA_REF: 2, BETA_REF: 1, AWAY: 0}
+
+
+def test_a_read_runs_the_same_statements_however_many_governed_rows_cite_the_page(world, monkeypatch):
+    """A policy that decides rows one by one costs one subject read per collection, never a statement per citing row."""
+    def key(number):
+        return f"00000000-0000-4000-8000-{number:012d}"
+
+    for number in range(3):
+        append(world, {"page": ALPHA_REF}, key=key(number))
+    write_scope(world.root, paths="Unrelated/**")
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f'refs: ["{collections.record_ref(LOG, key(1))}"]\n')
+    write_rule(world.root, ceiling=0)
+    statements = traced_statements(monkeypatch)
+
+    def measured_read():
+        _ready(world)
+        cited(world, who=_external(), limit=1)  # warm the caches a running service keeps warm
+        statements.clear()
+        return cited(world, who=_external(), limit=1)["count"], len(statements)
+
+    few = measured_read()
+    for number in range(3, 40):
+        append(world, {"page": ALPHA_REF}, key=key(number))
+    many = measured_read()
+    assert (few[0], many[0]) == (2, 39)
+    assert few[1] == many[1]
+
+
+def test_with_no_published_corpus_to_borrow_a_read_is_unavailable_never_a_walk_or_an_empty_list(world, monkeypatch):
+    append(world, {"page": ALPHA_REF})
+    _ready(world)
+    freshness.clear()
+    semantic_contract.reset_corpus_context_cache()
+
+    def walked(*args, **kwargs):
+        raise AssertionError("a citation read walked the vault")
+
+    monkeypatch.setattr(record_governance._LinkProjector, "_walk_candidate_index", walked)
+    assert cited(world) == {"state": "unavailable"}
 
 
 def test_a_value_that_is_not_a_ref_is_unavailable_never_an_empty_list(world):
