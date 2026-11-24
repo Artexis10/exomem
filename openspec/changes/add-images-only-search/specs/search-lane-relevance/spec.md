@@ -17,13 +17,13 @@ The CLIP lane in `find` SHALL admit an image or video keyframe only when its sim
 
 #### Scenario: An uncalibrated population keeps the old lane
 
-- **WHEN** the CLIP index holds fewer rows than the minimum population
+- **WHEN** the CLIP index holds fewer rows than the minimum population, or its similarities are too uniform to calibrate
 - **THEN** the CLIP lane ranks its top images without the band
 - **AND** the trace reports the band as `uncalibrated`
 
 #### Scenario: A setting with no chance level switches the band off
 
-- **WHEN** the alpha setting is 0 or 1
+- **WHEN** the alpha setting lies outside the open interval (0, 1)
 - **THEN** the CLIP lane ranks its top images without the band and does not fail
 - **AND** the trace reports the band as `off`
 
