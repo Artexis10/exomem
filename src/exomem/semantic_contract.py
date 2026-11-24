@@ -4188,6 +4188,21 @@ def warm_corpus_context(vault_root: Path) -> None:
         publish_capture_inventory(root, witness, census=not witness.seeded)
 
 
+def warm_writer_enrichment(vault_root: Path) -> None:
+    """Fill the enrichment memo that a writer's preflight reads, for the registries it loads.
+
+    Without it the first write after a start enriches every page itself. A caller that may not see
+    every page writes no memo, so this builds one only where the owner's writes can read it.
+    """
+    root = Path(vault_root)
+    registry, language = corpus_registry_overrides(
+        root,
+        relation_registry.load_registry(root),
+        semantic_language_registry.load_registry(root),
+    )
+    build_corpus_context_with_census(root, registry=registry, language_registry=language)
+
+
 def build_corpus_context_with_census(
     vault_root: Path,
     *,
@@ -4577,8 +4592,10 @@ def _build_corpus_context_with_census(
             completed = flight.done.is_set()
             if not completed:
                 if warm:
-                    # Startup owns the build lifetime, not an interactive budget.
-                    completed = flight.done.wait()
+                    # Startup owns the build lifetime, not an interactive budget. A store-mode warm
+                    # runs as foreground work (`warmup.warm_all`), and a bulk pass may own the flight.
+                    with foreground_priority.outside_foreground():
+                        completed = flight.done.wait()
                 else:
                     assert join_deadline is not None
                     # Recursive handoffs share one interactive waiting budget.

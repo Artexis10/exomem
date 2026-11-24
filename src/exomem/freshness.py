@@ -1547,11 +1547,13 @@ def _project_recall_entries(
 
     while True:
         identity = recall_policy.recall_policy_identity(vault_root)
-        projected = {
-            sp: signature
-            for sp, signature in entries
-            if recall_policy.is_recall_candidate(vault_root, Path(sp))
-        }
+        # Both callers project a whole scope, so one read of the stored pages serves the pass.
+        with recall_policy.held_pass(vault_root):
+            projected = {
+                sp: signature
+                for sp, signature in entries
+                if recall_policy.is_recall_candidate(vault_root, Path(sp))
+            }
         if recall_policy.recall_policy_identity(vault_root) == identity:
             return projected, identity
 
