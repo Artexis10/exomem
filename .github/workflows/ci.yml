@@ -7,13 +7,10 @@ on:
     types: [opened, synchronize, reopened]
   schedule:
     - cron: "17 2 * * *"
+  # GitHub's merge queue runs what a push to main runs on main plus the queued pull requests.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch:
-    inputs:
-      queue:
-        description: Set only by the merge queue (scripts/merge_queue.py), which names the pull requests this candidate tests. Empty means a Full run
-        required: false
-        default: ""
-        type: string
 
 concurrency:
   group: ci-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && format('full-{0}', github.ref) || github.event.pull_request.number || github.ref }}
@@ -56,12 +53,15 @@ jobs:
           fetch-depth: 2
       - id: scope
         run: python3 scripts/release_evidence.py scope
-      # A push to main skips the core and harness shards when the merge queue passed them on this tree.
+      # A push to main skips the core and harness shards when GitHub's merge queue already
+      # passed this exact commit: the queue moves main to the merge group commit it tested.
       - id: queue
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/merge_queue.py tested
+        run: |
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success" --jq .total_count || echo 0)
+          echo "tested=$([ "${passed:-0}" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
       - id: docs-scope
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -1213,32 +1213,6 @@ jobs:
                 gh issue close "$number" --comment "Main CI is green again."$'\n\n'"$facts"
               done ;;
           esac
-
-  # A merge queue run (scripts/merge_queue.py) reports its result on each member
-  # pull request and wakes the queue. A run the workflow token dispatched raises
-  # no workflow_run event, so it wakes the queue itself.
-  merge-queue-verdict:
-    name: merge queue verdict
-    needs: gate
-    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.queue && startsWith(github.ref, 'refs/heads/merge-queue/') }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write
-      contents: write
-      statuses: write
-    steps:
-      # The verdict runs main's script, so a candidate that breaks it still gets a verdict.
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          sparse-checkout: scripts
-      - name: Post the result on each member and wake the queue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          QUEUE: ${{ inputs.queue }}
-          RESULT: ${{ needs.gate.result }}
-        run: python3 scripts/merge_queue.py verdict
 
   # A full run that release-evidence-automation.yml dispatched with
   # GITHUB_TOKEN raises no workflow_run event when it completes, so the full

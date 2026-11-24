@@ -204,7 +204,7 @@ def prepare(source: str) -> dict:
         "source": source,
         "branch": branch,
         "predecessor": previous,
-        "policy": evidence.release_pr_check_policy(),
+        "policy": evidence.main_check_policy(),
         "propose": pr is None,
         "merged": bool(pr and pr.get("merged")),
     }
@@ -411,7 +411,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
         "head": head,
         "version": version,
         "predecessor": previous,
-        "policy": evidence.release_pr_check_policy(),
+        "policy": evidence.main_check_policy(),
         "fallback_requested": bool(checkpoint and checkpoint.get("fallback_requested")),
     }
     if checkpoint and checkpoint.get("evidence"):
@@ -457,7 +457,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
     for _ in range(evidence.CHECK_POLLS):
         if not pr.get("merged"):
             evidence.release_pr(pr["number"], source, head)
-        intent["policy"] = evidence.release_pr_check_policy()
+        intent["policy"] = evidence.main_check_policy()
         checks = evidence.inherited_checks(head, intent["policy"])
         if checks is not None:
             if any(check["bucket"] != "pass" for check in checks):
@@ -737,12 +737,15 @@ def reconcile(record: dict) -> None:
         if refresh or prospective_tree(latest, current["head"]["sha"]) != expected:
             # Main can move freely. Only a conflict or changed generated tree needs fresh CI.
             continue
+        # The release bot bypasses main's merge queue: the cut controller already proved
+        # this reconcile content, and it waits seconds, not a queue run, for the squash.
         evidence.command(
             "gh",
             "pr",
             "merge",
             str(pr["number"]),
             "--squash",
+            "--admin",
             "--match-head-commit",
             current["head"]["sha"],
         )

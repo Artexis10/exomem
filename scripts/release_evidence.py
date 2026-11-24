@@ -21,10 +21,7 @@ RELEASE_BRANCH = "release-please--branches--main"
 FULL_EVENTS = ("workflow_dispatch", "schedule")
 # The cut controller pushes a release's post-release metadata to main from this branch family.
 RECONCILE_PREFIX = "release-reconcile/"
-# The merge queue's candidate branches and its commit status (scripts/merge_queue.py).
-MERGE_QUEUE_PREFIX = "merge-queue/"
 CUT_PREFIX = "release-cuts/"
-MERGE_QUEUE_CONTEXT = "merge queue"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
 # Release PR checks take about 2 minutes after a re-run; 20 minutes bounds a stuck one.
@@ -51,9 +48,8 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
             or (base.startswith(CUT_PREFIX) and head == f"release-please--branches--{base}")
         )
     )
-    # A merge queue dispatch (scripts/merge_queue.py) runs what a push to main runs, not Full.
-    queued = bool((event.get("inputs") or {}).get("queue"))
-    full = event_name in FULL_EVENTS and not queued
+    # A merge_group run (GitHub's merge queue) runs what a push to main runs, not Full.
+    full = event_name in FULL_EVENTS
     return {"full": full, "release": release, "reconcile": reconcile}
 
 
@@ -61,16 +57,11 @@ def full_dispatch_refusal(event_name: str, event: dict) -> str | None:
     """Full runs on main, on schedule and on release cuts, never on a feature branch.
 
     A Full run takes about 90 jobs; on a feature branch it holds the shared runner pool and
-    delays the merge queue and release cuts. A merge queue dispatch is not Full.
+    delays the merge queue and release cuts.
     """
     if event_name != "workflow_dispatch":
         return None
     branch = str(event.get("ref", "")).removeprefix("refs/heads/")
-    if (event.get("inputs") or {}).get("queue"):
-        # The queue input selects the push-to-main tier, so only the queue's own branches carry it.
-        if branch.startswith(MERGE_QUEUE_PREFIX):
-            return None
-        return f"Only a {MERGE_QUEUE_PREFIX} branch may pass the queue input, not {branch!r}."
     if branch == "main" or branch.startswith(CUT_PREFIX):
         return None
     return (
@@ -106,8 +97,6 @@ def runs(commit: str) -> list[dict]:
 def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     return (
         run.get("event") in FULL_EVENTS
-        # Merge queue runs are dispatches too, but run only what a push to main runs.
-        and not (run.get("head_branch") or "").startswith(MERGE_QUEUE_PREFIX)
         and run.get("path") == WORKFLOW
         and run.get("workflow_id") == workflow_id
         and (run.get("repository") or {}).get("full_name") == repository
@@ -348,15 +337,6 @@ def main_check_policy() -> list[dict]:
     if not policy:
         raise ValueError("main has no readable required-check policy; no cut can land")
     return sorted(policy, key=lambda check: (check["context"], check.get("app_id") or -1))
-
-
-def release_pr_check_policy() -> list[dict]:
-    """Main's required checks for a release PR, which lands on its cut branch, not main.
-
-    The merge queue gates only what lands on main and never reads a PR on another
-    base, so its status never appears on a release PR. Full evidence covers that tree.
-    """
-    return [check for check in main_check_policy() if check["context"] != MERGE_QUEUE_CONTEXT]
 
 
 def inherited_checks(head: str, policy: list[dict]) -> list[dict] | None:

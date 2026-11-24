@@ -5,8 +5,8 @@ modules instead, and the repository-wide guard modules that
 `tests/pr_guard_modules.txt` lists: core modules on every runtime that Full
 covers, and harness modules (those listed in `tests/harness_modules.txt`) on
 the floor runtime, the first one listed. A push to main runs every shard of
-both tiers on the floor runtime, unless the merge queue (`scripts/merge_queue.py`)
-already passed every shard on the same tree, and a Full run (`release_evidence.FULL_EVENTS`)
+both tiers on the floor runtime, unless GitHub's merge queue already passed
+every shard on the same commit (a successful `merge_group` run), and a Full run (`release_evidence.FULL_EVENTS`)
 runs every shard on every runtime. A pull request whose history this script
 cannot compare runs every shard on the floor runtime.
 
@@ -218,7 +218,7 @@ def main(omitted: str) -> int:
                 core_shards=int(os.environ["CORE_SHARDS"]),
                 harness_shards=int(os.environ["HARNESS_SHARDS"]),
             )
-            # The merge queue already ran every shard on this exact tree (scripts/merge_queue.py tested).
+            # GitHub's merge queue already ran every shard on this exact commit.
             queue_tested = os.environ.get("QUEUE_TESTED") == "true" and not full
             if queue_tested:
                 core, harness = [], []
@@ -229,7 +229,7 @@ def main(omitted: str) -> int:
     if summary and os.environ.get("QUEUE_TESTED") == "true" and os.environ.get("FULL") == "false":
         with open(summary, "a", encoding="utf-8") as handle:
             handle.write(
-                "The merge queue passed every core and harness shard on this exact tree, "
+                "The merge queue passed every core and harness shard on this exact commit, "
                 "so this run skips them.\n"
             )
     if only_docs and summary:

@@ -210,7 +210,7 @@ def test_nightly_full_runs_store_and_upload_refreshed_durations(
     job = _workflow()["jobs"][job_id]
     command = _run_step(job)["run"]
     store = " ".join(command.split())
-    # The scope job's Full decision, so a merge queue dispatch never stores durations.
+    # The scope job's Full decision, so a merge_group run never stores durations.
     assert "${{ needs.scope.outputs.full == 'true' && '--store-durations --clean-durations' || '' }}" in store
 
     durations_step = next(
@@ -1108,13 +1108,12 @@ def test_superseded_feedback_runs_cancel_and_one_stable_gate_covers_both_tiers()
     # quality is the shared engineering-practices check, kept out of the required gate so the
     # required checks stay unchanged; the merge guard reads it. The push-run
     # cancel is a best-effort saving that must not decide evidence, and the tracking
-    # issue and the merge queue verdict only report the gate's result.
+    # issue only reports the gate's result.
     assert set(gate["needs"]) == set(workflow["jobs"]) - {
         "gate",
         "release-evidence-landed",
         "cancel-superseded-push-run",
         "main-failing-issue",
-        "merge-queue-verdict",
         "quality",
     }
     assert {"core-tests", "harness-tests"} <= set(gate["needs"])
@@ -1422,3 +1421,38 @@ def test_full_package_receipt_contract_has_the_required_generator_checks() -> No
         "tests/test_plugin_sync.py::test_manifest_matches_apart_from_the_version",
         "tests/test_plugin_sync.py::test_plugin_version_matches_the_selected_release",
     } <= selectors
+
+
+def test_every_required_check_runs_in_the_merge_queue():
+    """Catches a required check that never reports on a merge group, which strands every queued pull request."""
+    title = yaml.safe_load((ROOT / ".github/workflows/pr-title.yml").read_text())
+    workflow = _workflow()
+    # PyYAML reads the bare `on` key as True.
+    assert "merge_group" in workflow[True]
+    assert "merge_group" in title[True]
+    assert all("if" not in job for job in title["jobs"].values())
+
+
+@pytest.mark.parametrize("tested,full,shards", [("true", "false", 0), ("false", "false", 24), ("true", "true", 48)])
+def test_a_queue_tested_push_drops_only_the_core_and_harness_shards(tmp_path, tested, full, shards):
+    """Catches a Full run losing shards because the merge queue passed the same commit."""
+    output = tmp_path / "output"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts/ci_change_scope.py"), "the example check"],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "EVENT_NAME": "push",
+            "FULL": full,
+            "QUEUE_TESTED": tested,
+            "FULL_PYTHON_VERSIONS": '["3.11", "3.13"]',
+            "CORE_SHARDS": "24",
+            "HARNESS_SHARDS": "6",
+            "GITHUB_OUTPUT": str(output),
+        },
+        check=True,
+    )
+    decision = dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+    assert len(json.loads(decision["core_matrix"])) == shards
+    assert len(json.loads(decision["harness_matrix"])) == shards // 4
