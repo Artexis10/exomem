@@ -27,7 +27,7 @@ from exomem import freshness, page_citations, record_governance, semantic_contra
 from exomem import structured_collections as collections
 from exomem.collection_store import connection
 from exomem.governance.principal import owner_principal, request_scope
-from exomem.query_engine import runtime
+from exomem.query_engine import reference_resolution, runtime
 from exomem.vault import walk_vault_md
 
 OTHER_LOG = "ffffffff-ffff-4fff-8fff-ffffffffffff"
@@ -122,6 +122,27 @@ def test_a_withheld_row_of_a_collection_the_caller_can_read_is_absent_from_items
     write_rule(world.root, ceiling=0)
     seen = cited(world, who=_external())
     assert seen["count"] == 1 and [item["label"] for item in seen["items"]] == ["c1"]
+
+
+def test_a_reader_whom_no_row_rule_names_counts_every_row_without_deciding_one(world, monkeypatch):
+    """The scope that names one row carries a rule for the external audience only, so for the owner no row differs."""
+    for key in (K1, K2, K3):
+        append(world, {"page": ALPHA_REF}, key=key)
+    _ready(world)
+    write_scope(world.root, paths="Unrelated/**")
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f'refs: ["{collections.record_ref(LOG, K2)}"]\n')
+    write_rule(world.root, ceiling=0)
+    decided = []
+    batch = reference_resolution.rows_released
+
+    def counted(session, lookup, row_ids):
+        decided.append(len(row_ids))
+        return batch(session, lookup, row_ids)
+
+    monkeypatch.setattr(reference_resolution, "rows_released", counted)
+    assert cited(world)["count"] == 3 and decided == []
+    assert cited(world, who=_external())["count"] == 2 and decided == [3]
 
 
 def traced_statements(monkeypatch) -> list[str]:

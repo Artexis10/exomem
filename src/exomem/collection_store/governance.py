@@ -1346,9 +1346,10 @@ class OperationAuthorization:
                 held.append((subject, self.decision(subject)))
         container = tokens.container_hash(cid, generation, audit_head)
         prefix = f"exomem://{item_type}/{cid}/"
-        varies = (self._summary_rows_vary(cid, prefix)
-                  or any(identity.startswith(prefix) for identity in self.grants)
-                  or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        varying = self._summary_varying_scopes(cid, prefix)
+        named = (any(identity.startswith(prefix) for identity in self.grants)
+                 or any(cid in tombstone.casefold() for tombstone in self.tombstones))
+        varies = bool(varying) or named
         derived = self.conn.execute("SELECT derived FROM collections WHERE collection_id=?", (cid,)).fetchone()[0]
         derived_rows = None
         uniform_rows_complete = None
@@ -1374,6 +1375,8 @@ class OperationAuthorization:
             if first is not None:
                 sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
                 uniform_rows_complete = self.decision(sample).level >= 6
+        elif not named and self._released_in_any_scopes(cid, prefix, varying):
+            uniform_rows_complete = True
         return _SummaryPolicyRelease(manifest, decision, prefix, tuple(held), container,
                                      uniform_rows_complete, derived_rows)
 
@@ -1418,23 +1421,59 @@ class OperationAuthorization:
         return (selection.uniform_rows_complete
                 and all(decision.level >= 6 for _subject, decision in selection.held))
 
-    def _summary_rows_vary(self, cid: str, prefix: str) -> bool:
-        """Whether a configured scope can select some summary rows and not others.
+    def _summary_varying_scopes(self, cid: str, prefix: str) -> tuple[str, ...]:
+        """The configured scopes that can select some summary rows and not others.
 
         Rows share the manifest's path, projects and type. They differ only by
         their own ref, and by tags or classes taken from a declared ``tags`` or
         ``classes`` field (``row_metadata``), so a tag or class selector varies
         only where some manifest version of this collection declared one.
         """
-        scopes = self.policy.scopes.values()
-        if any(ref.startswith(prefix) for scope in scopes for ref in (*scope.refs, *scope.exclude_refs)):
-            return True
-        if not any(scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes for scope in scopes):
+        scopes = self.policy.scopes
+        varying = {scope_id for scope_id, scope in scopes.items()
+                   if any(ref.startswith(prefix) for ref in (*scope.refs, *scope.exclude_refs))}
+        selecting = {scope_id for scope_id, scope in scopes.items()
+                     if scope.tags or scope.classes or scope.exclude_tags or scope.exclude_classes}
+        if selecting - varying and self.conn.execute(
+                "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
+                "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
+        ).fetchone() is not None:
+            varying |= selecting
+        return tuple(sorted(varying))
+
+    def _released_in_any_scopes(self, cid: str, prefix: str, varying: tuple[str, ...]) -> bool:
+        """Whether this reader may read every summary row however the ``varying`` scopes place it.
+
+        A row's decision reads its scopes only through the meet of each scope's own decision and the
+        connector's denial of any of them; every other input is the same for every row. So when the
+        first row is released, and so are each varying scope alone and a row in no scope, every row is.
+        A rule that names a row for another audience then costs this reader no row decision. A write
+        reads its capture membership as a whole, so only a read is decided this way.
+        """
+        if self.mutation:
             return False
-        return self.conn.execute(
-            "SELECT 1 FROM collection_manifests WHERE collection_id=? AND (json_type(schema_json,'$.fields.tags') "
-            "IS NOT NULL OR json_type(schema_json,'$.fields.classes') IS NOT NULL) LIMIT 1", (cid,),
-        ).fetchone() is not None
+        first = self.conn.execute("SELECT item_key FROM items WHERE collection_id=? ORDER BY row_id LIMIT 1",
+                                  (cid,)).fetchone()
+        if first is None:
+            return True
+        sample = next(iter(subjects(self.conn, cid, self.logical_vault_id, identity=prefix + first[0])))
+        if self.decision(sample).level < 6:
+            return False
+        return all(self._scopes_released(sample.basis, scope_ids)
+                   for scope_ids in ((), *((scope_id,) for scope_id in varying)))
+
+    def _scopes_released(self, basis, scope_ids: tuple[str, ...]) -> bool:
+        """Whether a read of a subject with ``basis`` in exactly ``scope_ids`` is released, as `_subject_decision` decides."""
+        try:
+            ceiling = connector_boundary.decide_scopes(self.root, self.who, scope_ids, compiled=self.policy,
+                                                       strict=True)
+        except connector_boundary.UNDECIDED:
+            return False
+        if ceiling.level < 6:
+            return False
+        scope_ids, effective = subject_policy(basis, scope_ids, self.policy)
+        return decide(scope_ids, audience=self.who.audience_id, purpose=self.purpose, policy=effective,
+                      active_grants=list(self.policy.grants)).level >= 6
 
     def manifest_subject(self, cid: str) -> CanonicalSubject:
         """The collection's manifest subject, from one point read per read operation.
