@@ -367,7 +367,8 @@ class LocalRuntimeActivation:
                 RECALL_SEED_WAIT_SECONDS,
             )
             return
-        if not seeded:
+        # The seed may have ended successfully just after the wait ran out: read its result again.
+        if not seeded and not watcher.wait_until_seeded(timeout=0):
             log.warning(
                 "file watcher did not establish both recall projections; "
                 "switching this process to exact walk-backed recall"

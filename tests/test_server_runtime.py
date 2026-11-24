@@ -584,12 +584,59 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
         activation._stop_background_workers()
         readiness.reset()
 
-    assert observed_timeouts == [server_runtime.RECALL_SEED_WAIT_SECONDS]
+    assert observed_timeouts[0] == server_runtime.RECALL_SEED_WAIT_SECONDS
     assert 0 < server_runtime.RECALL_SEED_WAIT_SECONDS <= 180
     assert managed_at_compute == [False]
     assert "watcher-stop" in calls
     assert calls.count("graph") == 1
     assert calls.count("media") == 1
+
+
+def test_a_seed_that_succeeds_as_the_wait_ends_keeps_its_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The seed's result is read after it ends, so a success at the deadline is not taken for a failure."""
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    managed_at_compute: list[bool] = []
+
+    class Watcher:
+        seeds_recall_projections = True
+        seed_finished = False
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            if timeout:  # the bounded wait runs out, and the seed then ends successfully
+                self.seed_finished = True
+                return False
+            return self.seed_finished
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: Watcher())
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root, **_kwargs: managed_at_compute.append(readiness.runtime_managed()),
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(Path("unused-vault"))
+    try:
+        activation._activate()
+        kept = activation.file_watcher is not None
+    finally:
+        activation._stop_background_workers()
+        readiness.reset()
+
+    assert kept
+    assert managed_at_compute == [True]
 
 
 def test_store_mode_activation_keeps_its_importer_when_the_first_sweep_outlasts_the_seed_wait(
