@@ -2302,10 +2302,15 @@ def _find_rich_metadata_line(
         line = line_by_number.get(number)
         if line is None:
             continue
-        match = _RICH_METADATA_RE.match(line.text)
-        if match is not None and semantic_blocks.normalize_label(match.group("key")) == key:
+        if rich_metadata_key(line.text) == key:
             return line
     return None
+
+
+def rich_metadata_key(line: str) -> str | None:
+    """The schema key that a rich unit's metadata row names (`- Category: x` names `category`), else None."""
+    match = _RICH_METADATA_RE.match(line)
+    return None if match is None else semantic_blocks.normalize_label(match.group("key"))
 
 
 def _normalize_rich_diagnostics(

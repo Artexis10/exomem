@@ -1196,10 +1196,9 @@ def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
         if index == 0:
             fallback = position
             continue
-        meta = semantic_units._RICH_METADATA_RE.match(line)
-        if meta is None:
+        key = semantic_units.rich_metadata_key(line)
+        if key is None:
             break
-        key = meta.group("key").strip().casefold().replace(" ", "_").replace("-", "_")
         if key == "category":
             return (position, position, f"- id: {anchor}\n")
     return (fallback, fallback, f"- id: {anchor}\n")
