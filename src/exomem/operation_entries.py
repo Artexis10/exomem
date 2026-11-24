@@ -365,7 +365,7 @@ _REBASELINE_FIELDS = (
     "collection", "expected_manifest_hash", "expected_container_hash",
     "acknowledged_gap_codes", "why",
 )
-_RESTRUCTURE_FIELDS = ("collection", "steps", "why", "preview", "undo", "origin", "automatic")
+_RESTRUCTURE_FIELDS = ("collection", "steps", "why", "preview", "undo", "origin", "automatic")  # nosemgrep: ep-word-set -- the closed argument names of the restructure operation, which its tool schema fixes.
 # An inspection pages the collection's shape history by `limit` and `continuation`; the inventory lists retired collections on `include_retired`.
 _INSPECT_FIELDS = ("collection", "limit", "continuation", "include_retired")
 

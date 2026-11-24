@@ -3396,8 +3396,9 @@ def valid_planning_receipt(value: Any) -> bool:
     if (
         value.get("_plan_receipt") != _PLAN_RECEIPT_MARKER
         or value.get("receipt_version") != _RECORD_RECEIPT_VERSION
-        # nosemgrep: ep-word-membership -- the closed Planning receipt operations. `retract` is the store's own: a
-        # restructure that moves an item out of a collection retracts it there, and no Planning action returns it.
+        # `retract` is the store's own: a restructure that moves an item out of a collection retracts it there, and
+        # no Planning action returns it.
+        # nosemgrep: ep-word-membership -- the closed Planning receipt operations, which the receipt version fixes.
         or operation not in {"create", "add", "update", "triage", "retract"}
         or not _normalized_uuid(value.get("collection_id"))
         or not isinstance(value.get("affected_paths"), list)

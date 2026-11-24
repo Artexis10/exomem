@@ -99,9 +99,9 @@ MAX_STEPS = 16
 # path stayed inside it, but through the service a merge held up to 0.58 s on a laptop at load 13-14, nearly all of
 # it CPU: the same merge took 0.31-0.54 s of CPU across three runs. 256 keeps that worst case inside the budget.
 MAX_REWRITTEN_ROWS = 256
-# The scalar types that carry no extra declaration (enum values, items, properties), so a field of one can be
-# added or retyped by name and type alone. The manifest schema fixes the type names.
-_SCALAR_TYPES = ("string", "integer", "number", "boolean", "date", "datetime")
+# The scalar types that carry no extra declaration, so a field of one can be added or retyped by name and type alone:
+# every presentation scalar but `enum`, which needs its values, and `link`, which needs its target.
+_SCALAR_TYPES = tuple(sorted(collections._PRESENTATION_SCALAR_TYPES - {"enum", "link"}))
 _ROWS_NAMED = 10
 _FIELDS = ("item_schema", "fields")
 
