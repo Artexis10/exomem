@@ -703,9 +703,11 @@ class ReleaseCache:
         #: the proof holds only at that exact pair: this connection's writes, another connection's commit, a
         #: schema change and a changed policy, access file or tombstone each move it.
         self.render_proofs = OrderedDict()
-        #: (path, sha256 of its bytes or None, the operation's release inputs) -> (projection decision,). A
-        #: decision reads the store, those bytes and those inputs alone, so it holds until the store may have
-        #: changed: every write of this connection except a collection-free one (`begin`) drops them all.
+        #: (path, sha256 of its bytes or None, the operation's release inputs) -> (projection decision,
+        #: the data and schema versions when it was made). A decision reads the store, those bytes and
+        #: those inputs alone, so it holds until the store may have changed: every write of this connection
+        #: except a collection-free one (`begin`) drops them all, and a commit of another connection moves
+        #: the versions it holds, even one that a rollback's restamp hides from `check` (`finish`).
         self.projections = OrderedDict()
         self.pending = None
         self.replacements = {}
@@ -2016,7 +2018,8 @@ class OperationAuthorization:
         cache.check()
         # A write transaction that changed a collection has not dropped the kept decisions yet (`finish`).
         served = cache.pending is None or (cache.free and not cache.pending)
-        if key is not None and served and (kept := cache.projections.get(key)) is not None:
+        if (key is not None and served and (kept := cache.projections.get(key)) is not None
+                and kept[1] == cache._stamp()[1:]):
             cache.projections.move_to_end(key)
             return kept[0]
         # Read before deciding, so a write that lands meanwhile leaves this decision unkept.
@@ -2029,7 +2032,7 @@ class OperationAuthorization:
         # stamp and the store, this connection's or another's, stayed there throughout.
         if (key is not None and keepable and self.undecided == undecided and cache.pending is None
                 and not cache.unmanaged and stamp == cache.observed == cache._stamp()):
-            cache._remember(cache.projections, key, (decision,), _MAX_CACHED_SUBJECTS)
+            cache._remember(cache.projections, key, (decision, stamp[1:]), _MAX_CACHED_SUBJECTS)
         return decision
 
     def _kept_projection_key(self, path, digest):
@@ -2038,9 +2041,10 @@ class OperationAuthorization:
         A session reads time and its own grants, and a failed snapshot decides nothing, so neither
         keeps one; nor does an operation on a caller's own ownership proof. The inputs are this
         operation's own snapshot: the caller, the policy, the access file, the tombstones, the
-        purpose, the connector ceiling and the registry assignment. Two more live outside the store:
-        the Planning values that a manifest parse reads (`field_manifest`), and the ownership binding
-        and admitted collections, which the enrollment and the coordinator's fence decide.
+        purpose, the connector ceiling, the registry assignment and the caller's unrestricted access.
+        Two more live outside the store: the Planning values that a manifest parse reads
+        (`field_manifest`), and the ownership binding and admitted collections, which the enrollment
+        and the coordinator's fence decide.
         """
         if (self.context is not None or self.failed or self.authority is not None
                 or self._ownership_proof is not None):
@@ -2052,7 +2056,9 @@ class OperationAuthorization:
                 proof = self.projection_ownership()
                 inputs = (self.who, self._release_dependency(), membership.subject_inputs(self.root, self.policy),
                           PlanningValues(self.root, server_side=True).admitted_dependency(),
-                          proof.binding, proof.admitted)
+                          proof.binding, proof.admitted,
+                          # A quarantined hold, or one whose item is unreadable, is the unrestricted owner's.
+                          raw_protection.has_unrestricted_access(self.root, self.who))
                 hash(inputs)
             except (connector_boundary.BoundaryUnavailable, OpError, TypeError):
                 # The decision itself meets the same input and refuses as before; only keeping stops here.
