@@ -76,7 +76,7 @@ The restructure SHALL record the inverse steps, each moved row's origin, and bot
 - **THEN** the server refuses naming the colliding rows, and the collection keeps its current shape and every row
 
 ### Requirement: A restructure commits within one bounded call
-The leaf SHALL reuse the store's manifest versions and transactions on a store vault, and the collection's audit chain on a file-only vault. One call SHALL write and retract at most 256 rows together, a moved row counting twice, and reach a collection of at most 6,000 current rows, so that its one transaction stays inside the Records hold budget. A larger restructure SHALL refuse `RESTRUCTURE_TOO_MANY_ROWS`, naming the row count and a way forward, and change nothing.
+The leaf SHALL reuse the store's manifest versions and transactions on a store vault, and the collection's audit chain on a file-only vault. One call SHALL write and retract at most 256 rows together, a moved row counting twice, and reach a collection of at most 4,000 current rows, so that its one transaction stays inside the Records hold budget. A larger restructure SHALL refuse `RESTRUCTURE_TOO_MANY_ROWS`, naming the row count and a way forward, and change nothing.
 
 #### Scenario: A restructure larger than one call is refused
 - **WHEN** a restructure would rewrite 600 rows of a store collection
@@ -84,7 +84,7 @@ The leaf SHALL reuse the store's manifest versions and transactions on a store v
 
 #### Scenario: A collection larger than one call reshapes is refused before a row loads
 - **WHEN** an agent retitles or renames a field of a store collection that holds 20,000 current rows
-- **THEN** the server refuses `RESTRUCTURE_TOO_MANY_ROWS` naming 20,000 rows and the 6,000 maximum, after one row count and before it loads a row, and the collection is unchanged
+- **THEN** the server refuses `RESTRUCTURE_TOO_MANY_ROWS` naming 20,000 rows and the 4,000 maximum, after one row count and before it loads a row, and the collection is unchanged
 
 ### Requirement: Retiring a collection takes it off the agent's surfaces
 `retire` SHALL keep a collection's manifest, rows and history. A retired collection SHALL leave `search_memory`, `recall_context`, the Records routing advisory, the `collection_candidate` finding and the default inventory. `restore` SHALL return the collection to every surface it left.

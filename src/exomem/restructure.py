@@ -106,9 +106,11 @@ MAX_REWRITTEN_ROWS = 256
 # Measured on 2026-11-24 with `uv run python scripts/measure-restructure-hold.py ROWS --repeats 3` on a laptop at
 # load 3.6-3.9, a store without a marker, each step with its undo: the worst hold at 4,000 rows was 0.363 s, at 6,000
 # rows 0.454 s (a split; a rename 0.369 s, a retype 0.373 s, a merge 0.316 s, a retitle 0.243 s) and at 8,000 rows
-# 0.543 s. 6,000 is the largest size measured that stays inside the budget. A collection past it is refused after one
-# count, which costs 0.3 ms at 20,000 rows, where the same retitle held the writer 0.40 s and the same rename 0.88 s.
-MAX_COLLECTION_ROWS = 6000
+# 0.543 s. The bound is 4,000, not 6,000: at 384 rewritten rows on 2026-11-23, a merge held 0.576 s through the service
+# against at most 0.472 s on a store without a marker, about a fifth longer, which would take 0.454 s past the budget;
+# 4,000 keeps 0.363 s inside it. A collection past the bound is refused after one count, which costs 0.3 ms at
+# 20,000 rows, where the same retitle held the writer 0.40 s and the same rename 0.88 s.
+MAX_COLLECTION_ROWS = 4000
 # The scalar types that carry no extra declaration, so a field of one can be added or retyped by name and type alone:
 # every presentation scalar but `enum`, which needs its values, and `link`, which needs its target.
 _SCALAR_TYPES = tuple(sorted(collections._PRESENTATION_SCALAR_TYPES - {"enum", "link"}))
