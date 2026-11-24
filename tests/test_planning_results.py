@@ -111,3 +111,14 @@ def test_motivation_declared_with_link_items_stays_memory_refs_only_and_is_cited
     _ready_both(world)
     [cited] = citations_of(world, ALPHA_REF)["items"]
     assert (cited["ref"], cited["field"]) == (PLAN_REF, "motivation")
+
+
+def test_an_update_that_names_the_stored_result_by_its_title_is_refused_as_no_change(world):
+    """The title becomes the ref already stored, so committing it would add a version that changes nothing."""
+    added = plan_item(world, results=[ALPHA_REF])
+    guards = world.inspect_collection(PLAN)["lifecycle_guards"]
+    with pytest.raises(collections.CollectionError, match="does not change authored state"):
+        world.update_record(
+            PLAN, item_key=KEY, changes={"results": ["Alpha"]}, expected_item_version=added["after_item_hash"],
+            expected_container_hash=guards["expected_container_hash"], why="same result")
+    assert world._item(PLAN, KEY)["row_version"] == 1

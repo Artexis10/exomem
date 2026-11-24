@@ -144,9 +144,8 @@ def recheck_native(writer, candidate):
             raise connection.CollectionStoreError("COLLECTION_STORE_INPUT_CHANGED", "detached source changed after observation")
 
 
-def _canonical_links(writer, manifest, candidate, *, written=None):
+def _canonical_links(links, candidate, *, written=None):
     """Store each written link value as its page's stable ref; the request keeps what the caller supplied."""
-    links = link_values.for_write(writer, manifest)
     if links is not None:
         candidate.values = links.apply(candidate.values, written=written)
         candidate.link_notes = links.notes()
@@ -186,7 +185,7 @@ def append(writer, row, manifest, declared, arguments):
         writer._item(manifest.collection_id, key), resumed, held_basis, {})
     try:
         candidate.values = writer._validate(manifest, declared, key, values)
-        _canonical_links(writer, manifest, candidate)
+        _canonical_links(link_values.for_write(writer, manifest), candidate)
         candidate.body, _ = records._normalize_item_origin(writer.root, manifest, key=key, values=candidate.values,
             body=body, prior_body=None, item_path=lambda: None, render=lambda value: value,
             prepare_inputs=False, _canonical_owner=True)
@@ -239,6 +238,10 @@ def update(writer, row, manifest, declared, arguments):
     for name in delete_fields:
         final.pop(name, None)
     final.update(changes)
+    # The no-change guard compares what would be stored: a title that names the page a stored ref names is no change.
+    links = link_values.for_write(writer, manifest)
+    if links is not None:
+        final = links.apply(final, written=changes)
     final_body = before["body"] if body is None else body
     records._validate_body(final_body)
     if declared.kind == "intended" and final == old_values and final_body == before["body"]:
@@ -268,7 +271,7 @@ def update(writer, row, manifest, declared, arguments):
                         before["row_version"], before["payload_hash"]))
             if projection and projection[0] == hashlib.sha256(rendered.encode()).hexdigest():
                 raise collections.CollectionError("NOOP_RECORD_PRESENTATION", "managed presentation is already current")
-        _canonical_links(writer, manifest, candidate, written=changes)
+        _canonical_links(links, candidate, written=changes)
         writer._twins(manifest.collection_id, key, _natural_key(manifest, candidate.values))
         candidate.body, _ = records._normalize_item_origin(writer.root, manifest, key=key, values=candidate.values,
             body=final_body, prior_body=before["body"], item_path=lambda: None, render=lambda value: value,
