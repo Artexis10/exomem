@@ -5134,11 +5134,10 @@ def _wait_out_write_warmup(
     started = time.monotonic()
     from . import write_intake
 
-    replay_stop = write_intake.replay_stop_event()
     try:
         while warming is not None:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or replay_stop is not None and replay_stop.is_set():
+            if remaining <= 0 or write_intake.replay_stopping():
                 break
             # Polled, not one long wait: a warm that finishes without marking
             # this component also ends the gate (should_defer turns false).
@@ -5232,7 +5231,7 @@ class _FairCaptureQueue:
         replay_stop = write_intake.replay_stop_event()
         with self._condition:
             while True:
-                if replay_stop is not None and replay_stop.is_set():
+                if write_intake.replay_stopping():
                     return False
                 if self._line[0] is ticket:
                     return True
@@ -7957,12 +7956,18 @@ class LeaseManager:
 
         def extend(completion_deadline: float) -> float | None:
             # The store has not taken the write, so it never ran: it keeps its place while its wait allows.
-            if not wait.take_slot():
+            from . import write_intake
+
+            if write_intake.replay_stopping() or not wait.take_slot():
                 return None
-            return min(
+            later = min(
                 wait.deadline,
                 completion_deadline - max(wait.last_attempt_seconds, self._mutation_timeout_seconds),
             )
+            if write_intake.replay_stop_event() is not None:
+                # A replay extends one poll at a time, so the queue asks again soon and sees a stop.
+                later = min(later, time.monotonic() + _REPLAY_STOP_POLL_SECONDS)
+            return later
 
         def run() -> Any:
             return func(command, *injected, **call_kwargs)

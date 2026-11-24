@@ -388,6 +388,12 @@ def replay_stop_event() -> threading.Event | None:
     return None if replay is None else replay.stop
 
 
+def replay_stopping() -> bool:
+    """Whether this thread replays a queued save whose drainer is stopping; every dispatcher wait ends then."""
+    stop = replay_stop_event()
+    return stop is not None and stop.is_set()
+
+
 def mark_replay_reached_commit() -> None:
     """Record, before a queued save's replay writes its first canonical byte, that it reached its commit.
 
@@ -968,7 +974,10 @@ def _replay(vault_root: Path, claim: _Claim, *, stop: threading.Event | None = N
                 # Before the replay closes: its work may still commit late, and must find the mark.
                 _mark_uncertain(replay)
             return (QUEUED, code)
-        if stop is not None and stop.is_set() and refusal is not None and refusal.get("committed") is False:
+        if (
+            stop is not None and stop.is_set() and refusal is not None
+            and refusal.get("committed") is False and refusal.get("status") == "retryable"
+        ):
             # The stop ended a wait the save needed, such as episode reference re-planning: the
             # refusal proves nothing committed, so the save stays queued for the next process.
             return (QUEUED, code)

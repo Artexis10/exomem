@@ -199,6 +199,35 @@ def test_a_stop_during_a_replay_that_waits_out_a_warm_up_ends_promptly_and_loses
     assert len(_pages_titled(vault, "Queued save 31")) == 1
 
 
+def test_a_stop_ends_a_store_route_replay_that_waits_for_the_store_thread(
+    vault: Path, managers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defect: in a store-mode vault a replay waited out a busy store thread, past the stop allowance."""
+    from types import SimpleNamespace
+
+    from exomem.collection_store import runtime as store_runtime
+
+    writer, _holder = managers
+    monkeypatch.setenv("EXOMEM_CAPTURE_WAIT_SECONDS", "10")
+    # Its thread does nothing, so it never takes the request: a store thread busy for the whole wait.
+    monkeypatch.setattr(store_runtime.StoreServer, "_run", lambda _server: None)
+    server = store_runtime.StoreServer(vault, writer)
+    stop = threading.Event()
+    token = write_intake._REPLAY.set(write_intake._Replay(vault, SimpleNamespace(), stop=stop))
+    threading.Timer(0.3, stop.set).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(OpError) as refused:
+            writer._attempt_store_write(
+                lambda *_args, **_kwargs: pytest.fail("the store ran a write it never took"),
+                _command("remember"), (vault,), {"mutation_request_id": "replay-store-wait"}, server,
+            )
+    finally:
+        write_intake._REPLAY.reset(token)
+    assert refused.value.code in write_intake.ACCEPTED_REFUSALS
+    assert time.monotonic() - started < 3.0
+
+
 def test_a_refusal_that_a_stop_caused_keeps_the_save_queued(
     vault: Path, managers, drainer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
