@@ -546,6 +546,9 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
             observed_timeouts.append(timeout)
             return False
 
+        def seed_outcome(self, timeout=None) -> bool | None:
+            return False  # the seed finished, and at least one scope did not seed
+
         def finish_startup_recovery(self) -> None:
             calls.append("watcher-recovery")
 
@@ -589,6 +592,186 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
     assert "watcher-stop" in calls
     assert calls.count("graph") == 1
     assert calls.count("media") == 1
+
+
+def test_a_seed_still_running_when_the_wait_expires_keeps_the_watcher_and_its_registry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A promoted worker's seed outlasted the wait behind its catch-up flush.
+
+    Activation then retired the watcher and the registry for the life of the
+    process, and retrieval never converged again under ordinary writes.
+    """
+    from exomem import freshness, warmup
+
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    seed_done = threading.Event()
+    calls: list[str] = []
+    invalidated: list[object] = []
+    managed_at_compute: list[bool] = []
+    managed_at_warm: list[bool] = []
+
+    class SlowSeedWatcher:
+        seeds_recall_projections = True
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            return False  # the wait expires while the catch-up flush still runs
+
+        def seed_outcome(self, timeout=None) -> bool | None:
+            return True if seed_done.wait(timeout) else None
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            calls.append("watcher-stop")
+
+    monkeypatch.setattr(freshness, "invalidate", lambda root=None: invalidated.append(root))
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: SlowSeedWatcher())
+    monkeypatch.setattr(
+        server_runtime,
+        "_start_compute_runtime",
+        lambda _root, **_kwargs: managed_at_compute.append(readiness.runtime_managed()),
+    )
+    monkeypatch.setattr(
+        warmup,
+        "warm_retrieval_catalog",
+        lambda _root: managed_at_warm.append(readiness.runtime_managed()) or True,
+    )
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_vault_projector", lambda _root: None)
+    try:
+        activation._activate()
+        assert "watcher-stop" not in calls, "a seed still running stopped its watcher"
+        assert activation.file_watcher is not None
+        assert invalidated == []
+        assert managed_at_compute == [False], "requests serve walk-backed recall meanwhile"
+        assert managed_at_warm == []
+
+        seed_done.set()
+        activation.recall_seed_follower.join(timeout=5)
+
+        assert managed_at_warm == [True]
+        assert readiness.runtime_managed()
+        assert "watcher-stop" not in calls
+    finally:
+        activation._shutdown.set()
+        seed_done.set()
+        activation._stop_background_workers()
+        activation._join_native_workers()
+        readiness.reset()
+
+
+def test_a_seed_that_fails_after_the_wait_expired_retires_the_watcher_and_its_registry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The registry stays live only while a running watcher maintains it."""
+    from exomem import freshness, warmup
+
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    seed_failed = threading.Event()
+    calls: list[str] = []
+    invalidated: list[object] = []
+    warmed: list[object] = []
+
+    class SlowSeedWatcher:
+        seeds_recall_projections = True
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            return False
+
+        def seed_outcome(self, timeout=None) -> bool | None:
+            return False if seed_failed.wait(timeout) else None
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            calls.append("watcher-stop")
+
+    monkeypatch.setattr(freshness, "invalidate", lambda root=None: invalidated.append(root))
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: SlowSeedWatcher())
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root, **_kwargs: None)
+    monkeypatch.setattr(warmup, "warm_retrieval_catalog", warmed.append)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_vault_projector", lambda _root: None)
+    try:
+        activation._activate()
+        assert "watcher-stop" not in calls, "a seed still running stopped its watcher"
+
+        seed_failed.set()
+        activation.recall_seed_follower.join(timeout=5)
+
+        assert calls == ["watcher-stop"]
+        assert invalidated == [tmp_path]
+        assert activation.file_watcher is None
+        assert not readiness.runtime_managed()
+        assert warmed == []
+    finally:
+        activation._shutdown.set()
+        seed_failed.set()
+        activation._stop_background_workers()
+        activation._join_native_workers()
+        readiness.reset()
+
+
+def test_a_stop_during_a_slow_seed_returns_without_waiting_for_the_seed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A service stop must hand its lease back even while a seed is still running."""
+    from exomem import freshness
+
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    invalidated: list[object] = []
+
+    class StuckSeedWatcher:
+        seeds_recall_projections = True
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            return False
+
+        def seed_outcome(self, timeout=None) -> bool | None:
+            time.sleep(timeout or 0)
+            return None  # the seed never finishes, not even when stopped
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+    monkeypatch.setattr(freshness, "invalidate", lambda root=None: invalidated.append(root))
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: StuckSeedWatcher())
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _root, **_kwargs: None)
+    monkeypatch.setattr(server_runtime, "_start_graph_drain", lambda _root: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _root: None)
+    activation = server_runtime.LocalRuntimeActivation(tmp_path)
+    monkeypatch.setattr(activation, "_start_vault_projector", lambda _root: None)
+    try:
+        activation._activate()
+        activation._shutdown.set()
+        joiner = threading.Thread(target=activation._join_native_workers, daemon=True)
+        joiner.start()
+        joiner.join(timeout=server_runtime.RECALL_SEED_FOLLOW_POLL_SECONDS * 5)
+        assert not joiner.is_alive(), "the stop waited on the seed"
+        assert invalidated == [], "a stop is not a failed seed"
+    finally:
+        activation._shutdown.set()
+        activation._stop_background_workers()
+        readiness.reset()
 
 
 def test_store_mode_activation_keeps_its_importer_when_the_first_sweep_outlasts_the_seed_wait(

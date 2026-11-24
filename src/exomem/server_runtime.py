@@ -42,6 +42,8 @@ log = logging.getLogger(__name__)
 # Give it substantial headroom, but never let one blocked watcher prevent the
 # background catalogue warm/repair path from starting indefinitely.
 RECALL_SEED_WAIT_SECONDS = 120.0
+# How soon a seed that outlasted that wait notices a shutdown while it keeps waiting.
+RECALL_SEED_FOLLOW_POLL_SECONDS = 1.0
 
 # Failed catalogue publication can require another whole-vault build. Back off
 # to limit repeated I/O under persistent failure, with a cap for quiet recovery.
@@ -156,6 +158,7 @@ class LocalRuntimeActivation:
         self._vocabulary_stop = foreground_priority.StopEvent()
         self.recall_reembed: Any | None = None
         self.retrieval_warmup: threading.Thread | None = None
+        self.recall_seed_follower: threading.Thread | None = None
         self.matrix_warmup: threading.Thread | None = None
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
@@ -332,8 +335,10 @@ class LocalRuntimeActivation:
             if self._shutdown.is_set():
                 break
             self._start_component(label, starter)
-        if not self._shutdown.is_set() and self.file_watcher is not None:
-            self.file_watcher.arm_optional_recovery()
+        # Read once: a slow seed's follower can retire the watcher from its own thread.
+        watcher = self.file_watcher
+        if not self._shutdown.is_set() and watcher is not None:
+            watcher.arm_optional_recovery()
         if self._shutdown.is_set():
             self._stop_background_workers()
 
@@ -350,10 +355,62 @@ class LocalRuntimeActivation:
             # process, and readers answer from the store whether or not it has seeded.
             return
         try:
-            seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
+            # A False wait also answers a seed that is still running; only a finished one downgrades.
+            seeded = watcher.wait_until_seeded(
+                timeout=RECALL_SEED_WAIT_SECONDS
+            ) or watcher.seed_outcome(timeout=0)
         except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
             log.warning("file watcher seed wait failed", exc_info=True)
             self._downgrade_recall_runtime()
+            return
+        if seeded is None:
+            self._follow_recall_seed(watcher)
+        elif not seeded:
+            log.warning(
+                "file watcher did not establish both recall projections; "
+                "switching this process to exact walk-backed recall"
+            )
+            self._downgrade_recall_runtime()
+
+    def _follow_recall_seed(self, watcher: Any) -> None:
+        """Serve walk-backed recall while a slow seed finishes, keeping its watcher and registry.
+
+        The seed's catch-up flush can queue behind the catalogue barrier past
+        the wait. Retiring the registry then would leave every repair a walk
+        that a write refuses or that cannot prove itself live, for the life of
+        the process. Activation continues unmanaged meanwhile, and admission
+        returns through the warm's proof and heal once the seed finishes.
+        """
+        from . import readiness
+
+        log.warning(
+            "file watcher seed still running after %.0f s; serving exact walk-backed "
+            "recall until it finishes",
+            RECALL_SEED_WAIT_SECONDS,
+        )
+        managed = readiness.runtime_managed()
+        readiness.unmanage_runtime()
+        thread = threading.Thread(
+            target=self._await_recall_seed,
+            args=(watcher, managed),
+            name="exomem-recall-seed-follower",
+            daemon=True,
+        )
+        self.recall_seed_follower = thread
+        thread.start()
+
+    def _await_recall_seed(self, watcher: Any, managed: bool) -> None:
+        from . import readiness, warmup
+
+        seeded: bool | None = None
+        try:
+            while seeded is None and not self._shutdown.is_set():
+                seeded = watcher.seed_outcome(timeout=RECALL_SEED_FOLLOW_POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - a wait that cannot answer is a failed seed
+            log.warning("file watcher seed wait failed", exc_info=True)
+            seeded = False
+        # A shutdown stops the watcher, which ends its seed unsuccessfully; that is not a downgrade.
+        if self._shutdown.is_set() or self.file_watcher is not watcher:
             return
         if not seeded:
             log.warning(
@@ -361,6 +418,16 @@ class LocalRuntimeActivation:
                 "switching this process to exact walk-backed recall"
             )
             self._downgrade_recall_runtime()
+            return
+        if not managed:
+            return
+        readiness.manage_runtime()
+        try:
+            admitted = warmup.warm_retrieval_catalog(self.vault_root)
+        except Exception:  # noqa: BLE001 - the catalogue repair still owns admission
+            log.warning("retrieval catalogue verification after the seed failed", exc_info=True)
+            return
+        log.info("file watcher seed finished; retrieval admitted=%s", admitted)
 
     def _downgrade_recall_runtime(self) -> None:
         """Revoke an unavailable watcher generation and retain exact fallback."""
@@ -504,7 +571,8 @@ class LocalRuntimeActivation:
         from . import working_set_runtime
 
         for thread in (
-            self.retrieval_warmup, self.matrix_warmup, self.recall_reembed, self.upload_session_sweeper,
+            self.retrieval_warmup, self.recall_seed_follower, self.matrix_warmup, self.recall_reembed,
+            self.upload_session_sweeper,
         ):
             if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
                 thread.join()
