@@ -301,6 +301,16 @@ def test_an_undo_of_a_collection_larger_than_one_call_reshapes_is_refused(work, 
     assert work.manifest() == manifest
 
 
+def test_a_row_with_a_new_field_is_saved_in_a_collection_larger_than_one_call_reshapes(work, monkeypatch):
+    """Adding a field reads and rewrites no row, so a size bound on it would only refuse the row the write carries."""
+    monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
+
+    work.operate("append", collection=work.collection_id, item={"title": "c", "count": 5, "note": "kept"}, why=WHY,
+                 new_fields=["note"])
+
+    assert work.rows()["c"]["note"] == "kept"
+
+
 def test_a_declined_proposal_is_recorded_for_a_collection_larger_than_one_call_reshapes(work, monkeypatch):
     monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
 

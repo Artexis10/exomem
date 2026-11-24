@@ -1065,8 +1065,11 @@ def resolve(
     """Turn a call's `steps` or `undo` into a plan, reading history, rows and titles only where a step needs them.
 
     A `declined` origin keeps the proposal and plans no change: it is not proved, because it is not applied, and it
-    loads no row, so the collection's size does not bound it. Any other call first checks `size`, the number of
-    current rows the collection holds, counted without loading them (`require_collection_size`).
+    loads no row, so the collection's size does not bound it. Nor does it bound a run whose every step adds a field,
+    such as a record write's `new_fields`: such a run reads and rewrites no row, so its hold is the manifest revision's
+    own, as on a write with no restructure, and refusing it would lose the row that the write carries. Any other call
+    checks `size`, the number of current rows the collection holds, counted without loading them
+    (`require_collection_size`), before it reads a row.
     `collection_id`, `path` and `reach` name the called collection and how a move reaches others (see `plan`).
     `automatic` is the substrate's bound check of an automatic call, `automatic_collection.require_restructure_bounds`
     with its storage bound. It runs once, on the proven plan, with the starting manifest text, the steps, the entry
@@ -1076,8 +1079,6 @@ def resolve(
         raise refuse("INVALID_RESTRUCTURE", "give steps or undo, and not both")
     if undo is not None and origin == "declined":
         raise refuse("INVALID_RESTRUCTURE", "an undo is applied, so it has no declined origin")
-    if origin != "declined":
-        require_collection_size(size())
     entries = history() if undo is not None or automatic is not None else ()
     undoes = None
     if undo is not None:
@@ -1085,6 +1086,8 @@ def resolve(
         undoes, run = target["id"], parse_steps(target["inverse"], allow_inverse=True)
     else:
         run = parse_steps(steps)
+    if origin != "declined" and not adds_only(run):
+        require_collection_size(size())
     if origin == "declined":
         return Resolved(run, undoes, Plan(text, {}, (), run, ()))
     planned = plan(
@@ -1132,8 +1135,7 @@ def require_rows(count: int) -> None:
             f"one call writes and retracts at most {MAX_REWRITTEN_ROWS} rows together, and this restructure "
             f"would write and retract {count}",
             rows_total=count, maximum=MAX_REWRITTEN_ROWS,
-            remediation="add fields only, which writes no rows and works at any size; otherwise the collection keeps "
-                        "its current shape",
+            remediation="add fields only, which writes no rows; otherwise the collection keeps its current shape",
         )
 
 
