@@ -93,7 +93,7 @@ def test_a_withheld_page_answers_exactly_like_a_missing_one(world):
     with request_scope(owner_principal()):
         withheld = page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)
         missing = page_citations.inbound_citations(AWAY, world.root)
-    assert withheld == missing == {"state": "ready", "items": [], "count": 0, "more": None}
+    assert withheld == missing == {"state": "ready", "items": [], "count": 0, "count_complete": True, "more": None}
 
 
 def test_a_row_of_a_collection_the_caller_cannot_read_is_absent_from_items_and_count(world):
@@ -199,6 +199,53 @@ def test_a_read_runs_the_same_statements_however_many_governed_rows_cite_the_pag
     assert few[1] == many[1]
 
 
+def _cite_one_by_one(world):
+    """Alpha is cited by rows 00 to 03 and Beta by rows 04 to 06; a ceiling-0 rule withholds row 01 from external readers.
+
+    The rule names one row, so every row of the collection is decided on its own. Alpha's withheld row is
+    the only difference between the pages: for an external reader each has three visible citing rows.
+    """
+    def key(number):
+        return f"00000000-0000-4000-8000-{number:012d}"
+
+    for number in range(7):
+        append(world, {"page": ALPHA_REF if number < 4 else BETA_REF}, key=key(number))
+    _ready(world)
+    write_scope(world.root, paths="Unrelated/**")
+    scope = world.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + f'refs: ["{collections.record_ref(LOG, key(1))}"]\n')
+    write_rule(world.root, ceiling=0)
+
+
+def external_read(world, ref, **arguments):
+    with request_scope(_external()):
+        return page_citations.inbound_citations(ref, world.root, **arguments)
+
+
+def test_past_the_count_limit_the_count_is_a_lower_bound_and_paging_still_reaches_every_row(world, monkeypatch):
+    _cite_one_by_one(world)
+    monkeypatch.setenv(page_citations.COUNT_LIMIT_ENV, "2")
+    reply = external_read(world, ALPHA_REF, limit=1)
+    assert (reply["count"], reply["count_complete"]) == (2, False)
+    labels = [item["label"] for item in reply["items"]]
+    while reply["more"] is not None:
+        reply = external_read(world, ALPHA_REF, limit=1, more=reply["more"])
+        labels += [item["label"] for item in reply["items"]]
+    assert labels == ["00", "02", "03"]
+    with request_scope(_external()):
+        hit = page_citations.for_hits([ALPHA_REF], world.root)[ALPHA_REF]
+    assert (hit["cited_by_count"], hit["cited_by_count_complete"]) == (2, False)
+
+
+@pytest.mark.parametrize(("count_limit", "expected"), [("3", (3, False)), ("4", (3, True))])
+def test_a_withheld_row_never_moves_where_the_count_limit_cuts_the_count(world, monkeypatch, count_limit, expected):
+    """At a limit of 3, counting index entries instead of visible rows would cut Alpha's count and not Beta's."""
+    _cite_one_by_one(world)
+    monkeypatch.setenv(page_citations.COUNT_LIMIT_ENV, count_limit)
+    alpha, beta = external_read(world, ALPHA_REF), external_read(world, BETA_REF)
+    assert (alpha["count"], alpha["count_complete"]) == (beta["count"], beta["count_complete"]) == expected
+
+
 def test_with_no_published_corpus_to_borrow_a_read_is_unavailable_never_a_walk_or_an_empty_list(world, monkeypatch):
     append(world, {"page": ALPHA_REF})
     _ready(world)
@@ -235,4 +282,4 @@ def test_a_row_is_cited_by_the_rows_that_link_to_it_and_a_withheld_row_answers_l
     write_rule(world.root, ceiling=0)
     missing = collections.record_ref(LOG, "00000000-0000-4000-8000-0000000000ee")
     assert asked(target, _external()) == asked(missing, _external()) == {
-        "state": "ready", "items": [], "count": 0, "more": None}
+        "state": "ready", "items": [], "count": 0, "count_complete": True, "more": None}

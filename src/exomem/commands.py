@@ -8824,7 +8824,7 @@ _CITED_BY_LIMIT = 10
 def _with_cited_by(vault_root: Path, result: dict, *, frontmatter_only: bool) -> dict:
     """`result` with `cited_by` when it is a page read released in full: the rows and plan items citing it.
 
-    The reply is `page_citations.inbound_citations`: `items`, an exact visible `count`, `more` and `state`.
+    The reply is `page_citations.inbound_citations`: `items`, the visible `count`, `count_complete`, `more` and `state`.
     A reply of another kind (a view, a brief, a unit), a frontmatter-only scan and a page below full release
     carry none, as they carry no links. A vault with no collection store has no link field to cite from.
     """

@@ -4,7 +4,7 @@
 
 ### Requirement: One read seam answers which rows and plan items cite a page
 
-Exomem SHALL answer which Records rows and Planning items cite a page through one function, `inbound_citations(ref, caller, limit, more)`. It SHALL read the derived `item_references` index in a fixed number of indexed reads, never one per page, per collection or per citing row. It SHALL return at most `limit` citations (default 20, maximum 100), the exact count the caller may see, and a continuation when more remain. No other code path SHALL compute inbound citations.
+Exomem SHALL answer which Records rows and Planning items cite a page through one function, `inbound_citations(ref, caller, limit, more)`. It SHALL read the derived `item_references` index in indexed reads, never one per page, per collection or per citing row. It SHALL return at most `limit` citations (default 20, maximum 100), the count the caller may see, and a continuation when more remain. No other code path SHALL compute inbound citations.
 
 #### Scenario: A page cited by two rows and a plan item
 
@@ -15,6 +15,30 @@ Exomem SHALL answer which Records rows and Planning items cite a page through on
 
 - **WHEN** a row-level policy decides each row of a collection, and 40 of its rows cite a page instead of 3
 - **THEN** the read runs the same statements, deciding the citing rows in one batch for the collection
+
+### Requirement: A read counts row-decided citations up to a configured limit
+
+A citing row that a row-level policy releases on its own SHALL be counted only until the read has counted `EXOMEM_CITATION_COUNT_LIMIT` visible such rows (default 1,000; a batch shares the limit equally among its pages). The count SHALL then be a lower bound marked `count_complete: false`, and exact otherwise. A continuation SHALL still reach every visible citation. Where the count stops SHALL depend on visible rows only.
+
+#### Scenario: Past the limit the count is a lower bound
+
+- **WHEN** a row-level policy decides each row of a collection, and more of its visible rows cite a page than the limit
+- **THEN** the reply counts the limit with `count_complete: false`, and following `more` lists every visible citing row
+
+#### Scenario: A withheld row never moves the cut
+
+- **WHEN** two pages have the same visible citing rows in number, and only one of them is also cited by a withheld row
+- **THEN** both replies carry the same count and the same `count_complete`, at the limit and below it
+
+#### Scenario: A reader whom no row rule names decides no row
+
+- **WHEN** a scope names one row of a collection, and its only rule applies to the external audience
+- **THEN** the owner's read decides no row of that collection and reports the exact count
+
+#### Scenario: A recall hit says when its count is a lower bound
+
+- **WHEN** a recall or search hit's page is cited past the limit
+- **THEN** the hit carries `cited_by_count_complete: false` next to `cited_by_count`
 
 ### Requirement: Citations are visible only when both ends are visible
 
@@ -73,14 +97,14 @@ A `link` field in a Records or Planning manifest MAY declare `relation`, naming 
 
 ### Requirement: A page read lists its citations
 
-`read_page` SHALL return `cited_by` with the items, count, continuation and state from `inbound_citations` for the page it reads. A continuation SHALL page through the citations without re-reading the page.
+`read_page` SHALL return `cited_by` with the items, count, `count_complete`, continuation and state from `inbound_citations` for the page it reads. A continuation SHALL page through the citations without re-reading the page.
 
 #### Scenario: A lent cable's page shows the cable's row
 
 - **WHEN** an inventory row whose `page` links to a person's page records a cable as lent to that person
 - **THEN** reading that page lists the row in `cited_by` with count 1
 
-### Requirement: Recall page hits carry citation context in one query
+### Requirement: Recall page hits carry citation context from one batched read
 
 `recall_context` and `search_memory` SHALL add `cited_by_count` and at most three citing items to each of the top ten page hits of a response. One batched `inbound_citations` call SHALL serve all those hits. A hit whose citations are warming or unavailable SHALL carry `cited_by_state` instead of a count. Passage-level results are out of scope. Rows and plan items SHALL NOT become recall hits because of a citation.
 
@@ -92,7 +116,7 @@ A `link` field in a Records or Planning manifest MAY declare `relation`, naming 
 #### Scenario: Ten hits cost the reads of one
 
 - **WHEN** a recall response holds ten page hits
-- **THEN** one probe and one range read of the citation index run for that response, as for a response with one hit
+- **THEN** the response reads the citation index once for all ten hits, with one probe and one statement per round, never once per hit
 
 ### Requirement: The duplicate-fact detector compares only linked pairs
 

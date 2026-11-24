@@ -103,7 +103,7 @@ def test_a_row_in_a_collection_the_caller_cannot_read_leaves_a_page_as_if_no_row
     with request_scope(outsider):
         cited_page = commands.op_read_memory(world.root, CARGO_SLED)["cited_by"]
         uncited_page = commands.op_read_memory(world.root, spare)["cited_by"]
-    assert cited_page == uncited_page == {"items": [], "count": 0, "more": None, "state": "ready"}
+    assert cited_page == uncited_page == {"items": [], "count": 0, "count_complete": True, "more": None, "state": "ready"}
     hits = search(world, who=outsider)
     [uncited_hit] = [hit for hit in hits if hit.get("title") == "Cargo Sled Spare"]
     assert sled_hit(hits)["cited_by_count"] == uncited_hit["cited_by_count"] == 0

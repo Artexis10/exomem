@@ -87,7 +87,7 @@ def test_a_continuation_for_a_withheld_page_answers_exactly_like_one_for_a_missi
 
     assert withheld_and_missing() == ({"cited_by": {"state": "warming"}},) * 2
     _ready(world)
-    assert withheld_and_missing() == ({"cited_by": {"state": "ready", "items": [], "count": 0, "more": None}},) * 2
+    assert withheld_and_missing() == ({"cited_by": {"state": "ready", "items": [], "count": 0, "count_complete": True, "more": None}},) * 2
 
 
 def test_a_continuation_that_is_no_citation_cursor_is_refused_as_every_continuation_is(world):
