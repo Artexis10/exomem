@@ -934,9 +934,9 @@ def commit(
             "a store commit needs the vault mutation boundary, which derived-row work does not hold",
         )
     # Close the transaction before releasing capacity, including on rollback. The
-    # source lookup and admission run before the first canonical mutation.
-    transaction = (writer.handle.transaction() if before_move_commit is None
-                   else writer.handle.transaction(before_commit=before_move_commit))
+    # source lookup and admission run before the first canonical mutation. A commit writes only the
+    # vault store's tables (`_require_owned`), so the collections' release cache holds across it.
+    transaction = writer.handle.transaction(before_commit=before_move_commit, collection_free=True)
     with ExitStack() as allocations, transaction as tx:
         row = tx.execute("SELECT mode, revision FROM store_mode WHERE id = 1").fetchone()
         if row is None or row[0] != mode.STORE_MODE:

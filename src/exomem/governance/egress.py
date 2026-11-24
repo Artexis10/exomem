@@ -8438,7 +8438,11 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
     store to read the page's container; the set holds one (`request_snapshot`), as a move's
     post-commit filter does, and a request that already holds one keeps it. The store
     thread serves a write without a resolution scope, so each decision also resolved the vault and
-    its state folder again; the set shares one resolution, as a move's preflight does. The scope
+    its state folder again; the set shares one resolution, as a move's preflight does. Each decision
+    of a store-owned page also proved the collection store's ownership binding and proved it again
+    when it finished; the set shares one proof, which it proves again when the set ends, as a
+    whole-vault aggregate does (`owner_only_aggregate`). A binding that changed meanwhile fails the
+    whole set, as it failed the decision that met it. The scope
     ends with the set, so the write still finds the placement live, and reads the store's new
     revision, after it waits for the mutation boundary or commits. Without a bound writer a
     decision opens no writer snapshot, so this holds nothing.
@@ -8447,12 +8451,14 @@ def release_decision_context(vault_root: Path) -> Iterator[None]:
     if writer is None:
         yield
         return
+    from ..collection_store import ownership
     from ..vault_store import read as store_read
 
     with (
         state_paths.resolution_scope(),
         writer.read_snapshot(),
         store_read.request_snapshot(vault_root),
+        ownership.read_scope(vault_root, finalize=True),
     ):
         yield
 

@@ -250,6 +250,19 @@ This reuses the collection reader's pattern: normalize a subject, establish its 
 
 The load target remains 20,000 pages, about 100,000 units and 120,000 edges, including a hub with 10,000 links. Restricted first reads after a commit target about one second. Ranking on slim rows and hydrating only emitted hits remain a separate slice.
 
+### D14. Keep collection view decisions across vault commits
+
+A store-mode save admits the corpus for every caller, the owner included. The owner's walk must still withhold some collection views. These include a view whose bytes are not the current render, a retired history page and a tombstoned row. A view without a complete manifest or an owner plan is also withheld. So the store cannot skip the walk. Instead, it decides each view once and keeps that decision while its inputs hold.
+
+1. `release_decision_context` enters `ownership.read_scope(finalize=True)` under the bound writer. Both admissions of one save share one ownership proof, which is proved again when the request ends.
+2. The writer's release cache keeps each view's `projection_decision`. The key holds the path, the SHA-256 of the bytes it read, the caller and the operation's release inputs. These inputs are the policy fingerprint, audience, purpose, access fingerprint and blocked state, tombstones and connector identity. The key also holds `membership.subject_inputs`.
+3. A history page is kept only when the decision read the operation's own history inputs. The cache does not keep a view with relationship presentations, because those read the graph rows that each commit changes. It keeps no decision for a session caller, which reads the time and its own grants. It keeps none for an operation with an authority or its own ownership proof. It also keeps none that was undecided or that saw the store change while deciding.
+4. The cache drops every kept decision when the store database changes, except in a transaction that declares itself collection-free. A vault commit, a derivation and the projector's bookkeeping declare it. A commit writes no collection path (`_require_owned`), and the other two write only vault-store tables. The flag is a declaration that the cache trusts. A collection-free transaction that touches a collection all the same (`ReleaseCache.touch`) still drops the kept decisions when it commits.
+
+The cache keys no transaction head. Some collection rows change without a transaction row, such as view paths, log frames, re-encodings, store identity and migrations. The database change stamp sees all of them.
+
+On a generated vault with 300 Records views, a store create fell from 7.49 s to 1.70 s on the laptop. An edit fell from 2.32 s to 0.68 s. `tests/test_vault_store_kept_admission.py` counts the views that a create decides afresh. At 28 and 44 views, the base decided 133 and 165, and this change decides none. The owner-copy measurement remains task 7.1's.
+
 ## Estimate
 
 **Evidence.**
