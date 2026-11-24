@@ -1822,12 +1822,8 @@ def validate_hierarchy(
         kind = values["kind"]
         active = values["lifecycle"] == "active"
         own = write is not None and key == write.plan_id
-        try:
-            parent = _relation_target(manifest, values.get("parent"))
-        except CollectionError:
-            # A foreign or malformed parent refuses like a missing one: no item has the id "".
-            parent = ""
-        area = _relation_target(manifest, values.get("area"))
+        parent = _relation_target_or_unknown(manifest, values.get("parent"))
+        area = _relation_target_or_unknown(manifest, values.get("area"))
         if kind == "area":
             if parent is not None or area is not None:
                 _relation_error()
@@ -1950,6 +1946,17 @@ def _relation_target(manifest: collections.CollectionManifest, value: Any) -> st
     if parsed is None or parsed[0] != manifest.collection_id:
         _relation_error()
     return parsed[1]
+
+
+def _relation_target_or_unknown(manifest: collections.CollectionManifest, value: Any) -> str | None:
+    """`_relation_target`, with a foreign or malformed reference read as a target no item has.
+
+    The empty string is no item's id, so such a reference refuses like a missing one.
+    """
+    try:
+        return _relation_target(manifest, value)
+    except CollectionError:
+        return ""
 
 
 def _relation_error() -> Never:

@@ -562,9 +562,13 @@ def test_a_refused_planning_value_names_the_allowed_values_or_the_fields_at_faul
         return (
             await add(client, title="Lifecycle", lifecycle="gone"),
             await add(client, title="Area", kind="area", priority="high", parent=prefix + "x"),
-            # A missing target and one of the wrong kind read the same.
+            # A missing target, one of the wrong kind and one in another collection read the same.
             await add(client, title="Gone", area=prefix + "11111111-1111-4111-8111-111111111111"),
             await add(client, title="Wrong", area=prefix + outcome["plan_id"]),
+            await add(
+                client, title="Foreign",
+                area="exomem://plan/3db90f18-70df-4e41-986e-2d7d7db1caca/11111111-1111-4111-8111-111111111111",
+            ),
             await add(
                 client, title="Evidence",
                 progress_evidence=[{
@@ -574,10 +578,10 @@ def test_a_refused_planning_value_names_the_allowed_values_or_the_fields_at_faul
             ),
         )
 
-    lifecycle, area, missing, wrong_kind, evidence = _session(build(), scenario)
+    lifecycle, area, missing, wrong_kind, foreign, evidence = _session(build(), scenario)
 
     assert "lifecycle must be one of: active, archived" in _refusal(lifecycle)["message"].lower()
     assert "areas cannot carry delivery state or hierarchy: parent, priority" in _refusal(area)["message"].lower()
     assert "area takes an active item of kind area" in _refusal(missing)["message"].lower()
-    assert _refusal(missing) == _refusal(wrong_kind)
+    assert _refusal(missing) == _refusal(wrong_kind) == _refusal(foreign)
     assert "progress evidence role must be one of: progress, completion" in _refusal(evidence)["message"].lower()
