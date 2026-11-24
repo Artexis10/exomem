@@ -1449,9 +1449,11 @@ def test_full_media_probes_execute_public_process_search_and_read_paths() -> Non
         "media": media,
         "tolerances": {"score_absolute": 1e-9},
     }
+    from exomem import media_types
+
     modules = {
         name: {"available": True, "version": "fixture"}
-        for name in ("fitz", "PIL", "faster_whisper", "av")
+        for name in (*media_types.PDF_READERS, "PIL", "faster_whisper", "av")
     }
     recorder = Recorder()
 

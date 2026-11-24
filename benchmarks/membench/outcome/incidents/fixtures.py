@@ -1,7 +1,7 @@
 """The files a case puts in a unit's work directory, built at unit time from the case's own spec.
 
 Every file is deterministic: a spec yields the same bytes in every unit and every arm, so a digest that a
-check compares means one file. PyMuPDF renders the PDFs and the PNGs, as the product's own reader does.
+check compares means one file. A small writer sets the PDFs, and Pillow draws the PNGs.
 
 A spec is ``{"kind": "pdf", "pages": [text, ...], "title": ..., "doi": ...}`` (the title is the document
 information title and the DOI is declared in the XMP packet; both are optional), ``{"kind": "text",
@@ -11,7 +11,10 @@ information title and the DOI is declared in the XMP packet; both are optional),
 from __future__ import annotations
 
 import hashlib
+import io
 from pathlib import Path
+
+from membench.artifacts.pdf import pdf_bytes
 
 _XMP = (
     '<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
@@ -21,43 +24,53 @@ _XMP = (
 )
 
 
-def _write_text(page, text: str, *, fontsize: float, margin: float) -> None:
-    import pymupdf  # media extra only; the runner and the core test tier import this module without it
-
-    box = pymupdf.Rect(margin, margin, page.rect.width - margin, page.rect.height - margin)
-    if page.insert_textbox(box, text, fontsize=fontsize, fontname="helv") < 0:
-        raise ValueError("a fixture's text does not fit its page")
+_A4 = (595.276, 841.89)
+#: A PNG fixture is 480 x 320 points drawn at 96 dpi, so its sizes are the points scaled by 96 / 72.
+_PNG_SIZE = (640, 427)
+_PNG_MARGIN = 21
+_PNG_FONT_PX = 17
+_PNG_LEADING = 21
 
 
 def _pdf(spec: dict) -> bytes:
-    import pymupdf  # media extra only
-
-    document = pymupdf.open()
-    for text in spec["pages"]:
-        _write_text(
-            document.new_page(width=pymupdf.paper_rect("a4").width, height=pymupdf.paper_rect("a4").height), text, fontsize=11, margin=56
+    try:
+        return pdf_bytes(
+            spec["pages"],
+            size=_A4,
+            margin=56,
+            font_size=11,
+            info={"Title": spec.get("title", "")},
+            xmp=_XMP.format(doi=spec["doi"]) if spec.get("doi") else None,
         )
-    # No producer or date: the library would stamp its version and the clock into the bytes.
-    document.set_metadata(
-        {
-            "title": spec.get("title", ""),
-            "producer": "",
-            "creator": "",
-            "creationDate": "",
-            "modDate": "",
-        }
-    )
-    if spec.get("doi"):
-        document.set_xml_metadata(_XMP.format(doi=spec["doi"]))
-    return document.tobytes(garbage=3, deflate=True, no_new_id=True)
+    except ValueError as error:
+        raise ValueError(f"a fixture's text does not fit its page: {error}") from error
 
 
 def _png(spec: dict) -> bytes:
-    import pymupdf  # media extra only
+    # Media extra only: the runner and the core test tier import this module without it.
+    from PIL import Image, ImageDraw, ImageFont
 
-    page = pymupdf.open().new_page(width=480, height=320)
-    _write_text(page, spec["text"], fontsize=13, margin=16)
-    return page.get_pixmap(dpi=96).tobytes("png")
+    canvas = Image.new("RGB", _PNG_SIZE, color=(255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default(size=_PNG_FONT_PX)
+    room = _PNG_SIZE[0] - 2 * _PNG_MARGIN
+    lines: list[str] = []
+    for paragraph in spec["text"].split("\n"):
+        line = ""
+        for word in paragraph.split():
+            if line and draw.textlength(f"{line} {word}", font=font) > room:
+                lines.append(line)
+                line = word
+            else:
+                line = f"{line} {word}".strip()
+        lines.append(line)
+    if _PNG_MARGIN * 2 + _PNG_LEADING * len(lines) > _PNG_SIZE[1]:
+        raise ValueError("a fixture's text does not fit its page")
+    for index, line in enumerate(lines):
+        draw.text((_PNG_MARGIN, _PNG_MARGIN + index * _PNG_LEADING), line, fill=(0, 0, 0), font=font)
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def _text(spec: dict) -> bytes:

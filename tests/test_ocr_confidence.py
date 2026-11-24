@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from _identity_pdf import make_pdf
 
 from exomem import (
     commands,
@@ -299,7 +300,7 @@ def test_a_configured_caption_basename_cannot_imitate_the_measurement() -> None:
     assert ocr_text_available(engine) is None
     assert ocr_text_available(marked) is False
     assert marked.endswith(engine)
-    assert ocr_text_available("ocr-v1:1:pymupdf+tesseract") is None
+    assert ocr_text_available("ocr-v1:1:pdfium+tesseract") is None
 
 
 def test_an_engine_at_the_byte_limit_keeps_its_valid_payload_without_a_measurement() -> None:
@@ -316,10 +317,8 @@ def test_an_engine_at_the_byte_limit_keeps_its_valid_payload_without_a_measureme
 
 def test_a_scanned_pdf_page_keeps_all_of_its_text(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Only an image's text is split; a PDF page has no sidecar section to hold the rest.
-    fitz = pytest.importorskip("fitz")
-    with fitz.open() as doc:
-        doc.new_page()  # no text layer, as a scanned page has none
-        doc.save(tmp_path / "scan.pdf")
+    pytest.importorskip("pypdfium2")
+    make_pdf(tmp_path / "scan.pdf", [""])  # no text layer, as a scanned page has none
     reading = _reading(("steady", 95.0), ("qz", 10.0), text="steady qz")
     monkeypatch.setattr(extract, "resolve_tesseract_cmd", lambda: "tesseract")
     monkeypatch.setattr(ocr_models, "read_image", lambda _cmd, _image: reading)

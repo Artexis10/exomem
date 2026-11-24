@@ -1,8 +1,8 @@
-"""Generate small PDFs for the research-source identity tests, with PyMuPDF or as raw objects.
+"""Generate small PDFs for the PDF reading tests, written as raw objects.
 
 The text is invented and every DOI uses the `10.5555` prefix, which no registrant holds.
-A test that needs a PDF calls `pytest.importorskip("fitz")` first, as the extraction tests do.
-The hostile builders write raw objects, so a reader meets the bytes exactly as a crafted file holds them.
+A test that reads a PDF calls `pytest.importorskip("pypdfium2")` first, as the extraction tests do.
+Raw objects let a reader meet the bytes exactly as a crafted file holds them.
 """
 
 from __future__ import annotations
@@ -32,23 +32,52 @@ def make_pdf(
     xmp: str | None = None,
     password: str | None = None,
 ) -> Path:
-    """Write a PDF whose page `n` prints `pages[n]`; an empty string leaves that page with no text layer."""
-    import fitz
+    """Write a PDF whose page `n` prints `pages[n]`; an empty string leaves that page with no text layer.
+    A newline inside a page text starts a new printed line.
 
-    with fitz.open() as doc:
-        for text in pages:
-            page = doc.new_page()
-            if text:
-                page.insert_text((72, 72), text, fontsize=10)
-        if info:
-            doc.set_metadata(info)
-        if xmp:
-            doc.set_xml_metadata(xmp)
-        if password:
-            doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw=password, owner_pw=password)
-        else:
-            doc.save(path)
+    `info` names the document information entries in lower case (`title`, `subject`). A `password`
+    encrypts the file with AES-256 under that user and owner password.
+    """
+    objects: dict[int, bytes] = {3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
+    kids = []
+    for index, text in enumerate(pages):
+        page, content = 4 + 2 * index, 5 + 2 * index
+        kids.append(b"%d 0 R" % page)
+        objects[page] = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>"
+            % content
+        )
+        # A newline in the text starts the next printed line, the way a wrapped paragraph breaks.
+        lines = b" T* ".join(b"(" + _escape(line) + b") Tj" for line in text.split("\n"))
+        shown = b"BT /F1 10 Tf 12 TL 72 720 Td " + lines + b" ET" if text else b""
+        objects[content] = _stream(b"", shown)
+    objects[2] = b"<< /Type /Pages /Kids [" + b" ".join(kids) + b"] /Count %d >>" % len(pages)
+    next_number = 4 + 2 * len(pages)
+    catalog = b"<< /Type /Catalog /Pages 2 0 R"
+    if xmp:
+        objects[next_number] = _stream(b"/Type /Metadata /Subtype /XML", xmp.encode())
+        catalog += b" /Metadata %d 0 R" % next_number
+        next_number += 1
+    objects[1] = catalog + b" >>"
+    information = None
+    if info:
+        entries = b" ".join(b"/" + name.capitalize().encode() + b" (" + _escape(value) + b")" for name, value in info.items())
+        objects[next_number] = b"<< " + entries + b" >>"
+        information = next_number
+    _write_objects(path, objects, info=information)
+    if password:
+        from pypdf import PdfWriter
+
+        writer = PdfWriter(clone_from=path)
+        writer.encrypt(password, algorithm="AES-256")
+        with path.open("wb") as stream:
+            writer.write(stream)
     return path
+
+
+def _escape(text: str) -> bytes:
+    """`text` as the body of a PDF literal string."""
+    return text.encode("latin-1").replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)")
 
 
 def _write_objects(path: Path, objects: dict[int, bytes], *, info: int | None = None) -> Path:

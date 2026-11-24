@@ -5660,8 +5660,10 @@ async def run_exomem_direct_probes(
     await run("dataset-query", dataset_query)
 
     if profile == "full":
+        from exomem.media_types import PDF_READERS
+
         media_requirements = {
-            "media-pdf": ("fitz",),
+            "media-pdf": PDF_READERS,
             "media-image": ("PIL",),
             "media-audio": ("faster_whisper", "av"),
             "media-video": ("PIL", "faster_whisper", "av"),
@@ -7248,10 +7250,12 @@ async def _run_exomem_mcp(
                 "EXOMEM_DISABLE_CLIP": "1",
             }
         )
+    from exomem.media_types import PDF_READERS
+
     media_modules = (
         python_module_inventory(
             python,
-            ("PIL", "fitz", "faster_whisper", "av"),
+            ("PIL", *PDF_READERS, "faster_whisper", "av"),
             cwd=REPO_ROOT,
             env=env,
         )

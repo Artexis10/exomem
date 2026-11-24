@@ -1,0 +1,39 @@
+# trivy settings for scripts/check-image-licences.sh.
+#
+# Only language packages are scanned; operating-system packages are out of scope.
+# A finding fails the check when its licence is in `forbidden`: GPL and AGPL,
+# which require the combined work to carry the same licence. Each entry is a
+# base SPDX identifier, and trivy matches its -only, -or-later and `+` forms.
+# A licence under a linking exception (`GPL-3.0-or-later WITH GCC-exception-3.1`)
+# does not match, so it is printed as an unclassified licence.
+#
+# `restricted` holds LGPL only, so a separate, replaceable LGPL library passes
+# without a warning: trivy's own category for LGPL is `restricted`, which maps
+# to HIGH, and the script reports only CRITICAL and UNKNOWN. The list replaces
+# trivy's default `restricted` list, which holds GPL too; a licence listed in
+# two categories gets either one at random, so GPL stays out of it.
+#
+# The `exomem` distribution is this repository's own code, not third-party code.
+# Its licence follows the repository's licence declarations, so this check skips it.
+scan:
+  scanners:
+    - license
+  skip-files:
+    - "**/exomem-*.dist-info/METADATA"
+pkg:
+  types:
+    - library
+license:
+  forbidden:
+    - AGPL-1.0
+    - AGPL-3.0
+    - GPL-1.0
+    - GPL-2.0
+    - GPL-3.0
+  restricted:
+    - LGPL-2.0
+    - LGPL-2.1
+    - LGPL-3.0
+severity:
+  - CRITICAL
+exit-code: 1

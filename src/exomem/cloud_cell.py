@@ -10,10 +10,14 @@ into `os.environ` for these names directly.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 
 CLOUD_MODE_ENV = "EXOMEM_CLOUD_CELL"
 CLOUD_READ_ONLY_ENV = "EXOMEM_CLOUD_READ_ONLY"
@@ -39,6 +43,21 @@ GATEWAY_CONTEXT_HEADER = "x-exomem-client-context"
 #: Trusted on the same terms as `GATEWAY_CLIENT_HEADER`, never from clientInfo.
 #: This content-free, owner-private actor metadata grants no authority.
 GATEWAY_APP_ID_HEADER = "x-exomem-app-id"
+#: The gateway passes the operator's current maintenance or incident notice here, as
+#: base64url-encoded UTF-8 JSON. Trusted on the same terms as `GATEWAY_CLIENT_HEADER`: the
+#: gateway refuses every caller header that starts with `x-exomem-`. The cell relays the notice
+#: in its MCP results and never reads it outside cloud mode.
+GATEWAY_SERVICE_NOTICE_HEADER = "x-exomem-service-notice"
+SERVICE_NOTICE_VERSION = 1
+SERVICE_NOTICE_MAX_HEADER_BYTES = 1024
+SERVICE_NOTICE_MAX_SAY_CHARS = 400
+# nosemgrep: ep-word-set -- the closed kinds and states of the control plane's published notice header, not a reading of text.
+SERVICE_NOTICE_KINDS = frozenset({"maintenance", "incident"})
+SERVICE_NOTICE_STATES = frozenset({"scheduled", "active"})  # nosemgrep: ep-word-set -- same published header contract.
+#: The header's fields after `v`, which the cell checks and drops; the cell relays these and no other.
+_SERVICE_NOTICE_RELAYED = ("kind", "state", "starts_at", "ends_at", "say")  # nosemgrep: ep-word-set -- same published header contract.
+#: RFC 4648 section 5 alphabet, padding optional: the shape of a base64url token, not a reading of text.
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+={0,2}")
 
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _ISSUER_FAMILY_PREFIX = "cloud-cell:"
@@ -62,6 +81,67 @@ def canonical_app_id(value: object) -> str | None:
     except ValueError:
         return None
     return value if str(parsed) == value else None
+
+
+def _iso_timestamp(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _notice_sentence(value: object) -> bool:
+    """A sentence of 1 to `SERVICE_NOTICE_MAX_SAY_CHARS` characters that encodes as UTF-8.
+
+    JSON can spell a lone surrogate, which no UTF-8 response can carry; the notice would then fail the call it rides on.
+    """
+    if not isinstance(value, str) or not 1 <= len(value) <= SERVICE_NOTICE_MAX_SAY_CHARS:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def parse_service_notice(value: object) -> dict[str, object] | None:
+    """The notice a gateway header carries, or None when it is not a valid notice.
+
+    A header that is too long, not base64url-encoded UTF-8 JSON, or whose fields fall outside
+    the published shape is ignored, never refused: the notice informs the person and grants
+    nothing, so a bad one must not fail a call. The result holds only the header's own values.
+    """
+    # A base64url token is ASCII, so the character count is the byte count here.
+    if not isinstance(value, str) or len(value) > SERVICE_NOTICE_MAX_HEADER_BYTES:
+        return None
+    if _BASE64URL.fullmatch(value) is None:
+        return None
+    token = value.rstrip("=")
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)).decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict) or payload.keys() != {"v", *_SERVICE_NOTICE_RELAYED}:
+        return None
+    version, kind, state = payload["v"], payload["kind"], payload["state"]
+    ends_at = payload["ends_at"]
+    valid = (
+        type(version) is int
+        and version == SERVICE_NOTICE_VERSION
+        and isinstance(kind, str)
+        and kind in SERVICE_NOTICE_KINDS
+        and isinstance(state, str)
+        and state in SERVICE_NOTICE_STATES
+        and _iso_timestamp(payload["starts_at"])
+        and (ends_at is None or _iso_timestamp(ends_at))
+        and _notice_sentence(payload["say"])
+    )
+    if not valid:
+        return None
+    return {key: payload[key] for key in _SERVICE_NOTICE_RELAYED}
 
 
 class CloudConfigError(RuntimeError):

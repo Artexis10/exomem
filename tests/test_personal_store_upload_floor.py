@@ -442,3 +442,98 @@ def test_an_original_needs_room_for_the_pages_that_link_to_it(
         south = file_survey("south-survey")
         assert read.page_exists(served, south)
         assert queued(writer, south) == [(derivation.NO_ROOM,)]
+
+
+def test_an_original_draws_no_room_for_the_other_pages_its_commit_writes(
+    served, writer, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a drain that charges a commit's unrelated notes to its original's room.
+
+    The charge fails the commit's batch, and its 300 notes then derive one transaction at a time.
+    """
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    # Room for the original's own commit and derived rows, not for the graph rows of the notes.
+    free = [floor + 6 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free[0]))
+    notes = tuple(
+        write.PagePut(
+            f"Knowledge Base/Notes/Gauges/gauge-{note:03}.md",
+            (f"# Gauge {note}\n\n" + "".join(
+                f"- [rule] Check gauge {note} against [[station-{note:03}-{index:02}-{'calibration-' * 20}]].\n"
+                for index in range(30)
+            )).encode(),
+        )
+        for note in range(300)
+    )
+    original = "Knowledge Base/Evidence/Tests/Gauges/calibration.md"
+    with monkeypatch.context() as patch:
+        patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "file calibration with notes", puts=(
+            write.PagePut(original, b"# Calibration\n\nRaw readings.\n", media_allocation=True), *notes,
+        )))
+
+    drained = derivation.drain(served.resolve(), writer)
+
+    assert (drained.batches, drained.failed) == (1, 0)
+    assert queued(writer, original) == []
+    assert writer.connection.execute(
+        "SELECT COUNT(*) FROM store_derivation_queue WHERE path LIKE 'Knowledge Base/Notes/Gauges/%'"
+    ).fetchone() == (0,)
+
+
+def test_a_second_move_needs_room_for_the_pages_that_link_to_its_first_path(
+    served, writer, projecting, tmp_path, monkeypatch,  # noqa: F811
+):
+    """Catches a move that charges the pages linking to the path it leaves, but not the ones that
+    reach the original through its lineage and re-derive all the same."""
+    config = tmp_path / "media.json"
+    floor = 1024**2
+    config.write_text(json.dumps({"vaults": {str(served): {"store": "test", "upload_floor_bytes": floor}}}))
+    monkeypatch.setenv("EXOMEM_MEDIA_STORE_CONFIG", str(config))
+    free = [floor + 1024 * floor]
+    monkeypatch.setattr(media_capacity.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(total=4096 * floor, free=free[0]))
+    folder = "Knowledge Base/Evidence/Tests/Minutes"
+    for name in ("north-readings", "south-readings"):
+        with library_scope(), writer_lease.active_manager().mutation_guard(served, operation="test_preserve"):
+            preserve.preserve(served, scope="Tests", category="Minutes", filename=f"{name}.md",
+                              content="---\ntitle: Gauge log\n---\n\nRaw readings.\n")
+        # The move records lineage in the frontmatter, and the title differs from the first stem, so the
+        # notes reach the original through its lineage alone.
+        body = "".join(f"- [rule] Check gauge {index} against [[{name}]].\n" for index in range(30))
+        write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "linking notes", puts=tuple(
+            write.PagePut(f"Knowledge Base/Notes/Readings/{name}-{note:03}.md", f"# Note {note}\n\n{body}".encode())
+            for note in range(200))))
+
+    def move(old: str, new: str) -> None:
+        with library_scope():
+            move_file.move_file(served, old_path=f"{folder}/{old}.md", new_path=f"{folder}/{new}.md",
+                                update_wikilinks=False)
+
+    move("north-readings", "kept-north-readings")
+    move("south-readings", "kept-south-readings")
+    database = connection.store_path(served)
+    wal = database.with_name(database.name + "-wal")
+    assert writer.handle.checkpoint()
+    with closing(connection.open_reader(database)) as reader:
+        reader.execute("BEGIN")  # A pinned reader keeps every frame of both moves in the WAL.
+        reader.execute("SELECT revision FROM store_mode").fetchone()
+        page_size, = reader.execute("PRAGMA page_size").fetchone()
+        with monkeypatch.context() as patch:
+            patch.setattr(derivation, "drain", lambda *_arguments, **_keywords: None)
+            move("kept-north-readings", "archived-north-readings")
+        pages = writer.connection.execute("PRAGMA page_count").fetchone()[0]
+        wal_size = wal.stat().st_size
+        derivation.drain(served.resolve(), writer)
+        written = ((writer.connection.execute("PRAGMA page_count").fetchone()[0] - pages) * page_size
+                   + wal.stat().st_size - wal_size)
+        assert written > 8 * floor  # the 200 notes that name the first path re-derive their graph rows
+
+        free[0] = floor + written - media_capacity._allocation_unit(served)
+        move("kept-south-readings", "archived-south-readings")
+        south = f"{folder}/archived-south-readings.md"
+        assert read.page_exists(served, south)
+        assert queued(writer, south) == [(derivation.NO_ROOM,)]

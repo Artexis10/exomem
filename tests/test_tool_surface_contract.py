@@ -674,7 +674,7 @@ def test_the_server_tells_every_client_to_activate_context_first(
 
     assert "recall_context" in instructions
     assert "verbatim" in instructions
-    assert "read_instructions" in instructions and "first" in instructions
+    assert "read_instructions first" in instructions
     assert "Named tools belong to this server" in instructions
     assert "When recall is warranted" in instructions
     tools = asyncio.run(mcp.list_tools())

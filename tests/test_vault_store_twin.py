@@ -20,7 +20,7 @@ import test_vault_store_write_path as write_path
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_bypass_writers import govern
 from test_vault_store_migration import BETA, DIAGRAM, build_indexes, vault  # noqa: F401
-from test_vault_store_served import call, service  # noqa: F401
+from test_vault_store_served import call, derived, service  # noqa: F401
 from test_vault_store_write_path import planned, store_rows
 
 from exomem import compiled_history, delete_directory, delete_file, move_file, recover_from_trash
@@ -85,13 +85,16 @@ def stream(root):
 def settled(root, writer):
     """The store twin once its projector has drained the queue and its importer has swept.
 
-    With no ``writer`` they reach the store through the running store thread's door.
+    With no ``writer`` they reach the store through the running store thread's door, and the thread
+    derives the rows of the served writes after their replies, so this waits for that too.
     """
     run = None if writer is None else lambda work: work(writer)
     for _ in range(10):
         projector.Projector(root, run=run).run_pass()
         importer.Importer(root, run=run).sweep()
         if not store_rows(root, "SELECT path FROM store_projection_queue"):
+            if writer is None:
+                derived(root)
             return
     raise AssertionError(store_rows(root, "SELECT path, operation FROM store_projection_queue"))
 

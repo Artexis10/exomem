@@ -68,11 +68,17 @@ queued pull requests before any of them lands, because a pull request's own CI
 runs only its changed tests and the guard modules.
 
 1. Wait until the review note approves the pull request's current patch.
-2. Run `gh pr merge <number> --squash --auto`.
+2. Run `gh pr merge <number> --squash --auto --match-head-commit <head SHA>`, with the head that the review approved.
 3. Read the `merge queue` status on the pull request. "testing" means a queue run is in progress.
 4. If the status is "failed: conflicts with main", rebase onto main and push.
 5. If the status is "failed", fix the cause and push. The queue takes the new head.
 6. If the failure was a flake, run `gh pr merge <number> --disable-auto`, then step 2 again.
+
+If a pull request fails on a test that also fails on main, main itself is red.
+The fix for main must land first. If main is red for two separate reasons, each
+fix fails alone. Re-queue a fix whose status is "failed" with step 6. Then run
+`gh run cancel <id>` on the running `merge-queue/` run. Its members go back to
+the queue, and the next batch can hold both fixes.
 
 A pull request from a fork cannot join the queue, because its code would run
 with this repository's write token before it lands. Push its branch to this

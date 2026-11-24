@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -29,7 +32,7 @@ CLAIM = "https://doi.org/10.5555/aaa"
         ("cited as \u201c10.5555/aaa\u201d in the text", ("10.5555/aaa",)),
         ("DOI 10.5555/aaa\u20101 set with a Unicode hyphen", ("10.5555/aaa-1",)),
         ("DOI 10.5555/j.\u200baaa with a zero-width break", ("10.5555/j.aaa",)),
-        ("10.5555/abc\udced\udca0\udc80 as PyMuPDF decodes a lone surrogate", ("10.5555/abc",)),
+        ("10.5555/abc\udced\udca0\udc80 with a lone surrogate in the text", ("10.5555/abc",)),
     ],
 )
 def test_the_doi_syntax_is_read_from_running_text(text: str, expected: tuple[str, ...]) -> None:
@@ -198,7 +201,7 @@ def test_a_reply_block_that_does_not_read_as_one_is_refused_not_shown_as_a_state
 
 @pytest.fixture
 def pdfs(tmp_path: Path) -> Path:
-    pytest.importorskip("fitz")
+    pytest.importorskip("pypdfium2")
     return tmp_path
 
 
@@ -242,6 +245,28 @@ def test_only_the_first_two_pages_are_read(pdfs: Path) -> None:
     assert identity.inspect(path, CLAIM).state == identity.NOT_SHOWN
 
 
+def test_a_doi_wrapped_after_a_letter_and_a_hyphen_is_printed_not_a_conflict(pdfs: Path) -> None:
+    # PDFium writes a hyphen that ends a line as a control character and joins the lines.
+    path = make_pdf(pdfs / "a.pdf", ["The article is cited as 10.5555/aaa-\n123 in the journal of lanterns."])
+
+    assert identity.inspect(path, "https://doi.org/10.5555/aaa-123").state == identity.PRINTED
+
+
+def test_the_reader_child_dumps_no_core_when_pdfium_aborts_under_its_cap() -> None:
+    # PDFium aborts when an allocation fails under the cap; a core dump would write the document's bytes to disk.
+    pytest.importorskip("resource")
+    code = (
+        "import resource\n"
+        "from exomem import document_identity as d\n"
+        "d.read_pdf = lambda path: d.PdfEvidence(unavailable=str(resource.getrlimit(resource.RLIMIT_CORE)))\n"
+        "d._child([str(1 << 30)])\n"
+    )
+
+    reply = subprocess.run([sys.executable, "-c", code], input=b"x.pdf", capture_output=True, check=True)
+
+    assert json.loads(reply.stdout)["unavailable"] == "(0, 0)"
+
+
 def test_an_encrypted_pdf_is_unavailable_and_names_the_reason(pdfs: Path) -> None:
     path = make_pdf(pdfs / "locked.pdf", ["A study of harbour lanterns."], password="secret")
 
@@ -258,6 +283,14 @@ def test_a_malformed_pdf_is_unavailable_and_raises_nothing(pdfs: Path) -> None:
     result = identity.inspect(path, CLAIM)
 
     assert (result.state, result.reason) == (identity.UNAVAILABLE, identity.UNREADABLE)
+
+
+def test_a_pdf_cut_short_still_shows_the_doi_its_first_page_printed(pdfs: Path) -> None:
+    whole = make_pdf(pdfs / "whole.pdf", ["A study of harbour lanterns. 10.5555/aaa", "Second page of the study."])
+    cut = pdfs / "cut.pdf"
+    cut.write_bytes(whole.read_bytes()[: whole.stat().st_size * 6 // 10])
+
+    assert identity.inspect(cut, CLAIM).state == identity.PRINTED
 
 
 def test_a_pdf_with_no_text_layer_is_unavailable_for_that_reason(pdfs: Path) -> None:
