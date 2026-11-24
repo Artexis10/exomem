@@ -16140,10 +16140,27 @@ def _validate_rendered_arguments(name: str, action: object, arguments: Mapping[s
     matching = [entry for entry in operations.entries if entry.matches(action, arguments)]
     if not matching:
         _refuse_rendered_arguments(name, "the selected operation has invalid discriminants")
-    if not any(set(arguments) <= entry.fields and all(arguments.get(key) is not None
-                                                      for key in entry.required)
-               for entry in matching):
-        _refuse_rendered_arguments(name, "the selected operation has invalid fields")
+    from .cli_ops import action_argument_contract
+
+    # Each candidate's own misfit: the caller's names against what that entry takes.
+    misfits = [
+        (
+            sorted(set(arguments) - entry.fields),
+            sorted(key for key in entry.required if arguments.get(key) is None),
+            entry,
+        )
+        for entry in matching
+    ]
+    if any(not unexpected and not missing for unexpected, missing, _ in misfits):
+        return
+    # The closest candidate (fewest misfits, then table order) is the one the caller likely meant.
+    unexpected, missing, entry = min(misfits, key=lambda item: len(item[0]) + len(item[1]))
+    named = [
+        *([f"unexpected for {action}: {', '.join(unexpected)}"] if unexpected else []),
+        *([f"{action} requires {', '.join(missing)}"] if missing else []),
+        action_argument_contract(str(action), entry.fields, entry.required),
+    ]
+    _refuse_rendered_arguments(name, "; ".join(named))
 
 
 def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:

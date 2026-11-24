@@ -2896,12 +2896,14 @@ def _check_unregistered_entity_types(
         if finding_path == carrier_path:
             meta["proposal"] = proposal
             meta["expected_hash"] = registry.extension_hash
+            save = capabilities.active_call_text("schema_memory", {
+                "operation": "save-entity-types", "proposal": "<meta.proposal>",
+                "why": "<reason>", "expected_hash": "<meta.expected_hash>",
+            })
             return (
                 meta,
                 "Save `meta.proposal` — the full registry with this entry merged — "
-                'via `schema_memory(operation="save-entity-types", '
-                "proposal=meta.proposal, why=..., "
-                "expected_hash=meta.expected_hash)`. Do not save "
+                f"via `{save}`. Do not save "
                 "`proposed_entry` on its own; it is a description, not a registry.",
             )
         meta["proposal_carrier"] = carrier_path
@@ -4155,8 +4157,9 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
             path=str(item.get("path") or managed_join("")),
             detail=str(item.get("detail") or item.get("code") or "relation registry finding"),
             proposed_fix=(
-                "Review corpus evidence with schema_memory(subject='relations') and save "
-                "a complete, hash-guarded proposal."
+                "Review corpus evidence with "
+                f"{capabilities.active_call_text('schema_memory', {'subject': 'relations', 'operation': 'infer'})}"
+                " and save a complete, hash-guarded proposal."
             ),
             meta=item,
             )

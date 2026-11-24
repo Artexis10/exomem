@@ -3667,6 +3667,22 @@ def _resolve_child_selector(
     )
 
 
+def query_columns(manifest: collections.CollectionManifest) -> list[str]:
+    """The top-level columns a query on this manifest may name: its fields and system columns."""
+    profile = profile_for(manifest.semantic_profile)
+    return sorted(
+        set(manifest.schema.fields)
+        | {
+            "collection_id",
+            profile.item_id_property,
+            "item_version",
+            "inferred",
+            "ambiguous",
+            "parent_record_id",
+        }
+    )
+
+
 def _validate_query_projection_fields(
     manifest: collections.CollectionManifest,
     *,
@@ -3678,17 +3694,8 @@ def _validate_query_projection_fields(
     date_column: str | None,
 ) -> None:
     """Refuse undeclared fields before canonical rows enter query machinery."""
-    profile = profile_for(manifest.semantic_profile)
     allowed = collections._saved_view_selected_fields(
-        set(manifest.schema.fields)
-        | {
-            "collection_id",
-            profile.item_id_property,
-            "item_version",
-            "inferred",
-            "ambiguous",
-            "parent_record_id",
-        },
+        set(query_columns(manifest)),
         collections._saved_view_child_shapes(manifest.storage, manifest.child_tables),
         selected_child,
     )
@@ -3707,8 +3714,10 @@ def _validate_query_projection_fields(
         if raw is None:
             continue
         if type(raw) is not str or not raw or raw.split(".", 1)[0] not in allowed:
+            shown = raw if type(raw) is str else type(raw).__name__
             raise collections.CollectionError(
-                "INVALID_RECORD_QUERY_FIELD", "query field is not available in the safe projection"
+                "INVALID_RECORD_QUERY_FIELD",
+                f"query field {shown[:64]!r} is not available in the safe projection",
             )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -30,6 +30,7 @@ from .planning_values import PlanningValues, Unavailable
 from .structured_collections import CollectionError, parse_plan_ref
 
 _LIFECYCLES = frozenset({"active", "archived"})
+_RELATION_REFUSAL = "Planning relationship is not available"
 _EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
 #: The fields the narrow `triage` transition may change; plan_memory's triage action fixes them.
@@ -131,11 +132,7 @@ def _governed(
         return
     entry = _registered(planning_values, name, value)
     if entry is None:
-        if name == "kind":
-            _invalid("kind must be one of: " + ", ".join(planning_values.values("kind")))
-        _invalid(
-            f"{name} is invalid; see schema_memory(operation=inspect, subject=planning-values)"
-        )
+        _invalid(f"{name} must be one of: " + ", ".join(planning_values.values(name)))
     if entry.status != "active":
         replacement = (entry.replaced_by or "").partition(".")[2]
         _invalid(f"{name} is deprecated" + (f"; use {replacement}" if replacement else ""))
@@ -1816,7 +1813,11 @@ def validate_hierarchy(
     for key, values in plans.items():
         kind = values["kind"]
         active = values["lifecycle"] == "active"
-        parent = _relation_target(manifest, values.get("parent"))
+        try:
+            parent = _relation_target(manifest, values.get("parent"))
+        except CollectionError:
+            # A foreign or malformed parent refuses like a missing one: no item has the id "".
+            parent = ""
         area = _relation_target(manifest, values.get("area"))
         if kind == "area":
             if parent is not None or area is not None:
@@ -1835,10 +1836,10 @@ def validate_hierarchy(
         required_parent = active and _committed(values) and bool(allowed)
         if allowed == ():
             if parent is not None:
-                _relation_error()
+                _parent_rule_error(kind, allowed, active)
         elif parent is None:
             if required_parent:
-                _relation_error()
+                _parent_rule_error(kind, allowed, active)
         else:
             target = plans.get(parent)
             if (
@@ -1846,7 +1847,9 @@ def validate_hierarchy(
                 or (allowed is not None and target["kind"] not in allowed)
                 or (active and target["lifecycle"] != "active")
             ):
-                _relation_error()
+                if allowed is None:
+                    _relation_error()
+                _parent_rule_error(kind, allowed, active)
             if (
                 area is not None
                 and target.get("area") is not None
@@ -1941,7 +1944,30 @@ def _relation_target(manifest: collections.CollectionManifest, value: Any) -> st
 
 
 def _relation_error() -> Never:
-    raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL)
+
+
+def _parent_rule_error(kind: str, parents: Sequence[str], active: bool) -> Never:
+    """Refuse a parent link and state the item's own kind rule, the registry's `parents`.
+
+    A missing, withheld, wrong-kind or inactive target all raise this one text, which names
+    nothing about any target, so a caller cannot tell a withheld target from a missing one.
+    """
+    rule = (
+        f"kind {kind} takes {'an active' if active else 'a'} parent of kind: {', '.join(parents)}"
+        if parents
+        else f"kind {kind} takes no parent"
+    )
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL, {"rule": rule})
+
+
+def relation_refusal_message(error: CollectionError) -> str:
+    """The public text of an `INVALID_PLAN_RELATION`: the bounded base plus a rule it carries.
+
+    Only `_parent_rule_error` sets a rule, so no other reason reaches the caller.
+    """
+    rule = error.details.get("rule")
+    return f"{_RELATION_REFUSAL}; {rule}" if type(rule) is str else _RELATION_REFUSAL
 
 
 def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:

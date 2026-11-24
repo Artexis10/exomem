@@ -127,6 +127,8 @@ class RenderingSpec:
     tool_arguments: tuple[str, ...] = ()
     #: Wire field names that would otherwise collide with the operation discriminator.
     field_aliases: tuple[tuple[str, str], ...] = ()
+    #: `(synonym, leaf)` pairs: a second name a caller may send for a leaf field, never published.
+    field_synonyms: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,7 @@ class Rendering:
     #: Arguments the tool takes beside `operation`, from the grouped command's own signature.
     tool_arguments: tuple[str, ...] = ()
     field_aliases: tuple[tuple[str, str], ...] = ()
+    field_synonyms: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         wire = [name for name, _ in self.field_aliases]
@@ -156,10 +159,17 @@ class Rendering:
             raise ValueError("a leaf kind field needs an alias to preserve the discriminator")
         if set(wire) & fields:
             raise ValueError("a field alias collides with another leaf field")
+        if any(synonym in fields for synonym, _ in self.field_synonyms):
+            raise ValueError("a field synonym collides with a leaf field")
 
     def leaf_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
         """Translate wire fields without allowing an alias to overwrite a raw leaf field."""
         result = dict(fields)
+        for synonym, leaf in self.field_synonyms:
+            if synonym in result:
+                if leaf in result:
+                    raise ValueError(f"conflicting fields {synonym!r} and {leaf!r}; send one")
+                result[leaf] = result.pop(synonym)
         for wire, leaf in self.field_aliases:
             if leaf in fields:
                 raise ValueError(f"conflicting raw field {leaf!r}; use alias {wire!r}")
@@ -313,6 +323,7 @@ class CommandOperations:
                 variants=tuple(entry for entry in self.entries if entry.rendering == spec.name),
                 tool_arguments=spec.tool_arguments,
                 field_aliases=spec.field_aliases,
+                field_synonyms=spec.field_synonyms,
             )
             for spec in self.renderings
         )
@@ -955,8 +966,12 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
         if any(p.name == "response_detail" for p in parameters) and variants[0].effect == "write":
             tool_arguments += ("response_detail",)
         aliases = (("unit_kind", "kind"),) if command == "observe_memory" else (("file_kind", "kind"),) if command == "manage_memory_file" else ()
+        # Typed tools page with `more`; a schema operation that pages takes it too, beside `continuation`.
+        synonyms = (("more", "continuation"),) if command == "schema_memory" and any(
+            "continuation" in entry.fields for entry in variants) else ()
         specs.append(RenderingSpec(name, variants[0].effect, title,
-                                   description + " Select one operation.kind.", tool_arguments, aliases))
+                                   description + " Select one operation.kind.", tool_arguments, aliases,
+                                   synonyms))
     capture_write = _REMAINING.get(command, ())[2:] == (True,)
     result = CommandOperations(command, selector, tuple(entries), tuple(specs), capture_write)
     if retain:
