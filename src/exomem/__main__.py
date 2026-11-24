@@ -6,7 +6,7 @@ Subcommands:
 - `setup --remote` — guided remote-connector onboarding (tunnel → .env + GitHub OAuth
   → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
 - `init` — bootstrap a fresh Knowledge Base into a vault
-- `install-skill` — install the Exomem skill into Claude Code
+- `install-skill` — install the Evermatter skill into Claude Code
 - `personalize` — scan a vault and generate a starter `_access.yaml` (readonly/excluded siblings)
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code or Codex
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
@@ -17,16 +17,16 @@ Subcommands:
 - `doctor` — read-only local install/setup preflight
 - `auth sessions|revoke` — operator-only durable MCP session administration
 - `governance-schema status|plan-migration|stage-migration|commit-migration|restore-migration-backup|downmigrate` — offline schema control
-- `cell-init` — idempotent Exomem Cloud cell init-container entrypoint: vault
+- `cell-init` — idempotent Evermatter Cloud cell init-container entrypoint: vault
   init when absent, then offline state migration; no governance schema
   migration, no custody environment
-- `cell-export` — Exomem Cloud owner export Job: the canonical ZIP of a held
+- `cell-export` — Evermatter Cloud owner export Job: the canonical ZIP of a held
   cell, uploaded to controller-presigned parts; reports sizes and digests only
-- `cell-media-census` — Exomem Cloud backup Job: the cell's last census of its
+- `cell-media-census` — Evermatter Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
-- `cell-media-manifest` — Exomem Cloud backup Job: the media manifest that each
+- `cell-media-manifest` — Evermatter Cloud backup Job: the media manifest that each
   snapshot carries, or an unknown manifest when the census cannot say
-- `cell-media-collect` — Exomem Cloud backup Job: condemn the released media
+- `cell-media-collect` — Evermatter Cloud backup Job: condemn the released media
   names that no retained snapshot's manifest reaches
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
@@ -1165,7 +1165,7 @@ def _studio_main(argv: list[str]) -> int:
     parser.add_argument(
         "--url",
         default=os.environ.get("EXOMEM_BASE_URL", "http://127.0.0.1:8765"),
-        help="Exomem service base URL (default: $EXOMEM_BASE_URL or http://127.0.0.1:8765)",
+        help="Evermatter service base URL (default: $EXOMEM_BASE_URL or http://127.0.0.1:8765)",
     )
     parser.add_argument(
         "--open",
@@ -1444,7 +1444,7 @@ def _index_main(argv: list[str]) -> int:
 
 
 def _prominence_main(argv: list[str]) -> int:
-    """`exomem prominence [off|light|balanced|maximal]` — how much Exomem speaks up.
+    """`exomem prominence [off|light|balanced|maximal]` — how much Evermatter speaks up.
 
     Orthogonal to `exomem mode`, which governs machine footprint. Shares the same
     config file so one write can never drop the other's setting. Torch-free, so it
@@ -1454,7 +1454,7 @@ def _prominence_main(argv: list[str]) -> int:
 
     parser = argparse.ArgumentParser(
         prog="exomem prominence",
-        description="Show or set how much Exomem participates in a conversation: "
+        description="Show or set how much Evermatter participates in a conversation: "
         "off (explicit invocation only) | light (recall when asked, capture on "
         "request) | balanced (recall on topic match, capture durable conclusions) | "
         "maximal (recall before every substantive turn, capture every stepping "
@@ -3415,7 +3415,7 @@ def _cell_init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem cell-init",
         description=(
-            "Idempotent Exomem Cloud cell init-container entrypoint: vault init "
+            "Idempotent Evermatter Cloud cell init-container entrypoint: vault init "
             "when absent, then offline state migration. No governance schema "
             "migration and no custody environment -- a cell runs standalone "
             "governance defaults, like a fresh desktop install."
@@ -3516,7 +3516,7 @@ def _init_main(argv: list[str]) -> int:
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print(
-        f"  2. Install the Exomem {managed_root_rel()} skill so Claude knows how to use it: "
+        f"  2. Install the Evermatter {managed_root_rel()} skill so Claude knows how to use it: "
         "python -m exomem install-skill"
     )
     print(f"  3. Adapt {managed_join('_Schema/project-keys.yaml')} to your own projects.")
@@ -3531,7 +3531,7 @@ def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-skill",
         description=(
-            "Install the Exomem skills into every agent client on this machine. "
+            "Install the Evermatter skills into every agent client on this machine. "
             "The MCP server is the hands; the skills are the brain that tells the agent "
             "when to capture and how to file — without them, the tools sit unused."
         ),
@@ -3578,7 +3578,7 @@ def _install_skill_main(argv: list[str]) -> int:
 
     for client, report in reports.items():
         print(
-            f"Installed the Exomem skills for {client} ({report['mode']}, {report['files']} files):"
+            f"Installed the Evermatter skills for {client} ({report['mode']}, {report['files']} files):"
         )
         print(f"  {report['target']}")
         if report.get("workflow_skills"):
@@ -4059,7 +4059,7 @@ def _simple_ask_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem ask",
         description=(
-            "Ask Exomem what it knows. Thin alias over ask_memory with compact recall defaults."
+            "Ask Evermatter what it knows. Thin alias over ask_memory with compact recall defaults."
         ),
     )
     parser.add_argument("query", help="question or search phrase")

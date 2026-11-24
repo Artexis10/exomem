@@ -38,7 +38,7 @@ this call stored: `Saved 2 of 3 files -> first.md and 1 more; 1 file could not b
 whose bytes were already stored also reads `Already saved -> <path>`. The `files` rows
 carry the codes and reasons. A result whose status is
 `replayed` reads `Already saved -> <title>`. Each sentence ends with the name of the store
-that took the write, such as `Saved -> <title> (personal Exomem)`; the `read_instructions` reply's `store`
+that took the write, such as `Saved -> <title> (personal Evermatter)`; the `read_instructions` reply's `store`
 names the same store. A repeat of a request with the same idempotency key returns the
 first reply, so it reads as the first call did.
 When a `save_source` call passed `options.custody_only` and stored a new Source, the sentence adds

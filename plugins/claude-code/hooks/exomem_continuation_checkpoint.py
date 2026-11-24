@@ -2,7 +2,7 @@
 """Local structural continuation checkpoints for supported coding clients.
 
 This module intentionally depends only on the Python standard library so the
-deployed copy can run when Exomem, MCP, OAuth, and the network are unavailable.
+deployed copy can run when Evermatter, MCP, OAuth, and the network are unavailable.
 """
 
 from __future__ import annotations
@@ -1135,7 +1135,7 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
     advisory = (
         "Reconcile these structural pointers with the compacted context: reopen cited "
         "artifacts and continue from evidence, inventing nothing. Capture a genuine durable "
-        "stepping-stone through normal Exomem governance; otherwise no memory write. "
+        "stepping-stone through normal Evermatter governance; otherwise no memory write. "
         "Advisory only; it does not prove capture completion."
         "\nMemory citations: " + MEMORY_CITATION_GUIDANCE
     )
@@ -1146,7 +1146,7 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
     )
     section_budget = content_budget - len(("\n" + maximum_footer).encode("utf-8"))
     lines = [
-        "[Exomem continuation checkpoint]",
+        "[Evermatter continuation checkpoint]",
         f"checkpoint: {checkpoint['checkpoint_id']} ({status})",
     ]
 

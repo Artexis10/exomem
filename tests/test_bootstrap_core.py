@@ -57,7 +57,7 @@ SECTION_BYTE_CEILINGS = {
     "diagnostics_reading": 2_200,
 }
 
-#: `cloud` is the reduced surface an Exomem Cloud cell serves: the product surface
+#: `cloud` is the reduced surface an Evermatter Cloud cell serves: the product surface
 #: minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only commands, so a rule naming an
 #: excluded command vanishes there.
 SURFACES = (None, "claude-code", "cloud")
@@ -490,8 +490,8 @@ def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):
         return session["store"], commands.op_bootstrap(_root(), section="all")["store"]
 
     monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
-    personal = {"kind": "personal", "name": "personal Exomem"}
+    personal = {"kind": "personal", "name": "personal Evermatter"}
     assert served() == (personal, personal)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
-    cloud = {"kind": "cloud", "name": "Exomem Cloud"}
+    cloud = {"kind": "cloud", "name": "Evermatter Cloud"}
     assert served() == (cloud, cloud)

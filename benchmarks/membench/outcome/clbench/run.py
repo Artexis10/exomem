@@ -82,10 +82,11 @@ ENV_SERVER = Path(__file__).with_name("env_server.py")
 #: value is declared but never enforced by upstream's runner.
 TURN_TIMEOUT_SECONDS = 300.0
 
-#: The Exomem arm's instruction, worded in parallel with upstream's file-memory one.
+#: The memory arm's instruction, worded in parallel with upstream's file-memory one. It names
+#: the product as the agent sees it in the plugin and the server instructions.
 EXOMEM_MEMORY_INSTRUCTION = (
     "You should learn and store information from each interaction, so use your memory. "
-    "You have a persistent memory system in the Exomem tools (MCP server `exomem`). "
+    "You have a persistent memory system in the Evermatter tools (MCP server `exomem`). "
     "Recall from it at the start of each turn and save new information to it as you "
     "learn things that will be useful in future turns."
 )

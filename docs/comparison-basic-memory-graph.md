@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem vs Basic Memory: graph-value comparison
+# Evermatter vs Basic Memory: graph-value comparison
 
 > **WITHDRAWN (2026-08-09) — historical internal diagnostic, not publishable.**
 > An independent adversarial re-examination (verdict **REJECT — WITHDRAW**;
@@ -29,74 +29,74 @@
 ## Current relation-evidence boundary
 
 This withdrawn comparison does not establish relation quality or ontology
-improvement. Exomem's current synthetic graph-value workflow keeps relation
+improvement. Evermatter's current synthetic graph-value workflow keeps relation
 resolution, proposal, guarded registry save, and later edge acceptance as
 separate actions. A cohort census reports only aggregate `relation_counts`,
 `page_counts`, and `denominators`; it does not rank debt, expose note content,
 or automatically author, promote, or deprecate a relation.
 
-Measured 2026-07-16 against Exomem source package version `0.23.0` at the
+Measured 2026-07-16 against Evermatter source package version `0.23.0` at the
 post-tag revision `7e89a3f7bff7` and Basic Memory `0.22.1` at pinned revision
-`0e59bbffaf7d`. The Exomem revision is current `main`, not the already-published
+`0e59bbffaf7d`. The Evermatter revision is current `main`, not the already-published
 `v0.23.0` artifact.
 
 ## Verdict
 
-Exomem is demonstrably superior on the graph-dependent tasks in this benchmark.
+Evermatter is demonstrably superior on the graph-dependent tasks in this benchmark.
 It matches Basic Memory's native graph on ordinary one-hop reachability,
 multi-hop reachability, and relation-type fidelity, then wins on direction,
 distractor exclusion, traversal lenses, provenance traceability, active versus
 superseded state, and relation-bearing semantic blocks.
 
-That is a graph claim, not a claim that Exomem is globally the better product.
+That is a graph claim, not a claim that Evermatter is globally the better product.
 This benchmark says nothing about cloud onboarding, generic search UX, canvas
 workflows, imports, or ecosystem breadth.
 
-The broader lean local-core run is also green: Exomem passed all 22 required
+The broader lean local-core run is also green: Evermatter passed all 22 required
 public-path probes across shared core, lifecycle integrity, explanation truth,
-and Exomem extensions. Basic Memory passed 11 probes, failed the expected graph
-precision probe, and returned 10 explicit unsupported results for Exomem-only
+and Evermatter extensions. Basic Memory passed 11 probes, failed the expected graph
+precision probe, and returned 10 explicit unsupported results for Evermatter-only
 contracts. The harness deliberately emitted no full local-core-advantage claim:
 lean mode disables learned models, performance sampling, and media.
 
 | Lean gate | Result |
 |---|---:|
 | Required probe-ID coverage | 22/22 for each contender |
-| Exomem operation execution | 21/21 active MCP operations; CLI surface explicitly mirrored |
+| Evermatter operation execution | 21/21 active MCP operations; CLI surface explicitly mirrored |
 | Basic Memory operation execution | 16/16 active MCP and 5/5 active CLI operations |
 | Shared core | Pass |
 | Lifecycle integrity | Pass |
 | Explanation truth | Pass |
-| Exomem extensions | Pass |
+| Evermatter extensions | Pass |
 | Performance envelope | Not run in lean profile |
 | Full local-core advantage | Not emitted |
 
 ## Recorded result
 
-| Independent dimension | Exomem | Basic Memory | Reading |
+| Independent dimension | Evermatter | Basic Memory | Reading |
 |---|---:|---:|---|
 | One-hop reachability | 1/1 | 1/1 | Parity |
 | Multi-hop reachability | 2/2 | 2/2 | Parity |
 | Relation-type fidelity | 1/1 | 1/1 | Parity |
-| Direction fidelity | 2/2 | 1/2 | Exomem excludes the incoming neighbor under an outgoing traversal |
-| Distractor precision | 1/1 | 1/2 | Exomem's typed filter excludes the unrelated edge |
-| Traversal-lens filtering | 2/2 | 0/1 unsupported | Exomem exposes relation-family traversal profiles |
-| Provenance traceability | 2/2 | 0/1 unsupported | Exomem returns authored origin and source anchor |
-| Supersession handling | 3/3 | 0/1 unsupported | Exomem returns the edge plus active/superseded state |
-| Semantic-block precision | 2/2 | 0/1 unsupported | Exomem returns the claim block anchor and its edge |
+| Direction fidelity | 2/2 | 1/2 | Evermatter excludes the incoming neighbor under an outgoing traversal |
+| Distractor precision | 1/1 | 1/2 | Evermatter's typed filter excludes the unrelated edge |
+| Traversal-lens filtering | 2/2 | 0/1 unsupported | Evermatter exposes relation-family traversal profiles |
+| Provenance traceability | 2/2 | 0/1 unsupported | Evermatter returns authored origin and source anchor |
+| Supersession handling | 3/3 | 0/1 unsupported | Evermatter returns the edge plus active/superseded state |
+| Semantic-block precision | 2/2 | 0/1 unsupported | Evermatter returns the claim block anchor and its edge |
 
-The dominance gate passed. It has no weighted aggregate: Exomem must be no worse
+The dominance gate passed. It has no weighted aggregate: Evermatter must be no worse
 on every common graph dimension, pass every fixture invariant, and strictly win
-provenance, supersession, and semantic-block precision. A future Exomem
+provenance, supersession, and semantic-block precision. A future Evermatter
 reachability regression makes the result false even if all governance dimensions
 still pass.
 
-The authored Markdown trees were unchanged by both contenders. Exomem startup
+The authored Markdown trees were unchanged by both contenders. Evermatter startup
 created four recorded media-extraction sidecars, all classified as derived
 artifacts rather than authored content. Recorded initial corpus hashes were
 `57ee993e0d25f6a384d1f227fee91b7e8cf8b69ecf1cda7909cc8725fcdea298`
-for Exomem and `d4141c8adbbb423c77cfefd417daf0400a527c13744be682cabd1ee0ca7ad752`
-for Basic Memory. Lean index duration was 0.947 seconds for Exomem and 6.873
+for Evermatter and `d4141c8adbbb423c77cfefd417daf0400a527c13744be682cabd1ee0ca7ad752`
+for Basic Memory. Lean index duration was 0.947 seconds for Evermatter and 6.873
 seconds for Basic Memory. Graph-case response totals were 43,656 versus 28,486
 bytes; aggregate graph-case latency was 143 versus 2,461 milliseconds. These
 efficiency numbers are informational and do not affect any correctness gate.
@@ -109,7 +109,7 @@ schemas, deterministic media artifacts, deliberate distractors, 11 graph tasks,
 and 27 layered probes. It then renders each product's documented native
 Markdown:
 
-- Exomem receives its generic schema scaffold, governed frontmatter, semantic
+- Evermatter receives its generic schema scaffold, governed frontmatter, semantic
   blocks, and canonical `## Relations` bullets.
 - Basic Memory receives native frontmatter, atomic observations, and open
   relation bullets. Lifecycle and block facts are represented as far as its
@@ -133,13 +133,13 @@ contract finding identity before repair.
 
 ## Reproduce
 
-The fast Exomem-only fixture gate requires no Basic Memory checkout or model:
+The fast Evermatter-only fixture gate requires no Basic Memory checkout or model:
 
 ```bash
 uv run python scripts/graph_value_benchmark.py
 ```
 
-For the direct comparison, place a current Basic Memory checkout beside Exomem:
+For the direct comparison, place a current Basic Memory checkout beside Evermatter:
 
 ```bash
 uv run python scripts/graph_value_benchmark.py \
@@ -179,14 +179,14 @@ loading `BAAI/bge-base-en-v1.5` through SentenceTransformers, on both CPU and
 CUDA and in two separate virtual environments. The cached weight's SHA-256
 matches its content-addressed model blob, and direct safetensors inspection can
 read its tensors. This is therefore recorded as an environment/setup failure,
-not an Exomem loss, and the harness emits no report or claim from that attempt.
+not an Evermatter loss, and the harness emits no report or claim from that attempt.
 
 A prior pre-correction full diagnostic remains useful only for backlog evidence:
-its performance gate failed (Exomem/Basic Memory query median ratio 5.527 against
+its performance gate failed (Evermatter/Basic Memory query median ratio 5.527 against
 the 2.0 ceiling; p95 ratio 3.320 against 2.5), and PDF/image/audio/video probes
 were unavailable because the required local extras were absent. Its retrieval
 failures exposed harness setup mistakes that are fixed here: both products now
-build full embedding indexes, Exomem uses the public maintenance rebuild, and
+build full embedding indexes, Evermatter uses the public maintenance rebuild, and
 the lexical explanation probe requests a mode that actually exposes BM25 raw
 scores. Because the corrected full run could not pass native model setup, those
 fixes are covered by focused tests but do not upgrade the historical diagnostic

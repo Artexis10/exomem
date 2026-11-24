@@ -246,7 +246,7 @@ The kind decides what the expected SHA-256 covers:
 
 - `file`: the file's bytes.
 - `blob`: a pool blob's decompressed member, so the check runs `gzip -dc` first.
-- `text`: the text that a Source page fences, so the check reads it with the cell's own Exomem.
+- `text`: the text that a Source page fences, so the check reads it with the cell's own Evermatter.
 
 The scratch restore is the reviewed way to read a snapshot without touching the cell.
 It restores the whole snapshot, so it costs the scratch restore's time and volume.

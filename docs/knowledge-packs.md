@@ -2,12 +2,12 @@
 
 # Knowledge packs
 
-Knowledge packs are product-level guidance for Exomem. They let a fresh user pick
+Knowledge packs are product-level guidance for Evermatter. They let a fresh user pick
 useful starting domains, and they let agents route simple intentions into the
 right governed layer without asking the user to understand Sources, Evidence,
 Notes, Entities, or supersession first.
 
-Packs do not create a new storage engine. They compose Exomem's product commands
+Packs do not create a new storage engine. They compose Evermatter's product commands
 and governed canonical implementation leaves. They are advisory: selecting one
 does not activate a collection, create folders or templates, migrate content, or
 make a schema true behind the user's back.
@@ -21,7 +21,7 @@ make a schema true behind the user's back.
 - `business` - customers, meetings, commitments, contracts, invoices, risks, and decisions.
 - `personal-records` - everyday documents, purchases, travel, home, vehicles, admin records, and life logistics.
 
-`personal-records` is the default when Exomem cannot infer a more specific pack,
+`personal-records` is the default when Evermatter cannot infer a more specific pack,
 which makes it suitable for fresh or empty vaults.
 
 ## Schema
@@ -66,7 +66,7 @@ tool shape cannot spell.
 
 Unknown pack fields are rejected. Unknown workflow fields are also rejected. This
 is intentional: a deployment should not believe a pack field is active when this
-Exomem version ignores it.
+Evermatter version ignores it.
 
 ## Selection manifest
 
@@ -103,7 +103,7 @@ old notes, or compile material. Setup writes the manifest only after the
 
 ## Adoption and setup behavior
 
-Pack suggestions are deterministic. Exomem looks at structural signals from
+Pack suggestions are deterministic. Evermatter looks at structural signals from
 `overview`: folder paths and sample file names. It does not read every note body
 or ask a model to classify the vault.
 

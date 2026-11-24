@@ -6,8 +6,8 @@
     "name": "Substrate Systems O\u00dc",
     "url": "https://substratesystems.io"
   },
-  "homepage": "https://substratesystems.io/exomem",
-  "repository": "https://github.com/Artexis10/exomem",
+  "homepage": "https://evermatter.ai",
+  "repository": "https://github.com/substrate-systems/evermatter",
   "license": "Apache-2.0",
   "keywords": [
     "memory",
@@ -21,8 +21,8 @@
   "userConfig": {
     "mcp_url": {
       "type": "string",
-      "title": "Exomem MCP URL",
-      "description": "Optional full Exomem MCP service URL ending in /mcp. Leave blank and run `exomem setup` to configure a native client route.",
+      "title": "Evermatter MCP URL",
+      "description": "Optional full Evermatter MCP service URL ending in /mcp. Leave blank and run `exomem setup` to configure a native client route.",
       "default": "",
       "required": false
     }

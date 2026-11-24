@@ -1,4 +1,4 @@
-"""The label registries Exomem ships, and the rules a key, a label and a language tag follow.
+"""The label registries Evermatter ships, and the rules a key, a label and a language tag follow.
 
 A label registry is a closed set of keys. Each key has a description and labels keyed by
 language, and no behaviour. Each registry ships as data in its own pack, and a vault adds keys

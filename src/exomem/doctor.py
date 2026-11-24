@@ -1549,7 +1549,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 "ordinary startup refuses until an explicit offline migration completes."
             ),
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     if migration_status != "complete":
@@ -1559,7 +1559,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "Machine-local state migration is required before startup "
             f"(manifest status: {migration_status}).",
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     return _check(
@@ -2118,7 +2118,7 @@ def _check_mps_headroom() -> DoctorCheck | None:
         "mps.headroom",
         "pass",
         "Apple Silicon MPS is available. macOS does not expose a stable non-torch "
-        "free-memory probe for Metal, so Exomem uses policy controls: lazy model "
+        "free-memory probe for Metal, so Evermatter uses policy controls: lazy model "
         "preload by default, live-write burst deferral, and explicit indexing for imports.",
         details={
             "model_preload_allowed": warmup.model_preload_allowed(mode.resolve_mode()),

@@ -58,7 +58,7 @@ PLATFORM_NAMESPACE = "exomem-platform"
 CLOUD_NAMESPACE = "exomem-cloud"
 PLATFORM_ENVIRONMENT = "cloud-platform"
 DEPLOY_WORKFLOW = "cloud-deploy.yml"
-DEFAULT_REPOSITORY = "Artexis10/exomem"
+DEFAULT_REPOSITORY = "substrate-systems/evermatter"
 RELEASE_DESCRIPTION_PREFIX = "platform-"
 # The files a release may not change without an operator-step barrier entry:
 # the active secret registry, its selection and its destinations, at any

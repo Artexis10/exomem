@@ -25,7 +25,7 @@ structurally impossible, not merely discouraged.
    the competitor's own provider classes or whole harness unmodified.
 2. **Guest posture.** Head-to-head rows come from the competitors' own
    harnesses (Basic Memory's bm-bench; Supermemory's MemoryBench) with
-   Exomem as a guest provider. This repository authors only Exomem's own
+   Evermatter as a guest provider. This repository authors only Evermatter's own
    integration — the posture every vendor takes on a public suite.
 3. **One reader, one judge, one ledger.** Competitor-harness ANSWER/EVALUATE
    stages are never republished; ingest/search artifacts are exported and
@@ -53,7 +53,7 @@ structurally impossible, not merely discouraged.
    (`done` never implies extraction; its default dreaming mode has no
    completion signal and renders `readiness-unverifiable`, disclosed, not
    invalid — invalidating a product's default mode would be its own bias).
-   Exomem: doctor checks with refusal-not-degradation.
+   Evermatter: doctor checks with refusal-not-degradation.
 8. **Variants never collapse.** Hosted vs local Supermemory run different
    extraction models; document-search vs memory-search are different
    products in effect; git-backed vs plain Basic Memory differ on history.
@@ -132,7 +132,7 @@ structurally impossible, not merely discouraged.
 - Does any competitor knob lack provenance? (automatic disqualification)
 - Do the equivalence-gate diffs contain unexplained mismatches or expired
   exceptions?
-- Are Exomem's projector/driver LOC materially larger than competitors'?
+- Are Evermatter's projector/driver LOC materially larger than competitors'?
 - Did any row score a product where the manifest shows an environment fault?
 - Does any comparative claim rest on a family containing an N/A?
 - Does every privileged call have an authenticated sandbox receipt and an

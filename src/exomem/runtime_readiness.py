@@ -10,9 +10,10 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+
+from .install_info import installed_version
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
@@ -364,7 +365,7 @@ def package_release() -> str:
     global _package_release
     if _package_release is None:
         try:
-            _package_release = version("exomem")
+            _package_release = installed_version()
         except Exception:  # noqa: BLE001 - metadata failure must become diagnostic state
             return "0+unknown"
     return _package_release

@@ -1,10 +1,10 @@
 <!-- authority:non-specification -->
 
-# Prominence — how much Exomem speaks up
+# Prominence — how much Evermatter speaks up
 
-Exomem has one knob for how much it participates in a conversation. It is separate
-from `exomem mode`, which governs how much of your *machine* Exomem may use. A laptop
-on battery can still want maximal recall; a workstation can still want Exomem to stay
+Evermatter has one knob for how much it participates in a conversation. It is separate
+from `exomem mode`, which governs how much of your *machine* Evermatter may use. A laptop
+on battery can still want maximal recall; a workstation can still want Evermatter to stay
 out of the way.
 
 | Level | Recall | Capture | Narration |
@@ -65,7 +65,7 @@ removing a saved value cannot contradict the pin, and refusing would leave saved
 context values stuck. A *set* that conflicts with the pin is still refused.
 
 The context that applies to a request is **detected from the calling client**, or
-from an operator's explicit `EXOMEM_SURFACE`. On Exomem Cloud, the control plane's
+from an operator's explicit `EXOMEM_SURFACE`. On Evermatter Cloud, the control plane's
 client registry assigns each connected app its context, and the cell applies that
 before detection. No argument selects it, and it is an
 eagerness knob only: it never picks an identity, a vault, a storage path, or an
@@ -98,7 +98,7 @@ session that never lands work is not asked and an unanswered check waits for the
 `maximal`.** There is nothing there to re-arm the check, and instruction text decays
 over a long conversation: the model reads it at turn 1, then gradually stops acting on
 it. `maximal` on a hookless client produces roughly the behaviour `balanced` produces
-on a hooked one. If Exomem seems to "forget to remember" in a web chat, this is why —
+on a hooked one. If Evermatter seems to "forget to remember" in a web chat, this is why —
 raise the level rather than concluding recall is broken.
 
 Nothing stops you overriding either default. The intent is that you **tune down** if
@@ -140,7 +140,7 @@ agent makes every response say "never write on your own initiative" while the
 Stop hook on your laptop keeps injecting the capture reminder on its own timer.
 That is why `bootstrap()` and `settings.set` serve a `hook_cadence` block to
 every client in the **coding** context -- Claude Code, Codex, and any client
-Exomem does not recognise, since an unrecognised client is far more likely to be
+Evermatter does not recognise, since an unrecognised client is far more likely to be
 a hooked CLI than a web connector. Conversational clients get nothing, because
 there is genuinely no cadence there to be out of step with.
 
@@ -162,11 +162,11 @@ Each block is self-contained. Paste it into:
 - **ChatGPT** — Settings → Personalization → Custom instructions → *"Anything else
   ChatGPT should know?"* (each field caps around 1500 characters; these fit)
 
-Replace the connector name if you named yours something other than Exomem. Otherwise
+Replace the connector name if you named yours something other than Evermatter. Otherwise
 paste the block as it stands rather than writing your own shorter version of it.
-These blocks set how much Exomem speaks up; what it may DO on its own is the
+These blocks set how much Evermatter speaks up; what it may DO on its own is the
 delegation envelope, with its own block in
-[What Exomem does on its own](#what-exomem-does-on-its-own) below.
+[What Evermatter does on its own](#what-exomem-does-on-its-own) below.
 
 **Each item in the capture list is a separate switch, not an example of a general
 idea.** An assistant treats that list as the definition of what is worth saving, so
@@ -193,15 +193,15 @@ text for Claude Code and Codex. Leave it out at Light and Off: those levels save
 only when you ask.
 
 ```text
-Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
 ```
 
 ### Maximal — recommended for web and hosted
 
 ```
-I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
 
-Exomem prominence: MAXIMAL.
+Evermatter prominence: MAXIMAL.
 - Recall: search before every substantive turn; skip only chit-chat/control. Cite useful hits. An empty result is a scoped miss and reason to capture.
 - Capture: save every stepping stone: decision, solved problem, diagnosed failure, reusable pattern, reusable fact about a recurring entity, or a method carried out with a reported useful result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation; these, new Entity, own edge: `proactive_capture`; queued relation: `link_acceptance`; merge/structural change: confirmed `restructure_execution`. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-offs, incidental associations, and trivial metrics get no note. When torn between saving and letting it pass, save. Never save chat transcripts.
 - Entities: once per chat, after primary work and before the final response, list_review_items(queue="due", categories=["entity_recurrence"], limit=3); skip if unavailable.
@@ -212,9 +212,9 @@ Exomem prominence: MAXIMAL.
 ### Balanced — the default where hooks exist
 
 ```
-I use Exomem as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
+I use Evermatter as my durable Knowledge Base. If no skill is loaded, call bootstrap(profile="compact") once per chat and follow it.
 
-Exomem prominence: BALANCED.
+Evermatter prominence: BALANCED.
 - Recall: search when a turn concerns my projects, domains, named entities, or prior conclusions, attempts, or decisions. Skip chit-chat, control, and answered follow-ups; cite useful hits.
 - Capture: save at a stepping stone: a durable conclusion, reusable fact about a recurring entity, or a method carried out with a reported result. A stable preference, recurring routine, historical baseline, or durable affiliation qualifies only with stability or recurrence plus reusable comparison, interpretation, or decision value. Use a uniquely resolved Entity's narrow facet, else concise compiled observation; these, new Entity, own edge: `proactive_capture`; queued relation: `link_acceptance`; merge/structural change: confirmed `restructure_execution`. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-offs, incidental associations, and trivial metrics get no note. Not mid-thought exploration or tangents. Never save chat transcripts.
 - Entities: once per chat, after primary work and before the final response, list_review_items(queue="due", categories=["entity_recurrence"], limit=3); skip if unavailable.
@@ -225,18 +225,18 @@ Exomem prominence: BALANCED.
 ### Light — when it is getting in the way
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP connector.
+I keep a personal Knowledge Base served by the Evermatter MCP connector.
 
-Exomem prominence: LIGHT.
-- Recall: search Exomem only when I ask a recall question outright, or when the turn is unmistakably about a topic it covers. When in doubt, don't search.
-- Capture: write to Exomem only when I ask. Do not save on your own judgment, however durable the conclusion looks.
+Evermatter prominence: LIGHT.
+- Recall: search Evermatter only when I ask a recall question outright, or when the turn is unmistakably about a topic it covers. When in doubt, don't search.
+- Capture: write to Evermatter only when I ask. Do not save on your own judgment, however durable the conclusion looks.
 - Narration: never mention searching. Fold anything you retrieve into the answer with a citation and nothing more.
 ```
 
 ### Off — explicit invocation only
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP connector. Use it only when I explicitly ask you to search it or save to it. Never search or write on your own judgment, and don't mention it otherwise.
+I keep a personal Knowledge Base served by the Evermatter MCP connector. Use it only when I explicitly ask you to search it or save to it. Never search or write on your own judgment, and don't mention it otherwise.
 ```
 
 ---
@@ -256,16 +256,16 @@ append to the block:
 
 ## What the level does not change
 
-The level governs *when* Exomem acts, never what it is allowed to touch. Governed
+The level governs *when* Evermatter acts, never what it is allowed to touch. Governed
 writes stay inside the Knowledge Base folder at every level, `Sources/` and `Evidence/`
 stay append-only, and access policy is enforced independently. `maximal` is more
 eager, not more privileged.
 
 ---
 
-## What Exomem does on its own
+## What Evermatter does on its own
 
-The level says how much Exomem speaks up. A second, separate contract — the
+The level says how much Evermatter speaks up. A second, separate contract — the
 **delegation envelope** — says what it may do on its own, per kind of action,
 and it is the one that keeps an eager level from turning into an eager hand.
 
@@ -280,7 +280,7 @@ reports the live envelope under `engagement`, and
 Append this to your custom instructions instead:
 
 ```
-Exomem serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity merge, deletion, removing an edge and reverting a promotion always need my confirmation, while a new entity, your own edge, my type or relation saves and one minimal new Records collection within the server's limits follow proactive capture (any other new collection needs my confirmation), and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by list_review_items(queue="dispositions"), and you pick the one my words mean.
+Evermatter serves a delegation envelope under `engagement` when you call bootstrap. Follow it: name the action class before you act; treat an intent above that class's ceiling as a proposal rather than an act; honour the class disposition (off — do not start it on your own, though anything I ask for outright is never blocked; advisory — tell me in plain language and stop; silent — go ahead, and narrate as the level says; confirm or confirm-shortcut — get my confirmation first). Record what I decide through triage so it sticks. Restructure application, supersession, entity merge, deletion, removing an edge and reverting a promotion always need my confirmation, while a new entity, your own edge, my type or relation saves and one minimal new Records collection within the server's limits follow proactive capture (any other new collection needs my confirmation), and "always allow that from now on" does not exist yet — say so rather than inventing either a refusal or a permission for it; it is a founder decision, not yours or mine. If I ask you to stop suggesting some KIND of thing, quiet that signal family rather than lowering my level, which silences everything: the registered family names are listed by list_review_items(queue="dispositions"), and you pick the one my words mean.
 ```
 
 That block is deliberately not a table. The envelope moves when you change level

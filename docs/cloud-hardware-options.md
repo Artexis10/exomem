@@ -1,6 +1,6 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud hardware options
+# Evermatter Cloud hardware options
 
 Checked on 7 October 2026. These are published offers, not stock reservations or an order.
 All prices exclude VAT. Hardware acquisition remains deferred until demand justifies it.

@@ -17,7 +17,7 @@
       "additionalProperties": false,
       "required": ["image"],
       "properties": {
-        "image": {"type": "string", "pattern": "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$"}
+        "image": {"type": "string", "pattern": "^ghcr\\.io/(substrate-systems/evermatter|artexis10/exomem)@sha256:[0-9a-f]{64}$"}
       }
     },
     "scheduler": {
@@ -90,7 +90,7 @@
     "cellctl": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "image", "cellImageRepository", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "upgradeConcurrencyPerNode", "upgradePrepareEnabled", "upgradeWindow", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
+      "required": ["enabled", "image", "cellImageRepositories", "namespace", "replicas", "b2BucketName", "b2BucketId", "b2Endpoint", "initDeadlineMinutes", "upgradeReadyDeadlineMinutes", "upgradeConcurrencyPerNode", "upgradePrepareEnabled", "upgradeWindow", "exportDeadlineMinutes", "exportPauseCopyFloorMiB", "exportConcurrencyPerNode", "exportTtlHours", "databaseDsnSecretName", "databaseDsnSecretKey", "cellTokenKeySecretName", "backupMasterKeySecretName", "cellDataStagingSecretName", "cellDataBackupListSecretName", "hetznerReadTokenSecretName", "databaseEgressCidrs", "cellResources", "resources"],
       "properties": {
         "accessRecord": {
           "type": "object", "additionalProperties": false,
@@ -243,7 +243,13 @@
         },
         "enabled": {"type": "boolean"},
         "image": {"type": "string"},
-        "cellImageRepository": {"type": "string"},
+        "cellImageRepositories": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "object", "additionalProperties": false, "required": ["repository", "builder"], "properties": {
+            "repository": {"type": "string", "pattern": "^[^\\s@]+$"},
+            "builder": {"type": "string", "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"}
+          }}
+        },
         "namespace": {"const": "exomem-cloud"},
         "replicas": {"type": "integer", "minimum": 1, "maximum": 1},
         "b2BucketName": {"type": "string"},
@@ -334,7 +340,7 @@
       "if": {"properties": {"enabled": {"const": true}}},
       "then": {"properties": {
         "image": {"pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
-        "cellImageRepository": {"pattern": "^[^\\s@]+$"},
+        "cellImageRepositories": {"minItems": 1},
         "b2BucketName": {"minLength": 1},
         "b2BucketId": {"minLength": 1},
         "b2Endpoint": {"minLength": 1},

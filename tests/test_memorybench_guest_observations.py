@@ -1,4 +1,4 @@
-"""4.6a-2: project what the Exomem guest already recorded, and nothing else.
+"""4.6a-2: project what the Evermatter guest already recorded, and nothing else.
 
 The guest logs a request/response pair for every call it makes. These checks
 pin that the projection reports only what those entries prove: a half-recorded

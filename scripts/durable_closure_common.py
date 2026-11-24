@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Bounded public-MCP diagnostic for Exomem and Basic Memory's Markdown core.
+"""Bounded public-MCP diagnostic for Evermatter and Basic Memory's Markdown core.
 
 This deliberately reports two product rows; it is not a competitive score.
 Only public MCP calls take part in the timed workflow.  Corpus construction
@@ -893,7 +893,7 @@ def inspect_indexed_fixture(
             version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
             if version != (str(EXOMEM_LEXICAL_SCHEMA_VERSION),):
                 raise AdapterFault(
-                    "incompatible indexed-store schema: unsupported Exomem lexical version"
+                    "incompatible indexed-store schema: unsupported Evermatter lexical version"
                 )
             _require_columns(conn, "pages", {"path", "in_kb", "in_vault"})
             _require_columns(conn, "fts", {"stemmed"})
@@ -1037,7 +1037,7 @@ async def _await_exomem_mutation(
 
 
 def _permit_refusal_envelopes(client: Any) -> None:
-    """Keep a valid Exomem warming/refusal envelope visible to this diagnostic."""
+    """Keep a valid Evermatter warming/refusal envelope visible to this diagnostic."""
     for owner in (client, getattr(client, "session", None)):
         schemas = getattr(owner, "_tool_output_schemas", None)
         if isinstance(schemas, dict):
@@ -1223,7 +1223,7 @@ def _written_path(reply: Mapping[str, Any]) -> str:
 def _remember_commit_arguments(
     validation: Mapping[str, Any], *, title: str, content: str
 ) -> dict[str, Any]:
-    """Replay the accepted Exomem draft, adding a review disposition only when required."""
+    """Replay the accepted Evermatter draft, adding a review disposition only when required."""
     arguments: dict[str, Any] = {
         "title": title,
         "note_type": "insight",
@@ -1450,7 +1450,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="bounded initial public and full-index readiness wait in seconds",
     )
     parser.add_argument(
-        "--python", type=Path, default=Path(sys.executable), help="explicit Exomem interpreter"
+        "--python", type=Path, default=Path(sys.executable), help="explicit Evermatter interpreter"
     )
     parser.add_argument("--basic-memory-executable", type=Path, required=True)
     parser.add_argument("--basic-memory-wheel", type=Path, default=None)

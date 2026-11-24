@@ -1,4 +1,4 @@
-"""Out-of-band upload/download routes for Exomem."""
+"""Out-of-band upload/download routes for Evermatter."""
 
 from __future__ import annotations
 
@@ -996,7 +996,7 @@ def register_cloud_upload_route(mcp_app: FastMCP, *, vault_root: Path, cell_bear
             return _handoff_unavailable()
         # Refused before the claim, so a read-only window leaves the ticket usable.
         if cloud_cell.cloud_read_only_enabled():
-            return JSONResponse({"code": "CLOUD_CELL_READ_ONLY", "reason": "this Exomem Cloud cell is serving read-only"}, status_code=503)
+            return JSONResponse({"code": "CLOUD_CELL_READ_ONLY", "reason": "this Evermatter Cloud cell is serving read-only"}, status_code=503)
         with cloud_origin.bound(request_origin):
             try:
                 claimed = await upload_handoff.claim_upload(vault_root, ticket)

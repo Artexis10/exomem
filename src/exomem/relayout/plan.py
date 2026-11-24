@@ -8,7 +8,7 @@ nothing, takes no lease and holds no page body after it has used it. It reads in
    (`facts.PageFact`): its type, title, display title and the pointer fields that name a file.
    The facts decide each file's new place (`layout.place`, `layout.allocate`) and build the
    resolver that today's links resolve against.
-2. Edits. Each page that Exomem owns is read again, singly, for its links
+2. Edits. Each page that Evermatter owns is read again, singly, for its links
    (`links.LinkRewriter`). Pages outside the managed folder are scanned for links into it.
    Pointer fields come from the first pass's facts (`pointers.plan_pointers`).
 

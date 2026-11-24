@@ -19,7 +19,7 @@
 # Every K3s node first gets the same base hardening and its converged
 # inter-node firewall, so that no agent's join can race a peer that has not
 # admitted it yet (add-cloud-node-provisioning N4/N5).
-- name: Harden every Exomem K3s node and converge its inter-node firewall
+- name: Harden every Evermatter K3s node and converge its inter-node firewall
   hosts: hosted_nodes
   become: true
   gather_facts: true
@@ -50,7 +50,7 @@
         name: k3s
         tasks_from: inter_node.yml
 
-- name: Bootstrap the Exomem K3s server
+- name: Bootstrap the Evermatter K3s server
   hosts: hosted_nodes:!k3s_agents
   become: true
   gather_facts: true
@@ -111,7 +111,7 @@
   roles:
     - dedicated_host
 
-- name: Join the Exomem K3s agents
+- name: Join the Evermatter K3s agents
   hosts: k3s_agents
   become: true
   gather_facts: true

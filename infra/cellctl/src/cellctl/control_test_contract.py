@@ -47,12 +47,12 @@ def import_test_sql(fixtures: Path) -> str:
 def export_test_sql(fixtures: Path) -> str:
     """C6's export table, disk-use columns and export hold, run after `import_test_sql` and before the grants.
 
-    The fixture is the Exomem half of the pinned Substrate migration 0066. Its other half alters
+    The fixture is the Evermatter half of the pinned Substrate migration 0066. Its other half alters
     OAuth tables this disposable database only stubs, so the fixture must stay a prefix of it.
     """
     local = (fixtures / "exomem_cloud_exports.sql").read_text(encoding="utf-8")
     if not _committed_sql(fixtures, "exports_migration").startswith(local):
-        raise RuntimeError("exomem_cloud_exports.sql is not the Exomem half of the pinned migration 0066")
+        raise RuntimeError("exomem_cloud_exports.sql is not the Evermatter half of the pinned migration 0066")
     return local + "\n" + _committed_sql(fixtures, "custody_migration")
 
 

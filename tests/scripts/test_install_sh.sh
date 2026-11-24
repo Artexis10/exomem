@@ -5,10 +5,10 @@
 # flow end to end WITHOUT ever touching the network or doing a real install:
 #
 #   1. uv missing  -> install.sh must run the (mock) uv installer, then still
-#                     run `uv tool install exomem`, then either invoke
+#                     run `uv tool install evermatter`, then either invoke
 #                     `exomem setup` or print it as the next command.
 #   2. uv present  -> a re-run (idempotent case) must skip the installer and
-#                     go straight to `uv tool install exomem`.
+#                     go straight to `uv tool install evermatter`.
 #
 # Usage: sh tests/scripts/test_install_sh.sh
 
@@ -74,7 +74,7 @@ ENVEOF
 cat > "$HOME/.local/bin/uv" <<'UVEOF'
 #!/bin/sh
 echo "UV $*" >> "$MOCK_LOG"
-if [ "$1" = "tool" ] && [ "$2" = "install" ] && [ "$3" = "exomem" ]; then
+if [ "$1" = "tool" ] && [ "$2" = "install" ] && [ "$3" = "evermatter" ]; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/exomem" <<'EXEOF'
 #!/bin/sh
@@ -110,8 +110,8 @@ grep -q '^CURL ' "$MOCK_LOG" \
     || fail "expected install.sh to invoke curl to fetch the uv installer when uv is missing. Log:
 $(cat "$MOCK_LOG")"
 
-grep -q '^UV tool install exomem\( \|$\)' "$MOCK_LOG" \
-    || fail "expected install.sh to run 'uv tool install exomem'. Log:
+grep -q '^UV tool install evermatter\( \|$\)' "$MOCK_LOG" \
+    || fail "expected install.sh to run 'uv tool install evermatter'. Log:
 $(cat "$MOCK_LOG")"
 
 if ! grep -q '^EXOMEM setup$' "$MOCK_LOG" && ! printf '%s' "$output1" | grep -q 'exomem setup'; then
@@ -131,7 +131,7 @@ mkdir -p "$HOME2/.local/bin"
 cat > "$HOME2/.local/bin/uv" <<'UVEOF'
 #!/bin/sh
 echo "UV $*" >> "$MOCK_LOG"
-if [ "$1" = "tool" ] && [ "$2" = "install" ] && [ "$3" = "exomem" ]; then
+if [ "$1" = "tool" ] && [ "$2" = "install" ] && [ "$3" = "evermatter" ]; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/exomem" <<'EXEOF'
 #!/bin/sh
@@ -157,8 +157,8 @@ if grep -q '^CURL ' "$MOCK_LOG"; then
 $(cat "$MOCK_LOG")"
 fi
 
-grep -q '^UV tool install exomem\( \|$\)' "$MOCK_LOG" \
-    || fail "expected install.sh to still run 'uv tool install exomem' on a re-run. Log:
+grep -q '^UV tool install evermatter\( \|$\)' "$MOCK_LOG" \
+    || fail "expected install.sh to still run 'uv tool install evermatter' on a re-run. Log:
 $(cat "$MOCK_LOG")"
 
 if ! grep -q '^EXOMEM setup$' "$MOCK_LOG" && ! printf '%s' "$output2" | grep -q 'exomem setup'; then

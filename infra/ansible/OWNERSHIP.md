@@ -10,4 +10,4 @@ offline break glass.
 
 The pinned `substrate.infrastructure.base` collection owns shared hardening.
 Substrate-infra configures the control database host through its own playbook.
-The Exomem entrypoint targets only fleet nodes, including with an older combined inventory.
+The Evermatter entrypoint targets only fleet nodes, including with an older combined inventory.

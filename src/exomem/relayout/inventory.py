@@ -63,7 +63,7 @@ class Inventory:
     """Every file the planner reads, and the way to read a page's bytes.
 
     `skipped` counts the entries that a plan leaves out, by `<where>:<reason>`: a conflict
-    copy, or a link or special file that no Exomem walk keeps. `hidden` lists the dot-named
+    copy, or a link or special file that no Evermatter walk keeps. `hidden` lists the dot-named
     entries below the managed root that the plan does not read (it never enters them), except
     a part folder, whose files are listed in `managed`. `revision` is the store revision that
     every read sees, or None in file mode.

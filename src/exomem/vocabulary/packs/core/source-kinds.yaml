@@ -1,4 +1,4 @@
-# The source kinds Exomem ships: what a captured artifact IS. The set is a
+# The source kinds Evermatter ships: what a captured artifact IS. The set is a
 # useful default, never the permitted set; a vault adds kinds in
 # `_Schema/source-taxonomy.yaml` and new keys auto-register on first use.
 schema_version: 1

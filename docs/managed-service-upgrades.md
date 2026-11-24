@@ -952,9 +952,9 @@ file mode, and the next handoff tries the migration again. A vault whose store
 changes during every handoff, or whose collections take longer than the
 budget, migrates offline instead:
 
-1. Stop the Exomem service.
+1. Stop the Evermatter service.
 2. Run `(set -a; . ~/.config/exomem/operator.env; exomem collections migrate --vault <vault> --apply)`.
-3. Start the Exomem service.
+3. Start the Evermatter service.
 
 Step 2 reads the operator credential from the protected file in a subshell, so
 the credential never enters your shell history or your login shell. Use the

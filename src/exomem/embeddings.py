@@ -368,7 +368,7 @@ def get_reranker():
 
             def load_cross_encoder(**kwargs):
                 if backend == "onnx":
-                    # Do not auto-select CUDA: that would bypass Exomem's
+                    # Do not auto-select CUDA: that would bypass Evermatter's
                     # explicit accelerator/headroom policy. ONNX Runtime has
                     # no provider in the lean MPS profile, so MPS uses CPU.
                     provider = (
@@ -1313,7 +1313,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
 
 
 def _encode_caller() -> str:
-    """The nearest Exomem module above the encoder, as a span name suffix.
+    """The nearest Evermatter module above the encoder, as a span name suffix.
 
     An `embeddings.encode` of 80 s with 837 texts sat in the ledger for days
     with no way to say who asked for it; the caller was the semantic segmenter

@@ -1,7 +1,7 @@
-"""Isolate a Records measurement process from any live Exomem configuration.
+"""Isolate a Records measurement process from any live Evermatter configuration.
 
 The Records measurement scripts import this before they import ``exomem``. It
-removes every inherited Exomem setting, because an inherited endpoint or state
+removes every inherited Evermatter setting, because an inherited endpoint or state
 root could reach a live writer lease, and points the state, configuration and
 vault at a temporary tree. It also turns off the models and watchers that a
 measurement of the Records path does not exercise.

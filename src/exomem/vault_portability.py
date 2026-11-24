@@ -1085,7 +1085,7 @@ def _publish_export(
     _validate_context(context, allowed_states={"quiesced"})
     release = __version__ if exomem_release is None else exomem_release
     if not isinstance(release, str) or not release or len(release) > 128:
-        _fail("INVALID_RELEASE", "Exomem release must be a short non-empty string")
+        _fail("INVALID_RELEASE", "Evermatter release must be a short non-empty string")
     effective_limits = limits or PortabilityLimits()
     _validate_limits(effective_limits)
     source_root = Path(vault_root).absolute()

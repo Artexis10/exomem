@@ -1,4 +1,4 @@
-"""The `cell-init` entrypoint for Exomem Cloud cells (design D3).
+"""The `cell-init` entrypoint for Evermatter Cloud cells (design D3).
 
 Runs once, idempotently, ahead of the server (as a Kubernetes init container):
 

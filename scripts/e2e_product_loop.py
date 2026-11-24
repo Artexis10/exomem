@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Installed-wheel black-box E2E for Exomem's governed product lifecycle."""
+"""Installed-wheel black-box E2E for Evermatter's governed product lifecycle."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import traceback
 import urllib.error
 import urllib.request
@@ -2518,7 +2519,7 @@ def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> N
     if shell_status != 200 or not shell_headers.get("content-type", "").startswith("text/html"):
         raise RuntimeError(f"/studio/ shell not served as HTML: {shell_status}")
     app_asset = re.search(rb"/studio/assets/app\.v\d+\.js", shell_body)
-    if b"Exomem Review Studio" not in shell_body or app_asset is None:
+    if b"Evermatter Review Studio" not in shell_body or app_asset is None:
         raise RuntimeError("Studio shell body missing packaged markers")
     app_asset_path = app_asset.group(0).decode("ascii")
     asset_status, asset_headers, asset_body = _http_get_raw(
@@ -3405,7 +3406,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=REPO_ROOT,
             timeout=min(args.budget_seconds, 120),
         )
-        wheels = sorted(dist.glob("exomem-*.whl"))
+        # `uv build` names the wheel after the checkout's project.
+        pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        project = tomllib.loads(pyproject)["project"]["name"]
+        wheels = sorted(dist.glob(f"{project}-*.whl"))
         if not wheels:
             raise RuntimeError("uv build produced no wheel")
         venv = tmp / "venv"

@@ -1,4 +1,4 @@
-"""Single-writer lease coordination for replicated Exomem vaults.
+"""Single-writer lease coordination for replicated Evermatter vaults.
 
 The coordinator carries identity and timing metadata only. Vault content never
 leaves the replica. Coordination is opt-in through ``EXOMEM_WRITER_LEASE_URL``;
@@ -80,7 +80,7 @@ from .mutation_terminal import (
 from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
-    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/substrate-systems/evermatter)"
 )
 # The implicit replay window is the acknowledgement-loss recovery budget: when
 # the edge abandons a slow write that the origin then commits, retrying the
@@ -9357,7 +9357,7 @@ def invoke_command(
         if cloud_cell.cloud_read_only_enabled():
             raise OpError(
                 "CLOUD_CELL_READ_ONLY",
-                "this Exomem Cloud cell is serving read-only",
+                "this Evermatter Cloud cell is serving read-only",
                 "wait for the cell to leave read-only mode, or read instead of write",
             )
 

@@ -151,7 +151,7 @@ def test_the_owner_file_tools_refuse_view_paths_from_canonical_ownership(vault):
 
 
 def test_restoring_a_folder_where_a_collection_lost_its_views_refuses_them(vault):
-    """The views went missing outside Exomem; the restore path holds none, but its children would."""
+    """The views went missing outside Evermatter; the restore path holds none, but its children would."""
     for name in ("Items/Open plan.md", "notes.md"):
         (vault.root / "Knowledge Base/Notes/Old" / name).parent.mkdir(parents=True, exist_ok=True)
         (vault.root / "Knowledge Base/Notes/Old" / name).write_text("Stale copy.\n")

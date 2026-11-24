@@ -232,19 +232,19 @@ claude.ai → **Settings** → **Connectors** → **Add custom connector** →
 `https://<host>/mcp` → log in with GitHub as the account named in
 `EXOMEM_GITHUB_USERNAME`. A newly upgraded installation asks each existing
 client to do this once. Keep the connector definition and URL unchanged: after
-that final login, Codex/Claude reuse the Exomem-owned session across fresh chats
+that final login, Codex/Claude reuse the Evermatter-owned session across fresh chats
 and processes without depending on the temporary GitHub token.
 
-Then add Exomem behavior to the hosted client:
+Then add Evermatter behavior to the hosted client:
 
 1. Paste this learning instruction into the account-level or project-level custom instructions.
 2. Paste the instruction block from [ai-assistant-guide.md](ai-assistant-guide.md) after it.
 
 ```text
-Use Exomem as the memory for my work. Before you start a task, recall what Exomem holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
+Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter holds about the systems, projects or topics it touches. As you work, save each reusable fact you establish (how something is structured, a pitfall, a method that worked) as one concise observation, and update an existing note when one covers it, so a later session does not have to find it again. Keep each file I hand you to read, such as an attachment, a screenshot or a document I point to, as a Source by its exact bytes, even when it settles nothing; tell me in one line, and treat what it claims as unverified. Files you work on in my own repositories are not handed files. Files that hold secrets, such as keys, tokens or a .env file, are not kept.
 ```
 
-The agent then recalls what Exomem holds before a task and saves what it learns.
+The agent then recalls what Evermatter holds before a task and saves what it learns.
 The two texts together are longer than a 1,500-character field, so where the
 client caps a field, give each its own field. If you cannot paste the block, at
 minimum start new chats by asking the agent to call `read_instructions(profile="compact")`
@@ -295,7 +295,7 @@ exomem setup --vault "/path/to/vault" \
 ```
 
 Then use `/mcp` in Claude Code and `codex mcp login exomem` for native OAuth.
-After updating an older Exomem Claude plugin, run `/reload-plugins` or restart
+After updating an older Evermatter Claude plugin, run `/reload-plugins` or restart
 Claude Code so its former stdio process does not survive in the live session.
 
 ### ChatGPT Personal Plugin (OAuth only)
@@ -304,9 +304,9 @@ Create the Personal Plugin with MCP Server URL `https://<host>/mcp` and
 Authentication set to **OAuth**. Keep the discovered authorization, token,
 registration, authorization-server, resource, CIMD metadata, and callback
 values. Leave **Default scopes** blank, set **Base scopes** to
-`offline_access`, and turn **OIDC enabled** off. That base scope lets Exomem's
+`offline_access`, and turn **OIDC enabled** off. That base scope lets Evermatter's
 one-hour access tokens renew through durable rotating refresh tokens without
-another GitHub login. Exomem deliberately provides OAuth authorization-code flow, not
+another GitHub login. Evermatter deliberately provides OAuth authorization-code flow, not
 OpenID identity claims; the compatibility discovery alias is not permission to
 invent a `userinfo` endpoint. In particular, never accept a placeholder such as
 `https://example.com` for that field.
@@ -360,7 +360,7 @@ already frozen into that thread.
 | "Couldn't reach the MCP server" during connector add | OAuth discovery failed | See [deployment.md's troubleshooting table](deployment.md#troubleshooting) — the rest of the fixes there apply regardless of ingress profile. |
 | An existing connector gets one `401 invalid_token` immediately after the durable-session cutover | Its legacy FastMCP reference token is intentionally no longer accepted | Complete one final browser login. Do not delete or recreate the connector. |
 | Tools return `503` without an OAuth challenge | The authoritative session store is unavailable, not the login | Repair coordinator/network/storage health and retry. Re-authorizing cannot fix a 503. |
-| ChatGPT enables OIDC or proposes `https://example.com` as `userinfo` | The Personal Plugin UI inferred OpenID from Exomem's OAuth compatibility alias | Turn OIDC off, leave scopes blank, and keep the discovered OAuth/CIMD endpoints. |
+| ChatGPT enables OIDC or proposes `https://example.com` as `userinfo` | The Personal Plugin UI inferred OpenID from Evermatter's OAuth compatibility alias | Turn OIDC off, leave scopes blank, and keep the discovered OAuth/CIMD endpoints. |
 | ChatGPT discovers tools but invocation says `Resource not found` | Its registered tool snapshot is older than the deployed MCP surface | Refresh or recreate the Personal Plugin, verify the tool-surface fingerprint, then test from a fresh conversation. |
 
 For everything else — service management, GPU/CUDA, revoking access,

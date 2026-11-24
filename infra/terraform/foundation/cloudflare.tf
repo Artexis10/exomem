@@ -48,7 +48,7 @@ resource "cloudflare_dns_record" "control" {
   content = "${cloudflare_zero_trust_tunnel_cloudflared.alpha.id}.cfargotunnel.com"
   proxied = true
   ttl     = 1
-  comment = "Exomem hosted Access-protected control ingress"
+  comment = "Evermatter hosted Access-protected control ingress"
 }
 
 resource "cloudflare_dns_record" "transfer" {
@@ -58,7 +58,7 @@ resource "cloudflare_dns_record" "transfer" {
   content = "${cloudflare_zero_trust_tunnel_cloudflared.alpha.id}.cfargotunnel.com"
   proxied = true
   ttl     = 1
-  comment = "Exomem hosted direct browser transfer ingress"
+  comment = "Evermatter hosted direct browser transfer ingress"
 }
 
 resource "cloudflare_dns_record" "gateway" {
@@ -70,7 +70,7 @@ resource "cloudflare_dns_record" "gateway" {
   content = hcloud_primary_ip.node.ip_address
   proxied = false
   ttl     = 300
-  comment = "Exomem Cloud MCP direct TLS ingress"
+  comment = "Evermatter Cloud MCP direct TLS ingress"
 }
 
 resource "cloudflare_dns_record" "status" {
@@ -80,7 +80,7 @@ resource "cloudflare_dns_record" "status" {
   content = "substrate-systems.github.io"
   proxied = false
   ttl     = 300
-  comment = "Exomem public status on GitHub Pages"
+  comment = "Evermatter public status on GitHub Pages"
 }
 
 resource "cloudflare_zero_trust_access_service_token" "substrate" {
@@ -91,7 +91,7 @@ resource "cloudflare_zero_trust_access_service_token" "substrate" {
 
 resource "cloudflare_zero_trust_access_policy" "substrate" {
   account_id = var.cloudflare_account_id
-  name       = "Exomem Substrate service authentication"
+  name       = "Evermatter Substrate service authentication"
   decision   = "non_identity"
   include = [
     {
@@ -104,7 +104,7 @@ resource "cloudflare_zero_trust_access_policy" "substrate" {
 
 resource "cloudflare_zero_trust_access_application" "control" {
   account_id                 = var.cloudflare_account_id
-  name                       = "Exomem hosted control"
+  name                       = "Evermatter hosted control"
   domain                     = var.control_hostname
   type                       = "self_hosted"
   session_duration           = "24h"

@@ -1,4 +1,4 @@
-"""`bootstrap(section="activity")`: what Exomem Cloud Home shows as recent activity.
+"""`bootstrap(section="activity")`: what Evermatter Cloud Home shows as recent activity.
 
 Rows here are written by the ledger's own row builder and appender, exactly as a
 cell writes them, with chosen timestamps; the activity reader then reads that

@@ -1,22 +1,22 @@
 """The importer of a store-mode vault (OpenSpec make-vault-store-canonical D5, tasks 4.2 and 4.3).
 
 The store holds each page's exact bytes and the Markdown files are its projection (``projector``).
-A person can still change a file outside Exomem, in an editor, with git or by restoring a backup.
+A person can still change a file outside Evermatter, in an editor, with git or by restoring a backup.
 The importer reads those changes from the disk and settles each one for its path:
 
-* A file that holds bytes Exomem put there is not a change. Whose bytes a file holds is judged by
+* A file that holds bytes Evermatter put there is not a change. Whose bytes a file holds is judged by
   hash alone: the projection manifest, the stored page, and the bytes that the audit trail shows
-  Exomem wrote after the manifest. This is the projector's own rule (``Facts.own_hashes``), so
-  Exomem's projections cause no import and no hold.
+  Evermatter wrote after the manifest. This is the projector's own rule (``Facts.own_hashes``), so
+  Evermatter's projections cause no import and no hold.
 * A change that the store has not moved past is an audited import. "Not moved past" is one test,
   the ``Expect(revision, projected=True)`` of the commit that adopts the bytes: the manifest
   names the stored revision and bytes, no projection is queued, and nothing is held.
-* A change that races an Exomem change, or lands on a held path, is held with the person's latest
+* A change that races an Evermatter change, or lands on a held path, is held with the person's latest
   bytes. One row stands for each path and keeps its first detection time. A person's delete of a
-  page is held too, and the hold clears when the file returns with Exomem's own bytes.
+  page is held too, and the hold clears when the file returns with Evermatter's own bytes.
 * A binary is disk-canonical: the store records its path, hash and size and holds no bytes, so a
   hold would keep nothing. An outside change, delete or rename of a binary imports as an audited
-  record change. A binary is held only when an Exomem delete of it is queued and the file differs.
+  record change. A binary is held only when an Evermatter delete of it is queued and the file differs.
 
 The importer never writes, replaces or removes a file. A path that it cannot judge stays as it is.
 It reads the disk on the caller's thread and runs each decision on the store thread, one commit
@@ -94,13 +94,13 @@ _RECORDED_HASH = (
 class Verdict(enum.Enum):
     """What one path's disk state means for the store: the closed set that ``judge`` returns."""
 
-    #: Nothing to settle: the file holds bytes of Exomem's, or the store expects it missing.
+    #: Nothing to settle: the file holds bytes of Evermatter's, or the store expects it missing.
     OWN = enum.auto()
     #: A person's bytes are at the path: import them, or hold them.
     ADOPT = enum.auto()
-    #: A projected file is missing and Exomem did not remove it: a person deleted it.
+    #: A projected file is missing and Evermatter did not remove it: a person deleted it.
     GONE = enum.auto()
-    #: A held delete whose file is back with Exomem's own bytes: nothing is left to review.
+    #: A held delete whose file is back with Evermatter's own bytes: nothing is left to review.
     CLEAR = enum.auto()
 
 
@@ -121,7 +121,7 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
         # below, for the same reason, because its intent is queued.
         return Verdict.OWN
     if disk is None:
-        # A removal that Exomem queued or made, whose manifest write a kill lost, is not an outside
+        # A removal that Evermatter queued or made, whose manifest write a kill lost, is not an outside
         # delete: ``removed`` is the audit trail's own word for it. A page that the store dropped
         # is the same, and a path that was never projected has no file to lose.
         if (facts.held and page) or facts.removed or facts.stored_sha256 is None:
@@ -137,9 +137,9 @@ def judge(facts: Facts, disk: OnDisk | None) -> Verdict:
 
 
 def _orphaned_manifest(facts: Facts) -> bool:
-    """Whether a manifest row outlives the page that it describes, with nothing of Exomem's pending.
+    """Whether a manifest row outlives the page that it describes, with nothing of Evermatter's pending.
 
-    An Exomem delete or move keeps the manifest row of its old path beside a queued intent until the
+    An Evermatter delete or move keeps the manifest row of its old path beside a queued intent until the
     projector removes the file. A row with no page, intent, hold or audited removal is what a page
     that the store lost leaves, so its file is a new page to adopt, whatever bytes the row records.
     """
@@ -168,7 +168,7 @@ class ImportReport:
     held: list[str] = field(default_factory=list)
     #: Binaries whose outside delete the store now records.
     removed: list[str] = field(default_factory=list)
-    #: Held deletes that cleared because the file came back with Exomem's own bytes.
+    #: Held deletes that cleared because the file came back with Evermatter's own bytes.
     cleared: list[str] = field(default_factory=list)
     #: Markdown files that the store does not own, whose derived rows were rederived from the file.
     refreshed: list[str] = field(default_factory=list)
@@ -383,7 +383,7 @@ class Importer:
     def _known_hashes(self) -> dict[str, frozenset[str]]:
         """The hashes that the store expects a file to hold at each path: manifest, page, binary.
 
-        A manifest row counts only beside its page. With no page it is an Exomem removal in flight or
+        A manifest row counts only beside its page. With no page it is an Evermatter removal in flight or
         a page that the store lost, which ``judge`` tells apart, so the sweep settles the file.
         """
         known: dict[str, set[str]] = defaultdict(set)
@@ -897,7 +897,7 @@ class Importer:
         report: ImportReport,
     ) -> None:
         if facts.intent is not None:
-            # An Exomem removal is queued and the file is not the one it names: keep the race.
+            # An Evermatter removal is queued and the file is not the one it names: keep the race.
             self._hold(writer, rel, HELD_EDIT, facts, disk.sha256, None, report)
             return
         expect = (

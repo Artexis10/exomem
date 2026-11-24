@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import unquote_to_bytes
 
 from .governance.scrubber import NOTICE, scrub_text
+from .install_info import DISTRIBUTION_NAMES, distribution_probe
 
 MAX_CONTROL_BYTES = 64 * 1024
 #: Bound on the uv stderr tail surfaced in a staging failure: at most this
@@ -139,17 +140,19 @@ _STATE_DECLARATIONS_PROBE = (
 )
 
 _TARGET_PROBE = (
-    "import json; import importlib.metadata as m\n"
+    "import json\n"
     + _STATE_DECLARATIONS_PROBE
-    + 'print(json.dumps({"version": m.version("exomem"), "state_descriptors": descriptors, '
+    + distribution_probe("_installed_version")
+    + 'print(json.dumps({"version": _installed_version, "state_descriptors": descriptors, '
     '"supported_state_compatibility": compatibility}))'
 )
 
 _WHEEL_TARGET_PROBE = (
-    "import base64; import csv; import hashlib; import importlib.metadata as m; import json\n"
+    "import base64; import csv; import hashlib; import json\n"
     + _STATE_DECLARATIONS_PROBE
+    + distribution_probe("_installed_version")
+    + distribution_probe("distribution", "distribution")
     + "try:\n"
-    '    distribution = m.distribution("exomem")\n'
     '    name = distribution.metadata["Name"]\n'
     '    raw_direct_url = distribution.read_text("direct_url.json")\n'
     "    direct_url = json.loads(raw_direct_url) if raw_direct_url else None\n"
@@ -168,7 +171,7 @@ _WHEEL_TARGET_PROBE = (
     "    name = None\n"
     "    direct_url = None\n"
     "    record_hashes = None\n"
-    'print(json.dumps({"version": m.version("exomem"), "name": name, '
+    'print(json.dumps({"version": _installed_version, "name": name, '
     '"direct_url": direct_url, "record_hashes": record_hashes, "state_descriptors": descriptors, '
     '"supported_state_compatibility": compatibility}))'
 )
@@ -245,7 +248,16 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+_NOT_THIS_PACKAGE = f"candidate artifact is not an {' or '.join(DISTRIBUTION_NAMES)} wheel"
+
+
+def _canonical_distribution(name: str) -> str:
+    """The PEP 503 normalized form of a distribution name."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _wheel_metadata(wheel: Path) -> tuple[str, str]:
+    """The wheel's normalized distribution name and version; refuse a wheel of another package."""
     if wheel.suffix != ".whl":
         raise RuntimeError("candidate artifact must be a wheel")
     _regular_file(wheel)
@@ -253,15 +265,15 @@ def _wheel_metadata(wheel: Path) -> tuple[str, str]:
         with zipfile.ZipFile(wheel) as archive:
             metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
             if len(metadata_names) != 1 or "exomem/__init__.py" not in archive.namelist():
-                raise RuntimeError("candidate artifact is not an Exomem wheel")
+                raise RuntimeError(_NOT_THIS_PACKAGE)
             metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
     except (OSError, zipfile.BadZipFile) as exc:
         raise RuntimeError("candidate artifact is not a readable wheel") from exc
-    name = metadata.get("Name", "").strip()
+    name = _canonical_distribution(metadata.get("Name", "").strip())
     version = metadata.get("Version", "").strip()
-    if re.sub(r"[-_.]+", "-", name).lower() != "exomem" or not version:
-        raise RuntimeError("candidate artifact is not an Exomem wheel")
-    if not wheel.name.startswith(f"exomem-{version}-"):
+    if name not in DISTRIBUTION_NAMES or not version:
+        raise RuntimeError(_NOT_THIS_PACKAGE)
+    if not wheel.name.startswith(f"{name}-{version}-"):
         raise RuntimeError("candidate wheel filename does not match its package metadata")
     return name, version
 
@@ -324,7 +336,8 @@ def _snapshot_wheel(wheel: Path, target_dir: Path) -> tuple[Path, str, str]:
 def _verify_wheel_install(identity: dict[str, object], snapshot: Path, digest: str, version: str) -> None:
     name = identity.get("name")
     direct_url = identity.get("direct_url")
-    if re.sub(r"[-_.]+", "-", str(name)).lower() != "exomem" or identity["version"] != version:
+    wheel_name, _ = _wheel_metadata(snapshot)
+    if _canonical_distribution(str(name)) != wheel_name or identity["version"] != version:
         raise RuntimeError("staged candidate package identity does not match its wheel")
     if not isinstance(direct_url, dict):
         raise RuntimeError("staged candidate did not record wheel provenance")
@@ -440,6 +453,9 @@ def _stage_into(
     if target_dir.stat().st_uid != os.getuid() or target_dir.stat().st_mode & 0o077:
         raise RuntimeError("managed release directory is not owner-only")
     snapshot: Path | None = None
+    # A PyPI release installs under the former name, which carries every release,
+    # including the pre-rename ones a rollback stages (openspec rename-to-evermatter D3).
+    distribution = DISTRIBUTION_NAMES[-1]
     wheel_name = ""
     wheel_version = ""
     digest = ""
@@ -448,12 +464,12 @@ def _stage_into(
             raise RuntimeError("candidate wheel requires a full hexadecimal source revision")
         wheel_path = wheel.expanduser()
         _regular_file(wheel_path)
-        snapshot, _, wheel_version = _snapshot_wheel(wheel_path.resolve(), target_dir)
+        snapshot, distribution, wheel_version = _snapshot_wheel(wheel_path.resolve(), target_dir)
         wheel_name = wheel_path.name
         digest = _sha256_file(snapshot)
     environment = target_dir / "venv" if snapshot else target_dir
     target_python = environment / "bin" / "python"
-    requirement = f"exomem[{PROFILES[profile]}]" if PROFILES[profile] else "exomem"
+    requirement = f"{distribution}[{PROFILES[profile]}]" if PROFILES[profile] else distribution
     if snapshot:
         requirement = f"{requirement} @ {snapshot.as_uri()}#sha256={digest}"
     elif package_version:
@@ -461,7 +477,7 @@ def _stage_into(
     uv = _uv()
     for command in (
         [uv, "venv", "--python", str(launcher), str(environment)],
-        [uv, "pip", "install", "--refresh-package", "exomem", "--python", str(target_python),
+        [uv, "pip", "install", "--refresh-package", distribution, "--python", str(target_python),
          requirement, "--compile-bytecode"],
     ):
         # stderr goes to a file, not a pipe, so a long run is never held in
@@ -741,7 +757,7 @@ def main(argv: list[str] | None = None) -> int:
     action.add_argument("--resume", action="store_true", help="roll forward a recorded failed transition")
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--package-version", default="", help="pin the staged PyPI release")
-    source.add_argument("--wheel", type=Path, help="stage an immutable local Exomem wheel")
+    source.add_argument("--wheel", type=Path, help="stage an immutable local Evermatter wheel")
     parser.add_argument("--source-revision", default="", help="full source revision for a local wheel")
     parser.add_argument("--profile", choices=PROFILES, default="standard")
     args = parser.parse_args(argv)

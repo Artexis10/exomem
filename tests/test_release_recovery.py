@@ -167,6 +167,21 @@ def test_distribution_completeness_requires_matching_package_and_both_kinds():
     )
 
 
+def test_evermatter_releases_publish_the_compat_distribution_under_exomem():
+    assert recovery.package_names({"name": "evermatter"}) == ("evermatter", "exomem")
+    assert recovery.package_names({"name": "exomem"}) == ("exomem",)
+
+    complete = [
+        "evermatter-1.2.3-py3-none-any.whl",
+        "evermatter-1.2.3.tar.gz",
+        "exomem-1.2.3-py3-none-any.whl",
+        "exomem-1.2.3.tar.gz",
+    ]
+    assert recovery.distributions_complete(complete, ("evermatter", "exomem"), "1.2.3")
+    # Missing the compat wheel or sdist is incomplete even with a full evermatter set.
+    assert not recovery.distributions_complete(complete[:2], ("evermatter", "exomem"), "1.2.3")
+
+
 def test_pypi_retry_keeps_matching_bytes_and_rejects_conflicting_immutable_file(tmp_path):
     wheel = tmp_path / "sample-1.2.3-py3-none-any.whl"
     wheel.write_bytes(b"original wheel")
@@ -806,3 +821,19 @@ def test_failed_original_evidence_cannot_emit_a_family_assertion(tmp_path, monke
             {"cloud": {"ref": "ghcr.io/example/runtime:v1.2.3"}},
             "cloud",
         )
+
+
+def test_compat_pyproject_names_exomem_in_its_own_extras():
+    # An exomem extra that still required evermatter[...] would install both
+    # distributions over the same module files.
+    import tomllib
+    from packaging.requirements import Requirement
+
+    source = (ROOT / "pyproject.toml").read_text()
+    project = tomllib.loads(recovery.compat_pyproject(source, "exomem"))["project"]
+    requirements = list(project["dependencies"]) + [
+        r for extra in project["optional-dependencies"].values() for r in extra
+    ]
+    assert project["name"] == "exomem"
+    assert "evermatter" not in {Requirement(r).name for r in requirements}
+    assert any(Requirement(r).name == "exomem" for r in requirements)

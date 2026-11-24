@@ -65,7 +65,7 @@ Repeat the maintenance command with the valid configuration to complete publicat
 
 Limited clients create new objects only in configured capture folders.
 An explicit destination outside those folders receives an unavailable result before collision checks.
-Exomem does not silently redirect an explicit destination.
+Evermatter does not silently redirect an explicit destination.
 Existing admitted content can still be edited outside capture folders.
 
 Capture folders must remain visible to the restricted default across all writers, including unrestricted owners.

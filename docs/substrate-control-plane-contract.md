@@ -11,7 +11,7 @@ boundary even though the first billing adapter is Paddle.
 
 ## Ownership split
 
-| Concern | Exomem | Substrate / deployment |
+| Concern | Evermatter | Substrate / deployment |
 | --- | --- | --- |
 | Canonical knowledge | Markdown, original media, governed history, schema, portable review state | never copied into shared account or billing rows |
 | Tenant isolation | fail-closed single-vault cell config, private auth, mutation safety, readiness | process/container scheduling, private network, isolated mounts and secrets |
@@ -19,13 +19,13 @@ boundary even though the first billing adapter is Paddle.
 | Routing | verify trusted cell-bound context; expose no path selector | immutable account-to-cell registry and public gateway |
 | Commands | versioned registry-derived schemas, results, errors, retry semantics | forward the compatible contract without reimplementing command behavior |
 | Entitlements | enforce provider-neutral capability/resource policy | Paddle adapter, internal entitlement projection, suspension and quota decisions |
-| Product UI | private cell data/Review interfaces only | Exomem Home, friendly capture, Connections, Review and Account UI |
+| Product UI | private cell data/Review interfaces only | Evermatter Home, friendly capture, Connections, Review and Account UI |
 | Portability | quiesce, canonical archive/manifest verification, staged restore, cell checkpoint | backup/export delivery, object storage, retention and lifecycle orchestration |
 | Encryption | reject unsafe cell config; keep content out of operational logs | volume/backup encryption, KMS, secret injection and access controls |
 | Deletion | seal and report cell-local quiesced facts | revoke access, destroy storage/backups/keys, remove mappings and update account/billing |
 
 Neither repository should grow half of the other's responsibility. In
-particular, Exomem cells do not query account tables or Paddle, and Substrate
+particular, Evermatter cells do not query account tables or Paddle, and Substrate
 does not parse or mutate tenant Markdown directly.
 
 ## Account-to-cell registry
@@ -39,7 +39,7 @@ The internal mapping needs, at minimum:
 - immutable account subject and opaque tenant/cell/vault IDs;
 - private cell endpoint plus a reference to that cell's unique credential;
 - lifecycle and suspension state;
-- pinned Exomem release and gateway/cell protocol compatibility;
+- pinned Evermatter release and gateway/cell protocol compatibility;
 - current internal entitlement revision and resource policy; and
 - timestamps/revisions needed for atomic compare-and-set lifecycle changes.
 
@@ -90,12 +90,12 @@ No Paddle customer, price, transaction, or subscription identifier—and no Padd
 credential—crosses the gateway/cell contract. A cell never calls Paddle during
 startup, readiness, command execution, transfer, export, or deletion sealing.
 Paddle MCP is allowed as an operator/development tool for the Substrate billing
-lane; it is not production infrastructure or an Exomem dependency.
+lane; it is not production infrastructure or an Evermatter dependency.
 
-## Exomem Home and product surfaces
+## Evermatter Home and product surfaces
 
 Substrate owns the invite-to-value journey: invite acceptance, session creation,
-first-run setup, Exomem Home, friendly capture, Connections, Review integration,
+first-run setup, Evermatter Home, friendly capture, Connections, Review integration,
 and Account/billing UI. These surfaces use the same authenticated gateway and
 registry-derived command semantics as MCP; they do not gain direct filesystem or
 cell-database access.
@@ -109,7 +109,7 @@ commit through the mapped cell's normal mutation boundary.
 
 Substrate provisioning creates an opaque identity, tenant key/secret references,
 isolated vault/state/log mounts, unique cell credentials, resource policy, and a
-pinned release. It invokes Exomem's idempotent initializer only against an empty
+pinned release. It invokes Evermatter's idempotent initializer only against an empty
 staged root, verifies private readiness, and publishes the account mapping only
 after the cell is safely serviceable. A retry adopts the same cell; it does not
 create another vault or overwrite incompatible data.
@@ -129,7 +129,7 @@ root rather than overlaying the live vault.
 
 ## Backup and user-export delivery
 
-User exports and provider backups use Exomem's same canonical archive/manifest
+User exports and provider backups use Evermatter's same canonical archive/manifest
 contract. Substrate orchestrates quiescence, receives an opaque private artifact
 reference plus size/digest metadata, and keeps the artifact private until a
 separate authorized delivery or storage step.
@@ -141,21 +141,21 @@ Substrate/deployment owns:
 - authenticated, expiring user-download delivery; and
 - deletion of stored artifacts under the applicable retention/deletion policy.
 
-Exomem owns manifest classification and verification, but does not create public
+Evermatter owns manifest classification and verification, but does not create public
 download URLs or claim provider backup durability. Restore is prepared into a
 new root, validated completely, and atomically published only after the target
 cell is unrouted and quiesced. Derived indexes rebuild afterward.
 
 ## Suspension and destructive deletion
 
-Deletion is an orchestrated control-plane workflow, not a model-facing Exomem
+Deletion is an orchestrated control-plane workflow, not a model-facing Evermatter
 command. The order is:
 
 1. atomically suspend the account and stop all public routing;
 2. revoke sessions and outstanding transfer/export delivery authority;
 3. quiesce the cell and drain mutations/background writers;
 4. optionally obtain the policy-required final verified snapshot;
-5. ask Exomem to seal the cell and persist its idempotent deletion checkpoint;
+5. ask Evermatter to seal the cell and persist its idempotent deletion checkpoint;
 6. stop the process and destroy live storage, backup objects, tenant keys and
    cell credentials according to policy;
 7. remove the active registry binding and update account/Paddle state; and
@@ -163,7 +163,7 @@ command. The order is:
 
 Retries resume from durable checkpoints. Substrate must not report deletion
 complete while routing, storage, backups, keys, or required billing/account work
-remain. Exomem reports only facts it can prove locally—routing was declared
+remain. Evermatter reports only facts it can prove locally—routing was declared
 stopped, writers drained, and the cell sealed. It does not cancel billing,
 destroy KMS keys, erase object storage, remove account rows, or claim those
 external actions occurred.

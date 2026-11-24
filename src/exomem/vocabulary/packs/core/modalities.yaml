@@ -1,4 +1,4 @@
-# The modalities Exomem ships: whether a unit states what is the case or what ought to be. A
+# The modalities Evermatter ships: whether a unit states what is the case or what ought to be. A
 # unit's `modality` row names one of them; a unit without the row states what is. A vault adds
 # modalities or labels in the `modalities` section of `_Schema/semantic-language-registry.yaml`.
 # A modality carries labels and a description and no behaviour. Context never merges two units

@@ -243,7 +243,7 @@ def selected_writer(vault_root, selector, *, prove=None):
 
 
 #: What a caller hears about a store collection in a process that does not serve the store.
-UNSERVED = "this collection lives in the collection store, which only the running Exomem service serves"
+UNSERVED = "this collection lives in the collection store, which only the running Evermatter service serves"
 #: What it hears when this process serves the store but the operation runs on files alone.
 UNSUPPORTED = "this collection lives in the collection store, and this operation does not run on the store yet"
 MARKER_UNREADABLE = ("the collection store's authority marker is unreadable, so no collection here can be "

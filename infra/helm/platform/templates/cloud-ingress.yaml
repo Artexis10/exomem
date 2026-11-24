@@ -168,7 +168,7 @@ spec:
       services:
         - name: exomem-cloud-gateway
           port: 8080
-    # The Exomem icon at the conventional site-icon path. Clients that show a site icon for
+    # The Evermatter icon at the conventional site-icon path. Clients that show a site icon for
     # this MCP server read it here; without the route they fall back to the parent domain's.
     - kind: Rule
       match: {{ include "exomem.cloudHostMatch" . }} && Path(`/favicon.ico`) && (Method(`GET`) || Method(`HEAD`))

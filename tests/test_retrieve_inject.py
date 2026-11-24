@@ -224,7 +224,7 @@ def test_stub_header_gives_diagnostic_verification_guidance() -> None:
     [
         "what did I conclude about the kb hook design earlier?",
         "save this to the knowledge base",
-        "Have I looked at this Exomem decision before?",
+        "Have I looked at this Evermatter decision before?",
         "去年このプロジェクトについて何を結論づけましたか？詳しく教えてください。",
     ],
 )

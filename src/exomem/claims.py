@@ -1387,7 +1387,7 @@ class VerifierPin:
 
 #: Every verifier this build may run. This exact multilingual checkpoint passed
 #: ``stance-v2-multilingual`` against these declared bytes. The model card's
-#: broader language list is prior evidence only; the fixture set is Exomem's
+#: broader language list is prior evidence only; the fixture set is Evermatter's
 #: bounded acceptance claim.
 VERIFIER_PINS: tuple[VerifierPin, ...] = (
     VerifierPin(

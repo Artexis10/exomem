@@ -1572,7 +1572,7 @@ def test_profile_defaults_to_lean_and_accepts_full() -> None:
 
 
 def test_recall_visibility_registered_and_excluded_from_dominance_comparison() -> None:
-    """recall_visibility is a must-pass Exomem-only invariant: present in
+    """recall_visibility is a must-pass Evermatter-only invariant: present in
     ALL_DIMENSIONS (so load_manifest accepts its tasks and score_run/
     dominance_report's fixture_failures check covers it) but absent from
     COMMON_DIMENSIONS/GOVERNED_DIMENSIONS (so it never enters the
@@ -1602,7 +1602,7 @@ def test_recall_visibility_failure_is_independent_and_skips_dominance_checks(
     perfect_fixture,
 ) -> None:
     """A broken/missing graph annotation fails ONLY the fixture gate (must-pass
-    Exomem invariant) — it must never surface as a dominance_report `checks`
+    Evermatter invariant) — it must never surface as a dominance_report `checks`
     criterion, since that loop is scoped to COMMON_DIMENSIONS/
     GOVERNED_DIMENSIONS only (the Basic Memory comparison path)."""
     manifest, _, _, run = perfect_fixture

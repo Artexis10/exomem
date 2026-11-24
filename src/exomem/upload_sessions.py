@@ -92,7 +92,7 @@ LANE = "evidence"
 REQUIRED_METADATA = ("filename", "sha256", "scope", "category")
 #: The shell recipe an upload handoff links to rather than carries.
 RECIPE_URL = (
-    "https://github.com/Artexis10/exomem/blob/main/docs/deployment.md"
+    "https://github.com/substrate-systems/evermatter/blob/main/docs/deployment.md"
     "#resumable-uploads-from-a-shell"
 )
 

@@ -1,6 +1,6 @@
 # Image codec distribution notices
 
-Exomem's `image-codecs` extra installs `pi-heif==1.4.0` and Pillow 11.1.0 or later.
+Evermatter's `image-codecs` extra installs `pi-heif==1.4.0` and Pillow 11.1.0 or later.
 The Python wrapper uses BSD-3-Clause.
 The adjacent `LICENSE.txt` and `LICENSES_bundled.txt` preserve the upstream wheel notices unchanged.
 

@@ -1,6 +1,6 @@
 # HCP Terraform bootstrap ownership
 
-One-time local-state bootstrap for the Exomem Hosted HCP Terraform project and
+One-time local-state bootstrap for the Evermatter Hosted HCP Terraform project and
 its four state-only workspaces. Its state is sealed to a separate SOPS/age
 escrow artifact and never shares state with the already-applied legacy B2
 bootstrap root. Re-running must converge without replacing a workspace.

@@ -38,7 +38,7 @@ class _NeverExternalVerifier:
     required_scopes: list[str] = []
 
     async def verify_token(self, token: str) -> None:
-        raise AssertionError("durable Exomem access tokens must not call the provider")
+        raise AssertionError("durable Evermatter access tokens must not call the provider")
 
 
 @dataclass

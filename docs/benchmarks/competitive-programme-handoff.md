@@ -14,12 +14,12 @@ any summary, including this one.
 
 ## Mission (settled — do not re-litigate)
 
-Build the trustworthy 4-lane capability map for Exomem vs Supermemory vs
+Build the trustworthy 4-lane capability map for Evermatter vs Supermemory vs
 Basic Memory (protocol validity → standard memory → native lifecycle →
 epistemic/vault integrity → operational quality) plus the strategy report
 with pre-registered continue/narrow/stop gates. Fairness architecture:
 **inverted configuration authorship** — competitor rows come from
-competitor-authored harnesses/configs; Exomem enters their harnesses as a
+competitor-authored harnesses/configs; Evermatter enters their harnesses as a
 guest; residual glue is provenance-cited, disclosed, and externally
 reviewed. A result showing a competitor ahead is valid output. Full
 rationale: `docs/adr/0002-competitive-eval-architecture.md`.
@@ -61,7 +61,7 @@ lane's git-excluded `.task/RESULT.md`.
 - Integration suite on the merged branch: **365 passed** (epistemic +
   protocol + lme + equivalence + report + privacy) + full membench suite
   462 passed; schema drift green.
-- **W4 accepted outside this repo**: Exomem guest provider in Basic
+- **W4 accepted outside this repo**: Evermatter guest provider in Basic
   Memory's bm-bench — fork `Artexis10/basic-memory`, branch
   `exomem-provider-v2` (pushed), +961 lines, 22 tests, live smoke green
   (product defaults, fail-loud on degraded/warming envelopes, sentinel
@@ -117,7 +117,7 @@ providers strictly sequentially; benchmarks only on a quiesced machine;
    Guarded paths untouched: `tests/golden/`, `tests/test_latency_gate.py`,
    `tests/test_retrieval_golden.py`, `.github/` (except the planned
    additive `benchmark-protocol` CI job).
-7. Exomem `EXOMEM_DISABLE_*` flags are string-truthy (`"0"` DISABLES).
+7. Evermatter `EXOMEM_DISABLE_*` flags are string-truthy (`"0"` DISABLES).
    `benchmarks/run.py` inserts sys.path — bypass for A/B runs. Lean tests
    offline, <60s, no credentials.
 8. **Spend**: implementer/reviewer lanes are subscription-billed. Benchmark
@@ -164,7 +164,7 @@ providers strictly sequentially; benchmarks only on a quiesced machine;
   `_abs`/question identity is digested before the competitor renderer. An
   inert benchmark-owned Basic default project prevents accidental indexing
   of `~/basic-memory`; all project paths and final absence are proven. The
-  Exomem TS provider owns one initialized vault and authenticated ephemeral
+  Evermatter TS provider owns one initialized vault and authenticated ephemeral
   REST service per container and proves hybrid readiness with doctor. Both
   transports use bounded retries/deadlines, sequential concurrency, secure
   atomically published descriptors, owned-process-group teardown, and
@@ -174,7 +174,7 @@ providers strictly sequentially; benchmarks only on a quiesced machine;
   no provider run. Then 4.5 imports ingest/search ONLY with explicit
   `missing_fields` and owns `finally`/signal cleanup because pinned
   MemoryBench never invokes `Provider.clear()`; 4.6 runs the **25-case
-  Exomem direct-vs-MemoryBench
+  Evermatter direct-vs-MemoryBench
   equivalence gate in blocking mode**, and 4.7 performs the Supermemory
   SDK/provider report-mode spot-check.
 - **§5 W6b — epistemic completion**: runner glue binding scenarios to

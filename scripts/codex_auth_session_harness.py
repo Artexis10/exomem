@@ -132,11 +132,11 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
         ):
             raise HarnessFailure("fresh Codex process called an unexpected MCP tool")
         if tool.casefold() not in {"ask_memory", "mcp__exomem__ask_memory"}:
-            raise HarnessFailure("fresh Codex process called an unexpected Exomem tool")
+            raise HarnessFailure("fresh Codex process called an unexpected Evermatter tool")
         if _arguments(item.get("arguments")) != {"query": SENTINEL_QUERY}:
-            raise HarnessFailure("Exomem ask_memory call used unexpected arguments")
+            raise HarnessFailure("Evermatter ask_memory call used unexpected arguments")
         if _has_error_marker(item):
-            raise HarnessFailure("Exomem ask_memory call returned an error")
+            raise HarnessFailure("Evermatter ask_memory call returned an error")
 
         raw_id = item.get("id")
         call_id = (
@@ -148,13 +148,13 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
         if event.get("type") == "item.completed":
             if str(item.get("status") or "").casefold() not in _SUCCESS_STATUSES:
                 raise HarnessFailure(
-                    "Exomem ask_memory call lacked explicit success status"
+                    "Evermatter ask_memory call lacked explicit success status"
                 )
             completed_call_ids.append(call_id)
 
     if len(observed_call_ids) != 1 or len(completed_call_ids) != 1:
         raise HarnessFailure(
-            "fresh Codex process must contain one unambiguous completed Exomem call"
+            "fresh Codex process must contain one unambiguous completed Evermatter call"
         )
 
 
@@ -257,14 +257,14 @@ def run_harness(
         runner,
         ["codex", "mcp", "add", "exomem", "--url", url.strip()],
         env=env,
-        action="register the Exomem MCP server",
+        action="register the Evermatter MCP server",
         timeout=30.0,
     )
     _run_checked(
         runner,
         ["codex", "mcp", "login", "exomem"],
         env=env,
-        action="complete the one interactive Exomem login",
+        action="complete the one interactive Evermatter login",
         timeout=300.0,
         interactive=True,
     )
@@ -272,7 +272,7 @@ def run_harness(
     prompt = (
         "Use the exomem MCP server now. Make exactly one harmless read-only "
         f"ask_memory call with query '{SENTINEL_QUERY}'. Do not call any other "
-        "Exomem tool. Do not use shell commands."
+        "Evermatter tool. Do not use shell commands."
     )
     for index in range(1, runs + 1):
         result = _run_checked(
@@ -297,7 +297,7 @@ def run_harness(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Exomem MCP connector URL")
+    parser.add_argument("--url", required=True, help="Evermatter MCP connector URL")
     parser.add_argument(
         "--codex-home",
         type=Path,

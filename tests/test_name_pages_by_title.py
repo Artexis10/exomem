@@ -221,7 +221,7 @@ def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
     raw = b"---\r\ntitle: Panel shipment\r\n---\r\n\r\nFirst line\r\nSecond line\r\n"
     page.write_bytes(raw)
     result = {
-        "user_summary": f"Updated -> {path} (personal Exomem)",
+        "user_summary": f"Updated -> {path} (personal Evermatter)",
         "paths": [path],
         "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
         "after_item_hash": vault_module.content_hash(raw.decode()),
@@ -229,7 +229,7 @@ def test_file_receipt_names_the_committed_crlf_title(vault) -> None:
 
     with request_scope(owner_principal()):
         filtered = egress.filter_withheld_entries(vault, result, _item_receipt=True)
-        assert filtered["user_summary"] == "Updated -> Panel shipment (personal Exomem)"
+        assert filtered["user_summary"] == "Updated -> Panel shipment (personal Evermatter)"
         page.write_bytes(raw.replace(b"Panel shipment", b"Moved on"))
         assert egress.filter_withheld_entries(vault, result, _item_receipt=True) == result
 
@@ -282,7 +282,7 @@ def test_replayed_file_receipt_uses_the_committed_recipe_until_access_is_configu
             with monkeypatch.context() as patch:
                 patch.setattr(egress, "_name_receipt_title", configure_access_after_formatting)
                 excluded = (await client.call_tool(*call, meta=meta)).structured_content
-            assert excluded["user_summary"].endswith(f"-> {path} (personal Exomem)")
+            assert excluded["user_summary"].endswith(f"-> {path} (personal Evermatter)")
             assert excluded["item_key"] == saved["item_key"]
             assert excluded["after_item_hash"] == saved["after_item_hash"]
 
@@ -305,7 +305,7 @@ def test_receipt_sharing_refusal_uses_one_attempt(vault, monkeypatch, refused_at
     raw = b"---\ntitle: Panel shipment\n---\n"
     page.write_bytes(raw)
     receipt = {
-        "user_summary": f"Saved -> {path} (personal Exomem)",
+        "user_summary": f"Saved -> {path} (personal Evermatter)",
         "paths": [path],
         "item_key": "9a891855-83ed-4d53-958a-922c704a449b",
         "after_item_hash": vault_module.content_hash(raw.decode()),

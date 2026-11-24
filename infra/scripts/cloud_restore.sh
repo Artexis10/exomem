@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exomem Cloud restore tools. Run on the K3s server, as root, from a checkout
+# Evermatter Cloud restore tools. Run on the K3s server, as root, from a checkout
 # of the reviewed release. docs/runbooks/cloud-operator-restore.md says when to
 # use each one and what to record.
 #

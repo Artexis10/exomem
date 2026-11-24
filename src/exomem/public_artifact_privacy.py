@@ -235,7 +235,7 @@ _PRIVATE_OUTPUT_MARKER = ".exomem-private-output.json"
 # Binary handling is intentionally format-scoped and documented.  Adding another
 # public binary format requires adding an equally explicit provenance declaration.
 DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
-    BinaryProvenance("*.ico", "repository-authored Exomem application icon"),
+    BinaryProvenance("*.ico", "repository-authored Evermatter application icon"),
     # This closed inventory names the two approved brand assets and their generated locations.
     *(
         BinaryProvenance(

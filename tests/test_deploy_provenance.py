@@ -37,7 +37,7 @@ def _wheel_url() -> str:
 
 def test_editable_install_is_classified_editable(monkeypatch):
     monkeypatch.setattr(
-        deploy_provenance,
+        deploy_provenance.install_info,
         "distribution",
         lambda name: _FakeDist(_editable_url("C:" + "/proj/exomem")),
     )
@@ -48,7 +48,7 @@ def test_editable_install_is_classified_editable(monkeypatch):
 
 
 def test_wheel_install_is_classified_wheel(monkeypatch):
-    monkeypatch.setattr(deploy_provenance, "distribution", lambda name: _FakeDist(_wheel_url()))
+    monkeypatch.setattr(deploy_provenance.install_info, "distribution", lambda name: _FakeDist(_wheel_url()))
     source, root = deploy_provenance._install_source_and_root()
     assert source == "wheel"
     assert root is None
@@ -56,7 +56,7 @@ def test_wheel_install_is_classified_wheel(monkeypatch):
 
 def test_missing_direct_url_reports_wheel(monkeypatch):
     """No direct_url.json is the normal shape for a plain wheel install."""
-    monkeypatch.setattr(deploy_provenance, "distribution", lambda name: _FakeDist(None))
+    monkeypatch.setattr(deploy_provenance.install_info, "distribution", lambda name: _FakeDist(None))
     source, _ = deploy_provenance._install_source_and_root()
     assert source == "wheel"
 
@@ -67,14 +67,14 @@ def test_unresolvable_distribution_reports_unknown(monkeypatch):
     def _boom(name):
         raise RuntimeError("no metadata")
 
-    monkeypatch.setattr(deploy_provenance, "distribution", _boom)
+    monkeypatch.setattr(deploy_provenance.install_info, "distribution", _boom)
     source, root = deploy_provenance._install_source_and_root()
     assert source == "unknown"
     assert root is None
 
 
 def test_malformed_direct_url_does_not_raise(monkeypatch):
-    monkeypatch.setattr(deploy_provenance, "distribution", lambda name: _FakeDist("{not json"))
+    monkeypatch.setattr(deploy_provenance.install_info, "distribution", lambda name: _FakeDist("{not json"))
     source, _ = deploy_provenance._install_source_and_root()
     assert source == "wheel"
 
@@ -153,7 +153,7 @@ def test_provenance_reports_expected_keys():
 
 
 def test_revision_only_for_editable_installs(monkeypatch):
-    monkeypatch.setattr(deploy_provenance, "distribution", lambda name: _FakeDist(_wheel_url()))
+    monkeypatch.setattr(deploy_provenance.install_info, "distribution", lambda name: _FakeDist(_wheel_url()))
     monkeypatch.setattr(deploy_provenance, "_revision", lambda root: "deadbee")
     report = deploy_provenance.provenance()
     assert report["revision"] is None

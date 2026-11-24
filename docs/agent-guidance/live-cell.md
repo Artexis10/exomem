@@ -4,7 +4,7 @@
 
 Read the relevant sections before the work named by the root guidance. OpenSpec remains the specification authority.
 
-Identify the live deployment from current service configuration and Exomem recall before acting. The platform-specific commands and historical incident details below are not evidence of the current host. On WSL use the actual user unit and its configured paths; do not apply Windows service commands there.
+Identify the live deployment from current service configuration and Evermatter recall before acting. The platform-specific commands and historical incident details below are not evidence of the current host. On WSL use the actual user unit and its configured paths; do not apply Windows service commands there.
 
 ## Connector triage ("MCP not working" / slow first call / forced reconnect)
 
@@ -62,7 +62,7 @@ dump only reads state. Signal the worker pid itself: `systemctl kill -s USR1` al
 
 ## Cloud cells
 
-- **Never run an Exomem writer inside a live Cloud cell.** A `kubectl exec`
+- **Never run an Evermatter writer inside a live Cloud cell.** A `kubectl exec`
   of a command or script that writes the vault (capture, index, a script that
   calls the store) makes an out-of-process writer. The server reads the
   change as an outside edit, repairs its lexical catalogue, and answers

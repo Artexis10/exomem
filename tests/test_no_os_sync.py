@@ -1,7 +1,7 @@
 """No module may call `os.sync`: it flushes every filesystem the host mounts.
 
 One wedged mount — a stalled FUSE daemon, a hung network volume — then freezes the
-caller forever in uninterruptible sleep, though none of its files is Exomem's.
+caller forever in uninterruptible sleep, though none of its files is Evermatter's.
 Durability is scoped: `os.fsync` on the file's descriptor, then on the directory
 that holds its name (`cloud_import.flush_to_disk` for a written tree).
 """

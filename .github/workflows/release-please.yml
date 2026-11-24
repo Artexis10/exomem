@@ -185,11 +185,11 @@ jobs:
 
           # These targets and tags are the closed Docker release contract.
           image_list=(
-            "lean ghcr.io/artexis10/exomem:$version latest"
-            "ml ghcr.io/artexis10/exomem:$version-ml ml"
-            "cuda ghcr.io/artexis10/exomem:$version-cuda cuda"
-            "cloud ghcr.io/artexis10/exomem:$version-cloud cloud"
-            "cellctl ghcr.io/artexis10/exomem-cellctl:$version -"
+            "lean ghcr.io/substrate-systems/evermatter:$version latest"
+            "ml ghcr.io/substrate-systems/evermatter:$version-ml ml"
+            "cuda ghcr.io/substrate-systems/evermatter:$version-cuda cuda"
+            "cloud ghcr.io/substrate-systems/evermatter:$version-cloud cloud"
+            "cellctl ghcr.io/substrate-systems/evermatter-cellctl:$version -"
           )
           images='{}'
           for entry in "${image_list[@]}"; do
@@ -400,8 +400,12 @@ jobs:
           python - <<'PY'
           import glob
           import sys
+          import tomllib
 
-          [wheel] = glob.glob("dist/*.whl")
+          # dist/ holds one wheel per published distribution name; smoke the primary one.
+          with open("pyproject.toml", "rb") as fh:
+              primary = tomllib.load(fh)["project"]["name"]
+          [wheel] = glob.glob(f"dist/{primary}-*.whl")
           sys.path.insert(0, wheel)
           from exomem.tool_surface import contract, sha256
 
@@ -513,7 +517,7 @@ jobs:
   # registry entry points at a published package version — publishing first
   # would advertise a version nobody can install yet.
   #
-  # Ownership is proven two ways at once: GitHub OIDC for the io.github.Artexis10
+  # Ownership is proven two ways at once: GitHub OIDC for the io.github.substrate-systems
   # namespace, and the `mcp-name` marker in README.md, which PyPI renders as the
   # package description. Both must agree with `name` in server.json.
   #
@@ -643,7 +647,7 @@ jobs:
             EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
           provenance: mode=min,version=v0.2
           sbom: true
-          outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          outputs: type=image,name=ghcr.io/substrate-systems/evermatter,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
@@ -661,7 +665,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           provenance: mode=min,version=v0.2
           sbom: true
-          outputs: type=image,name=ghcr.io/artexis10/exomem-cellctl,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          outputs: type=image,name=ghcr.io/substrate-systems/evermatter-cellctl,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.source_commit }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
@@ -675,14 +679,14 @@ jobs:
         id: cloud-licences
         if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cloud-build.outcome == 'success' }}
         env:
-          IMAGE: ghcr.io/artexis10/exomem@${{ steps.cloud-build.outputs.digest }}
+          IMAGE: ghcr.io/substrate-systems/evermatter@${{ steps.cloud-build.outputs.digest }}
         run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
 
       - name: Check the Python distribution licences of the native cellctl image
         id: cellctl-licences
         if: ${{ !cancelled() && env.DRY_RUN != 'true' && steps.cellctl-build.outcome == 'success' }}
         env:
-          IMAGE: ghcr.io/artexis10/exomem-cellctl@${{ steps.cellctl-build.outputs.digest }}
+          IMAGE: ghcr.io/substrate-systems/evermatter-cellctl@${{ steps.cellctl-build.outputs.digest }}
         run: .release-tools/scripts/check-image-licences.sh "$IMAGE"
 
       - name: Retain successful native image digests
@@ -813,7 +817,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           provenance: mode=min,version=v0.2
           sbom: true
-          outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          outputs: type=image,name=ghcr.io/substrate-systems/evermatter,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_LEAN }}
@@ -823,7 +827,7 @@ jobs:
         id: lean-licences
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).lean.publish && env.DRY_RUN != 'true' && steps.lean-build.outcome == 'success' }}
         env:
-          IMAGE: ghcr.io/artexis10/exomem@${{ steps.lean-build.outputs.digest }}
+          IMAGE: ghcr.io/substrate-systems/evermatter@${{ steps.lean-build.outputs.digest }}
         run: |
           for platform in linux/amd64 linux/arm64; do
             .release-tools/scripts/check-image-licences.sh --platform "$platform" "$IMAGE"
@@ -834,7 +838,7 @@ jobs:
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).lean.publish && env.DRY_RUN != 'true' && steps.lean-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          subject-name: ghcr.io/artexis10/exomem
+          subject-name: ghcr.io/substrate-systems/evermatter
           subject-digest: ${{ steps.lean-build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
@@ -866,7 +870,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           provenance: mode=min,version=v0.2
           sbom: true
-          outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          outputs: type=image,name=ghcr.io/substrate-systems/evermatter,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_ML }}
@@ -876,7 +880,7 @@ jobs:
         id: ml-licences
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).ml.publish && env.DRY_RUN != 'true' && steps.ml-build.outcome == 'success' }}
         env:
-          IMAGE: ghcr.io/artexis10/exomem@${{ steps.ml-build.outputs.digest }}
+          IMAGE: ghcr.io/substrate-systems/evermatter@${{ steps.ml-build.outputs.digest }}
         run: |
           for platform in linux/amd64 linux/arm64; do
             .release-tools/scripts/check-image-licences.sh --platform "$platform" "$IMAGE"
@@ -887,7 +891,7 @@ jobs:
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).ml.publish && env.DRY_RUN != 'true' && steps.ml-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          subject-name: ghcr.io/artexis10/exomem
+          subject-name: ghcr.io/substrate-systems/evermatter
           subject-digest: ${{ steps.ml-build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
@@ -919,7 +923,7 @@ jobs:
           platforms: linux/amd64
           provenance: mode=min,version=v0.2
           sbom: true
-          outputs: type=image,name=ghcr.io/artexis10/exomem,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
+          outputs: type=image,name=ghcr.io/substrate-systems/evermatter,push-by-digest=true,push=${{ env.DRY_RUN != 'true' }}
           labels: |
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ env.IMAGE_CACHE_CUDA }}
@@ -929,7 +933,7 @@ jobs:
         id: cuda-licences
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cuda.publish && env.DRY_RUN != 'true' && steps.cuda-build.outcome == 'success' }}
         env:
-          IMAGE: ghcr.io/artexis10/exomem@${{ steps.cuda-build.outputs.digest }}
+          IMAGE: ghcr.io/substrate-systems/evermatter@${{ steps.cuda-build.outputs.digest }}
         run: .release-tools/scripts/check-image-licences.sh --platform linux/amd64 "$IMAGE"
 
       - name: Attest the exact cuda image
@@ -937,7 +941,7 @@ jobs:
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cuda.publish && env.DRY_RUN != 'true' && steps.cuda-licences.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          subject-name: ghcr.io/artexis10/exomem
+          subject-name: ghcr.io/substrate-systems/evermatter
           subject-digest: ${{ steps.cuda-build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
@@ -968,12 +972,12 @@ jobs:
           digest=$(python3 .release-tools/infra/scripts/release_recovery.py join-image --tag "$TAG" --image cloud --directory native-image-digests)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Attest the exact Exomem Cloud cell image
+      - name: Attest the exact Evermatter Cloud cell image
         id: cloud-attestation
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cloud.publish && env.DRY_RUN != 'true' && steps.cloud-build.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          subject-name: ghcr.io/artexis10/exomem
+          subject-name: ghcr.io/substrate-systems/evermatter
           subject-digest: ${{ steps.cloud-build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false
@@ -1006,12 +1010,12 @@ jobs:
           digest=$(python3 .release-tools/infra/scripts/release_recovery.py join-image --tag "$TAG" --image cellctl --directory native-image-digests)
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Attest the exact Exomem Cloud cellctl image
+      - name: Attest the exact Evermatter Cloud cellctl image
         id: cellctl-attestation
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cellctl.publish && env.DRY_RUN != 'true' && steps.cellctl-build.outcome == 'success' }}
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
         with:
-          subject-name: ghcr.io/artexis10/exomem-cellctl
+          subject-name: ghcr.io/substrate-systems/evermatter-cellctl
           subject-digest: ${{ steps.cellctl-build.outputs.digest }}
           push-to-registry: true
           create-storage-record: false

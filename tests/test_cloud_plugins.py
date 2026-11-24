@@ -274,11 +274,11 @@ def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_pat
         (
             "Stop",
             {"last_assistant_message": "We settled the adapter boundary."},
-            "Exomem capture check",
+            "Evermatter capture check",
         ),
         ("PreCompact", {"trigger": "manual"}, ""),
         ("SessionEnd", {}, ""),
-        ("SessionStart", {"source": "resume"}, "[Exomem continuation checkpoint]"),
+        ("SessionStart", {"source": "resume"}, "[Evermatter continuation checkpoint]"),
     ):
         handler = registrations[event][0]["hooks"][0]
         argv = [arg.replace("${CLAUDE_PLUGIN_ROOT}", str(package)) for arg in handler["args"]]
@@ -355,9 +355,9 @@ def test_openai_package_pins_every_install_line_to_the_release(tmp_path: Path) -
     package = tmp_path / "openai"
 
     importing = (package / "skills/exomem/references/importing.md").read_text()
-    assert f"uvx exomem@{release}" in importing
+    assert f"uvx evermatter@{release}" in importing
     routing = (package / "skills/exomem/references/operation-routing.md").read_text()
-    assert f"pip install exomem=={release}" in routing
+    assert f"pip install evermatter=={release}" in routing
 
     offenders = [
         path.relative_to(package).as_posix()

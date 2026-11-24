@@ -43,7 +43,7 @@ def _key_pem(key: ec.EllipticCurvePrivateKey) -> str:
 def make_pki(workdir: Path, hostnames: tuple[str, ...] = (SUBSTRATE_HOST, MCP_HOST)) -> RehearsalPki:
     now = dt.datetime.now(dt.UTC)
     ca_key = ec.generate_private_key(ec.SECP256R1())
-    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Exomem Cloud rehearsal CA")])
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Evermatter Cloud rehearsal CA")])
     ca_cert = (
         x509.CertificateBuilder()
         .subject_name(ca_name)
