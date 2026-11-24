@@ -718,14 +718,18 @@ class LocalRuntimeActivation:
         if not epistemic_graph.graph_enabled() or not epistemic_graph.startup_source_proof_pending(vault_root):
             return
         graph = epistemic_graph.EpistemicGraphIndex(vault_root)
-        with foreground_priority.bulk(stop=self._shutdown):
-            while True:
-                foreground_priority.check_cancelled()
-                admission = graph.validate_startup_snapshot()
-                if admission is not None:
-                    graph.recover_startup_graph(admission)
-                    return
-                foreground_priority.wait_for_retry(0.25)
+        try:
+            with foreground_priority.bulk(stop=self._shutdown):
+                while True:
+                    foreground_priority.check_cancelled()
+                    admission = graph.validate_startup_snapshot()
+                    if admission is not None:
+                        graph.recover_startup_graph(admission)
+                        return
+                    foreground_priority.wait_for_retry(0.25)
+        except foreground_priority.BulkCancelled:
+            # The shutdown's stop, as the watcher's own recovery handles it.
+            log.info("startup graph recovery cancelled")
 
     async def _finish_shutdown(self) -> None:
         """Finish the tracked shutdown before process teardown."""
