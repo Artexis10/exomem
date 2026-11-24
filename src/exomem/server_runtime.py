@@ -225,13 +225,13 @@ class LocalRuntimeActivation:
             return
         from .cloud_cell import cloud_mode_enabled
 
-        # First: HTTP serves saves before activation ends, and the waits below can last minutes
-        # after an upgrade. A save that meets a busy boundary is queued only while the drainer runs.
-        self._start_component("write intake", self._start_write_intake)
         if cloud_mode_enabled():
             from .catalogue_prewarm import adopt_at_boot
 
             self._start_component("staged catalogue", adopt_at_boot)
+        # Before the waits below: HTTP serves saves before activation ends, and these waits can
+        # last minutes after an upgrade. A busy save is queued only while the drainer runs.
+        self._start_component("write intake", self._start_write_intake)
         self._start_component("derived drain", self._start_derived_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
@@ -408,7 +408,7 @@ class LocalRuntimeActivation:
 
         # First, so no queued save starts a replay while the workers below stop; a replay in
         # flight is claimed by this process and re-claimed after the restart.
-        write_intake.stop(self.vault_root)
+        intake_stopped = write_intake.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -470,6 +470,9 @@ class LocalRuntimeActivation:
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
+        if not intake_stopped:
+            # A replay still running may commit after the lease is handed back.
+            raise RuntimeError("write intake is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 

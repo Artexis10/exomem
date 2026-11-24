@@ -1374,7 +1374,7 @@ def test_a_save_during_a_long_startup_wait_finds_the_write_intake_running(
     finally:
         release.set()
         activation._thread.join(10)
-        write_intake.stop(vault)
+        activation._stop_background_workers()
         readiness.reset()
 
 

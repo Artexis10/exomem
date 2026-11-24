@@ -153,6 +153,25 @@ def test_a_save_during_a_long_hold_comes_back_queued_and_lands_once_after_it(
     assert len(_pages_titled(vault, "Queued save 1")) == 1
 
 
+def test_a_stop_during_a_replay_that_waits_on_a_busy_boundary_ends_promptly_and_loses_nothing(
+    vault: Path, managers, drainer
+) -> None:
+    """Defect: a replay waited up to 40 s for the boundary, so a stop spent the supervisor's whole 10 s allowance."""
+    _writer, holder = managers
+    with _Hold(holder, vault):
+        receipt = _send(_command("remember"), vault, _remember_kwargs(vault, 30))
+        ref = receipt["queued_write"]["ref"]
+        _wait_for_state(vault, ref, "applying")
+        started = time.monotonic()
+        stopped = write_intake.stop(vault)
+        elapsed = time.monotonic() - started
+    assert stopped
+    assert elapsed < 5.0, elapsed
+    write_intake.start(vault)
+    _wait_for_state(vault, ref, "applied")
+    assert len(_pages_titled(vault, "Queued save 30")) == 1
+
+
 def test_a_resend_while_queued_returns_the_same_receipt_and_commits_once(
     vault: Path, managers, drainer
 ) -> None:
