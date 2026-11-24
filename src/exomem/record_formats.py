@@ -2101,11 +2101,11 @@ def inspection_diagnostics(
 
 
 def inspection_fields(manifest: collections.CollectionManifest) -> tuple[str, ...]:
-    """Return free-string field names in their manifest order."""
+    """Return free-string field names in their manifest order; a retired field is not part of the schema agents read."""
     return tuple(
         name
         for name, spec in manifest.schema.fields.items()
-        if spec.type == "string" and not spec.enum
+        if spec.type == "string" and not spec.enum and not spec.retired
     )
 
 
@@ -2996,6 +2996,15 @@ def query_collection(
                 date_column=date_column,
                 string_columns=string_columns,
                 project_values=staged_projector,
+            )
+    if not columns and aggregate is None:
+        # A retired field leaves the default columns; naming it in `columns` still returns its stored values.
+        retired = {name for name, spec in manifest.schema.fields.items() if spec.retired}
+        if retired:
+            result = replace(
+                result,
+                columns=[column for column in result.columns if column not in retired],
+                rows=[{key: value for key, value in row.items() if key not in retired} for row in result.rows],
             )
     if aggregate is None and result.truncated and result.returned == 0:
         raise collections.CollectionError(

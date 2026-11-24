@@ -15,7 +15,7 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .. import held_fs, planning, record_formats, record_governance, records, vault
+from .. import held_fs, planning, record_formats, record_governance, records, restructure, vault
 from .. import structured_collections as collections
 from . import (
     authority,
@@ -25,6 +25,7 @@ from . import (
     log_view,
     ownership,
     reference_index,
+    shape_history,
     summary,
     tokens,
     types,
@@ -116,6 +117,9 @@ class CapturedLegacyCollection:
     #: ``input_digest`` without the vault-wide audit segment census, plus every per-collection
     #: proof value the checkpoint records: an unrelated activity-log write leaves it unchanged.
     collection_basis: str
+    #: The collection's shape-history entries, oldest first, each as ``(transition id, stored text)``. The file mode
+    #: writes each entry beside the audit event of the same transition, so the import binds it to that event.
+    shape_entries: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +200,17 @@ def _markers(manifest, snapshot):
         marker = records._structural_audit_marker(manifest, sources[record.source.path], record)
         if marker is not None:
             yield records._AuditMarker(marker, record.source.path, record.identity.key)
+
+
+def _capture_shape_history(root, manifest):
+    """The collection's shape-history entries, oldest first, as `CapturedLegacyCollection.shape_entries` holds them.
+
+    The read covers the live activity log and every archive, so the import never carries part of the history as all
+    of it.
+    """
+    lines, _complete = vault.operation_log_lines(root, restructure.SHAPE_LINE_PREFIX)
+    entries = restructure.entries_from_lines(lines, manifest.collection_id)
+    return tuple((entry["id"], shape_history.encode(entry)) for entry in reversed(entries))
 
 
 def _capture_log_frame(manifest, snapshot):
@@ -347,6 +362,7 @@ def capture_legacy_collection(
     )
     resolutions, presentation_guards = _capture_presentation(root, manifest, snapshot, check=audit._check,
                                                             operation=presentation_operation)
+    shapes = _capture_shape_history(root, manifest)
     basis = {
         "manifest": _sha(data),
         "snapshot": snapshot.snapshot,
@@ -361,6 +377,7 @@ def capture_legacy_collection(
         "legacy_inspection": inspection,
         "legacy_audit_paths": captured_inspection.influencing_paths,
         "presentation": resolutions,
+        "shape_history": [(transition, shape_history.digest(text)) for transition, text in shapes],
     }
     collection_basis = {
         **{name: value for name, value in basis.items() if name != "audit_inputs"},
@@ -387,6 +404,7 @@ def capture_legacy_collection(
         presentation_operation,
         _sha(records._canonical_json(basis)),
         _sha(records._canonical_json(collection_basis)),
+        shapes,
     )
     _recheck(captured, check=audit._check)
     audit.require_source_root(root)
@@ -403,7 +421,9 @@ def _body(manifest, values, body):
     return records._semantic_body(body, manifest, values)
 
 
-def _envelope(captured, context, transition, generation, previous, *, original=None):
+def _envelope(captured, context, transition, generation, previous, *, original=None, shape=None):
+    """One import event. A history event whose transition wrote a shape-history entry carries the entry's digest, so
+    the chain binds the entry as a native revise's event binds its own (`history.effects`)."""
     checkpoint = original is None
     envelope = {
         "tag": "exomem-legacy-import",
@@ -452,6 +472,8 @@ def _envelope(captured, context, transition, generation, previous, *, original=N
                 "verification_summary": dict.fromkeys("abcdef", "passed"),
             }
         )
+    if shape is not None:
+        envelope["shape_sha256"] = shape_history.digest(shape)
     return envelope
 
 
@@ -517,7 +539,7 @@ def _insert_envelope(conn, txn_id, envelope, original, receipt=None):
 
 
 # This version describes temporary import material and its proof, not canonical receipts.
-MATERIAL_VERSION = 3
+MATERIAL_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,9 +553,11 @@ class LegacyMaterial:
     projections: tuple
     envelopes: tuple
     originals: tuple
+    #: Each imported shape-history entry as ``(index of its envelope, stored text)``.
+    shapes: tuple = ()
 
     def digest(self, check=lambda: None):
-        digest = hashlib.sha256(b"exomem.legacy-material:v3\0")
+        digest = hashlib.sha256(b"exomem.legacy-material:v4\0")
 
         def frame(value):
             check()
@@ -558,11 +582,14 @@ class LegacyMaterial:
         frame(len(self.originals))
         for kind, identity, path, raw in self.originals:
             frame((kind, identity, path, raw.hex()))
+        frame(len(self.shapes))
+        for entry in self.shapes:
+            frame(entry)
         check()
         return digest.hexdigest()
 
 
-def _materialize(captured, envelopes, check):
+def _materialize(captured, envelopes, check, shapes=()):
     manifest = captured.manifest
     declared = types.type_for_manifest(manifest)
     text = captured.manifest_bytes.decode("utf-8")
@@ -630,7 +657,7 @@ def _materialize(captured, envelopes, check):
                              for path, kind, _version, _digest, key in projections if kind in ("item", "log")))
     return LegacyMaterial(manifest.collection_id, captured.collection_basis, collection, current_manifest,
                           tuple(items), tuple(sorted(held_items)),
-                          tuple(sorted(projections)), tuple(envelopes), originals)
+                          tuple(sorted(projections)), tuple(envelopes), originals, tuple(shapes))
 
 
 def assemble(conn, material, check):
@@ -674,6 +701,9 @@ def assemble(conn, material, check):
     for index, (receipt, original) in enumerate(material.envelopes):
         check()
         _insert_envelope(conn, first + index, json.loads(receipt), original, receipt)
+    for index, text in material.shapes:
+        check()
+        shape_history.write(conn.execute, json.loads(text), text, txn_id=first + index)
     envelope = json.loads(material.envelopes[-1][0])
     for kind, identity, path, raw in material.originals:
         check()
@@ -721,7 +751,7 @@ def retained_material(conn, entry, *, check):
         if conn.execute("SELECT 1 FROM item_sources WHERE row_id=?", (row_id,)).fetchone():
             return None
         items.append((key, natural, version, values, body, payload, path, governance_json))
-    envelopes = []
+    envelopes, indexes = [], {}
     previous = None
     for index, txn in enumerate(conn.execute("SELECT txn_id,receipt_json,legacy_event_json,operation,event_hash,prev_event_hash,"
                                             "transition_id,profile_operation,generation_before,generation_after,"
@@ -742,6 +772,7 @@ def retained_material(conn, entry, *, check):
             return None
         previous = digest
         envelopes.append((receipt, original))
+        indexes[txn_id] = index
     if not envelopes or json.loads(envelopes[-1][0]).get("captured_input_digest") is None:
         return None
     # These schema tables are empty for legacy imports; their presence records native work.
@@ -772,8 +803,15 @@ def retained_material(conn, entry, *, check):
         return None
     if originals is None:
         return None
+    shapes = []
+    for txn_id, text in conn.execute("SELECT txn_id,entry_json FROM collection_shape_history WHERE collection_id=? "
+                                     "ORDER BY txn_id", (cid,)):
+        check()
+        if txn_id not in indexes:
+            return None
+        shapes.append((indexes[txn_id], text))
     material = LegacyMaterial(cid, entry["basis"], row, manifests[0], tuple(items), tuple(held),
-                              tuple(projections), tuple(envelopes), originals)
+                              tuple(projections), tuple(envelopes), originals, tuple(shapes))
     if (material.digest(check) != entry["material_digest"] or len(items) != entry["rows"]
             or len(envelopes) != entry["legacy_events"] + 1 or row[6] != previous):
         return None
@@ -865,6 +903,7 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
     count, head, previous = 0, None, None
     checkpoint_seen = False
     ordered = hashlib.sha256(b"legacy-audit-ordered-v1\0")
+    shapes = dict(captured.shape_entries)
     for row in conn.execute(
         "SELECT txn_id,transition_id,operation,profile_operation,generation_before,"
         "generation_after,manifest_version_before,manifest_version_after,actor,why,"
@@ -892,7 +931,10 @@ def _prove(conn, captured, context, checkpoint, checkpoint_transition, checkpoin
             legacy_json,
         ) = row
         check()
-        expected = _envelope(captured, context, transition, count, previous, original=legacy_json)
+        shape = None if legacy_json is None else shapes.get(transition)
+        expected = _envelope(captured, context, transition, count, previous, original=legacy_json, shape=shape)
+        if shape_history.bound_digest(conn, txn_id) != (None if shape is None else shape_history.digest(shape)):
+            _refuse("d", "imported shape-history entry differs from the captured entry")
         if checkpoint_seen:
             _refuse("d", "history follows import checkpoint")
         if legacy_json is None:
@@ -1008,18 +1050,26 @@ def import_legacy_collection(
     recheck = _recheck_sources if defer_presentation else _recheck
     recheck(captured, check=audit._check)
     chain.verify_store_chain(staging_conn, check=audit._check)
-    envelopes = []
+    envelopes, shapes = [], []
+    unbound = dict(captured.shape_entries)
     previous = None
     count = 0
     for event in audit.iter_reachable(captured.audit_proof):
+        shape = unbound.pop(event.transition_id, None)
         envelope = _envelope(
-            captured, context, event.transition_id, count, previous, original=event.original_json
+            captured, context, event.transition_id, count, previous, original=event.original_json, shape=shape
         )
         envelopes.append((_json(envelope), event.original_json))
+        if shape is not None:
+            shapes.append((count, shape))
         previous = _event_hash(envelope)
         count += 1
     if count != captured.audit_proof.reachable_count:
         _refuse("d", "captured reachable count differs")
+    if unbound:
+        # A file restructure writes its entry beside its audit event, so an entry with no reachable event is history
+        # this import cannot bind; carrying it unbound, or dropping it, would each misstate the collection's history.
+        _refuse("d", f"shape-history entries name no reachable event: {', '.join(sorted(unbound)[:5])}")
     checkpoint_transition = _sha(
         b"exomem.collection-legacy-import-checkpoint:v1\0"
         + records._canonical_json(
@@ -1034,7 +1084,7 @@ def import_legacy_collection(
     envelope = _envelope(captured, context, checkpoint_transition, count, previous)
     checkpoint_hash = _event_hash(envelope)
     envelopes.append((_json(envelope), None))
-    material = _materialize(captured, envelopes, audit._check)
+    material = _materialize(captured, envelopes, audit._check, shapes)
     result = assemble(staging_conn, material, audit._check)
     checkpoint = result.checkpoint_txn_id
     _prove(staging_conn, captured, context, checkpoint, checkpoint_transition, checkpoint_hash, check=audit._check)

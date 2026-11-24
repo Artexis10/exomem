@@ -6,10 +6,11 @@ never parses a note itself.
 
     python arm_side.py seed VAULT WORK          # note JSON, list of notes or null on stdin; places WORK/CLAUDE.md; prints the probe of each
     python arm_side.py seed_sources VAULT WORK  # list of Sources on stdin; captures each; prints the receipts
-    python arm_side.py seed_collections VAULT   # list of collections on stdin; creates each; prints the pages written
+    python arm_side.py seed_collections VAULT [store]  # list of collections on stdin; creates each (in the store with `store`); prints the pages written
     python arm_side.py prominence LEVEL         # sets the capture prominence; prints the level the arm then resolves
     python arm_side.py records VAULT PATH...    # prints the rows of each Records collection, by knowledge-base path
     python arm_side.py collections VAULT        # prints every collection of the vault with its schema, rows and automatic flag
+    python arm_side.py shape VAULT PATH...      # prints the identity, shape, shape history and rows of each collection, by knowledge-base path
     python arm_side.py instructions             # prints the text the arm's server hands every client
     python arm_side.py write_tools              # prints the names of the tools the arm's surface classes as writes
     python arm_side.py withhold                 # prints what the transport needs to withhold one write's acknowledgement
@@ -179,7 +180,25 @@ def manifest_method(vault: Path, path: str) -> str | None:
     return structured_collections.load_manifest(vault, vault / path).capture_method
 
 
-def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
+#: How a store collection declares its storage: the shape of the enrolment manifest in ``store.py``, whose
+#: strategy and view mode the arm names itself (``SQLITE_STORAGE``, ``summary.SUMMARY``).
+STORE_SOURCE, STORE_FORMAT_VERSION = "Items", 1
+
+
+def store_manifest(manifest: dict) -> dict:
+    """The case's manifest with its rows kept in the collection store, as the personal service keeps its own."""
+    from exomem import structured_collections
+    from exomem.collection_store import summary
+
+    storage = {
+        "strategy": structured_collections.SQLITE_STORAGE,
+        "source": STORE_SOURCE,
+        "format_version": STORE_FORMAT_VERSION,
+    }
+    return {**manifest, "storage": storage, "view_mode": summary.SUMMARY}
+
+
+def seed_collections(vault: Path, collections: list[dict], in_store: bool = False) -> list[dict]:
     """Create each Records collection as the arm's own records command does, with its method page and rows.
 
     A collection is ``{manifest_path, manifest, body?, rows?, method_page?}``. ``manifest_path`` is relative to
@@ -191,6 +210,10 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
     its current version is the last one. A refused write raises: a case whose seed is missing would measure
     nothing. The arm's own due-state heal then runs, as the maintenance job of a vault that has held its
     collections for a while would have run it: the write path routes by that projection.
+
+    With ``in_store`` the collections are made where the personal service keeps its own: the manifest's storage becomes
+    the collection store's (``store_manifest``), and the create and each append go through the dispatcher that the
+    arm's tools use, in a process that serves the store. The unit's coordinator must run, so this is for a ``store`` unit.
     """
     from exomem import commands, due_state
     from exomem.governance.principal import owner_principal, request_scope
@@ -203,7 +226,7 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
 
     why = "seeded by the incident harness"
     capture_supported, written = parses_capture(), []
-    with request_scope(owner_principal(surface="mcp")):
+    with served_store(), request_scope(owner_principal(surface="mcp")):
         for spec in collections:
             page = spec.get("method_page")
             if page:
@@ -231,6 +254,8 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
                         **edit,
                     )
             manifest = spec["manifest"]
+            if in_store:
+                manifest = store_manifest(manifest)
             if page and capture_supported:
                 manifest = {
                     **manifest,
@@ -245,13 +270,11 @@ def seed_collections(vault: Path, collections: list[dict]) -> list[dict]:
                     serialize_frontmatter(manifest), spec.get("body", ""), blank_line=True
                 )
             path = (kb_root(vault) / spec["manifest_path"]).relative_to(vault).as_posix()
-            created = commands.op_record_memory(
+            created = record_memory(
                 vault, action="create", manifest_path=path, manifest_text=manifest, why=why
             )
             for item in spec.get("rows", ()):
-                created = commands.op_record_memory(
-                    vault, action="append", collection=path, item=item, why=why
-                )
+                created = record_memory(vault, action="append", collection=path, item=item, why=why)
                 if created.get("error") or created.get("operation") != "append":
                     raise RuntimeError(
                         f"seeding a row of {path!r} failed: {json.dumps(created)[:300]}"
@@ -450,6 +473,78 @@ def collections(vault: Path) -> dict:
     return {"collections": described}
 
 
+#: The most pages of shape history one collection is read through (each holds up to 100 entries): a longer history
+#: reports an error and is never cut short, because a check that read part of it would read it as the whole.
+HISTORY_PAGES = 50
+
+
+def read_shape(vault: Path, path: str) -> dict:
+    """One collection as the arm's own code reads it: identity, shape, every shape-history entry and rows.
+
+    ``history`` is the entries newest first, with each entry's undo call, paged through the arm's own inspection;
+    it is ``None`` for an arm whose inspection reports no shape history (a release before the restructure). The
+    collection is read by its path, so a retired one answers too. A collection the arm cannot read reports ``error``.
+    """
+    from exomem import structured_collections
+
+    manifest = structured_collections.load_manifest(vault, vault / path)
+    entries, after, supported = [], None, False
+    for _ in range(HISTORY_PAGES):
+        # The first page is asked for without paging arguments, so an arm that has none is asked what it knows.
+        paging = {"continuation": after, "limit": 100} if after else {}
+        answer = record_memory(vault, action="inspect", collection=path, **paging)
+        page = answer.get("shape_history")
+        if answer.get("error") or (page is None and supported):
+            return {"error": json.dumps(answer, default=str)[:300]}
+        if page is None:
+            break
+        supported = True
+        entries += page["entries"]
+        after = page.get("continuation")
+        if after is None:
+            break
+    else:
+        return {"error": f"the shape history is longer than {HISTORY_PAGES} pages"}
+    answer = record_memory(vault, action="query", collection=path, limit=500)
+    rows = answer.get("rows")
+    return {
+        "path": path,
+        "collection_id": manifest.collection_id,
+        "title": manifest.title,
+        "lifecycle": manifest.lifecycle,
+        "natural_key": list(manifest.schema.natural_key),
+        "fields": list(manifest.schema.fields),
+        "history": entries if supported else None,
+        "rows": rows
+        if isinstance(rows, list)
+        else {"error": json.dumps(answer, default=str)[:300]},
+    }
+
+
+def shape(vault: Path, collections: list[str]) -> dict:
+    """The shape and the rows of each collection, by knowledge-base path, for the checks that follow a restructure.
+
+    A collection that does not read reports ``error`` in its place: unknown, never an unchanged or empty collection.
+    """
+    from exomem.cli_ops import OpError
+    from exomem.governance.principal import owner_principal, request_scope
+    from exomem.structured_collections import CollectionError
+    from exomem.vault import kb_root
+
+    described = {}
+    with served_store(), request_scope(owner_principal(surface="mcp")):
+        for relative in collections:
+            path = (kb_root(vault) / relative).relative_to(vault).as_posix()
+            try:
+                described[relative] = read_shape(vault, path)
+            except (
+                OpError,
+                CollectionError,
+            ) as error:  # the arm's refusal of this collection is its own answer
+                described[relative] = {"error": f"{type(error).__name__}: {error}"[:300]}
+    return described
+
+
 def write_tools() -> dict:
     """The tools the arm's own surface classes as writes: each typed tool whose effect is ``write``, and the write door.
 
@@ -640,7 +735,9 @@ if __name__ == "__main__":
     elif command == "seed_sources":
         result = seed_sources(Path(args[0]), Path(args[1]), json.load(sys.stdin))
     elif command == "seed_collections":
-        result = seed_collections(Path(args[0]), json.load(sys.stdin))
+        result = seed_collections(
+            Path(args[0]), json.load(sys.stdin), in_store=args[1:] == ["store"]
+        )
     elif command == "build_indexes":
         result = build_indexes(Path(args[0]))
     elif command == "prominence":
@@ -651,6 +748,8 @@ if __name__ == "__main__":
         result = records(Path(args[0]), args[1:])
     elif command == "collections":
         result = collections(Path(args[0]))
+    elif command == "shape":
+        result = shape(Path(args[0]), args[1:])
     elif command == "instructions":
         result = instructions()
     elif command == "write_tools":

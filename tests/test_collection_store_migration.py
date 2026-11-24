@@ -33,6 +33,7 @@ from test_collection_store_service import DAILY, DAILY_PATH, DAILY_TEXT, Service
 from test_collection_store_writer import CID, KEY, OTHER, manifest_path, manifest_text
 
 from exomem import __main__ as cli
+from exomem import commands
 from exomem import (
     held_fs,
     record_formats,
@@ -52,6 +53,7 @@ from exomem.collection_store import (
     chain,
     connection,
     custody,
+    history,
     legacy_import,
     migration,
     preflight,
@@ -1825,3 +1827,39 @@ def test_a_dry_run_blocks_collections_whose_marker_entries_would_overlap(env, ca
     blocked = {row["path"]: row["blocker"]["code"] for row in printed(capsys)["collections"]
                if row["status"] == "blocked"}
     assert blocked == dict.fromkeys((NESTED, WORK), "COLLECTION_STORE_MARKER_CONFLICT")
+
+
+def test_a_migrated_collection_keeps_its_shape_history_bound_into_the_chain_and_undoable(env, capsys):
+    """A migration that drops a file collection's reshapes, so the store forgets who designed the collection and what
+    an agent changed, cannot undo a reshape made before it, or keeps an altered entry unnoticed."""
+    root = legacy_vault(env)
+    # The file mode's own command path, which holds no writer lease past the call, as an owner's session before the
+    # migration would.
+    added = commands.op_record_memory(root, "restructure", collection=LEDGER_COLLECTION_PATH,
+                                      why="keep a note on each publication",
+                                      steps=[{"step": "add_field", "field": "note", "type": "string"}])
+    before = commands.op_record_memory(root, "inspect", collection=LEDGER_COLLECTION_PATH)["shape_history"]
+    assert [entry["id"] for entry in before["entries"]] == [added["shape"]["id"]]
+    stop_writer()
+
+    assert migrate(root, "apply") == 0 and printed(capsys)["status"] == "marker_admitted"
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        chain.verify_store_chain(reader)
+    service = start_service(root)
+    try:
+        after = call(root, "record_memory", action="inspect", collection=LEDGER_COLLECTION_PATH)["shape_history"]
+        assert after == before
+        undone = call(root, "record_memory", action="restructure", collection=LEDGER_COLLECTION_PATH,
+                      why="the note is not needed", undo=added["shape"]["id"])
+        assert undone["shape"]["undoes"] == added["shape"]["id"]
+    finally:
+        service.stop()
+
+    database = connection.store_path(root)
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("DROP TRIGGER collection_shape_history_append_only_update")
+        writer.execute("UPDATE collection_shape_history SET entry_json=replace(entry_json, 'publication', 'invoice') "
+                       "WHERE entry_id=?", (added["shape"]["id"],))
+        writer.commit()
+    with closing(connection.open_reader(database)) as reader, pytest.raises(chain.StoreChainError, match="shape-history"):
+        history.verify(reader, LEDGER_ID)

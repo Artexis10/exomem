@@ -72,11 +72,12 @@ def detach(writer, collection, arguments):
 
 def acquire(root, prepared, *, why, on_reject, lifetime):
     """Finalize ordered outcomes outside SQL; failed inputs never claim a key or filename."""
+    from .writer import _new_row_path
+
     manifest = prepared.manifest
     seen, source_guards = {}, {}
     outcomes, plans, source_inputs, origins = [], [], [], []
     occupied = ChainMap({}, prepared.occupied)
-    is_log = manifest.storage.strategy == "markdown-log"
     has_sources = records._bulk_sources_field(manifest)
     for candidate in prepared.candidates:
         index = candidate.index
@@ -119,15 +120,7 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
             continue
         if candidate.derived:
             seen[key] = index
-        if before:
-            path = before["view_path"]
-        elif is_log:
-            path = f"{manifest.storage.source}#{key}"
-        elif manifest.view_mode == summary.SUMMARY:
-            path = None
-        else:
-            path = (collections.render_item_path(manifest, values, key, occupied_path_keys=occupied)
-                    if manifest.item_filename else f"{manifest.storage.source}/{key}.md")
+        path = before["view_path"] if before else _new_row_path(manifest, values, key, occupied)
         if path is not None:
             occupied[collections._portable_path_key(path)] = 1
         source_guards[resolved.path] = resolved.guard
@@ -218,6 +211,10 @@ def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
         candidate.values, candidate.body, candidate.source = values, body, resolved
         candidate.derived = derived is not None
     _current(writer, manifest.collection_id, candidates)
+    for candidate in candidates:
+        if candidate.before is not None:
+            candidate.values = records.keep_retired(manifest, json.loads(candidate.before["values_json"]),
+                                                    candidate.values)
     return candidates
 
 

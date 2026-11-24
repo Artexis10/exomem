@@ -380,7 +380,7 @@ def test_full_keeps_every_key_the_old_replayed_record_compact_reply_carried() ->
             "affected_paths", "after_container_hash", "after_item_hash", "audit_correlation",
             "before_container_hash", "before_item_hash", "collection_id", "idempotency_key",
             "item_key", "mutated", "ok", "operation", "outcome", "paths", "payload_hash",
-            "receipt_id", "replayed", "request_id", "status", "warnings_count",
+            "receipt_id", "replayed", "request_id", "say", "status", "warnings_count",
         },
         terminal,
     )
@@ -843,6 +843,7 @@ def test_record_replay_terminal_is_not_presented_as_a_new_commit() -> None:
         "after_item_hash": "a" * 64,
         "after_container_hash": "b" * 64,
         "outcome": "replayed",
+        "say": mutation_terminal.PLAIN_REPLY,
     }
     assert _operational(terminal) == {
         "ok": True,
@@ -901,6 +902,7 @@ def test_lifecycle_record_receipt_keeps_the_next_guard_hashes_and_moves_the_audi
         "after_manifest_hash": "b" * 64,
         "after_container_hash": "d" * 64,
         "outcome": "committed",
+        "say": mutation_terminal.PLAIN_REPLY,
     }
     operational = _operational(terminal)
     assert operational["_record_receipt"] == "exomem.records-mutation"

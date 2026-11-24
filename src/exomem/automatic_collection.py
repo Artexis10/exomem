@@ -13,6 +13,10 @@ the call names are added to the collection and the row is written. `fields_to_ad
 `require_field_bounds` is its one check; its field bound holds only for a collection that was created automatically.
 Renaming, retyping or removing a field stays the confirmed `revise`.
 
+`restructure` takes the same flag for a change of shape the agent starts on its own. `require_restructure_bounds` is the
+one check, called by `restructure.resolve` for both storage modes: the disposition, the user's decisions in the shape
+history, the field cap, the creation bounds of a split's new collection, and the daily count of automatic restructures.
+
 The flag rests on the agent's word, as every agent-initiated write does. The bounds are not a security
 boundary: they keep an eager agent from building sprawl, and a refusal costs one question, because the
 way forward is the confirmed create without the flag. The flag never widens what a plain create allows.
@@ -22,22 +26,23 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import textwrap
 import unicodedata
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Never
 
 import yaml
 
-from . import kbdir, memory_refs, vault
+from . import kbdir, manifest_edit, memory_refs, restructure, vault
 from . import structured_collections as collections
 
 #: Most item fields of an automatic collection: a minimal schema, since a speculative field costs every later row.
 MAX_FIELDS = 12
 #: Most automatic creations per vault in `WINDOW`: stops an agent that loops from scattering collections.
 MAX_PER_WINDOW = 3
+#: Most automatic restructures of one collection in `WINDOW`: stops two sessions flipping a shape back and forth.
+MAX_RESTRUCTURES_PER_WINDOW = 3
 WINDOW = dt.timedelta(hours=24)
 
 #: SQL for "this create transaction's receipt carries the automatic flag", on a `txns` row aliased `t`.
@@ -60,6 +65,7 @@ INVENTORY_ARCHIVES = 4
 
 _CREATE_ACT = "create it without `automatic`"
 _FIELD_ACT = "add it with a confirmed `revise` of the collection"
+_RESTRUCTURE_ACT = "restructure without `automatic`"
 #: The Unicode general categories that can end a line in a title: control characters and the line and paragraph
 #: separators. A closed set that the Unicode standard fixes.
 _LINE_BREAKING = frozenset({"Cc", "Zl", "Zp"})
@@ -80,16 +86,19 @@ def _refuse(bound: str, reason: str, **details: Any) -> Never:
     raise collections.CollectionError("AUTOMATIC_CREATION_REFUSED", f"{reason}; {way}", {"bound": bound, **details})
 
 
-def require_bounds(vault_root: Path, manifest_path: str, manifest_text: str) -> None:
+def require_bounds(
+    vault_root: Path, manifest_path: str, manifest_text: str, *, refuse: Callable[..., Never] = _refuse
+) -> None:
     """Refuse an automatic create whose caller or manifest is outside the bounds that read no create record.
 
-    The daily bound reads them, so `require_daily_room` checks it under the writer's own lock.
+    The daily bound reads them, so `require_daily_room` checks it under the writer's own lock. `refuse` raises the
+    refusal: a split's new collection passes the same bounds and refuses in its own call's code.
     """
     from . import envelope
 
     disposition = envelope.active()["proactive_capture"]
     if disposition != "silent":
-        _refuse(
+        refuse(
             "proactive_capture",
             f"automatic creation needs proactive_capture silent, and it is {disposition}",
             disposition=disposition,
@@ -97,12 +106,12 @@ def require_bounds(vault_root: Path, manifest_path: str, manifest_text: str) -> 
     root = Path(vault_root)
     manifest = collections.parse_manifest_bytes(root, root / manifest_path, manifest_text.encode("utf-8"))
     if manifest.semantic_profile != "records":
-        _refuse("profile", "automatic creation is for Records collections", semantic_profile=manifest.semantic_profile)
+        refuse("profile", "automatic creation is for Records collections", semantic_profile=manifest.semantic_profile)
     if not manifest.schema.natural_key:
-        _refuse("natural_key", "an automatic collection declares a natural key, so a repeated item updates its row")
+        refuse("natural_key", "an automatic collection declares a natural key, so a repeated item updates its row")
     total = field_count(manifest.schema.fields)
     if total > MAX_FIELDS:
-        _refuse(
+        refuse(
             "fields", f"an automatic collection has at most {MAX_FIELDS} item fields", fields=total, maximum=MAX_FIELDS
         )
     front = vault.parse_frontmatter(manifest_text)[0]
@@ -114,7 +123,7 @@ def require_bounds(vault_root: Path, manifest_path: str, manifest_text: str) -> 
         *(["references"] if collections.declared_references(manifest.schema) else []),
     ]
     if declared:
-        _refuse("authored_features", f"an automatic collection declares no {', '.join(declared)}", declared=declared)
+        refuse("authored_features", f"an automatic collection declares no {', '.join(declared)}", declared=declared)
 
 
 def field_count(fields: Mapping[str, collections.FieldSpec]) -> int:
@@ -239,10 +248,14 @@ def minimal_manifest(
     )
 
 
+def now_stamp() -> str:
+    """The instant a record of a collection's shape carries: UTC, to the second, the form its `committed_at` takes."""
+    return dt.datetime.now(dt.UTC).strftime(_STAMP)
+
+
 def create_line(collection_id: str) -> str:
     """The activity-log line that marks a file collection's create as automatic."""
-    at = dt.datetime.now(dt.UTC).strftime(_STAMP)
-    return CREATE_LINE_PREFIX + json.dumps({"collection_id": collection_id, "at": at}, separators=(",", ":"))
+    return CREATE_LINE_PREFIX + json.dumps({"collection_id": collection_id, "at": now_stamp()}, separators=(",", ":"))
 
 
 def _file_creates(
@@ -279,7 +292,7 @@ def file_created_ids(vault_root: Path) -> tuple[frozenset[str], bool] | None:
     return frozenset(event["collection_id"] for event in creates), complete
 
 
-def require_daily_room(vault_root: Path, connection: Any = None) -> None:
+def require_daily_room(vault_root: Path, connection: Any = None, *, refuse: Callable[..., Never] = _refuse) -> None:
     """Refuse the creation that would be the `MAX_PER_WINDOW`-th plus one in `WINDOW`.
 
     Each storage mode counts its own create record. A store vault counts the collections' create
@@ -301,9 +314,9 @@ def require_daily_room(vault_root: Path, connection: Any = None) -> None:
     try:
         created += sum(1 for event in _file_creates(vault_root, since=since)[0] if event["at"] >= cutoff)
     except (vault.PathGuardError, OSError, ValueError):
-        _refuse("daily", "the activity log could not be read to count the automatic creations in the last 24 hours")
+        refuse("daily", "the activity log could not be read to count the automatic creations in the last 24 hours")
     if created >= MAX_PER_WINDOW:
-        _refuse(
+        refuse(
             "daily",
             f"this vault created {created} collections automatically in the last 24 hours, the most allowed",
             created=created,
@@ -383,44 +396,166 @@ def require_field_bounds(
 def with_added_fields(manifest_text: str, added: Mapping[str, str]) -> str:
     """`manifest_text` with one declaration per `added` field at the end of `item_schema.fields`, every other byte kept.
 
-    The manifest is YAML frontmatter and a collection may carry comments and saved views, so this edits
-    at the parsed node's position as `record_formats.render_manifest_audit_head` does, rather than dumping
-    the document again. A `fields` mapping written in flow style has no line to extend and is refused,
-    which leaves the confirmed `revise`.
+    A layout that has no line to extend (a `fields` mapping in flow style) is refused, which leaves the confirmed `revise`.
     """
-    _front, _body, front_text = vault.parse_frontmatter(manifest_text, strict=True)
-    document = yaml.compose(front_text or "")
-
-    def child(node: Any, key: str) -> Any:
-        if not isinstance(node, yaml.MappingNode):
-            return None
-        return next((value for name, value in node.value if getattr(name, "value", None) == key), None)
-
-    declared = child(child(document, "item_schema"), "fields")
-    if not isinstance(declared, yaml.MappingNode) or declared.flow_style or not declared.value:
-        _refuse_fields("layout", "this collection's fields are not written one per line, so a field cannot be added in place")
-    newline = "\r\n" if "\r\n" in front_text else "\n"
-    indent = " " * declared.value[0][0].start_mark.column
-    entries = "".join(
-        textwrap.indent(yaml.safe_dump({name: {"type": field_type}}, sort_keys=False), indent)
-        for name, field_type in added.items()
-    ).replace("\n", newline)
-    # The `fields` mapping ends where the next token starts (a sibling key, a later top-level key), or at the document
-    # end. A last field that is a block sequence or a block scalar ends on that same mark, so its own end is no
-    # insertion line.
-    end = declared.end_mark
-    if end.index >= len(front_text):
-        revised = front_text + entries if front_text.endswith("\n") else front_text + newline + entries.removesuffix(newline)
-    else:
-        line_start = end.index - end.column
-        revised = front_text[:line_start] + entries + front_text[line_start:]
-    # The edit is checked against the document it edits, so a layout this does not foresee is refused, never written.
-    expected = yaml.safe_load(front_text)
-    expected["item_schema"]["fields"].update({name: {"type": field_type} for name, field_type in added.items()})
+    edit = manifest_edit.ManifestEdit(manifest_text)
     try:
-        intact = yaml.safe_load(revised) == expected
-    except yaml.YAMLError:
-        intact = False
-    if not intact:
-        _refuse_fields("layout", "a field cannot be added in place to this collection's manifest without moving other content")
-    return manifest_text.replace(front_text, revised, 1)
+        for name, field_type in added.items():
+            edit.add_entry(("item_schema", "fields"), name, {"type": field_type})
+    except manifest_edit.ManifestLayoutError as layout:
+        _refuse_fields("layout", f"a field cannot be added in place to this collection's manifest: {layout.reason}")
+    return edit.text
+
+
+def _refuse_restructure(bound: str, reason: str, **details: Any) -> Never:
+    way = _way_forward(details.get("disposition", "silent"), "change in plain words", _RESTRUCTURE_ACT)
+    raise collections.CollectionError("AUTOMATIC_RESTRUCTURE_REFUSED", f"{reason}; {way}", {"bound": bound, **details})
+
+
+def _refuse_split(bound: str, reason: str, **details: Any) -> Never:
+    """A split's new collection fails a creation bound: the same bound, refused in this call's code."""
+    _refuse_restructure(bound, f"the new collection is outside the creation bounds: {reason}", creation=True, **details)
+
+
+def _domains(step: Mapping[str, Any]) -> set[tuple[str, ...]]:
+    """What a step changes: the fields it names, the collection's key, or the collection (and the fields it renames).
+
+    Read from the parameters that the step schema gives each kind, never from a field or a collection name. A merge or
+    its undo renames each field its `mapping` names, so those fields are in its domains beside the collection.
+    """
+    if "field" in step:
+        return {("field", name) for name in (step["field"], step.get("to")) if name is not None}
+    if "key" in step:
+        return {("key",)}
+    mapping = step.get("mapping") or {}
+    return {("collection",), *(("field", name) for name in (*mapping, *mapping.values()))}
+
+
+def _decision_changed(history: Sequence[Mapping[str, Any]], steps: Sequence[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """The shape-history entry of a user's decision that `steps` would change, or None.
+
+    A decision is an entry whose origin names the user (`restructure.CREATE_ORIGINS`) and that no later entry undid.
+    Its steps protect what they changed. A creation entry holds no steps, so a design the user described protects
+    all of it, and an automatic step may only add a field, which changes none of it. A plain create protects nothing,
+    since every collection starts as one. A `declined` entry records a proposal and decided nothing. An undo that the
+    call performs is not recorded yet, so an automatic undo of a user's change finds that change and refuses.
+    """
+    undone = {entry["undoes"] for entry in history if entry["undoes"] is not None}
+    touched = set().union(*map(_domains, steps))
+    for entry in history:
+        if entry["origin"] not in restructure.CREATE_ORIGINS or entry["id"] in undone:
+            continue
+        if not entry["steps"]:
+            if entry["origin"] == "user_design" and not restructure.adds_only(steps):
+                return entry
+        elif touched & set().union(*map(_domains, entry["steps"])):
+            return entry
+    return None
+
+
+def window_start() -> str:
+    """The instant `WINDOW` ago, in the form a shape-history entry's `at` and `committed_at` take."""
+    return (dt.datetime.now(dt.UTC) - WINDOW).strftime(_STAMP)
+
+
+def counts_toward_window(entry: Mapping[str, Any], undos: Collection[str]) -> bool:
+    """Whether the daily bound counts a shape-history entry: an automatic restructure that adds no field only.
+
+    A plain undo is not counted: it puts back a change that was counted. An undo of an undo is counted like any
+    restructure, since two sessions that each undo the other's last change flip the shape back and forth (design
+    decision 4). `undos` holds the id of each entry that is itself an undo.
+
+    `shape_history.counted_since` states the same rule as SQL over the entry's indexed columns. This copy serves
+    file-only collections and goes with file mode when move-structured-collections-to-sqlite retires it (phase P6).
+    """
+    return (
+        entry["origin"] == "automatic" and not restructure.adds_only(entry["steps"])
+        and (entry["undoes"] is None or entry["undoes"] in undos)
+    )
+
+
+def _field_total(vault_root: Path, path: str, text: str) -> int | None:
+    """The item fields a manifest declares, or None for a text that does not parse (the validation that follows names why)."""
+    root = Path(vault_root)
+    try:
+        return field_count(collections.parse_manifest_bytes(root, root / path, text.encode("utf-8")).schema.fields)
+    except collections.CollectionError:
+        return None
+
+
+def require_restructure_bounds(
+    text: str,
+    planned: restructure.Plan,
+    steps: Sequence[Mapping[str, Any]],
+    undoes: str | None,
+    history: Sequence[Mapping[str, Any]],
+    *,
+    vault_root: Path,
+    collection_id: str,
+    path: str,
+    counted: Callable[[str], int] | None = None,
+    created: Callable[[str], bool] | None = None,
+    connection: Any = None,
+    begun: Callable[[restructure.Change], bool] | None = None,
+) -> None:
+    """Refuse an automatic restructure of the collection `collection_id` unless every bound holds.
+
+    `text` is the manifest the call started from, `planned` the proven plan of `steps` (an undo's inverse when `undoes`
+    names the entry), and `history` the collection's shape-history entries, newest first. `counted` is the store's
+    own count of the entries that `counts_toward_window` since a cutoff, one indexed query; without it the count reads
+    `history`, which a file collection's call has already read whole. `created` is the store's answer to whether a
+    collection's create was automatic; without it a file collection's create line answers. The field bound, like
+    `require_field_bounds`, applies only to a collection created automatically, and asks only when a change would
+    leave one over the bound. `connection` is the store's, for the creation count of a split. `begun` says whether a
+    split's new collection was already made by the store's admitted create, which passed the creation bounds itself
+    and now counts among the day's creations, so this call does not count it again. The caller holds the mutation
+    lock, so two calls cannot both pass the count.
+    """
+    from . import envelope
+
+    disposition = envelope.active()["proactive_capture"]
+    if disposition != "silent":
+        _refuse_restructure(
+            "proactive_capture",
+            f"an automatic restructure needs proactive_capture silent, and it is {disposition}",
+            disposition=disposition,
+        )
+    decision = _decision_changed(history, steps)
+    if decision is not None:
+        _refuse_restructure(
+            "decision",
+            f"a step changes what the user decided in the shape-history entry {decision['id']} ({decision['origin']})",
+            decision=decision["id"], decided_by=decision["origin"], decided_at=decision["at"],
+        )
+    automatic = created or (lambda cid: created_automatically(vault_root, cid, store_created=None))
+    grown = [(collection_id, path, text, planned.text)] + [
+        (change.collection_id, change.path, planned.starts[change.collection_id], change.text)
+        for change in planned.others if not change.created
+    ]
+    for grown_id, manifest_path, before, after in grown:
+        total, was = _field_total(vault_root, manifest_path, after), _field_total(vault_root, manifest_path, before)
+        # A change that does not add a field keeps the collection as wide as it was, however wide that is; a
+        # collection the owner made takes any width, as `require_field_bounds` says.
+        if total is not None and was is not None and total > MAX_FIELDS and total > was and automatic(grown_id):
+            _refuse_restructure(
+                "fields", f"an automatic change leaves at most {MAX_FIELDS} item fields, and this would leave {total}",
+                fields=total, maximum=MAX_FIELDS,
+            )
+    for change in planned.others:
+        # A split's collection takes the source's shape, so only the creation count applies, not the shape bounds
+        # of a collection drafted from one row (`require_bounds`).
+        if change.created and (begun is None or not begun(change)):
+            require_daily_room(vault_root, connection, refuse=_refuse_split)
+    undos = {entry["id"] for entry in history if entry["undoes"] is not None}
+    if restructure.adds_only(steps) or (undoes is not None and undoes not in undos):
+        return
+    cutoff = window_start()
+    recent = counted(cutoff) if counted is not None else sum(
+        1 for entry in history if entry["at"] >= cutoff and counts_toward_window(entry, undos)
+    )
+    if recent >= MAX_RESTRUCTURES_PER_WINDOW:
+        _refuse_restructure(
+            "daily",
+            f"this collection had {recent} automatic restructures in the last 24 hours, the most allowed",
+            restructures=recent, maximum=MAX_RESTRUCTURES_PER_WINDOW,
+        )

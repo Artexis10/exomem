@@ -314,7 +314,8 @@ def _manifest_admits(root: Path, rel: str, data: bytes) -> bool:
 
     try:
         manifest = structured_collections.parse_manifest_bytes(root, rel, data)
-        admitted = manifest.semantic_profile in PROFILES
+        # A retired collection is set aside: its manifest leaves recall through the one lifecycle flag it carries.
+        admitted = manifest.semantic_profile in PROFILES and not manifest.retired
     except (UnicodeError, ValueError):
         admitted = False
     with _MANIFEST_ADMISSION_LOCK:

@@ -81,7 +81,8 @@ RANGES: dict[str, tuple[str, ...]] = {
 #: Holds no ". ": the hook's over-cap fallback keeps the block's first sentence, which this opens.
 PROACTIVE_CAPTURE_MEANING: dict[str, str] = {
     "silent": "save durable material without asking, then report the write in one line",
-    "advisory": "offer the save in one line and stop",
+    # "In the user's words": an advisory offer is the whole reply, and no write reply's `say` reaches it.
+    "advisory": "offer the save in one line, in the user's words, and stop",
     "off": "write only on an explicit request",
 }
 
@@ -116,8 +117,9 @@ CONFIRM_SHORTCUT: str = (
 #: ratification may ever create one. Pinned as its own refusal so it cannot be
 #: shadowed by the generic range refusal, and so the capability cannot drift in
 #: as a convenience. The ratified exceptions are not delegations: creating a
-#: minimal Records collection, and adding fields to a Records collection, inside the bounds of
-#: `automatic_collection` are `proactive_capture`, and the server enforces those bounds on every such write.
+#: minimal Records collection, adding fields to a Records collection, and restructuring a collection
+#: losslessly, inside the bounds of `automatic_collection`, are `proactive_capture`, and the server enforces those
+#: bounds on every such write. A restructure that fails a bound, and every permanent deletion, stay `restructure_execution`.
 FOUNDER_GATE: str = "standing restructure delegation is absent in v1; founder ratification is required"
 
 # The six actions are closed product operations, not vault vocabulary (O2/R3).
@@ -147,11 +149,11 @@ def _owner_actions(action_class: str) -> str:
 
 # Generate promotion clauses from the map so served prose cannot classify them differently.
 CONFIRM_REQUIRED: str = (
-    "confirm-required: restructure application, out-of-bounds or Planning collection creation, supersession, "
+    "confirm-required: out-of-bounds restructure, out-of-bounds or Planning collection creation, supersession, "
     f"entity merge, deletion, {_owner_actions('restructure_execution')}. Deletion has a server confirm parameter; "
     "adoption apply is preview-first; supersession has no server-side gate yet: future work. Additive owner "
-    f"promotions on v1: {_owner_actions('proactive_capture')}, bounded collection creation and added fields follow "
-    "proactive_capture. Meaning, alias, deprecation and deletion edits stay restructure."
+    f"promotions on v1: {_owner_actions('proactive_capture')}, bounded collection creation, added fields and a "
+    "bounded restructure follow proactive_capture. Meaning, alias, deprecation and deletion edits stay restructure."
 )
 
 #: The protocol the agent contract teaches for actions covered by the envelope.

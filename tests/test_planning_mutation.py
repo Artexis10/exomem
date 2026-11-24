@@ -331,6 +331,26 @@ def test_planning_manifest_lifecycle_validates_revises_and_publishes_profile_aud
     )
 
 
+def test_a_planning_revise_that_rewrites_many_item_files_keeps_its_full_receipt(tmp_path: Path) -> None:
+    """A revise of a file collection can rewrite every item file, so its receipt names that many paths.
+
+    Adding 300 items takes minutes, so the test pads the paths of a real receipt to the length such a revise returns.
+    """
+    from exomem import mutation_terminal
+    from exomem.planning import create_collection, revise, validate
+
+    (tmp_path / "Knowledge Base").mkdir()
+    (tmp_path / "Knowledge Base" / "log.md").write_text("# Log\n", encoding="utf-8")
+    manifest_path = "Knowledge Base/Planning/Work/_collection.md"
+    create_collection(tmp_path, manifest_path, _manifest(), why="create planning collection")
+    proposal = (tmp_path / manifest_path).read_text(encoding="utf-8").replace("title: Planning work", "title: Programme", 1)
+    guards = validate(tmp_path, mode="revision", collection=manifest_path, manifest_text=proposal)["lifecycle_guards"]
+    receipt = revise(tmp_path, manifest_path, manifest_text=proposal, **guards, why="rename the programme")
+    item_paths = [f"Knowledge Base/Planning/Work/item-{number:04d}.md" for number in range(300)]
+
+    assert mutation_terminal.valid_planning_receipt({**receipt, "affected_paths": item_paths})
+
+
 def test_planning_revision_and_rebaseline_require_exact_current_guards_and_gaps(
     tmp_path: Path,
 ) -> None:

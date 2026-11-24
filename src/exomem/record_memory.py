@@ -16,6 +16,8 @@ from . import (
     record_governance,
     record_history,
     records,
+    reply_names,
+    restructure,
     structured_collections,
     writer_lease,
 )
@@ -59,6 +61,7 @@ def record_memory(
         "update",
         "retract",
         "revise",
+        "restructure",
         "rebaseline",
         "discard",
         "import",
@@ -83,6 +86,7 @@ def record_memory(
     expand_child: str | None = None,
     continuation: str | None = None,
     include_agent_history: bool | None = None,
+    include_retired: bool | None = None,
     output_format: Literal["json", "markdown", "csv"] | None = None,
     item: dict[str, Any] | None = None,
     item_key: str | None = None,
@@ -105,8 +109,12 @@ def record_memory(
     automatic: bool | None = None,
     new_collection: dict[str, Any] | None = None,
     new_fields: list[str] | None = None,
+    steps: list[dict[str, Any]] | None = None,
+    undo: str | None = None,
+    origin: str | None = None,
+    preview: bool | None = None,
 ) -> dict[str, Any]:
-    """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, rebaseline, discard or import Records.
+    """Describe, validate, inspect, create, query, append, bulk_upsert, update, retract, revise, restructure, rebaseline, discard or import Records.
 
     Records are human-owned event and state histories.  This command keeps the
     complete workflow on one product surface while routing mutations to guarded
@@ -135,6 +143,7 @@ def record_memory(
         expand_child: Exact declared child table/container to project and expand.
         continuation: Snapshot-bound query continuation.
         include_agent_history: Include bounded governed agent mutation history.
+        include_retired: Inventory inspect only: also list retired collections; the count is always reported.
         output_format: Query output format.
         item: Item values for append.
         item_key: The item's internal UUID identity, required for update. Omit it
@@ -169,10 +178,12 @@ def record_memory(
         item_id: update or retract only: the row `id` a query returned. It stands for item_key,
             expected_item_version and expected_container_hash, which the call reads under
             the writer lease. A stale id is refused with the current one.
-        automatic: create only: true when you start the collection yourself under silent
+        automatic: create: true when you start the collection yourself under silent
             proactive_capture. Unless the bounds in `automatic_collection` hold, the server refuses
             AUTOMATIC_CREATION_REFUSED and names the failed bound; nothing is created. The receipt
-            and the inventory then report the collection as automatic.
+            and the inventory then report the collection as automatic. On restructure: true when you start
+            the change yourself under silent proactive_capture, with no origin; the server records origin
+            automatic, and refuses AUTOMATIC_RESTRUCTURE_REFUSED with the failed bound named, changing nothing.
         new_collection: append only, `{"natural_key": [<item fields that identify a row>]}`: when
             `collection` is a title that names no collection, create a minimal one from `item` through
             the same automatic create (so its bounds hold) and append the row, in one call with one
@@ -183,19 +194,30 @@ def record_memory(
             from the values, then writes the row, in one call; the reply names them in `added_fields`.
             Under advisory or off, or past the field bound, it refuses AUTOMATIC_FIELDS_REFUSED with the
             proposal. A declared field is never retyped, renamed or removed this way.
+        steps: restructure only: 1 to 16 changes, each {"step": add_field | rename_field | retype_field |
+            retire_field | restore_field | rekey | merge_into | split_out | retitle | retire | restore, ...}.
+            The server applies them, applies their inverse, and commits only when manifest and rows come back
+            equal. merge_into copies every row into `target` (a title) and retires this collection; split_out
+            moves the rows `where` selects into a new collection called `title`.
+        undo: restructure only: the shape-history entry id whose inverse to apply, in place of steps.
+        origin: create: user_choice (default) or user_design, recorded as the collection's first shape-history entry.
+            restructure: user_choice (default), user_design, or declined, which records the proposal and changes nothing.
+        preview: restructure only: true to check the result and return it without writing.
 
     retract takes one row out of current state with a required why. Its history stays, and
     appending the same natural key later brings the row back. A store-routed collection
     without one view file per row takes it; any other refuses RETRACT_UNAVAILABLE.
     """
     collection = collection_refs.resolve_collection(vault_root, collection, profile="records")
+    steps = restructure.resolve_targets(
+        steps, lambda title: collection_refs.resolve_collection(vault_root, title, profile="records"))
     if item_id is not None:
         if action not in {"update", "retract"} or any(
                 v is not None for v in (item_key, expected_container_hash, expected_item_version)):
             _invalid_arguments("item_id applies to update or retract and replaces item_key and both guards")
-        from .collection_store import preview
+        from .collection_store import preview as store
 
-        bound = preview.bind_row(vault_root, str(collection), item_id) or collection_refs.bind_item(
+        bound = store.bind_row(vault_root, str(collection), item_id) or collection_refs.bind_item(
             lambda **kw: record_memory(vault_root, "query", **kw),
             collection=str(collection), item_id=item_id, profile="records",
         )
@@ -222,6 +244,7 @@ def record_memory(
         "expand_child": expand_child,
         "continuation": continuation,
         "include_agent_history": include_agent_history,
+        "include_retired": include_retired,
         "output_format": output_format,
         "item": item,
         "item_key": item_key,
@@ -243,6 +266,10 @@ def record_memory(
         "automatic": automatic,
         "new_collection": new_collection,
         "new_fields": new_fields,
+        "steps": steps,
+        "undo": undo,
+        "origin": origin,
+        "preview": preview,
     }
     _validate_arguments(action, values)
     # A leaf takes only the arguments it declares, and these two are the facade's alone.
@@ -252,15 +279,21 @@ def record_memory(
     from .query_engine.errors import QueryError
 
     try:
-        from .collection_store import preview
+        from .collection_store import preview as store
 
+        if action == "restructure":
+            # The facade is where a caller's origin is checked: the server sets `automatic` for a call that carries the flag.
+            values["origin"] = origin = restructure.call_origin(origin, automatic=bool(automatic))
+        if action == "create" and origin is not None:
+            # Checked here so a refused origin creates nothing; an automatic create names none, since the server sets it.
+            values["origin"] = origin = records.create_origin(origin, automatic=bool(automatic))
         if action == "create" and automatic:
             automatic_collection.require_bounds(vault_root, manifest_path, manifest_text)
         if new_fields is not None:
             return _with_new_fields(vault_root, action, values, new_fields, new_collection)
         if automatic_collection.creates_from_row(action, collection, new_collection):
             return _append_creating(vault_root, values, new_collection)
-        selected, result = preview.dispatch(vault_root, "records", action, values)
+        selected, result = store.dispatch(vault_root, "records", action, values)
         if selected:
             return result
         if action in {"import", "retract"} or query is not None or (action == "query" and item_key is not None):
@@ -302,10 +335,12 @@ def record_memory(
             )
         if action == "inspect":
             if collection is None:
-                return record_governance.inventory_collections(vault_root)
+                return record_governance.inventory_collections(vault_root, include_retired=include_retired is True)
             if _is_direct_legacy_tracker_selector(collection):
                 return record_governance.inspect_legacy_tracker(vault_root, collection)
-            return record_governance.inspect_collection(vault_root, collection)
+            return record_governance.inspect_collection(
+                vault_root, collection, history_limit=limit, history_after=continuation
+            )
         if action == "create":
             assert manifest_path is not None
             assert manifest_text is not None
@@ -324,6 +359,7 @@ def record_memory(
                 why=why,
                 scaffold=True if scaffold is None else scaffold,
                 automatic=bool(automatic),
+                origin=origin,
             )
         if action == "query":
             assert collection is not None
@@ -429,6 +465,13 @@ def record_memory(
                 expected_container_hash=expected_container_hash,
                 why=why,
             )
+        if action == "restructure":
+            assert collection is not None and why is not None
+            return records.restructure_collection(
+                vault_root, collection, why=why, semantic_profile="records",
+                steps=steps, undo=undo, origin=origin,
+                preview=bool(preview), automatic=bool(automatic),
+            )
         if action == "rebaseline":
             assert collection is not None
             assert expected_manifest_hash is not None
@@ -467,7 +510,11 @@ def record_memory(
     except (CollectionError, query_data.QueryDataError) as error:
         details = _json_safe_details(getattr(error, "details", None))
         remediation = collection_remediation(error) if isinstance(error, CollectionError) else None
-        reason = error.reason
+        if (isinstance(error, CollectionError) and action == "append" and error.code in _KEY_TAKEN
+                and item_key is None and held is None):
+            # The code's own remedy is to update the stored row, which replaces an earlier occurrence.
+            remediation = _KEY_TAKEN_REMEDY
+        reason = reply_names.retired_reason(vault_root, error) if isinstance(error, CollectionError) else error.reason
         if isinstance(error, CollectionError) and error.code == "SCHEMA_UNKNOWN_FIELD" and action in {"append", "update"}:
             details, reason = _unknown_field_route(vault_root, action, values, details or {}, reason)
         raise OpError(error.code, reason, remediation, details=details) from error
@@ -476,6 +523,18 @@ def record_memory(
 
         refusal = route.details(error)
         raise OpError(error.code, error.message, refusal["repair"], details=refusal) from error
+
+
+# nosemgrep: ep-word-set -- the two refusal codes of an append whose key a stored row already holds; cli_ops fixes them.
+_KEY_TAKEN = frozenset({"RECORD_ID_CONFLICT", "RECORD_NATURAL_KEY_CONFLICT"})
+#: The remedy of such an append when the row's key came from its values: a further occurrence keeps both rows.
+_KEY_TAKEN_REMEDY = (
+    "A stored row already has this row's key. If this is a further occurrence, reshape the list so its key also "
+    "holds what tells occurrences apart, such as their date (records.restructure, step rekey; lossless and "
+    "undoable: under silent capture pass automatic true and ask nothing, under advisory propose it first), then "
+    "add the row. The rekey changes nothing the user sees, so do not mention it. If it corrects the stored row, "
+    "change that row instead. Tell the user only what was kept, in their words."
+)
 
 
 def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[str, Any]) -> dict[str, Any]:
@@ -490,12 +549,18 @@ def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[st
     for name in ("held", "expected_container_hash", "delivery", "item_key"):
         if values[name] is not None:
             _invalid_arguments(f"new_collection starts the collection with this row, so it takes no {name}")
-    natural_key = declared["natural_key"] if isinstance(declared, Mapping) and set(declared) == {"natural_key"} else None
+    shaped = isinstance(declared, Mapping) and set(declared) in ({"natural_key"}, {"natural_key", "origin"})
+    natural_key = declared["natural_key"] if shaped else None
+    # A user who named what to keep designed the shape: the create records that, and no automatic bound applies.
+    origin = declared.get("origin") if shaped else None
     if not (
         isinstance(natural_key, list) and natural_key and len(set(natural_key)) == len(natural_key)
         and all(isinstance(name, str) and name for name in natural_key)
-    ):
-        _invalid_arguments('new_collection is {"natural_key": [one or more distinct fields of item]}')
+    ) or origin not in (None, *restructure.CREATE_ORIGINS):
+        _invalid_arguments(
+            'new_collection is {"natural_key": [one or more distinct fields of item]}, with "origin": '
+            '"user_design" when the user named the details to keep'
+        )
     root = Path(vault_root)
     title = str(values["collection"]).strip()
     item, body = values["item"], values["body"]
@@ -510,7 +575,7 @@ def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[st
         with writer_lease.mutation_step("create"):
             created = record_memory(
                 vault_root, "create", manifest_path=draft.manifest_path, manifest_text=draft.manifest_text,
-                why=values["why"], automatic=True,
+                why=values["why"], **({"automatic": True} if origin is None else {"origin": origin}),
             )
     except OpError as refusal:
         if refusal.code != "AUTOMATIC_CREATION_REFUSED":
@@ -532,7 +597,8 @@ def _append_creating(vault_root: Path, values: dict[str, Any], declared: dict[st
         hold=values["hold"],
     )
     warnings = [*created.get("warnings", ()), *appended.get("warnings", ())]
-    return {**appended, "automatic": True, "created_collection": made, **({"warnings": warnings} if warnings else {})}
+    return {**appended, "automatic": origin is None, "created_collection": made,
+            **({"warnings": warnings} if warnings else {})}
 
 
 def _current_manifest(
@@ -563,6 +629,30 @@ def _field_revision(
     return {"collection": manifest.collection_id, "manifest_text": revised, **guards["lifecycle_guards"], "why": why}
 
 
+def _add_fields(
+    vault_root: Path, manifest: structured_collections.CollectionManifest, added: Mapping[str, str], why: str
+) -> dict[str, Any]:
+    """The `restructure` that adds `added`, labelled `automatic`: its guards are read under the write lock, and it logs a shape-history entry.
+
+    One call adds at most `restructure.MAX_STEPS` fields, so a longer list commits in several. Returns the last receipt.
+    """
+    from .collection_store import preview as store
+
+    steps = [{"step": "add_field", "field": name, "type": kind} for name, kind in added.items()]
+    receipt: dict[str, Any] = {}
+    for start in range(0, len(steps), restructure.MAX_STEPS):
+        chunk = steps[start : start + restructure.MAX_STEPS]
+        with writer_lease.mutation_step("fields"):
+            selected, reply = store.dispatch(
+                vault_root, "records", "restructure",
+                {"collection": manifest.collection_id, "why": why, "steps": chunk, "undo": None, "origin": "automatic", "preview": None},
+            )
+            receipt = reply if selected else records.restructure_collection(
+                vault_root, manifest.collection_id, why=why, semantic_profile="records", steps=chunk, origin="automatic"
+            )
+    return receipt
+
+
 def _field_refusal_details(
     vault_root: Path, manifest: structured_collections.CollectionManifest, text: str, added: Mapping[str, str],
     why: str, refusal: CollectionError,
@@ -585,8 +675,8 @@ def _with_new_fields(
 ) -> dict[str, Any]:
     """`add_record` or `edit_record` with `new_fields`: add the fields the call names, typed from its values, then run the write.
 
-    The addition is the ordinary `revise` (its guards, its audit event, the store's own writer for a store
-    collection), under the bounds of `automatic_collection`. A field the collection already declares adds nothing, and
+    The addition is a `restructure` of `add_field` steps labelled `automatic` (one audit event and one shape-history
+    entry, the store's own writer for a store collection), under the bounds of `automatic_collection`. A field the collection already declares adds nothing, and
     the row's own validation judges its value, so a replay of the call, or a second call with the same row, writes only the row. The fields
     commit before the row, and a failure of the row leaves them declared; the retry adds nothing twice.
     """
@@ -611,12 +701,10 @@ def _with_new_fields(
                 refusal.code, refusal.reason,
                 _field_refusal_details(vault_root, manifest, text, added, values["why"], refusal),
             ) from refusal
-        revision = _field_revision(vault_root, manifest, text, added, values["why"])
-        with writer_lease.mutation_step("fields"):
-            revised = record_memory(vault_root, "revise", **revision)
-        # The revise moved the container hash. A caller's guard that named the hash it revised from now names the
+        revised = _add_fields(vault_root, manifest, added, values["why"])
+        # The restructure moved the container hash. A caller's guard that named the hash it started from now names the
         # revised one, and a guard from an older state stays and refuses the write as stale.
-        if values["expected_container_hash"] == revision["expected_container_hash"]:
+        if values["expected_container_hash"] == revised["before_container_hash"]:
             values = {**values, "expected_container_hash": revised["after_container_hash"]}
     reply = record_memory(vault_root, action, **values)
     return {**reply, "automatic": True, "added_fields": added} if added else reply

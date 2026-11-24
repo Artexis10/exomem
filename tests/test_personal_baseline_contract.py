@@ -586,7 +586,7 @@ def _assert_baseline_authority_mapping(name: str, block: str) -> None:
         "new entity proactive_capture",
     )
     assert re.search(
-        r"merge.{0,60}(?:substantial curation|structural change).{0,100}restructure_execution",
+        r"merge.{0,60}(?:substantial curation|structural change|page curation).{0,100}restructure_execution",
         normalized,
     ), (name, "restructure_execution")
     assert not re.search(r"entity creation[^.;]{0,120}restructure_execution", normalized), (

@@ -17,6 +17,8 @@ Contract held here, not in the writers:
   item version has exactly one identity, and ``item_sources`` references it.
   A JSON payload mints its identity in the same statement; a typed-v1 identity
   requires its typed payload (``typed_storage``);
+- ``collection_shape_history`` (schema 21) is append-only too: each entry is bound into the chain by the
+  digest that its revise event carries;
 - ``item_rows`` rows are never deleted (schema 19): a retracted row keeps its row and its history, and
   only the ``items`` view, which every current-state read uses, stops showing it;
 - a natural key is unique per collection when complete (a partial unique
@@ -48,7 +50,7 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The last schema that changed a table that a store-mode page read reads: 16 gave pages their mtime. A store
@@ -131,6 +133,7 @@ TABLES = (
     "rollup_members",
     "item_references",
     "item_reference_state",
+    "collection_shape_history",
     *VAULT_STORE_TABLES,
 )
 _V1_APPEND_ONLY_TABLES = (
@@ -142,7 +145,7 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_type_versions",
 )
 APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats",
-                      "store_audit", "version_source_bindings")
+                      "store_audit", "version_source_bindings", "collection_shape_history")
 
 #: The declared-reference inverse index (schema 17). It derives from items, so the replica
 #: leaves it empty and warms a rebuilt state instead of trusting a copied one.
@@ -337,6 +340,7 @@ _CONFLICT_KEYS = {
     "item_versions": (("row_id", "row_version"),),
     "item_sources": (("row_id", "row_version", "ordinal"),),
     "version_source_bindings": (("row_id", "row_version", "canonical_ref"),),
+    "collection_shape_history": (("entry_id",), ("txn_id",)),
     "collection_manifests": (("collection_id", "manifest_version"),),
     "collection_type_versions": (("name", "version"),),
     "item_rows": _ITEM_KEYS,
@@ -1309,6 +1313,33 @@ def _migrate_to_20(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX store_derivation_queue_by_revision ON store_derivation_queue(revision)")
 
 
+def _migrate_to_21(conn: sqlite3.Connection) -> None:
+    """Keep each collection's shape history in its own append-only table, one row per entry.
+
+    A restructure, an undo and a ``new_fields`` addition each write one entry in the transaction of the revise that
+    commits it, and that revise's event carries the entry's digest, so a dropped or altered entry fails verification.
+    ``adds_only`` records that every step of the entry adds a field, a fact the entry's steps fix when it is written.
+    The index serves a collection's newest entries and its entries since a time, in one range each.
+    """
+    conn.execute("""CREATE TABLE collection_shape_history(
+      entry_id TEXT PRIMARY KEY,
+      collection_id TEXT NOT NULL REFERENCES collections(collection_id),
+      txn_id INTEGER NOT NULL UNIQUE REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED,
+      committed_at TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      undoes TEXT,
+      adds_only INTEGER NOT NULL CHECK(adds_only IN (0,1)),
+      entry_json TEXT NOT NULL CHECK(json_valid(entry_json))
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX collection_shape_history_by_time "
+                 "ON collection_shape_history(collection_id, committed_at, txn_id)")
+    for statement in _TRIGGERS_V21:
+        conn.execute(statement)
+
+
+_TRIGGERS_V21 = _append_only_triggers("collection_shape_history")
+
+
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
     """The state compatibility ids that a store at ``version`` requires of a release that opens it.
 
@@ -1399,7 +1430,8 @@ def ensure_schema(conn: Connection) -> int:
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
                               *(_TRIGGERS_V14 if target >= 14 else ()),
                               *(_TRIGGERS_V15 if target >= 15 else ()),
-                              *(_TRIGGERS_V18 if target >= 18 else ())):
+                              *(_TRIGGERS_V18 if target >= 18 else ()),
+                              *(_TRIGGERS_V21 if target >= 21 else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

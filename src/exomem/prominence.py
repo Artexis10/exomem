@@ -282,9 +282,13 @@ _CAPTURE_RULES = (
 #: them by the owner's `proactive_capture`, so advisory proposes the collection and silent makes it.
 #: The create step is the one call `add_record` with `new_collection`. Per-turn only: the bootstrap core
 #: has no bytes to spare, and the scaffold's Records procedure (`records_planning`) carries the full rule.
+#: Its parenthesis names the reshape. A session that never loads bootstrap or the skill reads only this block
+#: and the tool results, and a real-model round (2026-11-23) saw such sessions keep two lists of one kind
+#: apart and save a note beside a list whose key could not hold a second occurrence. The Records inventory
+#: says how (`restructure.RESHAPE_CUE`); this block sits 5 characters under the hook's 1,000-character rules cap.
 _STRUCTURED_WORK_CAPTURE = (
-    "Named items that recur, are compared or change: add_record to a matching collection by natural key, "
-    "else with new_collection per proactive_capture; prose stays in Notes."
+    "Named items that recur, are compared or change: add_record to a matching collection by natural key "
+    "(reshape it to fit), else new_collection per proactive_capture; prose stays in Notes."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the

@@ -7112,6 +7112,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "update": "mutation",
         "retract": "mutation",
         "revise": "mutation",
+        "restructure": "mutation",
         "rebaseline": "mutation",
         "discard": "mutation",
         # `import_request.mode` decides: preview and status read, while start
@@ -7143,6 +7144,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "update": "mutation",
         "triage": "mutation",
         "revise": "mutation",
+        "restructure": "mutation",
         "rebaseline": "mutation",
         "history": "structure",
     },

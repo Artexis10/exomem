@@ -50,6 +50,7 @@ def test_record_memory_exposes_exactly_the_declared_actions() -> None:
             "update",
             "retract",
             "revise",
+            "restructure",
             "rebaseline",
             "discard",
             "import",
@@ -133,7 +134,7 @@ def test_record_memory_rejects_invalid_saved_view_before_create(tmp_path: Path) 
     ("kwargs", "code"),
     [
         ({"action": "describe", "collection": "x"}, "INVALID_RECORD_ARGUMENTS"),
-        ({"action": "inspect", "collection": "x", "limit": 1}, "INVALID_RECORD_ARGUMENTS"),
+        ({"action": "inspect", "collection": "x", "view": "recent"}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "validate", "manifest_path": "a"}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "validate", "manifest_path": "a", "manifest_text": "x", "why": "no"}, "INVALID_RECORD_ARGUMENTS"),
         ({"action": "create", "manifest_path": "a", "manifest_text": "x", "why": "because", "scaffold": False, "limit": 1}, "INVALID_RECORD_ARGUMENTS"),
@@ -162,11 +163,11 @@ def test_record_memory_unknown_argument_refusal_lists_what_the_action_accepts(
     with pytest.raises(OpError) as describe:
         record_memory(tmp_path, action="describe", collection="x")
     with pytest.raises(OpError) as inspect:
-        record_memory(tmp_path, action="inspect", limit=5)
+        record_memory(tmp_path, action="inspect", view="recent")
 
     assert "unexpected for describe: collection" in describe.value.message
     assert "describe allowed: none" in describe.value.message
-    assert "unexpected for inspect: limit" in inspect.value.message
+    assert "unexpected for inspect: view" in inspect.value.message
     assert "inspect allowed: collection" in inspect.value.message
 
 

@@ -28,10 +28,17 @@ class StillWarming(RuntimeError):
 
 
 def is_warming(answer: object) -> bool:
-    return (
-        isinstance(answer, dict)
-        and (answer.get("abstention") or {}).get("reason") == WARMING_REASON
-    )
+    """A cold server's abstention, or an activation index that the server is still building.
+
+    The unit's indexes are built before its service starts, by a process that serves no collection store, so the
+    service rebuilds them over its own store. A long-lived service has done that, and a session that began first
+    would be graded on a map that the product's users never see. ``index_stale`` is the arm's own protocol field.
+    """
+    if not isinstance(answer, dict):
+        return False
+    if (answer.get("abstention") or {}).get("reason") == WARMING_REASON:
+        return True
+    return (answer.get("generation") or {}).get("index_stale") is True
 
 
 def answer_of(result: object) -> dict:

@@ -101,7 +101,7 @@ when Evermatter cannot capture; move durable results to Evermatter when it can.
 Records routing is semantic: use it for durable observed events, current state and
 recurring structured work without waiting for a magic verb. When exactly one compatible
 existing collection accepts a sufficiently identified observation, the active engagement
-policy may append or update it and the agent reports the mutation. Ask one focused question
+policy may append or update it and the agent reports what it kept, in the user's words. Ask one focused question
 when collections compete or identity, date, provenance, or ownership is unclear.
 
 **Recurring structured work** is stable identities that recur, repeated observations or
@@ -119,10 +119,14 @@ synthesis stay in Notes.
    the served `proactive_capture` disposition (below).
 5. Backfill the items the conversation already established, each with its date and who
    said what.
-6. Report the collection and the rows in your reply.
+6. Report what you kept, in the user's words.
 
-Ask one question only when two collections compete, an identity is unresolved, or the type
-or scope is unclear in a way that changes the action.
+Ask one question only when more than one reasonable shape fits what the user said and the
+choice changes what they get later: what is kept, what they can get back, or which value
+counts. Make it one sentence about their things, with the recommended answer first, for
+example "Want me to also keep the price each time?". Never name a field, a key, a type, a
+collection or a schema. A reply asks at most one such question; other open choices wait for a
+later turn. Otherwise decide under `silent`, or propose under `advisory`.
 
 A minimal collection is a Records collection with a declared natural key, a short list of
 fields, and no saved views, references or rollups. You author no schema for it:
@@ -143,9 +147,9 @@ the vault is not in `silent` capture, the schema is outside the bounds, or the v
 created its daily share of automatic collections. The refusal carries the create call with
 the manifest it would have made: propose that collection, and make that call after the user
 confirms. `records.create` with `automatic: true` is the same bounded create for a manifest
-you wrote yourself. Any other creation is confirmed `restructure_execution`, and so is every
-schema change other than adding fields, merge, deletion and migration of a collection. A
-Planning collection never takes `automatic`. The inventory shows `created_automatically` for each collection, so the
+you wrote yourself. Any other creation is confirmed `restructure_execution`. A change of shape
+follows the same split (see Reshaping a collection). A
+Planning collection never takes `automatic` on a create. The inventory shows `created_automatically` for each collection, so the
 owner can review what you created.
 
 A collection is never complete at its first row. When a later fact has no field (an outside
@@ -157,8 +161,52 @@ mixes who said what. Under `advisory`, or when an automatic collection would pas
 is refused with the proposal and the confirmed `revise` that adds the fields: propose them,
 make that call after the user confirms, then write the row or resume its held candidate.
 A write that names an undeclared field without `new_fields` is refused
-`SCHEMA_UNKNOWN_FIELD` with the same next step. Renaming, retyping or removing a field stays a
-confirmed `revise`.
+`SCHEMA_UNKNOWN_FIELD` with the same next step. Renaming, retyping or setting a field aside
+goes through `restructure`, below.
+
+### Reshaping a collection
+
+Change a collection's shape with one `restructure` call:
+`manage_memory(operation="records.restructure", arguments={"collection": ..., "steps": [...], "why": ...})`
+(`plans.restructure` for Planning). Each step is one of `add_field`, `retire_field`,
+`restore_field`, `rename_field`, `retype_field`, `rekey`, `merge_into`, `split_out`, `retitle`,
+`retire` or `restore`; the server refuses by name a step it cannot apply to that collection.
+`merge_into` copies every row into the collection that `target` names and retires this one, which
+stays readable and points to it. `split_out` moves the rows that `where` selects into a new
+collection called `title`. The call is lossless: before it commits
+the server applies the steps and their inverse and refuses, naming the step and the rows, if
+anything differs. `retire_field` and `retire` keep every value and can be restored. Pass
+`preview: true` to see the result first. To undo, call `restructure` with `undo` set to the id
+of the shape-history entry that `inspect` lists.
+
+A restructure you start yourself follows `proactive_capture`, as a creation does. Pass
+`automatic: true` and no `origin`. Under `silent` the server applies it and records origin
+`automatic`, provided every bound holds: no step changes what the user chose or designed, a
+change that adds fields leaves at most 12, the collection had fewer than 3 automatic
+restructures in the last 24 hours (an undo and an added field do not count), and a split's new
+collection passes the creation bounds. Otherwise it refuses `AUTOMATIC_RESTRUCTURE_REFUSED`,
+names the bound and changes nothing: propose the change in plain words, and call again without
+`automatic` after the user confirms. Under `advisory`, propose a change that alters what the
+user gets and apply it after one inline confirmation; start none that alters nothing they
+get. Under `off`, restructure only when the user asks. Put a list away with `retire`
+instead of deleting it; any permanent deletion stays confirmed `restructure_execution`.
+
+`origin` records who decided. `user_choice` (the default) means the user answered a question
+with yes. `user_design` means the user described the shape themselves. `declined` means the
+user said no: it keeps the proposal, changes nothing, and you do not ask again about it unless
+the user raises the subject.
+
+Explicit design stays possible and is never required. When the user describes a structure in
+their own words ("keep my reading list with the title, the author and a rating out of five"),
+build it with `create` or `restructure` and origin `user_design`, restate the result in their
+words, and ask at most one question, about a part that is ambiguous and changes what they get.
+
+Surface or stay silent. Tell the user when a change alters what they get: a new detail you
+will keep, two lists becoming one, a list set aside or brought back. Stay silent about
+reshaping that leaves what they get unchanged. Whether a change matters is your judgement in
+context. The reply's `user_summary` already states what changed in their words; a rename, a
+retype or a rekey has none and needs no mention unless asked. Speak of their things, never of
+collections, Records, Planning, schemas, fields, keys or paths.
 
 Keep who said what in separate fields: the user's own feedback, your proposals, and findings
 from outside sources. When the user has not resolved whether two names are the same item,

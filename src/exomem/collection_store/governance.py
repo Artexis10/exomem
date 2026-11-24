@@ -592,7 +592,8 @@ def iter_subjects(conn: sqlite3.Connection, cid: str, logical_vault_id: str, *, 
                 meta = _metadata(raw_metadata)
                 if meta["projects"] != manifest_meta["projects"]:
                     raise ValueError("canonical row project differs from its manifest")
-                policy_path = path if summary else source_path if layout == "markdown-log" else view_path
+                # A row a restructure retracted gave up its view file, so the collection's path governs it, as in a summary.
+                policy_path = path if summary else source_path if layout == "markdown-log" else view_path or path
                 yield make(f"exomem://{declared.item_type}/{cid}/{key}", row_id, policy_path,
                            declared.item_type, raw_metadata, row_version, payload, "row")
     if not include_held or row_key is not None:
@@ -711,6 +712,8 @@ class ReleaseCache:
         self.projections = OrderedDict()
         self.pending = None
         self.replacements = {}
+        #: Collections whose replacement state predates a row this transaction touched after building it.
+        self.outdated = set()
         self.observed = self._stamp()
         self.accounted = conn.total_changes
         self.unmanaged = False
@@ -749,6 +752,7 @@ class ReleaseCache:
         self.render_proofs.clear()
         self.projections.clear()
         self.replacements.clear()
+        self.outdated.clear()
         self.observed = self._stamp()
 
     def discard_history(self, cid=None, *, new_row=False):
@@ -840,6 +844,7 @@ class ReleaseCache:
         self.unmanaged = False
         self.free = collection_free
         self.replacements = {}
+        self.outdated = set()
         self.accounted = self.conn.total_changes
         self.prepared = {}
         self.history_sweep_before = self.history_sweep
@@ -859,6 +864,8 @@ class ReleaseCache:
     def touch(self, cid, identity=None):
         if self.pending is not None:
             self.pending.setdefault(cid, set()).add(identity)
+            if identity is not None and cid in self.replacements:
+                self.outdated.add(cid)
 
     def prepare(self):
         self.check()
@@ -884,7 +891,9 @@ class ReleaseCache:
                 if None in identities:
                     self.inspections.discard(cid)
                     self.states.pop(cid, None)
-                    if cid in self.replacements:
+                    # A replacement built before a later row change in this transaction no longer holds the
+                    # committed rows, and no delta repairs it here, so the next read builds it again.
+                    if cid in self.replacements and cid not in self.outdated:
                         self._remember_state(cid, state)
                 else:
                     for identity, current in self.prepared.get(cid, {}).items():
@@ -933,6 +942,7 @@ class ReleaseCache:
         self._charge_history()
         self.pending = None
         self.replacements = {}
+        self.outdated = set()
         self.prepared = {}
         self.observed = self.prepared_stamp if committed else self._stamp()
         self.unmanaged = False
@@ -1007,6 +1017,7 @@ class ReleaseCache:
             if self.pending is not None and (self.pending or self.unmanaged
                                             or self.conn.total_changes != self.observed[0]):
                 self.replacements[cid] = current
+                self.outdated.discard(cid)
             else:
                 self._remember_state(cid, current)
         return current

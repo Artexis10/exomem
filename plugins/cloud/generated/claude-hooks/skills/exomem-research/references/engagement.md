@@ -232,9 +232,8 @@ identified candidate is decided, and no independently useful synthesis is
 appended to a narrower page because it ranked highly. After `resume`, make the
 final pass once: `action="coverage"` puts the input ref beside each receipt and
 its readback; read the input, compare, prepare anything omitted or misrouted,
-then attest with `resume` and `postcommit=true`. A committed note or a Saved
-marker is not coverage, and the server never claims your candidates exhaust
-the input.
+then attest with `resume` and `postcommit=true`. A committed note is not
+coverage, and the server never claims your candidates exhaust the input.
 
 ## Relevant due advice
 
@@ -378,7 +377,7 @@ Evidence companion. Keep reported remote identity separate and set verified
 identity only from matching platform proof; never infer remote byte equality.
 A missing collection follows the bounded Records rule: one minimal collection under
 `proactive_capture` ([Records and Planning](planning-records.md)). A collection outside
-those bounds, and any schema change other than adding fields, is confirmed `restructure_execution`. A separately
+those bounds is confirmed `restructure_execution`, as is a restructure outside its own bounds. A separately
 accepted relation remains `link_acceptance`. Adoption success never waits on any of those
 later changes.
 

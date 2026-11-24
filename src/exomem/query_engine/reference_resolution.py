@@ -18,7 +18,7 @@ from contextlib import closing
 from dataclasses import dataclass
 
 from .. import structured_collections as collections
-from ..collection_store import derived_rows, governance
+from ..collection_store import derived_rows, governance, reference_index
 from .errors import QueryError
 
 #: Key values matched by one SQL statement, which keeps each statement's parameters few.
@@ -245,9 +245,7 @@ class BoundInverse:
 
     def candidates(self, conn, natural_key, item_key) -> list[tuple[int, str]]:
         """The distinct (source row id, item key) pairs whose match names this target row."""
-        keys = [key for key in (natural_key, f"ref:{item_key}") if key is not None]
-        if not keys:
-            return []
+        keys = sorted(reference_index.row_matches(item_key, natural_key))
         return [(row_id, key) for row_id, key in conn.execute(
             "SELECT DISTINCT r.row_id, i.item_key FROM item_references r"
             " JOIN items i ON i.row_id = r.row_id WHERE r.collection_id=? AND r.field_path=?"

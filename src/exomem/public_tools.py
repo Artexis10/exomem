@@ -798,7 +798,7 @@ class AddRecord(Wire):
     collection: str
     item: dict[str, Any] = Field(description="Fields by column name.")
     why: str
-    new_collection: dict[str, Any] | None = Field(default=None, description="{natural_key: [item fields that identify a row]}")
+    new_collection: dict[str, Any] | None = Field(default=None, description="{natural_key: [item fields that identify a row], origin: \"user_design\" when the user named the details to keep}")
     body: str | None = None
     hold: bool | None = None
     held: str | None = None
@@ -1081,7 +1081,8 @@ TOOLS: dict[str, WireTool] = {t.name: t for t in (  # nosemgrep: ep-word-dict --
     _tool("add_record", "Add record",
           "Add a Records row. Outcomes go here; intentions go to Planning. "
           "If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, "
-          "your proposals and outside claims each get a field; `options.new_fields` adds one.",
+          "your proposals and outside claims each get a field; `options.new_fields` adds one. "
+          "Report what you kept in the user's words.",
           AddRecord, "write", _add_record,
           [Route("record_memory", when={"action": "append"}, inverse={"response_detail": "detail"}, bag="options")],
           claims=(("record_memory", "append"),),

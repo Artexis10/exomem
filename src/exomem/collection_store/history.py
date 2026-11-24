@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 
 from .. import mutation_terminal, records
-from . import chain, tokens, typed_storage, types, version_sources
+from . import chain, shape_history, tokens, typed_storage, types, version_sources
 
 # A6 fixes the generated history page limits.
 MAIN_ENTRIES = 200
@@ -148,6 +148,9 @@ def effects(conn, txn):
     if txn["operation"] == "rebaseline":
         return {name: receipt[name] for name in
                 ("acknowledged_gap_codes", "gap_fingerprint", "checkpoint_snapshot_hash")}
+    # A create or revise that committed a shape-history entry carries the entry's digest, so the entry is part of the chain.
+    if txn["operation"] in ("create", "revise") and (shape := shape_history.bound_digest(conn, txn["txn_id"])) is not None:
+        return {"shape": shape}
     _refuse_unbound_effects(conn, txn)
     if txn["operation"] == "view_move":
         first = conn.execute("SELECT version_before FROM audit_effects WHERE txn_id=? ORDER BY ordinal LIMIT 1",
@@ -183,6 +186,9 @@ def verify_event(conn, txn):
                     _fail(txn, "imported envelope binding differs")
             if envelope["imported_at"] != txn["committed_at"]:
                 _fail(txn, "imported time binding differs")
+            # An imported shape-history entry is bound by its event's digest, as a native revise binds its own.
+            if envelope.get("shape_sha256") != shape_history.bound_digest(conn, txn["txn_id"]):
+                _fail(txn, "imported shape-history entry differs")
             if original is None:
                 for row_id, key, version, payload, schema_version in conn.execute(
                     "SELECT v.row_id,i.item_key,v.row_version,v.payload_hash,v.schema_version FROM version_identity v "
@@ -688,7 +694,9 @@ class PageContext:
         meta = governance._metadata(raw)
         if meta["projects"] != self.metadata["projects"]:
             raise ValueError("canonical row project differs from its manifest")
-        path = self.path if self.view_mode == "summary" else self.source if self.layout == "markdown-log" else view_path
+        # A row a restructure retracted gave up its view file, so the collection's path governs it, as in a summary.
+        path = (self.path if self.view_mode == "summary" else self.source if self.layout == "markdown-log"
+                else view_path or self.path)
         subject = self.make(f"exomem://{self.declared.item_type}/{self.manifest.collection_id}/{key}",
                             row_id, path, self.declared.item_type, raw, version, digest, "row")
         self.subjects[row_id] = subject

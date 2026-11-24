@@ -1697,6 +1697,9 @@ def _collection_candidates(
     records: list[_Candidate] = []
     plans: list[_Candidate] = []
     for manifest, rel, stored in discovered:
+        # A retired collection is set aside: neither its anchor nor its Planning items are offered.
+        if getattr(manifest, "retired", False):
+            continue
         absolute = Path(vault_root) / rel
         fields = tuple(getattr(getattr(manifest, "schema", None), "fields", {}) or ())
         claims = tuple(
@@ -2206,6 +2209,16 @@ def published_collection_manifests(
 
 
 def collection_manifests(
+    vault_root: Path, generation: int, *, token: Sequence[int] | None = None
+) -> tuple[Any, ...]:
+    """The live manifests activation reads: the published set less each retired collection, by its one lifecycle flag."""
+    return tuple(
+        manifest for manifest in _collection_manifests(vault_root, generation, token=token)
+        if not getattr(manifest, "retired", False)
+    )
+
+
+def _collection_manifests(
     vault_root: Path, generation: int, *, token: Sequence[int] | None = None
 ) -> tuple[Any, ...]:
     """The manifests activation reads, without enumerating a single directory.

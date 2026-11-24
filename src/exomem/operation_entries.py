@@ -365,6 +365,9 @@ _REBASELINE_FIELDS = (
     "collection", "expected_manifest_hash", "expected_container_hash",
     "acknowledged_gap_codes", "why",
 )
+_RESTRUCTURE_FIELDS = ("collection", "steps", "why", "preview", "undo", "origin", "automatic")  # nosemgrep: ep-word-set -- the closed argument names of the restructure operation, which its tool schema fixes.
+# An inspection pages the collection's shape history by `limit` and `continuation`; the inventory lists retired collections on `include_retired`.
+_INSPECT_FIELDS = ("collection", "limit", "continuation", "include_retired")
 
 RECORDS = CommandOperations(
     command="record_memory",
@@ -385,10 +388,10 @@ RECORDS = CommandOperations(
             "write",
             "Change records",
             "Change human-owned Records: create a collection, append, update, retract or "
-            "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
+            "bulk-upsert items, discard a held candidate, restructure, revise or rebaseline a manifest, or "
             "start or cancel an import. `operation.kind` selects the operation. Under silent capture "
             "create a minimal collection with `automatic`; otherwise propose it first. Guarded writes "
-            "need the hashes that the matching read returns. "
+            "need the hashes that the matching read returns. Report what you kept in the user's words. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
             tool_arguments=("response_detail",),
@@ -396,7 +399,7 @@ RECORDS = CommandOperations(
     ),
     entries=(
         _entry("describe", READ_RECORDS, (), effect="read"),
-        _entry("inspect", READ_RECORDS, ("collection",), effect="read"),
+        _entry("inspect", READ_RECORDS, _INSPECT_FIELDS, effect="read"),
         _entry(
             "validate", READ_RECORDS,
             ("collection", "manifest_path", "manifest_text", "scaffold"), ("manifest_text",),
@@ -416,7 +419,7 @@ RECORDS = CommandOperations(
             effect="read", constraints=(LiteralConstraint(("import_request", "mode"), "status"),),
         ),
         _entry(
-            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold", "automatic"),
+            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold", "automatic", "origin"),
             ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         # `item` is required only when the caller is not resuming a held candidate,
@@ -460,6 +463,10 @@ RECORDS = CommandOperations(
         ),
         _entry(
             "revise", CHANGE_RECORDS, _MANIFEST_REVISION_FIELDS, _MANIFEST_REVISION_FIELDS,
+            effect="write", destructive=True, outcome_verb="updated",
+        ),
+        _entry(
+            "restructure", CHANGE_RECORDS, _RESTRUCTURE_FIELDS, ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(
@@ -521,7 +528,7 @@ PLANS = CommandOperations(
         ),
     ),
     entries=(
-        _entry("inspect", READ_PLANS, ("collection",), effect="read"),
+        _entry("inspect", READ_PLANS, _INSPECT_FIELDS, effect="read"),
         _entry(
             "validate", READ_PLANS, ("collection", "manifest_path", "manifest_text"),
             ("manifest_text",), effect="read",
@@ -532,7 +539,7 @@ PLANS = CommandOperations(
             ("collection", "plan_id"), effect="read",
         ),
         _entry(
-            "create", CHANGE_PLANS, ("manifest_path", "manifest_text", "why", "scaffold"),
+            "create", CHANGE_PLANS, ("manifest_path", "manifest_text", "why", "scaffold", "origin"),
             ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         _entry(
@@ -552,6 +559,10 @@ PLANS = CommandOperations(
         ),
         _entry(
             "revise", CHANGE_PLANS, _MANIFEST_REVISION_FIELDS, _MANIFEST_REVISION_FIELDS,
+            effect="write", destructive=True, outcome_verb="updated",
+        ),
+        _entry(
+            "restructure", CHANGE_PLANS, _RESTRUCTURE_FIELDS, ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
         ),
         _entry(

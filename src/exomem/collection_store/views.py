@@ -306,6 +306,12 @@ class PublicationBatch:
                     previous["published_row_version"], previous["published_sha256"] = pair
             elif result.error.code != "MISSING":
                 raise result.error
+            elif descriptor.get("retired") and previous["published_sha256"] is not None:
+                # A retired view whose file is gone publishes nothing here any more: its retirement installed, or
+                # the file went first. A row that takes the path again renders a new file, never a deletion to hold.
+                self.writer._execute(
+                    "UPDATE projection_state SET published_row_version=NULL,published_sha256=NULL WHERE path=?", (path,))
+                previous["published_row_version"] = previous["published_sha256"] = None
         except (held_fs.HeldFsError, vault.PathGuardError, OSError):
             self.pending = True
         previous["source_pairs"] = sorted(pairs)

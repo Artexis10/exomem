@@ -126,21 +126,23 @@ def test_generic_client_can_discover_validate_create_inspect_and_append_from_emp
 
     inventory = op_record_memory(tmp_path, action="inspect")
     assert inventory["kind"] == "records_inventory"
-    assert inventory["collections"] == [
-        {
-            "collection_id": created["collection_id"],
-            "title": "Observed events",
-            "manifest_path": example["manifest_path"],
-            "semantic_profile": "records",
-            "lifecycle": "active",
-            "storage_strategy": "markdown-items",
-            "natural_key": ["occurred_on", "label"],
-            "created_automatically": False,
-            "committed": 0,
-            "held": 0,
-            "unreflected": 0,
-        }
-    ]
+    (listed,) = inventory["collections"]
+    expected = {
+        "collection_id": created["collection_id"],
+        "title": "Observed events",
+        "manifest_path": example["manifest_path"],
+        "semantic_profile": "records",
+        "lifecycle": "active",
+        "storage_strategy": "markdown-items",
+        "natural_key": ["occurred_on", "label"],
+        "created_automatically": False,
+        "committed": 0,
+        "held": 0,
+        "unreflected": 0,
+    }
+    assert {key: listed[key] for key in expected} == expected
+    # The create is the collection's first shape-history entry, decided by the caller.
+    assert [entry["origin"] for entry in listed["shape_history"]["entries"]] == ["user_choice"]
     assert inventory["legacy_trackers"] == []
 
     inspected = op_record_memory(

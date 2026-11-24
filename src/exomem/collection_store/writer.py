@@ -13,9 +13,11 @@ import json
 import os
 import sqlite3
 import uuid
+from collections import ChainMap
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +28,11 @@ from .. import (
     item_keys,
     memory_refs,
     mutation_terminal,
+    origin_bindings,
     planning,
     record_formats,
     records,
+    restructure,
     state_paths,
     sync_providers,
     vault,
@@ -60,6 +64,7 @@ from . import (
     references,
     rollups,
     schema,
+    shape_history,
     source_dependencies,
     summary,
     tables,
@@ -116,6 +121,18 @@ def _revived(before) -> bool:
     return before is not None and before.get("retracted_txn") is not None
 
 
+_SPLIT_IDS = uuid.UUID("1d18623f-7edc-4cd7-ae0f-93359e16228d")
+
+
+def split_collection_id(source_id: str, manifest_version: int, title: str) -> str:
+    """The id that a split of `source_id` at `manifest_version` gives its new collection titled `title`.
+
+    The id derives from the split, so a retry of a split whose collection a separate create already made names that
+    collection again instead of making a second one.
+    """
+    return str(uuid.uuid5(_SPLIT_IDS, f"{source_id}\0{manifest_version}\0{title}"))
+
+
 def _affected(manifest, path) -> list[str]:
     """The views a row write changes: its file, the log, or the summary pages queued for reconcile."""
     if manifest.storage.strategy == "markdown-log":
@@ -123,6 +140,17 @@ def _affected(manifest, path) -> list[str]:
     if manifest.view_mode == summary.SUMMARY:
         return list(summary.page_paths(manifest))
     return [path]
+
+
+def _new_row_path(manifest, values, key, occupied) -> str | None:
+    """Where a new row's view lives: its log anchor, none in a summary, or its own file named by the manifest."""
+    if manifest.storage.strategy == "markdown-log":
+        return f"{manifest.storage.source}#{key}"
+    if manifest.view_mode == summary.SUMMARY:
+        return None
+    if manifest.item_filename:
+        return collections.render_item_path(manifest, values, key, occupied_path_keys=occupied)
+    return f"{manifest.storage.source}/{key}.md"
 
 
 def _refuse_view_stamp(manifest, values):
@@ -361,9 +389,10 @@ class CollectionWriter:
 
     @staticmethod
     def _rows_writable(manifest, action):
-        """The one gate on row mutations: a derived collection's rows change only through its imports."""
+        """The one gate on row mutations: a derived collection's rows change only through its imports, and a retired one's not at all."""
         if manifest.derived:
             raise derived_rows.refused(action)
+        records.refuse_retired(manifest)
 
     def _collection_manifest(self, row):
         self._require_operation_context()
@@ -583,7 +612,9 @@ class CollectionWriter:
                 "SELECT 1 FROM items WHERE view_path=? LIMIT 1", (path, path, path),
             ).fetchone() is not None
 
-    def inspect_collection(self, collection, *, facade_profile: str | None = None) -> dict[str, Any]:
+    def inspect_collection(
+        self, collection, *, facade_profile: str | None = None, history_limit=None, history_after=None
+    ) -> dict[str, Any]:
         """Report the dark writer's canonical state without publishing or repairing.
 
         This preview contract supports guard refresh and writer wire goldens.
@@ -594,7 +625,9 @@ class CollectionWriter:
         self.connection.execute("BEGIN")
         try:
             with self._authorization(mutation=False):
-                result, selection = self._inspect_collection(collection, facade_profile=facade_profile)
+                result, selection = self._inspect_collection(
+                    collection, facade_profile=facade_profile, history_limit=history_limit, history_after=history_after
+                )
                 operation = self._operation
                 from .field_admission import public_basis
 
@@ -619,7 +652,9 @@ class CollectionWriter:
             result["governance"] = {"notices": notices}
         return governance._seal_inspection_projection(result, evidence)
 
-    def _inspect_collection(self, collection, *, facade_profile: str | None = None) -> tuple[dict[str, Any], governance._ReleaseSelection]:
+    def _inspect_collection(
+        self, collection, *, facade_profile: str | None = None, history_limit=None, history_after=None
+    ) -> tuple[dict[str, Any], governance._ReleaseSelection]:
         from .. import due_state, record_governance
 
         row, manifest, declared = self._collection(collection, facade_profile=facade_profile or self._facade_profile)
@@ -784,6 +819,10 @@ class CollectionWriter:
             "diagnostics": diagnostics[:64],
             "audit": self._inspection_audit(row, complete=complete),
             "saved_views": saved_views, "lifecycle_guards": guards,
+            "shape_history": shape_history.page(
+                self.connection, manifest.collection_id,
+                limit=history_limit, after=history_after, collection=manifest.collection_id,
+            ),
         }
         if manifest.view_mode == summary.SUMMARY:
             # Items mode stays wire-identical to file collections; summary names its own bounds.
@@ -1823,9 +1862,10 @@ class CollectionWriter:
                     if observed is not None and digest != observed.digest:
                         continue  # changed again since it settled; the next pass looks again
                     if projection["kind"] == "item" and self.connection.execute(
-                            "SELECT 1 FROM items WHERE row_id=? AND view_path!=?",
+                            "SELECT 1 FROM item_rows WHERE row_id=? AND view_path IS NOT ?",
                             (projection["row_id"], projection["path"])).fetchone():
-                        # Filename maintenance moved this row's view: the old path retires, never holds a delete.
+                        # The row no longer holds this path: filename maintenance moved its view, or a restructure
+                        # retracted it (its view_path is NULL). The old path retires, never holds a delete.
                         if raw is None and not preserved:
                             self._execute("DELETE FROM projection_state WHERE path=?", (projection["path"],))
                         else:
@@ -2266,120 +2306,144 @@ class CollectionWriter:
         scaffold: bool = True,
         request_id: str | None = None,
         automatic: bool = False,
+        origin: str | None = None,
     ) -> dict[str, Any]:
         return self._create_collection(manifest_path, manifest_text, why=why, scaffold=scaffold,
-                                       request_id=request_id, automatic=automatic)
+                                       request_id=request_id, automatic=automatic, origin=origin)
 
     @staticmethod
-    def create_arguments(manifest_text, why, scaffold, automatic=False):
+    def create_arguments(manifest_text, why, scaffold, automatic=False, origin=None):
         """The arguments a create's request identity covers, one shape for the direct and the admitted create.
 
-        Only a flagged request carries the flag, so every earlier request keeps its recorded hash.
+        Only a flagged request carries the flag, and only an origin other than the default carries it, so every
+        earlier request keeps its recorded hash.
         """
+        named = None if automatic or origin in (None, restructure.DEFAULT_ORIGIN) else origin
         return {"manifest_text": manifest_text, "why": why, "scaffold": scaffold,
-                **({"automatic": True} if automatic else {})}
+                **({"automatic": True} if automatic else {}), **({} if named is None else {"origin": named})}
 
     def _create_collection(self, manifest_path, manifest_text, *, why, scaffold,
-                           request_id, admission=None, automatic=False):
+                           request_id, admission=None, automatic=False, origin=None):
         records._validate_why(why)
+        origin = records.create_origin(origin, automatic=automatic)
         with self._mutation():
             identity, digest, replay = self._identity(
-                "create", manifest_path, self.create_arguments(manifest_text, why, scaffold, automatic), request_id,
+                "create", manifest_path,
+                self.create_arguments(manifest_text, why, scaffold, automatic, origin), request_id,
             )
             if admission is not None:
                 admission.check(identity, digest, replay)
             if replay is not None:
                 return replay
-            if automatic:
-                # Under the mutation lock, so two concurrent creates cannot both pass the count.
-                automatic_collection.require_daily_room(self.root, self.connection)
-            manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
-            try:
-                connector_boundary.require_create(self.root, manifest.path)
-                connector_boundary.require_create(self.root, manifest.storage.source)
-            except ValueError as error:
-                raise collections.CollectionError("WRITE_REFUSED", "target is unavailable") from error
-            conflicts = self.connection.execute(
-                "SELECT collection_id FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
-                (manifest.collection_id, manifest.path, manifest.storage.source),
-            ).fetchall()
-            if conflicts:
-                for (cid,) in conflicts:
-                    self._operation.require_collection(cid)
-                raise collections.CollectionError(
-                    "CREATE_ONLY_CONFLICT", "collection manifest already exists"
-                )
-            # File-mode data cannot be silently adopted by a dark writer.
-            records._assert_portable_absent(self.root, self.root / manifest.path)
-            records._assert_portable_absent(self.root, self.root / manifest.storage.source)
-            txn = self._txn(None, manifest, "create", why, identity, digest)
-            if admission is not None:
-                admission.record(manifest, txn)
-            types.register_builtins(self.connection, txn_id=txn["txn_id"])
-            self._execute(
-                INSERT_COLLECTION,
-                {
-                    "collection_id": manifest.collection_id,
-                    "type_name": declared.name,
-                    "type_version": declared.version,
-                    "manifest_path": manifest.path,
-                    "source_path": manifest.storage.source,
-                    "layout": authority.store_layout(manifest.storage.strategy),
-                    "audit_head": txn["event_hash"],
-                    "txn_id": txn["txn_id"],
-                    "view_mode": manifest.view_mode,
-                    "derived": int(manifest.derived),
-                    "item_key_scheme": self._new_item_key_scheme(manifest),
-                },
-            )
-            self._manifest(manifest, manifest_text, 1, txn["txn_id"])
-            reference_index.revise(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, dropped=(),
-                added=tuple(collections.declared_references(manifest.schema)), retargeted=())
-            if manifest.view_mode == summary.SUMMARY:
-                # An empty summary collection publishes its native payload/query pair here.
-                if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
-                                               manifest.collection_id, manifest.schema.fields, limit=1,
-                                               encoding=typed_storage.TYPED_V2) != "ready":
-                    raise RuntimeError("an empty collection publishes its typed layout at once")
-                self._pending_summary(manifest, 1)
-            affected = [manifest.path, *summary.page_paths(manifest)] + ([manifest.storage.source] if scaffold else [])
-            log_text = None
-            if scaffold and manifest.storage.strategy == "markdown-log":
-                frame = log_view.empty(manifest)
-                log_text = log_view.render(manifest, frame, ())
-                self._execute(
-                    "UPDATE collections SET log_frame_json = ? WHERE collection_id = ?",
-                    (frame.as_json(), manifest.collection_id),
-                )
-                self._pending_log(manifest, 1)
-            receipt = records._result(
-                operation="create",
-                manifest=manifest,
-                key=None,
-                before_item_hash=None,
-                after_item_hash=hashlib.sha256(log_text.encode()).hexdigest() if log_text else None,
-                before_container_hash=None,
-                after_container_hash=tokens.container_hash(
-                    manifest.collection_id, 1, txn["event_hash"]
-                ),
-                affected_paths=affected,
-                payload_hash=None,
-                outcome="committed",
-                audit_correlation=txn["transition_id"],
-            )
-            if automatic:
-                # Stored with the receipt: the daily count and the inventory read it back from the create's transaction.
-                receipt = {**receipt, "automatic": True}
-            # Stored with the receipt, so a replay and the served create report it too.
-            receipt = records._with_warnings(receipt, [
-                f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
-            self._precommit(manifest)
-            self._insert_txn(txn, receipt)
+            receipt, manifest = self._commit_create(
+                manifest_path, manifest_text, why=why, scaffold=scaffold, identity=identity, digest=digest,
+                origin=origin, automatic=automatic, admission=admission)
         writer_lease.mark_active_mutation_committed()
         records._refresh_manifest_due_state(self.root, manifest)
         return receipt
+
+    def _commit_create(self, manifest_path, manifest_text, *, why, scaffold, identity, digest, origin, automatic,
+                       admission=None):
+        """Commit one new collection inside the caller's mutation: the one path a create and a split share.
+
+        An `automatic` create first passes the daily bound. Returns the receipt and the new manifest.
+        """
+        if automatic:
+            # Under the mutation lock, so two concurrent creates cannot both pass the count.
+            automatic_collection.require_daily_room(self.root, self.connection)
+        manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
+        try:
+            connector_boundary.require_create(self.root, manifest.path)
+            connector_boundary.require_create(self.root, manifest.storage.source)
+        except ValueError as error:
+            raise collections.CollectionError("WRITE_REFUSED", "target is unavailable") from error
+        conflicts = self.connection.execute(
+            "SELECT collection_id FROM collections WHERE collection_id = ? OR manifest_path = ? OR source_path = ?",
+            (manifest.collection_id, manifest.path, manifest.storage.source),
+        ).fetchall()
+        if conflicts:
+            for (cid,) in conflicts:
+                self._operation.require_collection(cid)
+            raise collections.CollectionError(
+                "CREATE_ONLY_CONFLICT", "collection manifest already exists"
+            )
+        # File-mode data cannot be silently adopted by a dark writer.
+        records._assert_portable_absent(self.root, self.root / manifest.path)
+        records._assert_portable_absent(self.root, self.root / manifest.storage.source)
+        transition = records._transition_id()
+        entry = restructure.creation_entry(
+            transition_id=transition, collection_id=manifest.collection_id,
+            at=automatic_collection.now_stamp(), origin=origin, why=why)
+        shape_text = shape_history.encode(entry)
+        # The create's event carries the entry's digest, as a revise's does, so the chain covers the first entry.
+        txn = self._txn(None, manifest, "create", why, identity, digest, _transition_id=transition,
+                        effects={"shape": shape_history.digest(shape_text)})
+        if admission is not None:
+            admission.record(manifest, txn)
+        types.register_builtins(self.connection, txn_id=txn["txn_id"])
+        self._execute(
+            INSERT_COLLECTION,
+            {
+                "collection_id": manifest.collection_id,
+                "type_name": declared.name,
+                "type_version": declared.version,
+                "manifest_path": manifest.path,
+                "source_path": manifest.storage.source,
+                "layout": authority.store_layout(manifest.storage.strategy),
+                "audit_head": txn["event_hash"],
+                "txn_id": txn["txn_id"],
+                "view_mode": manifest.view_mode,
+                "derived": int(manifest.derived),
+                "item_key_scheme": self._new_item_key_scheme(manifest),
+            },
+        )
+        self._manifest(manifest, manifest_text, 1, txn["txn_id"])
+        reference_index.revise(
+            index_migrations.AccountedWriter(self.connection, self._execute),
+            manifest.collection_id, dropped=(),
+            added=tuple(collections.declared_references(manifest.schema)), retargeted=())
+        if manifest.view_mode == summary.SUMMARY:
+            # An empty summary collection publishes its native payload/query pair here.
+            if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
+                                           manifest.collection_id, manifest.schema.fields, limit=1,
+                                           encoding=typed_storage.TYPED_V2) != "ready":
+                raise RuntimeError("an empty collection publishes its typed layout at once")
+            self._pending_summary(manifest, 1)
+        affected = [manifest.path, *summary.page_paths(manifest)] + ([manifest.storage.source] if scaffold else [])
+        log_text = None
+        if scaffold and manifest.storage.strategy == "markdown-log":
+            frame = log_view.empty(manifest)
+            log_text = log_view.render(manifest, frame, ())
+            self._execute(
+                "UPDATE collections SET log_frame_json = ? WHERE collection_id = ?",
+                (frame.as_json(), manifest.collection_id),
+            )
+            self._pending_log(manifest, 1)
+        receipt = records._result(
+            operation="create",
+            manifest=manifest,
+            key=None,
+            before_item_hash=None,
+            after_item_hash=hashlib.sha256(log_text.encode()).hexdigest() if log_text else None,
+            before_container_hash=None,
+            after_container_hash=tokens.container_hash(
+                manifest.collection_id, 1, txn["event_hash"]
+            ),
+            affected_paths=affected,
+            payload_hash=None,
+            outcome="committed",
+            audit_correlation=txn["transition_id"],
+        )
+        if automatic:
+            # Stored with the receipt: the daily count and the inventory read it back from the create's transaction.
+            receipt = {**receipt, "automatic": True}
+        # Stored with the receipt, so a replay and the served create report it too.
+        receipt = records._with_warnings(receipt, [
+            f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
+        shape_history.write(self._execute, entry, shape_text, txn_id=txn["txn_id"])
+        self._precommit(manifest)
+        self._insert_txn(txn, receipt)
+        return receipt, manifest
 
     def _prepare_create(self, manifest_path, manifest_text, scaffold):
         """Every check on a new collection's manifest that reads no store state a create would write.
@@ -2900,6 +2964,12 @@ class CollectionWriter:
         else:
             row_id = before["row_id"]
             self._execute(tables.REVIVE_ITEM if revived else tables.UPDATE_ITEM, {**parameters, "target_row_id": row_id})
+            if revived and path != before["view_path"]:
+                # A restructure's retraction gave up the row's view file; its revival holds the path it is written to.
+                self._execute("UPDATE item_rows SET view_path=? WHERE row_id=?", (path, row_id))
+        if _renders_rows(manifest):
+            # The row that holds a view path owns its projection, also a path a retracted row handed over.
+            self._execute("UPDATE projection_state SET row_id=? WHERE path=? AND row_id IS NOT ?", (row_id, path, row_id))
         if encoding == typed_storage.JSON_V1:
             # The JSON payload mints its json-v1 version_identity in the same statement.
             self._execute(tables.INSERT_VERSION, {
@@ -3177,19 +3247,9 @@ class CollectionWriter:
                     self._release(resumed)
                     self._publication.bind(result)
                 else:
-                    if detached_path is not None:
-                        path = detached_path
-                    elif manifest.storage.strategy == "markdown-log":
-                        path = f"{manifest.storage.source}#{key}"
-                    elif manifest.view_mode == summary.SUMMARY:
-                        path = None
-                    elif manifest.item_filename:
-                        path = collections.render_item_path(
-                            manifest, values, key,
-                            occupied_path_keys=self.handle.release_cache.state(manifest.collection_id).occupied_path_keys,
-                        )
-                    else:
-                        path = f"{manifest.storage.source}/{key}.md"
+                    path = detached_path if detached_path is not None else _new_row_path(
+                        manifest, values, key,
+                        self.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
                     if _prepare is not None:
                         preparation.update({"manifest": manifest, "item_key": key, "path": path, "payload_hash": payload,
                                             "body": body, "container_hash": before_container, "values": dict(values)})
@@ -3464,8 +3524,13 @@ class CollectionWriter:
             self._insert_txn(txn, receipt)
         return receipt
 
-    def _prepare_revision(self, current, declared, manifest_text):
-        """Validate the canonical proposal for both preflight and a guarded revision."""
+    def _prepare_revision(self, current, declared, manifest_text, *, rows=None, rekeyed=False):
+        """Validate the canonical proposal for both preflight and a guarded revision.
+
+        `rows`, when given, maps every key the collection will hold to its values under the proposal (a restructure's
+        plan); they are validated in place of the stored values. `rekeyed` admits a new natural key: only a restructure
+        passes it, and it writes every row under its new key in the same transaction.
+        """
         proposed = collections.parse_manifest_bytes(
             self.root, current.path, manifest_text.encode()
         )
@@ -3474,13 +3539,13 @@ class CollectionWriter:
             proposed.semantic_profile,
             proposed.storage,
             proposed.schema.version,
-            proposed.schema.natural_key,
+            None if rekeyed else proposed.schema.natural_key,
         ) != (
             current.collection_id,
             current.semantic_profile,
             current.storage,
             current.schema.version,
-            current.schema.natural_key,
+            None if rekeyed else current.schema.natural_key,
         ):
             raise collections.CollectionError(
                 "IMMUTABLE_COLLECTION_REPRESENTATION",
@@ -3527,14 +3592,18 @@ class CollectionWriter:
             diagnostic = proposed.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)
         record_formats.validate_storage_contract(proposed)
+        # The commit builds the rollups from these declarations; a preflight refuses what that build would refuse.
+        rollups.normalize(proposed.schema.fields, vault.parse_frontmatter(manifest_text, strict=True)[0].get("rollups"))
         reference_declarations.require_targets(self._operation, proposed, current)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)
         newly_required = records._newly_required(current, proposed)
+        stored = rows.items() if rows is not None else typed_storage.collection_values(
+            self.connection, current.collection_id)
         plans = {
             key: self._validate(proposed, declared, key, values, operation="revise", validate_graph=False,
                                 written=newly_required)
-            for key, values in typed_storage.collection_values(self.connection, current.collection_id)
+            for key, values in stored
         }
         for name in declared.validators:
             types.named_validator(name).validate(proposed, plans, write=None)
@@ -3593,109 +3662,633 @@ class CollectionWriter:
             row, current, declared = self._collection(collection)
             records._expect_hash(expected_manifest_hash, current.manifest_version.hash, "manifest")
             records._expect_hash(expected_container_hash, self._container(row), "container")
-            proposed, mode_change, plans, metadata, row_metadata = self._prepare_revision(
-                current, declared, manifest_text)
-            # Unchanged row inputs and governance retain their immutable original manifest's render proof.
-            # Capture before replacing governance; held views lack that original-manifest chain.
-            self._preflight_views([current.path, *(path for key, path, before in self.connection.execute(
-                "SELECT item_key,view_path,governance_json FROM items "
-                "WHERE collection_id=? AND view_path IS NOT NULL", (current.collection_id,),
-            ) if row_metadata[key] != before), *(path for (path,) in self.connection.execute(
-                "SELECT view_path FROM held_candidates WHERE collection_id=?", (current.collection_id,),
-            ))])
-            if mode_change and (self._publication.pending
-                                or summary.populated(self.connection, current.collection_id)
-                                or summary.publication_outstanding(self.connection, current.collection_id)):
-                # Preflight can hold an offline edit; an unclassified edit or unpublished view also keeps the mode.
-                raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
-            txn = self._txn(row, proposed, "revise", why, identity, digest)
-            self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
-            old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
-            new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
-            reference_index.revise(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                current.collection_id,
-                dropped=tuple(sorted(set(old_refs) - set(new_refs))),
-                added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
-                retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
-                                 if new_refs[name].collection != old_refs[name].collection),
-            )
-            if mode_change:
-                self._execute("UPDATE collections SET view_mode=? WHERE collection_id=?",
-                              (proposed.view_mode, current.collection_id))
-                if proposed.view_mode == summary.SUMMARY and typed_storage.migrate_batch(
-                        index_migrations.AccountedWriter(self.connection, self._execute),
-                        current.collection_id, proposed.schema.fields, limit=1,
-                        encoding=typed_storage.TYPED_V2) != "ready":
-                    raise RuntimeError("an empty collection publishes its typed layout at once")
-            self._pending_summary(proposed, txn["generation_after"])
-            self._execute(
-                "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
-                (txn["manifest_version_after"], current.collection_id),
-            )
-            self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
-                ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
-            # A retracted row is not validated again; its history is judged on the revised projects. Only a change of
-            # projects touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
-            before_metadata = self.connection.execute(
-                "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
-                (current.collection_id, row["manifest_version"])).fetchone()[0]
-            if governance.projects_changed(before_metadata, metadata):
-                last = 0
-                while batch := self.connection.execute(
-                        "SELECT row_id,governance_json FROM item_rows "
-                        "WHERE collection_id=? AND retracted_txn IS NOT NULL AND row_id>? ORDER BY row_id LIMIT 500",
-                        (current.collection_id, last)).fetchall():
-                    last = batch[-1][0]
-                    self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
-                                  [(governance.reprojected(captured, metadata), row_id) for row_id, captured in batch],
-                                  many=True)
-            for held_id, kind, encoded, captured, path in self.connection.execute(
-                "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
-                (current.collection_id,),
-            ).fetchall():
-                candidate = None if kind == "view-correction" else records._decode_held_value(json.loads(encoded))
-                if candidate is None or (candidate.get("action") == "update" and candidate.get("item_key") not in plans):
-                    # A view correction, or an update held against a row since retracted, has no current row to
-                    # validate again; it keeps its own tags and classes.
-                    held_metadata = governance.reprojected(captured, metadata)
-                else:
-                    before = plans.get(candidate.get("item_key"))
-                    held_metadata = governance.held_metadata(proposed.schema, candidate, metadata, before)
-                self._execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
-                    (held_metadata, held_id))
-                if kind == "view-correction" and held_metadata != captured:
-                    version, text = self._render_view({"kind": "held", "path": path, "held_id": held_id}, proposed)
-                    self._pending(path, current.collection_id, "held", version, text, manifest=proposed)
-            after_container = self._advance(txn)
-            payload = records.lifecycle_request_hash(
-                action="revise",
-                collection_id=current.collection_id,
-                before_manifest_hash=current.manifest_version.hash,
-                before_container_hash=self._container(row),
-                proposed_manifest_hash=proposed.manifest_version.hash,
-                acknowledged_gap_codes=(),
-                rationale=why,
-            )
-            receipt = records._lifecycle_result(
-                operation="revise",
-                manifest=current,
-                before_manifest_hash=current.manifest_version.hash,
-                after_manifest_hash=proposed.manifest_version.hash,
-                before_container_hash=self._container(row),
-                after_container_hash=after_container,
-                payload_hash=payload,
-                audit_correlation=txn["transition_id"],
-                continuity=True,
-                acknowledged_gap_codes=(),
-                gap_fingerprint=None,
-                checkpoint_snapshot_hash=None,
-                affected_paths=(current.path,),
-            )
-            self._precommit(proposed)
-            self._insert_txn(txn, receipt)
+            receipt, proposed, _entry = self._commit_revision(
+                row, current, declared, manifest_text, why, identity, digest)
         writer_lease.mark_active_mutation_committed()
         records._refresh_manifest_due_state(self.root, proposed)
+        return receipt
+
+    def _commit_revision(
+        self, row, current, declared, manifest_text, why, identity, digest, *, shape=None, prepared=None,
+    ):
+        """Commit one manifest revision inside the caller's mutation: the one path `revise` and `restructure` share.
+
+        `shape` is a callable from the revision's transition id to its shape-history entry. The entry is written in
+        the revision's transaction, and the revise event carries its digest, so the chain covers it. Returns the
+        receipt, the proposed manifest and the entry (None without `shape`).
+        """
+        proposed, mode_change, plans, metadata, row_metadata = prepared or self._prepare_revision(
+            current, declared, manifest_text)
+        # Unchanged row inputs and governance retain their immutable original manifest's render proof.
+        # Capture before replacing governance; held views lack that original-manifest chain.
+        self._preflight_views([current.path, *(path for key, path, before in self.connection.execute(
+            "SELECT item_key,view_path,governance_json FROM items "
+            "WHERE collection_id=? AND view_path IS NOT NULL", (current.collection_id,),
+        ) if row_metadata.get(key) != before), *(path for (path,) in self.connection.execute(
+            "SELECT view_path FROM held_candidates WHERE collection_id=?", (current.collection_id,),
+        ))])
+        if mode_change and (self._publication.pending
+                            or summary.populated(self.connection, current.collection_id)
+                            or summary.publication_outstanding(self.connection, current.collection_id)):
+            # Preflight can hold an offline edit; an unclassified edit or unpublished view also keeps the mode.
+            raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
+        transition = None if shape is None else records._transition_id()
+        entry = None if shape is None else shape(transition)
+        shape_text = None if entry is None else shape_history.encode(entry)
+        txn = self._txn(row, proposed, "revise", why, identity, digest, _transition_id=transition,
+                        effects=None if shape_text is None else {"shape": shape_history.digest(shape_text)})
+        self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
+        old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
+        new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
+        reference_index.revise(
+            index_migrations.AccountedWriter(self.connection, self._execute),
+            current.collection_id,
+            dropped=tuple(sorted(set(old_refs) - set(new_refs))),
+            added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
+            retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
+                             if new_refs[name].collection != old_refs[name].collection),
+        )
+        if proposed.schema.natural_key != current.schema.natural_key:
+            reference_index.rekeyed(index_migrations.AccountedWriter(self.connection, self._execute),
+                                    current.collection_id)
+        if mode_change:
+            self._execute("UPDATE collections SET view_mode=? WHERE collection_id=?",
+                          (proposed.view_mode, current.collection_id))
+            if proposed.view_mode == summary.SUMMARY and typed_storage.migrate_batch(
+                    index_migrations.AccountedWriter(self.connection, self._execute),
+                    current.collection_id, proposed.schema.fields, limit=1,
+                    encoding=typed_storage.TYPED_V2) != "ready":
+                raise RuntimeError("an empty collection publishes its typed layout at once")
+        self._pending_summary(proposed, txn["generation_after"])
+        self._execute(
+            "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
+            (txn["manifest_version_after"], current.collection_id),
+        )
+        self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
+            ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
+        # A retracted row is not validated again; its history is judged on the revised projects. Only a change of
+        # projects touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
+        before_metadata = self.connection.execute(
+            "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+            (current.collection_id, row["manifest_version"])).fetchone()[0]
+        if governance.projects_changed(before_metadata, metadata):
+            last = 0
+            while batch := self.connection.execute(
+                    "SELECT row_id,governance_json FROM item_rows "
+                    "WHERE collection_id=? AND retracted_txn IS NOT NULL AND row_id>? ORDER BY row_id LIMIT 500",
+                    (current.collection_id, last)).fetchall():
+                last = batch[-1][0]
+                self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
+                              [(governance.reprojected(captured, metadata), row_id) for row_id, captured in batch],
+                              many=True)
+        for held_id, kind, encoded, captured, path in self.connection.execute(
+            "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
+            (current.collection_id,),
+        ).fetchall():
+            candidate = None if kind == "view-correction" else records._decode_held_value(json.loads(encoded))
+            if candidate is None or (candidate.get("action") == "update" and candidate.get("item_key") not in plans):
+                # A view correction, or an update held against a row since retracted, has no current row to
+                # validate again; it keeps its own tags and classes.
+                held_metadata = governance.reprojected(captured, metadata)
+            else:
+                before = plans.get(candidate.get("item_key"))
+                held_metadata = governance.held_metadata(proposed.schema, candidate, metadata, before)
+            self._execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
+                (held_metadata, held_id))
+            if kind == "view-correction" and held_metadata != captured:
+                version, text = self._render_view({"kind": "held", "path": path, "held_id": held_id}, proposed)
+                self._pending(path, current.collection_id, "held", version, text, manifest=proposed)
+        after_container = self._advance(txn)
+        payload = records.lifecycle_request_hash(
+            action="revise",
+            collection_id=current.collection_id,
+            before_manifest_hash=current.manifest_version.hash,
+            before_container_hash=self._container(row),
+            proposed_manifest_hash=proposed.manifest_version.hash,
+            acknowledged_gap_codes=(),
+            rationale=why,
+        )
+        receipt = records._lifecycle_result(
+            operation="revise",
+            manifest=current,
+            before_manifest_hash=current.manifest_version.hash,
+            after_manifest_hash=proposed.manifest_version.hash,
+            before_container_hash=self._container(row),
+            after_container_hash=after_container,
+            payload_hash=payload,
+            audit_correlation=txn["transition_id"],
+            continuity=True,
+            acknowledged_gap_codes=(),
+            gap_fingerprint=None,
+            checkpoint_snapshot_hash=None,
+            affected_paths=(current.path,),
+        )
+        if entry is not None:
+            shape_history.write(self._execute, entry, shape_text, txn_id=txn["txn_id"])
+        self._precommit(proposed)
+        self._insert_txn(txn, receipt)
+        return receipt, proposed, entry
+
+    def shape_history(self, collection_id):
+        """A collection's shape-history entries, newest first."""
+        return shape_history.entries(self.connection, collection_id)
+
+    def newest_shape_history(self, collection_ids, *, limit):
+        """For each collection, its `limit` newest shape-history entries and its total, in one read."""
+        with self.read_snapshot():
+            return shape_history.newest(self.connection, list(collection_ids), limit=limit)
+
+    def _restructure_proposal(self, row, current, declared, *, steps, undo, origin, automatic=False):
+        """Resolve one restructure of a store collection against its stored manifest and rows, and validate the result.
+
+        Returns what the call comes to and what it commits: the proposed manifest's preparation, each other collection
+        a move writes, and the body and sources of each row a move carries. Refuses naming the step, the rows or the
+        dependent; every collection is validated with the rows as the plan leaves them.
+        """
+        (text,) = self.connection.execute(
+            "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+            (current.collection_id, row["manifest_version"]),
+        ).fetchone()
+        version = row["manifest_version"]
+        resolved = restructure.resolve(
+            text, steps=steps, undo=undo, origin=origin,
+            history=lambda: self.shape_history(current.collection_id),
+            rows=lambda: dict(typed_storage.collection_values(self.connection, current.collection_id)),
+            size=lambda: self._current_row_count(current.collection_id),
+            # A collection this split already began holds its title; the split takes it over instead (`_begun`).
+            # Only collections the caller may read hold a title: a refusal that named a withheld one would tell an
+            # author who cannot read it that it exists, so a title only it holds counts as free.
+            titles=lambda: frozenset(
+                other.title
+                for other in collections.discover_collections(
+                    self.root, authorize_path=self._operation.allows_file, reject_duplicates=False)
+                if other.collection_id not in (
+                    current.collection_id, split_collection_id(current.collection_id, version, other.title))
+            ),
+            collection_id=current.collection_id, path=current.path, reach=self._reach(current.collection_id, version),
+            automatic=None if not automatic else partial(
+                automatic_collection.require_restructure_bounds, vault_root=self.root,
+                collection_id=current.collection_id, path=current.path, connection=self.connection,
+                counted=lambda cutoff: shape_history.counted_since(
+                    self.connection, [current.collection_id], since=cutoff, origin="automatic")[current.collection_id],
+                created=self.created_automatically, begun=self._begun,
+            ),
+        )
+        planned = resolved.planned
+        restructure.require_one_call(planned)
+        if planned.moves and current.derived:
+            raise derived_rows.refused("restructure")
+        try:
+            prepared = self._prepare_revision(
+                current, declared, planned.text,
+                rows=planned.rows if planned.changed_rows or planned.retracted else None, rekeyed=planned.moves)
+        except collections.CollectionError as error:
+            raise restructure.dependent_refusal(planned.text, resolved.run, error) from error
+        others = tuple(self._prepare_change(change) for change in planned.others)
+        written = [(current, prepared[0], planned.rows, {*planned.changed_rows, *planned.retracted})]
+        for change, revision in zip(planned.others, others, strict=True):
+            if not change.created:  # A new collection's id is new, so no reference names it yet.
+                held = self._collection(change.collection_id)[1]
+                written.append((held, held if revision is None else revision[3][0], change.rows,
+                                {*change.written, *change.retracted}))
+        self._refuse_lost_references(written)
+        return resolved, prepared, others, self._moved_inputs(planned)
+
+    def _current_row_count(self, collection_id):
+        """The rows a collection holds now, counted in the database without loading one."""
+        return self.connection.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (collection_id,)).fetchone()[0]
+
+    def _refuse_lost_references(self, written):
+        """Refuse a restructure after which a declared reference of any collection would no longer find its rows.
+
+        Each of `written` is a collection that the restructure writes: its manifest now and as proposed, its rows as
+        the plan leaves them, and the keys it writes or retracts. A declaration that names a rekeyed collection must
+        accept the new key, and a row that a reference finds must keep its match. Each declaration costs one lookup in
+        the reference index; while that index builds it cannot say, so the restructure refuses as busy.
+        """
+        for current, proposed, rows, touched in written:
+            cid, rekeyed = current.collection_id, proposed.schema.natural_key != current.schema.natural_key
+            leaving = set()
+            for key, natural_key in self.connection.execute(
+                    "SELECT item_key,natural_key FROM items WHERE collection_id=? "
+                    "AND item_key IN (SELECT value FROM json_each(?))", (cid, _json(sorted(touched)))).fetchall():
+                leaving |= reference_index.row_matches(key, natural_key)
+            if leaving:
+                leaving -= {match for key, values in rows.items()
+                            for match in reference_index.row_matches(key, _natural_key(proposed, values))}
+            if not leaving and not rekeyed:
+                continue
+            for source_id, _path, _text, declarations in reference_index.declaring(self.connection, cid):
+                readable = reference_declarations.readable(self._operation, source_id)
+                source = None if readable is None else (source_id, readable.title)
+                for declaration in declarations:
+                    field = f"{declaration.location}.references"
+                    if rekeyed:
+                        try:
+                            reference_declarations.require_supported(field, proposed, derived=proposed.derived)
+                        except collections.CollectionError as error:
+                            raise restructure.references_lost(source, field, error) from error
+                    if not leaving:
+                        continue
+                    found = reference_index.finds_any(self.connection, source_id, declaration.dotted, cid, leaving)
+                    if found is None:
+                        raise connection.busy(
+                            "a collection that references this one is still building its reference index, so the "
+                            "restructure cannot check those references yet; nothing changed")
+                    if found:
+                        raise restructure.references_lost(source, field)
+
+    def _reach(self, source_id, version):
+        """How a store restructure reads, parses and names the other collections a move writes.
+
+        `source_id` at manifest `version` is the called collection, from which a split's new collection takes its id.
+        """
+
+        def load(name, extra):
+            row, manifest, _declared = self._collection(name)
+            if manifest.derived:
+                raise derived_rows.refused("restructure")
+            # A move loads every row of the collection it reaches, so that collection is bounded as the called one is.
+            restructure.require_collection_size(self._current_row_count(row["collection_id"]), extra=extra)
+            (text,) = self.connection.execute(
+                "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (row["collection_id"], row["manifest_version"]),
+            ).fetchone()
+            return restructure.Holding(row["collection_id"], manifest.path, text,
+                                       dict(typed_storage.collection_values(self.connection, row["collection_id"])))
+
+        def parse(path, text):
+            manifest = collections.parse_manifest_bytes(
+                self.root, path, text.encode(), planning_values=PlanningValues(self.root, server_side=True))
+            stored = self.connection.execute(
+                "SELECT item_key_scheme FROM collections WHERE collection_id=?", (manifest.collection_id,)).fetchone()
+            return replace(manifest, item_key_scheme=stored[0] if stored else self._new_item_key_scheme(manifest))
+
+        def create(source_path, title):
+            # A split's collection sits beside its source, in a folder named by its title.
+            folder = Path(source_path).parent.parent / vault.sanitize_title_filename(title)
+            return split_collection_id(source_id, version, title), (folder / "_collection.md").as_posix()
+
+        return restructure.Reach(load, parse, create)
+
+    def _prepare_change(self, change):
+        """Validate what a move leaves in another collection, with every row it will hold.
+
+        A split's new collection is checked as a create; an existing one as a revision. Returns that revision's
+        preparation when its manifest changes, else None.
+        """
+        if change.created:
+            self._begun(change)
+            manifest, _text, declared = self._prepare_create(change.path, change.text, False)
+            plans = {key: self._validate(manifest, declared, key, values, operation="revise", validate_graph=False)
+                     for key, values in change.rows.items()}
+            for name in declared.validators:
+                types.named_validator(name).validate(manifest, plans, write=None)
+            return None
+        row, current, declared = self._collection(change.collection_id)
+        prepared = self._prepare_revision(current, declared, change.text, rows=change.rows)
+        (text,) = self.connection.execute(
+            "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+            (current.collection_id, row["manifest_version"]),
+        ).fetchone()
+        return None if text == change.text else (row, current, declared, prepared)
+
+    def _begun(self, change):
+        """Whether a split's new collection is already in the store, made by the admitted create that ran first.
+
+        Only the collection as that create left it is taken over: the manifest this split makes and no row.
+        """
+        found = self.connection.execute(
+            "SELECT m.manifest_text FROM collections c JOIN collection_manifests m ON m.collection_id=c.collection_id "
+            "AND m.manifest_version=c.manifest_version WHERE c.collection_id=?", (change.collection_id,)).fetchone()
+        if found is None:
+            return False
+        if found[0] != change.text or self.connection.execute(
+                "SELECT 1 FROM items WHERE collection_id=? LIMIT 1", (change.collection_id,)).fetchone() is not None:
+            raise restructure.refuse(
+                "RESTRUCTURE_STEP_REFUSED",
+                "the collection that this split began has changed since its create; nothing moved",
+                collection=change.collection_id,
+                remediation="split into another title, or merge that collection back first")
+        return True
+
+    def _moved_inputs(self, planned):
+        """The body and sources of each row a move carries to another key or collection, read before anything moves.
+
+        A body with origin notes is bound to the row it was written to, so moving it refuses, naming the rows.
+        """
+        wanted = {}
+        for origins in (planned.origins, *(change.origins for change in planned.others)):
+            for cid, key in origins.values():
+                wanted.setdefault(cid, set()).add(key)
+        moved = {}
+        for cid, keys in wanted.items():
+            sources = self._row_sources(cid, keys)
+            for key, before in self._current_rows(cid, keys).items():
+                moved[(cid, key)] = (before["body"], sources.get(key, []))
+        bound = sorted(key for (_cid, key), (body, _) in moved.items()
+                       if origin_bindings.extract_origin_metadata(body)[1] is not None)
+        if bound:
+            raise restructure.bound_to_row(bound)
+        return moved
+
+    def _current_rows(self, cid, keys):
+        """The current rows of `keys` in one statement, hydrated, by key."""
+        found = self.connection.execute(
+            "SELECT * FROM items WHERE collection_id=? AND item_key IN (SELECT value FROM json_each(?))",
+            (cid, _json(sorted(keys))))
+        names = tuple(column[0] for column in found.description)
+        return {row["item_key"]: row for row in typed_storage.hydrate(
+            self.connection, [dict(zip(names, values, strict=True)) for values in found.fetchall()])}
+
+    def _row_sources(self, cid, keys):
+        """The source references of each current row of `keys`, in their order, in one statement."""
+        sources = {}
+        for key, ref in self.connection.execute(
+            "SELECT i.item_key,s.source_ref FROM items i JOIN item_sources s "
+            "ON s.row_id=i.row_id AND s.row_version=i.row_version "
+            "WHERE i.collection_id=? AND i.item_key IN (SELECT value FROM json_each(?)) ORDER BY i.item_key,s.ordinal",
+            (cid, _json(sorted(keys)))):
+            sources.setdefault(key, []).append(ref)
+        return sources
+
+    def preview_restructure(self, collection, *, why, steps=None, undo=None, origin=None, automatic=False):
+        """The result of a restructure, proved and validated, with nothing written."""
+        records._validate_why(why)
+        origin = restructure.call_origin(origin, automatic=automatic, allowed=restructure.ORIGINS)
+        with self.read_snapshot(mutation=True):
+            row, current, declared = self._collection(collection)
+            resolved, _prepared, _others, _moved = self._restructure_proposal(
+                row, current, declared, steps=steps, undo=undo, origin=origin, automatic=automatic)
+            return {
+                "valid": True, "preview": True, "collection_id": current.collection_id, "origin": origin,
+                "steps": list(resolved.run), "inverse": list(resolved.planned.inverse),
+                "rows_changed": len(resolved.planned.changed_rows),
+                "rows_total": self._current_row_count(current.collection_id),
+            }
+
+    def _restructure_identity(self, collection, steps, undo, origin, why, request_id):
+        """A restructure's request identity, digest and replay: what its creations and its commit both read."""
+        return self._identity("restructure", collection, dict(steps=steps, undo=undo, origin=origin, why=why), request_id)
+
+    def restructure_creations(self, collection, *, why, steps=None, undo=None, origin=None, request_id=None,
+                              automatic=False):
+        """The new collections that a restructure's split makes and the store does not hold yet, with nothing written.
+
+        Each is `(collection id, manifest path, manifest text)`. A served store makes them through its admitted create
+        before the restructure commits its moves. A retry of a committed restructure replays, so it makes none. The
+        whole proposal runs first, automatic bounds included, so a refused restructure makes no collection either.
+        """
+        if not restructure.creates_collections(steps):
+            return ()
+        records._validate_why(why)
+        origin = restructure.call_origin(origin, automatic=automatic, allowed=restructure.ORIGINS)
+        with self.read_snapshot(mutation=True):
+            _identity, _digest, replay = self._restructure_identity(collection, steps, undo, origin, why, request_id)
+            if replay is not None:
+                return ()
+            row, current, declared = self._collection(collection)
+            resolved, _prepared, _others, _moved = self._restructure_proposal(
+                row, current, declared, steps=steps, undo=undo, origin=origin, automatic=automatic)
+            return tuple((change.collection_id, change.path, change.text) for change in resolved.planned.others
+                         if change.created and not self._begun(change))
+
+    def restructure_collection(self, collection, *, why, steps=None, undo=None, origin=None, request_id=None,
+                               automatic=False):
+        """Apply a restructure as one revision of the stored manifest and its shape-history entry, in one transaction.
+
+        A step that rewrites rows rewrites them in the same transaction (`_write_rows`); a move also commits what it
+        writes to other collections (`_commit_moves`). `origin` `declined` records the proposal as an entry and leaves
+        the manifest as it is. `automatic` marks a change the agent starts on its own: it records origin `automatic`
+        and refuses, before anything is written, unless the bounds of `automatic_collection` hold.
+        """
+        records._validate_why(why)
+        origin = restructure.call_origin(origin, automatic=automatic, allowed=restructure.ORIGINS)
+        created = self._create_split_collections(collection, why=why, steps=steps, undo=undo, origin=origin,
+                                                 request_id=request_id)
+        with self._mutation():
+            identity, digest, replay = self._restructure_identity(collection, steps, undo, origin, why, request_id)
+            if replay is not None:
+                # The stored receipt leaves the entry to its table; a retried call still returns the same entry.
+                entry = shape_history.of_request(self.connection, identity)
+                return replay if entry is None else mutation_terminal._CanonicalRequestReplay({**replay, "shape": entry})
+            row, current, declared = self._collection(collection)
+            resolved, prepared, others, moved = self._restructure_proposal(
+                row, current, declared, steps=steps, undo=undo, origin=origin, automatic=automatic)
+            planned = resolved.planned
+            receipt, proposed, entry = self._commit_revision(
+                row, current, declared, planned.text, why, identity, digest, prepared=prepared,
+                shape=lambda transition_id: restructure.entry(
+                    transition_id=transition_id, collection_id=current.collection_id,
+                    at=automatic_collection.now_stamp(), origin=origin, why=why, steps=resolved.run,
+                    inverse=planned.inverse, undoes=resolved.undoes,
+                ),
+            )
+            home = restructure.Change(current.collection_id, current.path, planned.text, False, planned.rows,
+                                      planned.changed_rows, planned.retracted, planned.origins)
+            inner = []
+            if planned.moves:
+                inner = self._commit_moves(home, planned.others, others, moved, why, digest)
+            elif planned.changed_rows:
+                inner = [self._write_rows(home, why, digest)]
+        writer_lease.mark_active_mutation_committed()
+        records._refresh_manifest_due_state(self.root, proposed)
+        # The publication at commit adds its warnings to the receipts of the transactions that wrote views; the
+        # reply carries every warning of every transaction the restructure wrote.
+        warnings = list(dict.fromkeys(warning for written in (*created, receipt, *inner)
+                                      for warning in written.get("warnings", ())))
+        return {**receipt, "shape": entry, **({"warnings": warnings} if warnings else {})}
+
+    def _create_split_collections(self, collection, *, why, steps, undo, origin, request_id):
+        """Commit each new collection that a split makes on a store without a marker, before its moves; return the receipts.
+
+        Each create commits on its own transaction, as the admitted create of an enrolled store does
+        (`preview.dispatch`). A create runs DDL, and DDL leaves the release cache unmanaged until its transaction
+        ends, so inside the moves' transaction every retraction after it would verify its chain from genesis. A
+        failure between a create and the moves leaves the new collection empty, and a retry of the same split takes
+        it over (`_begun`).
+        """
+        from . import authority
+
+        if not restructure.creates_collections(steps) or authority.read_marker(self.root) is not None:
+            return []
+        automatic = origin == "automatic"
+        receipts = []
+        for cid, path, text in self.restructure_creations(collection, why=why, steps=steps, undo=undo, origin=origin,
+                                                          request_id=request_id, automatic=automatic):
+            # The create takes a request identity derived from the restructure's, which stays on the moves.
+            with writer_lease.mutation_step(f"split_out:{cid}"):
+                receipts.append(self.create_collection(path, text, why=why, scaffold=False,
+                                                       origin=None if automatic else origin, automatic=automatic))
+        return receipts
+
+    def _commit_moves(self, home, others, prepared, moved, why, request_hash):
+        """Commit what a move writes after the called collection's revision, in the same transaction.
+
+        Each other collection's manifest commits first; a split's new collection is already committed by its own
+        create. Then each retracted row commits as its own retraction, and each collection's written rows as one bulk
+        upsert. Returns their receipts.
+        """
+        receipts = []
+        for change, revision in zip(others, prepared, strict=True):
+            if change.created and not self._begun(change):
+                # Only an enrolled store that no running service serves reaches this: a store without a marker
+                # made the collection just before (`_create_split_collections`), and nothing else writes in between.
+                raise restructure.creation_unavailable()
+            if revision is not None:
+                row, current, declared, revision = revision
+                receipts.append(self._commit_revision(
+                    row, current, declared, change.text, why, None, request_hash, prepared=revision)[0])
+        handed = {}
+        for change in (home, *others):
+            retracted, handing = self._retract_rows(change, why, request_hash)
+            receipts.extend(retracted)
+            handed.update(handing)
+        for change in (home, *others):
+            if change.written:
+                receipts.append(self._write_rows(change, why, request_hash, handed=handed, moved=moved))
+        return receipts
+
+    def _retract_rows(self, change, why, request_hash):
+        """Take a move's retracted rows of one collection out of current state, one retraction each.
+
+        A retracted row's view file passes to the row written in its place in the same collection (a rekey), and is
+        otherwise retired. Either way the row lets go of the path, so another row can hold it. Returns the retractions'
+        receipts and the handed paths by the `(collection id, key)` that takes them.
+        """
+        if not change.retracted:
+            return [], {}
+        cid = change.collection_id
+        row = self._collection_row(cid)
+        manifest = self._collection_manifest(row)[0]
+        befores = self._current_rows(cid, change.retracted)
+        if set(befores) != set(change.retracted):
+            raise collections.CollectionError("RECORD_NOT_FOUND", "a row the restructure retracts is not current")
+        renders = _renders_rows(manifest)
+        handed = {}
+        if renders:
+            takers = {key: taker for taker, (owner, key) in change.origins.items()
+                      if owner == cid and key in befores}
+            held = set(self._current_rows(cid, takers.values()))
+            handed = {(cid, taker): befores[key]["view_path"] for key, taker in takers.items() if taker not in held}
+            self._preflight_views(before["view_path"] for before in befores.values())
+        passed = set(handed.values())
+        results = []
+        maintained = index_migrations.AccountedWriter(self.connection, self._execute)
+        layout = self._item_write_context(manifest)[2]
+        item_type = types.type_for_manifest(manifest).item_type
+        # One write check covers every retraction here, and the commit checks the end state again (`_mutation`): the
+        # manifest stays as it is, and a retraction only takes rows away, so no later state holds a row it refuses.
+        self._precommit(manifest)
+        for key in change.retracted:
+            before = befores[key]
+            row = self._collection_row(cid)
+            row_id, version, payload = before["row_id"], before["row_version"], before["payload_hash"]
+            txn = self._txn(row, manifest, "retract", why, None, request_hash,
+                            effects={"key": key, "retracted_version": version, "payload_hash": payload})
+            self._execute(tables.RETRACT_ITEM, {"target_row_id": row_id, "retracted_txn": txn["txn_id"]})
+            if layout is not None:
+                typed_storage.forget_current(maintained, layout, row_id)
+            index_migrations.forget_item(maintained, cid, row_id, key, json.loads(before["values_json"]))
+            reference_index.forget(maintained, row_id)
+            self._execute(tables.INSERT_EFFECT, {
+                "txn_id": txn["txn_id"], "ordinal": 0, "row_id": row_id, "item_key": key, "effect": "retract",
+                "version_before": version, "hash_before": payload})
+            if renders:
+                if before["view_path"] not in passed:
+                    self._publication.retire(self._publication.captured[before["view_path"]])
+                self._execute("UPDATE item_rows SET view_path=NULL WHERE row_id=?", (row_id,))
+            elif manifest.view_mode == summary.SUMMARY:
+                self._pending_summary(manifest, txn["generation_after"])
+            else:
+                self._pending_log(manifest, txn["generation_after"])
+            self.handle.release_cache.touch(cid, f"exomem://{item_type}/{cid}/{key}")
+            result = records._result(
+                operation="retract", manifest=manifest, key=key, before_item_hash=self._version(before),
+                after_item_hash=None, before_container_hash=self._container(row),
+                after_container_hash=self._advance(txn), affected_paths=_affected(manifest, before["view_path"]),
+                payload_hash=None, outcome="committed", audit_correlation=txn["transition_id"])
+            self._insert_txn(txn, result)
+            results.append(result)
+        return results, handed
+
+    def _write_rows(self, change, why, request_hash, *, handed=None, moved=None):
+        """Write the rows a restructure's plan writes in one collection as one bulk-upsert txn.
+
+        A current row is updated in place; a key a row held before is revived; any other key is inserted. A moved row
+        takes the body and sources of the row it came from (`moved`), and a view path a retracted row handed to it
+        (`handed`); every other row keeps its own. Each row gets a new version and its effect, so the chain verifies
+        it as it verifies a bulk upsert. Every written row is read back through its collection's encoding, and a value
+        that does not read back as planned refuses the call, so nothing commits.
+        """
+        handed, moved = handed or {}, moved or {}
+        cid, keys = change.collection_id, list(change.written)
+        row = self._collection_row(cid)
+        manifest = self._collection_manifest(row)[0]
+        current = self._current_rows(cid, keys)
+        sources = self._row_sources(cid, current.keys() - change.origins.keys())
+        found = self.connection.execute(
+            "SELECT * FROM item_rows WHERE collection_id=? AND retracted_txn IS NOT NULL "
+            "AND item_key IN (SELECT value FROM json_each(?))", (cid, _json(sorted(set(keys) - current.keys()))))
+        names = tuple(column[0] for column in found.description)
+        # A retracted row is the predecessor of its revival, unhydrated as `_retracted` reads it.
+        gone = {values["item_key"]: values for values in (dict(zip(names, raw, strict=True)) for raw in found.fetchall())}
+        occupied = ChainMap({}, self.handle.release_cache.state(cid).occupied_path_keys)
+        writes = []
+        for key in keys:
+            values = dict(change.rows[key])
+            before = current.get(key) or gone.get(key)
+            if key in change.origins:
+                body, refs = moved[change.origins[key]]
+            elif key in current:
+                body, refs = before["body"], sources.get(key, [])
+            else:
+                raise collections.CollectionError("RECORD_NOT_FOUND", "a row the restructure rewrites is not current")
+            if key in current:
+                path = before["view_path"]
+            elif (cid, key) in handed:
+                path = handed[(cid, key)]
+            else:
+                path = _new_row_path(manifest, values, key, occupied)
+            if path is not None:
+                occupied[collections._portable_path_key(path)] = 1
+            writes.append((key, values, body, refs, path, before))
+        payloads = [tokens.payload_hash(manifest.schema.version, key, values, body)
+                    for key, values, body, *_ in writes]
+        if _renders_rows(manifest):
+            self._preflight_views(path for *_, path, _before in writes)
+        txn = self._txn(
+            row, manifest, "bulk_upsert", why, None, request_hash,
+            effects=[{"key": key, "payload_hash": payload, "sources": refs}
+                     for (key, _, _, refs, _, _), payload in zip(writes, payloads, strict=True)],
+            _source_inputs=[version_sources.effect_input(key, payload, body, before)
+                            for (key, _, body, _, _, before), payload in zip(writes, payloads, strict=True)],
+        )
+        scope = self.handle.write_scope
+        for ordinal, (key, values, body, refs, path, before) in enumerate(writes):
+            self._write_item(manifest, key, values, body, path, txn, before, None, refs,
+                             ordinal=ordinal, queue_log=False, scope=scope)
+        stored = dict(typed_storage.keyed_values(self.connection, cid, keys))
+        differs = [key for key in keys if key not in stored or not restructure.same(stored[key], change.rows[key])]
+        if differs:
+            raise restructure.not_read_back(differs)
+        if manifest.storage.strategy == "markdown-log":
+            self._pending_log(manifest, txn["generation_after"])
+        elif manifest.view_mode == summary.SUMMARY:
+            self._pending_summary(manifest, txn["generation_after"])
+        receipt = {
+            "operation": "bulk_upsert", "collection_id": cid, "batch_id": txn["transition_id"],
+            "committed": True, "on_reject": "abort",
+            "rows": [{"index": ordinal, "item_key": key, "identity": "natural-key" if manifest.schema.natural_key
+                      else "generated", "source": None, "outcome": "updated" if key in current else "inserted",
+                      "transition_id": txn["transition_id"]}
+                     for ordinal, (key, *_) in enumerate(writes)],
+            "counts": {"inserted": len(keys) - len(current), "updated": len(current), "unchanged": 0, "rejected": 0},
+            "before_container_hash": self._container(row), "after_container_hash": self._advance(txn),
+            "first_transition": txn["transition_id"], "last_transition": txn["transition_id"],
+        }
+        self._precommit(manifest)
+        self._insert_txn(txn, receipt)
         return receipt
 
     def conversion_state(self, collection):

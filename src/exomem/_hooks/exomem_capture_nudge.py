@@ -55,7 +55,7 @@ without the hook reading a transcript record. A session that never lands work is
 never asked, and an ask answered without a record is not repeated until the next
 landing: an autonomous run with no record would otherwise be blocked at every
 cooldown for as long as it ran. Only a SUCCESSFUL record resets the turn count:
-an unrelated write, a `Saved ->` marker or a failed record leaves the episode
+an unrelated write or a failed record leaves the episode
 pending. When the ask is due it takes that Stop; on every other Stop the
 per-turn capture reminder behaves exactly as before. The hook never records
 anything itself — hooks trigger, agents author.
@@ -78,8 +78,8 @@ of that call — the door unconfigured, a timeout, any error, or the episode
 simply not found yet — falls straight through to the transcript-only
 behaviour above.
 
-Candidate coverage (close-memory-loop 4.1). A successful write or a `Saved ->`
-marker is an attempted capture: it answers that turn's capture reminder and
+Candidate coverage (close-memory-loop 4.1). A successful write is an attempted
+capture: it answers that turn's capture reminder and
 never the episode's coverage. Once a session prepares, dispositions or resumes
 an episode candidate, the hook mirrors that episode's ledger state -- attempted
 leaves, pending items, the input revision it is covered through and its next
@@ -149,12 +149,14 @@ _KB_WRITES = (
     "manage_memory:files.revert_reclassification",
     "manage_memory:plans.create",
     "manage_memory:plans.rebaseline",
+    "manage_memory:plans.restructure",
     "manage_memory:plans.revise",
     "manage_memory:records.bulk_upsert",
     "manage_memory:records.create",
     "manage_memory:records.discard",
     "manage_memory:records.import",
     "manage_memory:records.rebaseline",
+    "manage_memory:records.restructure",
     "manage_memory:records.retract",
     "manage_memory:records.revise",
     "save_episode",
@@ -184,7 +186,7 @@ EPISODE_ASK = (
 #: episode whose candidates the session prepared, `{next}` its ledger's next step.
 COVERAGE_ASK = (
     "[Evermatter episode coverage] Episode {key} is not covered through its current "
-    "input; its ledger's next step is {next}. A committed note or a Saved marker "
+    "input; its ledger's next step is {next}. A committed note "
     'does not cover it. Read inspect_memory operation="episodes.candidates" and continue: '
     'decide each candidate, resume the routed ones, or make the final pass '
     '(inspect_memory operation="episodes.coverage", then manage_memory operation="episodes.resume" with postcommit=true). Deferred work may '
@@ -1356,9 +1358,9 @@ def main(argv: list[str] | None = None) -> int:
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if _restart_pending(tools):  # hooks are live but the MCP server is not loaded yet
         return 0
-    # Before the attempted-capture checks below: a write or a Saved marker
-    # answers this turn's reminder, never the episode's coverage, which only
-    # a record or the candidate ledger establishes (task 4.1).
+    # Before the attempted-capture checks below: a write answers this turn's
+    # reminder, never the episode's coverage, which only a record or the
+    # candidate ledger establishes (task 4.1).
     ask = _episode_ask(
         session_id, tools, len(assistant_text.strip()) >= min_chars, level
     )
@@ -1366,9 +1368,8 @@ def main(argv: list[str] | None = None) -> int:
         _log(assistant_text)
         print(json.dumps({"decision": "block", "reason": _capture_reason(ask)}))
         return 0
-    attempted = any(_successful_kb_write(tool) for tool in tools) or bool(
-        re.search(r"Saved\s*(?:->|→|:)", assistant_text)
-    )
+    # A save is read from the tool result alone: the reply is the agent's prose and carries no marker.
+    attempted = any(_successful_kb_write(tool) for tool in tools)
     if attempted:  # capture was attempted this turn; coverage is the checks above
         return 0
     if level == "maximal":  # the most aggressive level keeps the length gate

@@ -1834,10 +1834,12 @@ def test_bootstrap_teaches_routing_candidates_and_collection_confirmation(
     assert "one" in candidate and "confirmation" in candidate
     assert "exactly dated" in candidate and "sources" in candidate
     # Collection creation splits: out of bounds or in Planning stays confirm-required, a bounded one is capture.
-    # Added fields are capture as well; renaming, retyping or removing a field stays confirm-required.
+    # A restructure splits the same way, and every permanent deletion stays confirm-required.
     confirm_required = " ".join(envelope.CONFIRM_REQUIRED.split())
-    assert "out-of-bounds or Planning collection creation" in confirm_required.split(". ")[0]
-    assert "bounded collection creation and added fields follow proactive_capture" in confirm_required
+    confirm_clause = confirm_required.split(". ")[0]
+    assert "out-of-bounds or Planning collection creation" in confirm_clause
+    assert "out-of-bounds restructure" in confirm_clause and "deletion" in confirm_clause
+    assert "bounded collection creation, added fields and a bounded restructure follow proactive_capture" in confirm_required
     assert "refused" not in envelope.FOUNDER_GATE
     with pytest.raises(ValueError, match="STANDING_DELEGATION_REFUSED"):
         envelope.set_disposition("restructure_execution", "silent")

@@ -1,0 +1,1063 @@
+{
+  "incident": "Agent-managed structure: an agent keeps a user's lists in a shape that must change as the user's work grows. The cases check that it changes the shape without losing a row or asking an implementation question, that the shape history records who decided what, and that its replies stay in the user's words. They use invented names and domains, and run for the hooked and the hookless actor alike (`--actor`).",
+  "cases": [
+    {
+      "id": "service-log-new-key",
+      "about": "A service log of a weaving studio's looms is keyed by part, and the warp beam ratchet is already in it. A second service of the same part is reported, which the key cannot hold as it stands. The agent changes the key to part and date, keeps every earlier row, adds the new service as its own row, asks nothing, and its reply names no path and no internal name. The log lives in the vault's collection store, as the personal service keeps its own.",
+      "turns": [
+        "Waxed the warp beam ratchet again on 12 Nov, because the pawl was sticking just like it did in August. How often should a loom ratchet be waxed?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Loom servicing/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "c3e8a1d4-6b27-4f59-9d0a-2e7b5c1f8a36",
+            "title": "Loom servicing",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "serviced_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "looms"
+              ],
+              "terms": [
+                "loom",
+                "heddle",
+                "warp",
+                "treadle",
+                "ratchet",
+                "service",
+                "weaving"
+              ]
+            }
+          },
+          "body": "Servicing of the looms in an invented weaving studio.\n",
+          "rows": [
+            {
+              "part": "Warp beam ratchet",
+              "serviced_on": "2026-08-14",
+              "work_done": "Waxed the pawl"
+            },
+            {
+              "part": "Heddle frame",
+              "serviced_on": "2026-09-02",
+              "work_done": "Replaced two cords"
+            },
+            {
+              "part": "Treadle cords",
+              "serviced_on": "2026-09-20",
+              "work_done": "Re-tied and waxed"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "no_new_collection": true,
+        "restructure": {
+          "collections": [
+            "Records/Loom servicing/_collection.md"
+          ],
+          "entries": [
+            {
+              "origin": "automatic",
+              "step": "rekey"
+            }
+          ]
+        },
+        "rows_preserved": {
+          "equals": 4,
+          "added": [
+            [
+              "Warp beam ratchet",
+              "2026-11-12"
+            ]
+          ]
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "plant-lists-merge",
+      "about": "Two plant lists of an invented flat share the fern and the pothos with equal watering. The user names the overlap and adds a rubber plant but asks for no change to the lists. The agent merges the two lists, the union of their rows survives with the new plant, one list is retired and not deleted, it asks nothing, and its reply names no path and no internal name. Both lists live in the vault's collection store.",
+      "turns": [
+        "I keep two plant lists, one for the window sill and one for the balcony, and they've drifted into nearly the same list: the fern and the pothos are on both. Bought a rubber plant on 14 Nov, for the hallway, and it wants watering every 12 days. Which of my plants need to come in for the winter?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Window plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "8d2f6b19-4a73-4c0e-b5d1-7e9a3c2f0d48",
+            "title": "Window plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "light": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "sill",
+                "light"
+              ]
+            }
+          },
+          "body": "Plants on the window sill of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Fern",
+              "water_every_days": 7,
+              "light": "Bright shade"
+            },
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "light": "Indirect"
+            },
+            {
+              "plant": "Peace lily",
+              "water_every_days": 5,
+              "light": "Low light"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Balcony plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "f1a7c5e3-0b94-4d62-8a3e-6c2d9b1e5f07",
+            "title": "Balcony plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "spot": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "balcony",
+                "rail"
+              ]
+            }
+          },
+          "body": "Plants on the balcony of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "spot": "Rail"
+            },
+            {
+              "plant": "Fern",
+              "water_every_days": 7,
+              "spot": "Corner"
+            },
+            {
+              "plant": "Lavender",
+              "water_every_days": 4,
+              "spot": "Rail"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "restructure": {
+          "collections": [
+            "Records/Window plants/_collection.md",
+            "Records/Balcony plants/_collection.md"
+          ],
+          "entries": [
+            {
+              "origin": "automatic",
+              "step": "merge_into"
+            }
+          ]
+        },
+        "rows_preserved": {
+          "equals": 5,
+          "added": [
+            [
+              "Rubber plant",
+              "12"
+            ]
+          ],
+          "retired": {
+            "collections": [
+              "Records/Window plants/_collection.md",
+              "Records/Balcony plants/_collection.md"
+            ],
+            "equals": 1
+          }
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "plant-lists-disagree",
+      "about": "Two plant lists of an invented flat share the fern, but one list waters it every 7 days and the other every 10. The agent asks one plain question about the fern, merges nothing until the user answers, and then merges with the user's answer as the decision. The balcony list's fern value is the out-of-date one by the user's word.",
+      "turns": [
+        "I keep two plant lists, one for the window sill and one for the balcony, and the fern and the pothos are on both. It's getting cold. Which of my plants need to come in for the winter?",
+        "Every 7 days. The balcony list is the out-of-date one."
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Window plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "8d2f6b19-4a73-4c0e-b5d1-7e9a3c2f0d48",
+            "title": "Window plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "light": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "sill",
+                "light"
+              ]
+            }
+          },
+          "body": "Plants on the window sill of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Fern",
+              "water_every_days": 7,
+              "light": "Bright shade"
+            },
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "light": "Indirect"
+            },
+            {
+              "plant": "Peace lily",
+              "water_every_days": 5,
+              "light": "Low light"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Balcony plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "f1a7c5e3-0b94-4d62-8a3e-6c2d9b1e5f07",
+            "title": "Balcony plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "spot": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "balcony",
+                "rail"
+              ]
+            }
+          },
+          "body": "Plants on the balcony of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "spot": "Rail"
+            },
+            {
+              "plant": "Fern",
+              "water_every_days": 10,
+              "spot": "Corner"
+            },
+            {
+              "plant": "Lavender",
+              "water_every_days": 4,
+              "spot": "Rail"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "restructure": {
+          "collections": [
+            "Records/Window plants/_collection.md",
+            "Records/Balcony plants/_collection.md"
+          ],
+          "entries": [
+            {
+              "origin": "user_choice",
+              "step": "merge_into"
+            }
+          ],
+          "automatic_steps_among": [
+            "add_field"
+          ]
+        },
+        "rows_preserved": {
+          "equals": 4,
+          "corrected": [
+            {
+              "collection": "Records/Balcony plants/_collection.md",
+              "row": {
+                "plant": "Fern"
+              },
+              "field": "water_every_days",
+              "value": 7
+            }
+          ],
+          "retired": {
+            "collections": [
+              "Records/Window plants/_collection.md",
+              "Records/Balcony plants/_collection.md"
+            ],
+            "equals": 1
+          }
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 1
+          }
+        },
+        "step_order": {
+          "merge_into": 2
+        }
+      }
+    },
+    {
+      "id": "quote-price-detail",
+      "about": "A joinery workshop's quotes list has a customer, a date and the job, and no price. A new quote arrives with its price. The agent keeps the price without asking, keeps every earlier quote, and tells the user in plain words that it now keeps the price. Its reply names no path and no internal name.",
+      "turns": [
+        "Quoted the bookshop on Alder Lane on 14 Nov, for fitting out a reading nook in oak, 1450 for the whole job. Is that a sensible price for the oak I specified?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Joinery quotes/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "4b9d0e72-a1c5-4f38-9e6b-3d8a7c2f1b05",
+            "title": "Joinery quotes",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "customer",
+                "quoted_on"
+              ],
+              "fields": {
+                "customer": {
+                  "type": "string",
+                  "required": true
+                },
+                "quoted_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "job": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "quotes"
+              ],
+              "terms": [
+                "quote",
+                "quoted",
+                "joinery",
+                "shelving",
+                "counter",
+                "fitting",
+                "oak"
+              ]
+            }
+          },
+          "body": "Quotes from an invented joinery workshop.\n",
+          "rows": [
+            {
+              "customer": "Harbour Cafe",
+              "quoted_on": "2026-10-03",
+              "job": "Oak counter"
+            },
+            {
+              "customer": "Elm Street Surgery",
+              "quoted_on": "2026-10-21",
+              "job": "Reception shelving"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "no_new_collection": true,
+        "restructure": {
+          "collections": [
+            "Records/Joinery quotes/_collection.md"
+          ],
+          "entries": [
+            {
+              "origin": "automatic",
+              "step": "add_field"
+            }
+          ]
+        },
+        "rows_preserved": {
+          "equals": 3,
+          "added": [
+            [
+              "1450"
+            ]
+          ]
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 0
+          }
+        },
+        "judge": {
+          "schema": {
+            "type": "object",
+            "properties": {
+              "says_it_now_keeps_the_price": {
+                "type": "boolean",
+                "description": "True if a reply tells the user that the assistant now keeps the price of the quotes, or of this quote. False if no reply says so, or a reply only repeats the price."
+              },
+              "reason": {
+                "type": "string",
+                "description": "One short paragraph that cites the replies."
+              }
+            },
+            "required": [
+              "says_it_now_keeps_the_price",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "says_it_now_keeps_the_price": true
+          }
+        }
+      }
+    },
+    {
+      "id": "reading-list-user-design",
+      "about": "No collection exists. The user describes a reading list in their own words: the title, the author, the date they finished it and a rating out of five. The agent builds that shape with the user as its author, and keeps the first book. A later book arrives with a page count the user never asked to keep. Any automatic change only adds a field, so every field of the user's own design stays, and the agent asks nothing.",
+      "turns": [
+        "Can you keep a reading list for me? I want the title, the author, the date I finished it and a rating out of five. I just finished The Salt Road by Marit Olsen on 9 Nov and gave it a four.",
+        "Finished Lanterns at Low Tide by Odile Brandt on 18 Nov. It's 288 pages, but I only gave it a three."
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "pass": {
+        "new_collection": {
+          "equals": 1,
+          "max_fields": 8,
+          "min_rows": 2,
+          "rows_each": [
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Salt Road"
+              }
+            ],
+            [
+              {
+                "field": "*",
+                "op": "contains",
+                "value": "Low Tide"
+              }
+            ]
+          ]
+        },
+        "restructure": {
+          "new": true,
+          "entries": [
+            {
+              "origin": "user_design"
+            }
+          ],
+          "automatic_steps_among": [
+            "add_field"
+          ]
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 0
+          }
+        },
+        "judge": {
+          "include_rows": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "keeps_what_the_user_described": {
+                "type": "boolean",
+                "description": "True if the saved list has a field for each of the title, the author, the date finished and the rating, under whatever names, and holds both books with the ratings 4 and 3. False otherwise."
+              },
+              "reason": {
+                "type": "string",
+                "description": "One short paragraph that cites the saved rows."
+              }
+            },
+            "required": [
+              "keeps_what_the_user_described",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "require": {
+            "keeps_what_the_user_described": true
+          }
+        }
+      }
+    },
+    {
+      "id": "plant-lists-put-back",
+      "about": "Two plant lists of an invented flat share the fern and the pothos with equal watering, and the user's first turn leads the agent to merge them. In the next turn the user asks for the two lists apart again. The agent undoes the merge: both lists hold exactly their earlier rows again, neither is retired, the new rubber plant is kept, and the agent asks nothing.",
+      "turns": [
+        "I keep two plant lists, one for the window sill and one for the balcony, and they've drifted into nearly the same list: the fern and the pothos are on both. Bought a rubber plant on 14 Nov, for the hallway, and it wants watering every 12 days. Which of my plants need to come in for the winter?",
+        "Actually, I'd rather keep the balcony plants apart from the window ones, because the balcony has different needs. Can you put them back as two separate lists?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Window plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "8d2f6b19-4a73-4c0e-b5d1-7e9a3c2f0d48",
+            "title": "Window plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "light": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "sill",
+                "light"
+              ]
+            }
+          },
+          "body": "Plants on the window sill of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Fern",
+              "water_every_days": 7,
+              "light": "Bright shade"
+            },
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "light": "Indirect"
+            },
+            {
+              "plant": "Peace lily",
+              "water_every_days": 5,
+              "light": "Low light"
+            }
+          ]
+        },
+        {
+          "manifest_path": "Records/Balcony plants/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "f1a7c5e3-0b94-4d62-8a3e-6c2d9b1e5f07",
+            "title": "Balcony plants",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "plant"
+              ],
+              "fields": {
+                "plant": {
+                  "type": "string",
+                  "required": true
+                },
+                "water_every_days": {
+                  "type": "integer"
+                },
+                "spot": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "plants"
+              ],
+              "terms": [
+                "plant",
+                "water",
+                "watering",
+                "leaf",
+                "pot",
+                "balcony",
+                "rail"
+              ]
+            }
+          },
+          "body": "Plants on the balcony of an invented flat.\n",
+          "rows": [
+            {
+              "plant": "Pothos",
+              "water_every_days": 10,
+              "spot": "Rail"
+            },
+            {
+              "plant": "Fern",
+              "water_every_days": 7,
+              "spot": "Corner"
+            },
+            {
+              "plant": "Lavender",
+              "water_every_days": 4,
+              "spot": "Rail"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "silent",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "restructure": {
+          "collections": [
+            "Records/Window plants/_collection.md",
+            "Records/Balcony plants/_collection.md"
+          ],
+          "entries": [
+            {
+              "origin": "automatic",
+              "step": "merge_into",
+              "undone": true
+            }
+          ]
+        },
+        "rows_preserved": {
+          "equals": 7,
+          "added": [
+            [
+              "Rubber plant",
+              "12"
+            ]
+          ],
+          "retired": {
+            "collections": [
+              "Records/Window plants/_collection.md",
+              "Records/Balcony plants/_collection.md"
+            ],
+            "equals": 0
+          }
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 0
+          }
+        }
+      }
+    },
+    {
+      "id": "service-log-advisory",
+      "about": "The service log of a weaving studio's looms with the owner's capture set to advisory. The key cannot hold a second service of the warp beam ratchet. The agent asks one plain question about keeping each service as its own entry and changes nothing before the answer: the shape stays, every row stays and nothing is written.",
+      "turns": [
+        "Waxed the warp beam ratchet again on 12 Nov, because the pawl was sticking just like it did in August. How often should a loom ratchet be waxed?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Loom servicing/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "c3e8a1d4-6b27-4f59-9d0a-2e7b5c1f8a36",
+            "title": "Loom servicing",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "serviced_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "looms"
+              ],
+              "terms": [
+                "loom",
+                "heddle",
+                "warp",
+                "treadle",
+                "ratchet",
+                "service",
+                "weaving"
+              ]
+            }
+          },
+          "body": "Servicing of the looms in an invented weaving studio.\n",
+          "rows": [
+            {
+              "part": "Warp beam ratchet",
+              "serviced_on": "2026-08-14",
+              "work_done": "Waxed the pawl"
+            },
+            {
+              "part": "Heddle frame",
+              "serviced_on": "2026-09-02",
+              "work_done": "Replaced two cords"
+            },
+            {
+              "part": "Treadle cords",
+              "serviced_on": "2026-09-20",
+              "work_done": "Re-tied and waxed"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "advisory",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "no_write": true,
+        "restructure": {
+          "collections": [
+            "Records/Loom servicing/_collection.md"
+          ],
+          "none": true
+        },
+        "rows_preserved": {
+          "equals": 3
+        },
+        "plain_reply": {
+          "questions": {
+            "equals": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "service-log-off",
+      "about": "The service log of a weaving studio's looms with the owner's capture set to off. The agent initiates nothing: no restructure happens, the shape stays, every row stays and nothing is written.",
+      "turns": [
+        "Waxed the warp beam ratchet again on 12 Nov, because the pawl was sticking just like it did in August. How often should a loom ratchet be waxed?"
+      ],
+      "seed_collections": [
+        {
+          "manifest_path": "Records/Loom servicing/_collection.md",
+          "manifest": {
+            "type": "collection",
+            "exomem_id": "c3e8a1d4-6b27-4f59-9d0a-2e7b5c1f8a36",
+            "title": "Loom servicing",
+            "semantic_profile": "records",
+            "collection_version": 1,
+            "schema_version": 1,
+            "lifecycle": "active",
+            "storage": {
+              "strategy": "markdown-items",
+              "source": "Entries",
+              "format_version": 1
+            },
+            "item_schema": {
+              "natural_key": [
+                "part"
+              ],
+              "fields": {
+                "part": {
+                  "type": "string",
+                  "required": true
+                },
+                "serviced_on": {
+                  "type": "date",
+                  "required": true
+                },
+                "work_done": {
+                  "type": "string"
+                }
+              }
+            },
+            "claims": {
+              "tags": [
+                "looms"
+              ],
+              "terms": [
+                "loom",
+                "heddle",
+                "warp",
+                "treadle",
+                "ratchet",
+                "service",
+                "weaving"
+              ]
+            }
+          },
+          "body": "Servicing of the looms in an invented weaving studio.\n",
+          "rows": [
+            {
+              "part": "Warp beam ratchet",
+              "serviced_on": "2026-08-14",
+              "work_done": "Waxed the pawl"
+            },
+            {
+              "part": "Heddle frame",
+              "serviced_on": "2026-09-02",
+              "work_done": "Replaced two cords"
+            },
+            {
+              "part": "Treadle cords",
+              "serviced_on": "2026-09-20",
+              "work_done": "Re-tied and waxed"
+            }
+          ]
+        }
+      ],
+      "transport": "http",
+      "remote_owner": true,
+      "capture_disposition": "off",
+      "store": true,
+      "store_collections": true,
+      "pass": {
+        "no_write": true,
+        "restructure": {
+          "collections": [
+            "Records/Loom servicing/_collection.md"
+          ],
+          "none": true
+        },
+        "rows_preserved": {
+          "equals": 3
+        }
+      }
+    }
+  ]
+}

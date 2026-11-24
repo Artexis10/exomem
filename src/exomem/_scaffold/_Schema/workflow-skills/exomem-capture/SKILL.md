@@ -2,7 +2,7 @@
 name: exomem-capture
 description: Preserve a durable conclusion or recurring entity from a conversation without dumping transcripts into compiled memory.
 metadata:
-  skill_contract: a318d61254f90b9508528142a625d333b1f95c909d0fcd59644159278466b187
+  skill_contract: a49a82d41c1ebdd847dae14babcaa9b9540ba7b49756f2d8ed6fc39e9cb2119a
   version: "0.1.0"
 ---
 
@@ -40,8 +40,10 @@ the structured error. For warming, busy, pending, or
 and unchanged payload; wait/reconcile/retry only as instructed, never with a new
 identity after an uncertain commit.
 
-Tell the user the user_summary. Give codes, ids, hashes, retries and sync state
-only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
+Tell the user the user_summary. Speak of the user's things in their words, never of
+collections, Records, Planning, schemas, entities or paths. A change with no
+user_summary needs no mention unless asked. Give codes, ids, hashes, retries and
+sync state only if asked. State a blocker plainly. Working on Evermatter does not make an unrelated
 conversation diagnostic.
 
 Bootstrap's `store` names the Evermatter this connector reaches. When the user asks for a
@@ -100,8 +102,8 @@ stays in Notes. Follow `references/planning-records.md`: list the collections, r
 compatible one and update rows by natural key, else `add_record` with `new_collection`
 creates a minimal collection and adds the first row, under the served disposition. A later
 fact that has no field is added with `new_fields`, never put into another field. Backfill
-what the conversation established with dates and attribution, and report the collection and
-the rows in the reply.
+what the conversation established with dates and attribution, and report what you kept in the
+user's words.
 
 When a write ends `MUTATION_ACKNOWLEDGEMENT_PENDING`, replay it with the same identity and
 the same payload, or read the collection and the row by natural key before submitting that write again.

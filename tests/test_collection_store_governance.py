@@ -1298,6 +1298,10 @@ def test_hidden_row_allocation_cannot_change_limited_collection_observations(tmp
                 # store's random identity; field admission derives it without reading rows.
                 for key in ("store_id", "classification_basis"):
                     inspection["field_release_basis"].pop(key)
+                # The same holds for the creation entry of shape history: its id is random and its stamp is the wall clock.
+                for entry in inspection["shape_history"]["entries"]:
+                    for key in ("id", "at"):
+                        entry.pop(key)
                 observations.append((query, inspection))
         monkeypatch.delenv("EXOMEM_CONNECTOR_BOUNDARY_CONFIG")
     assert observations[0] == observations[1] == observations[2]

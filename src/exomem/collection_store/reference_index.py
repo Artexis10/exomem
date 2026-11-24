@@ -76,7 +76,7 @@ def match(target, target_id: str, value: str) -> str | None:
     profile, schema = target
     ref = collections.parse_row_ref(value)
     if ref is not None:
-        return f"ref:{ref[2]}" if ref[:2] == (profile, target_id) else None
+        return _ref_match(ref[2]) if ref[:2] == (profile, target_id) else None
     key = schema.natural_key
     if len(key) != 1:
         return None
@@ -88,6 +88,44 @@ def match(target, target_id: str, value: str) -> str | None:
             SimpleNamespace(schema=schema), {key[0]: value})
     except (ValueError, collections.CollectionError):
         return None
+
+
+def _ref_match(item_key: str) -> str:
+    return f"ref:{item_key}"
+
+
+def row_matches(item_key: str, natural_key: str | None) -> set[str]:
+    """Every match by which a reference finds one target row: its canonical row ref and its serialized natural key."""
+    return {_ref_match(item_key), *((natural_key,) if natural_key is not None else ())}
+
+
+def finds_any(conn, source_id: str, field_path: str, target_id: str, matches) -> bool | None:
+    """Whether a row of ``source_id`` holds at ``field_path`` a value that finds one of ``matches`` in ``target_id``.
+
+    None while the declaration's index is warming or built for another target, since the index cannot say then.
+    One lookup on the index's primary key.
+    """
+    state = _state(conn, source_id, field_path) if _present(conn) else None
+    if state is None or not state[2] or state[0] != target_id:
+        return None
+    return conn.execute(
+        "SELECT 1 FROM item_references WHERE collection_id=? AND field_path=? "
+        "AND match IN (SELECT value FROM json_each(?)) LIMIT 1",
+        (source_id, field_path, json.dumps(sorted(matches))),
+    ).fetchone() is not None
+
+
+def rekeyed(conn, target_id: str) -> None:
+    """Reset to warming every declaration that names ``target_id``, after its natural key changed.
+
+    An entry's match is the value serialized under the target's natural key, so the backfill rebuilds each under
+    the new key; until then an inverse read says warming instead of reporting stale matches.
+    """
+    if not _present(conn):
+        return
+    conn.execute("DELETE FROM item_references WHERE (collection_id, field_path) IN "
+                 "(SELECT collection_id, field_path FROM item_reference_state WHERE target_id=?)", (target_id,))
+    conn.execute("UPDATE item_reference_state SET built_through=0, ready=0 WHERE target_id=?", (target_id,))
 
 
 def maintain(conn, manifest, row_id: int, values: Mapping[str, Any]) -> None:
@@ -282,6 +320,23 @@ def due(conn) -> tuple[str, ...]:
         "SELECT DISTINCT collection_id FROM item_reference_state WHERE ready=0").fetchall())
 
 
+def declaring(conn, target_id: str):
+    """Each current collection that declares a reference to ``target_id``, the target itself included.
+
+    Yields ``(source id, manifest path, manifest text, the declarations that name the target)``. It reads every
+    current manifest and no row.
+    """
+    for source_id, path, text, schema_json in conn.execute(
+            "SELECT c.collection_id, c.manifest_path, m.manifest_text, m.schema_json FROM collections c "
+            "JOIN collection_manifests m ON m.collection_id=c.collection_id "
+            "AND m.manifest_version=c.manifest_version").fetchall():
+        data, _, _ = _vault().parse_frontmatter(text, strict=True)
+        schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
+        targeting = tuple(d for d in collections.declared_references(schema) if d.collection == target_id)
+        if targeting:
+            yield source_id, path, text, targeting
+
+
 def inbound(operation, conn, manifest) -> list[dict]:
     """The declarations of other collections that name this one, as inspection's ``inbound``.
 
@@ -295,19 +350,7 @@ def inbound(operation, conn, manifest) -> list[dict]:
     plan = operation.field_plan(manifest)
     if plan.natural_key_withheld or not plan.manifest.schema.natural_key:
         return {"declarations": [], "truncated": False, "total": 0}
-    rows = conn.execute(
-        "SELECT c.collection_id, c.manifest_path, m.manifest_text, m.schema_json FROM collections c "
-        "JOIN collection_manifests m ON m.collection_id=c.collection_id "
-        "AND m.manifest_version=c.manifest_version").fetchall()
-    from .. import vault
-
-    for source_id, path, text, schema_json in rows:
-        data, _, _ = vault.parse_frontmatter(text, strict=True)
-        schema = collections._parse_schema(data["schema_version"], json.loads(schema_json))
-        targeting = [d for d in collections.declared_references(schema)
-                     if d.collection == manifest.collection_id]
-        if not targeting:
-            continue
+    for source_id, path, text, targeting in declaring(conn, manifest.collection_id):
         try:
             operation.require_collection(source_id)
         except collections.CollectionError:  # a source the caller cannot read is omitted, never named
