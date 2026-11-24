@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **licensing:** license the server, CLI and images under FSL-1.1-ALv2 ([#3130](https://github.com/substrate-systems/evermatter/issues/3130))
+
+### Features
+
+* **cloud-rehearsal:** rehearse the automatic cell rollout end to end ([#2858](https://github.com/substrate-systems/evermatter/issues/2858)) ([00b9604](https://github.com/substrate-systems/evermatter/commit/00b9604a4b62bd73354a082e8a80ea4942a1059d))
+* **cloud:** relay the gateway's service notice in MCP results ([#3114](https://github.com/substrate-systems/evermatter/issues/3114)) ([6cf3980](https://github.com/substrate-systems/evermatter/commit/6cf3980c87726d709e66af6d9f55f598c4e2eeb5))
+* **cloud:** serve and accept more than one public gateway hostname ([#3136](https://github.com/substrate-systems/evermatter/issues/3136)) ([49b7e12](https://github.com/substrate-systems/evermatter/commit/49b7e123963351c4b8da2152ca2b5423251cf61b))
+* **licensing:** license the server, CLI and images under FSL-1.1-ALv2 ([#3130](https://github.com/substrate-systems/evermatter/issues/3130)) ([49da4f4](https://github.com/substrate-systems/evermatter/commit/49da4f42030b91916953a89545b480340b398bfe))
+* **licensing:** remove third-party strong copyleft from the product and its images ([#3108](https://github.com/substrate-systems/evermatter/issues/3108)) ([1deea8b](https://github.com/substrate-systems/evermatter/commit/1deea8b2537fc940481590fe066619e12e3cd577))
+* **mcp:** ask clients without hooks to recall per subject, even mid-conversation ([#3124](https://github.com/substrate-systems/evermatter/issues/3124)) ([66cf260](https://github.com/substrate-systems/evermatter/commit/66cf260cce6b431223ed15c65c380be7fbe77893))
+* **names:** find pages whose file name no longer follows their title ([#3103](https://github.com/substrate-systems/evermatter/issues/3103)) ([68fc8db](https://github.com/substrate-systems/evermatter/commit/68fc8db2f33c11b02553d69a4424ad5aeaa34b24))
+* rename the product to Evermatter on its external surfaces ([#3123](https://github.com/substrate-systems/evermatter/issues/3123)) ([813dbfe](https://github.com/substrate-systems/evermatter/commit/813dbfe8d7562a66c0f13189eb7047aaee4c32d2))
+* **store:** acknowledge saves at the commit, and let reads wait for their rows ([#3100](https://github.com/substrate-systems/evermatter/issues/3100)) ([bb8893f](https://github.com/substrate-systems/evermatter/commit/bb8893f0f9b464667b0c5abca96399efb575cd6b))
+* **units:** supersede, assess and link one claim inside a note ([#3143](https://github.com/substrate-systems/evermatter/issues/3143)) ([41276ad](https://github.com/substrate-systems/evermatter/commit/41276addfa75e045841a9380f212a267ede87096))
+
+
+### Bug Fixes
+
+* **activation:** keep legacy pages grandfathered after an exomem_id stamp ([#3161](https://github.com/substrate-systems/evermatter/issues/3161)) ([ca16019](https://github.com/substrate-systems/evermatter/commit/ca16019cd13650ec0f08979cbf6a282b74d26ec5))
+* **cloud-deploy:** fail a re-run while the rollout is paused ([#3151](https://github.com/substrate-systems/evermatter/issues/3151)) ([15a89af](https://github.com/substrate-systems/evermatter/commit/15a89af83850e6ecafb57b26b0c43fd2880c38ef))
+* follow the Evermatter rename in tests and diagnostics ([#3144](https://github.com/substrate-systems/evermatter/issues/3144)) ([5001574](https://github.com/substrate-systems/evermatter/commit/500157496d895fbea13aff012271e9ea22a944d1))
+* **graph:** leave barrier debt the queue owns to the queue ([#3157](https://github.com/substrate-systems/evermatter/issues/3157)) ([da8518a](https://github.com/substrate-systems/evermatter/commit/da8518a6d1d6af7baf3a8893e82c3943a1ad1a44))
+* **graph:** let a stop end start-up graph validation at the next page ([#3135](https://github.com/substrate-systems/evermatter/issues/3135)) ([f3d14fc](https://github.com/substrate-systems/evermatter/commit/f3d14fcd16aca2d0e188dafc468afb9fbeb49bdc))
+* **graph:** let a whole-vault rebuild wait out a brief deferred-index lock ([#3121](https://github.com/substrate-systems/evermatter/issues/3121)) ([01f93f7](https://github.com/substrate-systems/evermatter/commit/01f93f7869573a825890ad18f17724c21c09367f))
+* **licensing:** quiet LGPL in the image licence check and halve the OCR render peak ([#3116](https://github.com/substrate-systems/evermatter/issues/3116)) ([3d28e8c](https://github.com/substrate-systems/evermatter/commit/3d28e8cf893e663b60172a1abf938a704bbaebbd))
+* **recall:** offer store collections from the service's background index build ([#3111](https://github.com/substrate-systems/evermatter/issues/3111)) ([63644d2](https://github.com/substrate-systems/evermatter/commit/63644d26829ad0987df7b609501f6ac23309f42c))
+* **release:** keep a foreign commit visible after a rolled-back write ([#3141](https://github.com/substrate-systems/evermatter/issues/3141)) ([553d760](https://github.com/substrate-systems/evermatter/commit/553d760da08ea1e73d45672dfe3c73eb165d90e5))
+* **release:** verify each release against the repository that built it ([#3160](https://github.com/substrate-systems/evermatter/issues/3160)) ([380bdee](https://github.com/substrate-systems/evermatter/commit/380bdee7a672fc0d9a3cc7a5eb8728ee34efbac7))
+* **relocate:** refuse a moved page only for the debt the move adds ([#3120](https://github.com/substrate-systems/evermatter/issues/3120)) ([2cbdf41](https://github.com/substrate-systems/evermatter/commit/2cbdf4150709a46a73a00249536d7a81c3276fc0))
+* **runtime:** keep the recall registry through a slow watcher seed ([#3155](https://github.com/substrate-systems/evermatter/issues/3155)) ([d64a458](https://github.com/substrate-systems/evermatter/commit/d64a458a5853dbd4c86af36240b8604395179a6c))
+* **storage:** charge only an original's own pages to its derived room ([#3126](https://github.com/substrate-systems/evermatter/issues/3126)) ([12ecb7f](https://github.com/substrate-systems/evermatter/commit/12ecb7f41f68eef769acd8f8dc70a6ab512f6b1d))
+* **tools:** name what to change in refused tool calls ([#3159](https://github.com/substrate-systems/evermatter/issues/3159)) ([240e28b](https://github.com/substrate-systems/evermatter/commit/240e28bfc95ee79b1ce3ccfa908ccc721a7e582e))
+* **writes:** start the write intake before activation's start-up waits ([#3149](https://github.com/substrate-systems/evermatter/issues/3149)) ([9ba9501](https://github.com/substrate-systems/evermatter/commit/9ba95010af5e8a8e8c89ec9538fc5a7330b29b87))
+
+
+### Performance
+
+* **recall:** reread only changed dataset cards after a write ([#3079](https://github.com/substrate-systems/evermatter/issues/3079)) ([d702c8a](https://github.com/substrate-systems/evermatter/commit/d702c8a1a29cd11613a9d3fc3ac2e336a1a9b330))
+* **store:** keep collection view decisions across vault commits ([#3132](https://github.com/substrate-systems/evermatter/issues/3132)) ([9720da1](https://github.com/substrate-systems/evermatter/commit/9720da1b2a262a54354895fc03bd6f1cf63eb8e2))
+
 ## [0.201.0](https://github.com/Artexis10/exomem/compare/v0.200.0...v0.201.0) (2026-11-23)
 
 
