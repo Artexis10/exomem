@@ -2374,10 +2374,10 @@ class CollectionWriter:
         entry = restructure.creation_entry(
             transition_id=transition, collection_id=manifest.collection_id,
             at=automatic_collection.now_stamp(), origin=origin, why=why)
-        encoded = shape_history.encode(entry)
+        shape_text = shape_history.encode(entry)
         # The create's event carries the entry's digest, as a revise's does, so the chain covers the first entry.
         txn = self._txn(None, manifest, "create", why, identity, digest, _transition_id=transition,
-                        effects={"shape": shape_history.digest(encoded)})
+                        effects={"shape": shape_history.digest(shape_text)})
         if admission is not None:
             admission.record(manifest, txn)
         types.register_builtins(self.connection, txn_id=txn["txn_id"])
@@ -2440,7 +2440,7 @@ class CollectionWriter:
         # Stored with the receipt, so a replay and the served create report it too.
         receipt = records._with_warnings(receipt, [
             f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
-        shape_history.write(self._execute, entry, encoded, txn_id=txn["txn_id"])
+        shape_history.write(self._execute, entry, shape_text, txn_id=txn["txn_id"])
         self._precommit(manifest)
         self._insert_txn(txn, receipt)
         return receipt, manifest
@@ -3694,9 +3694,9 @@ class CollectionWriter:
             raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
         transition = None if shape is None else records._transition_id()
         entry = None if shape is None else shape(transition)
-        encoded = None if entry is None else shape_history.encode(entry)
+        shape_text = None if entry is None else shape_history.encode(entry)
         txn = self._txn(row, proposed, "revise", why, identity, digest, _transition_id=transition,
-                        effects=None if encoded is None else {"shape": shape_history.digest(encoded)})
+                        effects=None if shape_text is None else {"shape": shape_history.digest(shape_text)})
         self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
         old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
         new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
@@ -3784,7 +3784,7 @@ class CollectionWriter:
             affected_paths=(current.path,),
         )
         if entry is not None:
-            shape_history.write(self._execute, entry, encoded, txn_id=txn["txn_id"])
+            shape_history.write(self._execute, entry, shape_text, txn_id=txn["txn_id"])
         self._precommit(proposed)
         self._insert_txn(txn, receipt)
         return receipt, proposed, entry

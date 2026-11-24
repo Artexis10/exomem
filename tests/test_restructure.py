@@ -311,6 +311,19 @@ def test_a_row_with_a_new_field_is_saved_in_a_collection_larger_than_one_call_re
     assert work.rows()["c"]["note"] == "kept"
 
 
+def test_a_collection_that_holds_a_refused_row_still_reshapes_and_saves_a_row_with_a_new_field(work):
+    """The store's revise also replays held rows; their text must not become the shape entry its event binds."""
+    with pytest.raises(OpError) as refused:
+        work.append({"title": "held", "count": "not a number"})
+    assert refused.value.as_public_dict().get("held")
+
+    work.restructure(steps=[{"step": "retitle", "title": "Plants"}])
+    work.operate("append", collection=work.collection_id, item={"title": "c", "count": 5, "note": "kept"}, why=WHY,
+                 new_fields=["note"])
+
+    assert work.manifest()["title"] == "Plants" and work.rows()["c"]["note"] == "kept"
+
+
 def test_a_declined_proposal_is_recorded_for_a_collection_larger_than_one_call_reshapes(work, monkeypatch):
     monkeypatch.setattr(restructure, "MAX_COLLECTION_ROWS", 1)
 
