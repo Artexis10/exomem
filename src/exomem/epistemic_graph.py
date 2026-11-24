@@ -1383,10 +1383,11 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     not refused by the epoch or by an unready vault. The oldest receipt's age
     bounds it: a requeue keeps a receipt's first enqueue time, so a receipt
     that never drains ages past the threshold however much drains around it.
-    That age counts only from this process's first per-path attempt
-    (`graph_drain.per_path_repair_attempted_for`): a receipt queued before it,
-    by a worker that never drained it, is untried here, and its age across
-    process lifetimes is not a stall.
+    That age counts only from when this process first saw receipts queued
+    (`graph_drain.observed_receipt_age`): a receipt queued before it, by a
+    worker that never drained it, is unseen here, and its age across process
+    lifetimes is not a stall. It runs whichever pass drains or fails, so a
+    queue this process cannot clear escalates after the threshold.
     The age does not bound a queue whose latest pass cleared nothing only
     because live commits won the race for it
     (`graph_drain.per_path_repair_raced`): that queue is old because writes keep
@@ -1399,9 +1400,9 @@ def _graph_receipts_own_repair(vault_root: Path) -> bool:
     if graph_drain.per_path_repair_blocked(vault_root):
         return False
     try:
-        oldest_age = deferred_index.graph_oldest_receipt_age(vault_root)
-        if oldest_age is not None:
-            oldest_age = min(oldest_age, graph_drain.per_path_repair_attempted_for(vault_root))
+        oldest_age = graph_drain.observed_receipt_age(
+            vault_root, deferred_index.graph_oldest_receipt_age(vault_root)
+        )
         return (
             oldest_age is not None
             and (

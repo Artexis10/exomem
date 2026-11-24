@@ -116,11 +116,12 @@ _PER_PATH_LOCK = threading.Lock()
 #: stall. None records contention with an observation set too large to prove.
 _per_path_raced: dict[Path, bool | None] = {}
 
-#: When this process first tried per-path repair for each vault, on the clock
-#: that ages queued receipts (`deferred_index.time`). A receipt older than that
-#: was queued before this process tried to drain it, so its wall-clock age says
-#: nothing about a stall. Scheduling state only, like `_per_path_blocked`.
-_per_path_first_attempt: dict[Path, float] = {}
+#: When this process first saw receipts queued for each vault, on the clock that
+#: ages them (`deferred_index.time`); dropped when it sees the queue empty. A
+#: receipt older than that was queued before this process looked at it, so its
+#: wall-clock age says nothing about a stall. Scheduling state only, like
+#: `_per_path_blocked`.
+_receipts_first_seen: dict[Path, float] = {}
 
 #: Threads whose watcher batch holds a vault's read barrier as its fence, from
 #: the withdrawal until the batch's graph fan-out has queued its repair. The
@@ -188,32 +189,31 @@ def note_graph_progress(vault_root: Path) -> None:
     _DEBT.set()
 
 
-def _note_first_attempt_locked(key: Path) -> None:
-    from . import deferred_index
+def observed_receipt_age(vault_root: Path, oldest_age: float | None) -> float | None:
+    """The oldest queued receipt's age, counted from when this process first saw receipts queued.
 
-    _per_path_first_attempt.setdefault(key, deferred_index.time.time())
-
-
-def per_path_repair_attempted_for(vault_root: Path) -> float:
-    """Seconds this process has been trying per-path repair for this vault; 0.0 before its first try.
-
-    Bounds a receipt's age for the stall escalation: a receipt queued before this
-    process's first attempt is the queue's until the process has tried it for
-    `stall_seconds`, however long it sat in the durable queue before.
+    The stall escalation's clock: a receipt queued before this process looked
+    at the queue is the queue's until the process has watched it for
+    `stall_seconds`, however long it sat in the durable queue before, and
+    whichever pass drains or fails meanwhile. `oldest_age` is the queue's own
+    reading, None for an empty queue, which restarts the count.
     """
     from . import deferred_index
 
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        first = _per_path_first_attempt.get(key)
-    return 0.0 if first is None else max(0.0, deferred_index.time.time() - first)
+        if oldest_age is None:
+            _receipts_first_seen.pop(key, None)
+            return None
+        now = deferred_index.time.time()
+        first = _receipts_first_seen.setdefault(key, now)
+    return min(oldest_age, max(0.0, now - first))
 
 
 def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
     """Record whether this vault's latest per-path drain could repair per path."""
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        _note_first_attempt_locked(key)
         if admissible:
             _per_path_blocked.discard(key)
         else:
@@ -254,7 +254,6 @@ def note_per_path_race(vault_root: Path, *, raced: bool | None) -> None:
     """Record proved or inconclusive contention on the latest per-path drain."""
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        _note_first_attempt_locked(key)
         if raced is False:
             _per_path_raced.pop(key, None)
         else:

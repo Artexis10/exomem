@@ -2162,6 +2162,11 @@ class FileWatcher:
         rebuild_graph = epistemic_graph.graph_enabled() and graph_exists
         try:
             decline = epistemic_graph.recovery_decline_reason(self._vault_root) if rebuild_graph else None
+            if decline == epistemic_graph.RECOVERY_DECLINE_ACKNOWLEDGEMENT_IN_FLIGHT:
+                # A batch holds the barrier as its fence and retires this epoch
+                # itself once its repair is queued; withdrawing and rebuilding
+                # under it would redo the whole vault for the page it queues.
+                return
             marker_owns_repair = decline == epistemic_graph.RECOVERY_DECLINE_MARKER_OWNS_REPAIR
             if decline == epistemic_graph.RECOVERY_DECLINE_QUEUE_OWNS_REPAIR:
                 observation = freshness.external_observation_stamp()
@@ -2573,6 +2578,8 @@ class FileWatcher:
                     self._suspend_reads_for_acknowledgement(candidate)
                 except Exception:  # noqa: BLE001 - retain pending for periodic recovery
                     ack_ready = False
+                    # The withdrawal failed, so no fence stands and periodic recovery owns the epoch.
+                    graph_drain.note_acknowledgement_finished(self._vault_root)
                     log.exception("file watcher: graph availability withdrawal failed")
                 else:
                     guarded_graph = candidate

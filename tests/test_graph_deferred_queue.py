@@ -48,6 +48,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1952,27 +1953,34 @@ def _watcher_sees_a_create_the_checkpoint_does_not_cover(vault: Path) -> file_wa
 
 
 @pytest.mark.parametrize(
-    ("owner", "step"),
+    ("owner", "step", "poll"),
     [
-        (index_sync, "upsert_after_write"),
-        (freshness, "retire_external_pending_paths"),
+        (index_sync, "upsert_after_write", "drain"),
+        (freshness, "retire_external_pending_paths", "drain"),
+        (freshness, "retire_external_pending_paths", "reconcile_recovery"),
     ],
-    ids=["after_the_mark_is_retired", "before_the_mark_is_retired"],
+    ids=[
+        "drain_poll_after_the_mark_is_retired",
+        "drain_poll_before_the_mark_is_retired",
+        "reconcile_recovery_before_the_mark_is_retired",
+    ],
 )
-def test_a_drain_poll_inside_the_watchers_fence_rebuilds_nothing(
+def test_a_poll_inside_the_watchers_fence_rebuilds_nothing(
     vault: Path,
     whole_vault_passes: list[str],
     monkeypatch: pytest.MonkeyPatch,
     owner: Any,
     step: str,
+    poll: str,
 ) -> None:
-    """The drain's idle poll must not rebuild a barrier the watcher is mid-way through handing over.
+    """A poll must not rebuild a barrier the watcher is mid-way through handing over.
 
     The watcher raises the read barrier, retires the path's mark and only then
     queues the path, about 0.3 s later. A drain poll in that gap found a barrier
     with an empty queue and no mark, and ran a whole-vault rebuild (346 s on a
     live vault) for a page the queue was about to own. A poll before the mark
-    retired took the other rebuild route, `barrier_external_epoch`.
+    retired took the other rebuild route, `barrier_external_epoch`. A reconcile
+    pass before the mark retired took a third, `_recover_external_pending`.
     """
     watcher = _watcher_sees_a_create_the_checkpoint_does_not_cover(vault)
     whole_vault_passes.clear()
@@ -1981,14 +1989,19 @@ def test_a_drain_poll_inside_the_watchers_fence_rebuilds_nothing(
     def poll_then_run(*args: Any, **kwargs: Any) -> Any:
         if not polls:
             polls.append(EpistemicGraphIndex(vault).reads_suspended())
-            graph_drain._work_once(vault)  # the drain's idle poll
+            if poll == "drain":
+                graph_drain._work_once(vault)  # the drain's idle poll
+            else:
+                epoch = freshness.external_pending_epoch(vault)
+                assert epoch is not None, "the mark was already retired"
+                watcher._recover_external_pending(epoch)  # the reconcile's recovery step
         return real(*args, **kwargs)
 
     monkeypatch.setattr(owner, step, poll_then_run)
     watcher._flush()
 
     assert polls == [True], "the poll did not land inside the fence"
-    assert whole_vault_passes == [], "a drain poll rebuilt the vault inside the watcher's fence"
+    assert whole_vault_passes == [], "a poll rebuilt the vault inside the watcher's fence"
     assert deferred_index.graph_full_rebuild_pending(vault) is None
     assert deferred_index.list_graph_paths(vault) == [CREATED], "the outside write's repair is not queued"
     assert not graph_drain.acknowledgement_in_flight(vault), "the batch kept its fence after it finished"
@@ -2051,6 +2064,108 @@ def test_inherited_receipts_are_drained_before_barrier_recovery(
     file_watcher.FileWatcher(vault, debounce_seconds=0.2)._reconcile_once(seed=False)
 
     assert whole_vault_passes == [], "barrier recovery rebuilt the vault before the drain ran"
+    assert deferred_index.list_graph_paths(vault) == []
+    assert EpistemicGraphIndex(vault).available()
+    _assert_matches_a_fresh_rebuild(vault)
+
+
+def test_a_failed_withdrawal_leaves_no_fence_behind_it(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch whose withdrawal fails holds no barrier, so it must not hold recovery off.
+
+    The epoch stays pending for periodic recovery, and the rest of the batch
+    can run for a long time; an entry that outlived the failed withdrawal would
+    decline that recovery the whole while.
+    """
+    watcher = _watcher_sees_a_create_the_checkpoint_does_not_cover(vault)
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the barrier could not be raised")
+
+    held, real = [], index_sync.upsert_after_write
+
+    def note_then_run(*args: Any, **kwargs: Any) -> Any:
+        held.append(graph_drain.acknowledgement_in_flight(vault))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(watcher, "_suspend_reads_for_acknowledgement", refuse)
+    monkeypatch.setattr(index_sync, "upsert_after_write", note_then_run)
+    watcher._flush()
+
+    assert held == [False], "the batch kept its fence entry after its withdrawal failed"
+    assert freshness.external_pending(vault), "a failed withdrawal retired the epoch"
+
+
+def _inherited_receipts_behind_a_raised_barrier(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> list[float]:
+    """Adopted residue whose receipts are 10 stall thresholds old, on a clock the test advances.
+
+    Returns the one-element list that holds the seconds the clock has moved.
+    """
+    _write_without_graph_repair(vault, monkeypatch, {PAGE_A: _page("A", "Changed.")})
+    with sqlite3.connect(deferred_index.store_path(vault)) as conn:
+        conn.execute("UPDATE graph_upserts SET created_at = ?", (time.time() - 10 * graph_drain.stall_seconds(),))
+    _seed_live_freshness(vault)
+    assert EpistemicGraphIndex(vault).apply_adopted_residue({PAGE_A})
+    graph_drain._per_path_blocked.clear()
+    graph_drain._per_path_raced.clear()
+    moved, real_clock = [0.0], time.time
+    monkeypatch.setattr(
+        deferred_index, "time",
+        SimpleNamespace(time=lambda: real_clock() + moved[0], monotonic=time.monotonic),
+    )
+    return moved
+
+
+def test_receipts_behind_a_barrier_escalate_once_this_process_has_watched_them_for_the_stall(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Receipts that never drain must not hold the barrier for good, whichever pass fails.
+
+    With no graph drain thread (the kill switch, or startup held until
+    retrieval is admitted) the watcher's reconcile is the only drain. When its
+    per-path pass raises before it records an attempt, the stall clock must
+    still run, or recovery declines behind the queue on every pass.
+    """
+    moved = _inherited_receipts_behind_a_raised_barrier(vault, monkeypatch)
+
+    def failing_pass(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("the per-path pass failed")
+
+    monkeypatch.setattr(index_sync, "_drain_graph_receipts", failing_pass)
+    whole_vault_passes.clear()
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.2)
+
+    for _ in range(4):
+        watcher._reconcile_once(seed=False)
+        moved[0] += 300.0
+
+    assert whole_vault_passes == ["pass"], "receipts that never drained held the barrier past the stall"
+    assert EpistemicGraphIndex(vault).available()
+
+
+def test_a_process_past_the_stall_still_drains_before_it_rebuilds_the_vault(
+    vault: Path, whole_vault_passes: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reconcile's drain runs before its barrier recovery, even for a queue judged stalled.
+
+    This process has watched the receipts for longer than the stall threshold,
+    but the drain can clear them now. Recovery first would rebuild the whole
+    vault for work the next call repairs per path.
+    """
+    moved = _inherited_receipts_behind_a_raised_barrier(vault, monkeypatch)
+    assert (
+        epistemic_graph.recovery_decline_reason(vault)
+        == epistemic_graph.RECOVERY_DECLINE_QUEUE_OWNS_REPAIR
+    ), "the first sight of the receipts was judged stalled"
+    moved[0] += graph_drain.stall_seconds() + 1.0
+    whole_vault_passes.clear()
+
+    file_watcher.FileWatcher(vault, debounce_seconds=0.2)._reconcile_once(seed=False)
+
+    assert whole_vault_passes == [], "barrier recovery ran before the reconcile's drain"
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
     _assert_matches_a_fresh_rebuild(vault)
