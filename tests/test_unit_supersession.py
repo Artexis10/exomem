@@ -885,23 +885,52 @@ def test_a_line_separator_inside_an_item_does_not_shift_the_relation_lines(
     assert [finding.detail.rsplit(": ", 1)[-1] for finding in findings] == ["'Sells seeds.'"]
 
 
-def test_a_dry_run_fix_lists_the_plan_and_writes_nothing(tmp_path: Path) -> None:
-    page = _facet_audit_vault(tmp_path)
+def _facet_and_link_vault(root: Path) -> Path:
+    """An entity page with one facet claim and one link that the fix canonicalises."""
+    _write_page(
+        root,
+        rel="Knowledge Base/Entities/Cedar Two.md",
+        source=(
+            "---\ntitle: Cedar Two\ntype: entity\nentity_type: organisation\nstatus: active\n"
+            "exomem_id: 00000000-0000-4000-8000-000000000093\nupdated: 2026-07-15\n---\n\n"
+            "# Cedar Two\n"
+        ),
+    )
+    return _write_page(
+        root,
+        rel=ENTITY_PAGE,
+        source=_entity_source(
+            "# Harbour Co-op\n\n"
+            "## Suppliers\n- Juniper One takes preorders.\n\n"
+            "## Related\n- [[cedar two]]\n"
+        ),
+    )
+
+
+def test_a_dry_run_fix_lists_every_item_its_plan_covers_and_writes_nothing(tmp_path: Path) -> None:
+    page = _facet_and_link_vault(tmp_path)
     before = page.read_bytes()
 
     report = audit_fix.audit_fix(tmp_path, dry_run=True)
 
     assert report.plan_id
     assert page.read_bytes() == before
+    listed = [fixed for fixed in report.fixed if fixed.path == ENTITY_PAGE]
+    assert [fixed.category for fixed in listed] == ["broken_wikilink", "entity_facet_unaddressed"]
+    assert "'Juniper One takes preorders.'" in listed[1].detail
+    assert "- [suppliers] Juniper One takes preorders. ^" in listed[1].action
 
 
-def test_the_local_apply_does_not_convert_facet_items(tmp_path: Path) -> None:
-    page = _facet_audit_vault(tmp_path)
-    before = page.read_bytes()
+def test_the_local_apply_lands_the_link_fix_and_leaves_the_facet_item(tmp_path: Path) -> None:
+    """Facet conversion waits for a reviewed plan; the page's other fixes do not wait with it."""
+    page = _facet_and_link_vault(tmp_path)
 
-    audit_fix.audit_fix(tmp_path)
+    report = audit_fix.audit_fix(tmp_path)
 
-    assert page.read_bytes() == before
+    text = page.read_bytes().decode("utf-8")
+    assert "\n- Juniper One takes preorders.\n" in text
+    assert "[[cedar two]]" not in text
+    assert [fixed.category for fixed in report.fixed if fixed.path == ENTITY_PAGE] == ["broken_wikilink"]
 
 
 def test_the_reviewed_plan_converts_items_in_place(tmp_path: Path) -> None:

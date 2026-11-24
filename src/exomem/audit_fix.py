@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import access, find_corpus, foreground_priority, indexes, temporal
+from . import access, find_corpus, foreground_priority, indexes, semantic_units, temporal
 from . import audit as audit_module
 from . import find as find_module
 from .vault import (
@@ -352,13 +352,24 @@ class _Rewrite:
     rel: str
     write: PlannedWrite
     before_hash: str
-    #: Rewrites a human must review first apply only through a reviewed plan
-    #: (`_commit_in_chunks`); the local apply leaves the page alone.
-    reviewed_only: bool = False
+    #: The page with a reviewed-only layer on top of `write` (entity facet conversions), and the
+    #: fixes that layer adds. A reviewed plan applies it; the local apply writes `write` alone.
+    reviewed: PlannedWrite | None = None
+    reviewed_fixes: tuple[FixedFinding, ...] = ()
+
+    @property
+    def planned(self) -> PlannedWrite:
+        """The write a reviewed plan applies, which its `plan_id` names."""
+        return self.reviewed or self.write
 
     @property
     def after_hash(self) -> str:
-        return content_hash(self.write.content)
+        return content_hash(self.planned.content)
+
+    @property
+    def changes_locally(self) -> bool:
+        """Whether the local apply has anything to write: a page with only reviewed-only fixes does not."""
+        return content_hash(self.write.content) != self.before_hash
 
 
 def _plan_sidecar_repairs(
@@ -478,30 +489,54 @@ def _compose_writes(*groups: list[PlannedWrite]) -> list[PlannedWrite]:
 
 
 
-def _facet_converted_body(
+def _facet_conversions(
     vault_root: Path, rel_path: str, fm: Any, body: str
-) -> tuple[str, int]:
-    """The body with each entity facet claim converted to a compact unit in place.
+) -> list[tuple[Any, tuple[int, int, str]]]:
+    """Each entity facet claim of the page and the splice that converts it to a compact unit in place.
 
     The enumeration is the audit check's own (`audit_module.entity_facet_claims`),
     and each conversion is the one the supersede span path writes
     (`observe_memory.claim_conversion`): one conversion contract.
     """
-    from . import note_types, observe_memory, semantic_index, semantic_units
+    from . import note_types, observe_memory, semantic_index
 
     note_type = note_types.Basis(vault_root).resolve(
         str(fm.get("type") or "") if isinstance(fm, dict) else ""
     )
     if not note_type.selects(note_types.entity_role):
-        return body, 0
+        return []
     try:
         state = semantic_index.selected_parent_index_state(vault_root, rel_path)
     except (OSError, ValueError):
-        return body, 0
-    claims = audit_module.entity_facet_claims(body, state.document)
+        return []
     existing: set[str | None] = {unit.anchor for unit in state.document.units if unit.anchor}
-    conversions = [observe_memory.claim_conversion(target, existing)[1] for target in claims]
-    return semantic_units.apply_splices(body, conversions), len(claims)
+    return [
+        (target, observe_memory.claim_conversion(target, existing)[1])
+        for target in audit_module.entity_facet_claims(body, state.document)
+    ]
+
+
+def _rendered(original: str, fm_text: str | None, new_fm_text: str | None, body: str) -> str:
+    """The page text from its fixed frontmatter and body, keeping the original's newline and spacing."""
+    if fm_text is None:
+        return body
+    had_blank_after_fm = bool(
+        re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", original, re.DOTALL)
+    )
+    return render_frontmatter_document(
+        new_fm_text,
+        body,
+        newline=document_newline(original),
+        blank_line=had_blank_after_fm,
+    )
+
+
+def _list_reviewed_layer(rewrites: list[_Rewrite], report: AuditFixReport) -> None:
+    """Report the reviewed-only layer: a dry run lists what its plan covers, a reviewed run applies it."""
+    for rewrite in rewrites:
+        report.fixed.extend(rewrite.reviewed_fixes)
+        if rewrite.reviewed is not None and not rewrite.changes_locally:
+            report.files_rewritten += 1
 
 
 def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> list[_Rewrite]:
@@ -537,23 +572,8 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
             new_fm_text, fm_warnings = _normalize_frontmatter_wikilinks(
                 fm_text, vault_root, resolver
             )
-        # An entity page's facet claims convert to compact units in place —
-        # only inside a reviewed plan, so the local apply never moves them.
-        try:
-            rel = _page_rel(vault_root, md)
-        except ValueError:
-            rel = md.as_posix()
-        facet_body, facet_count = _facet_converted_body(vault_root, rel, fm, body)
-        reviewed_only = facet_count > 0
-        if reviewed_only:
-            report.fixed.append(FixedFinding(
-                category="entity_facet_unaddressed",
-                path=rel,
-                detail=f"{facet_count} unaddressed facet claim(s)",
-                action="converted to compact units under their section's category",
-            ))
         new_body, _body_warnings = normalize_body_wikilinks(
-            facet_body, vault_root, resolver=resolver
+            body, vault_root, resolver=resolver
         )
 
         # ---- Pass 2: frontmatter backfill (only on this file's parsed fm) ----
@@ -591,25 +611,35 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
                         action=f"converted to `projects: [{old_value}]`",
                     ))
 
-        # Reconstruct file text.
-        if fm_text is not None:
-            had_blank_after_fm = bool(
-                re.match(r"^---\r?\n.*?\r?\n---\r?\n\r?\n", original, re.DOTALL)
+        new_text = _rendered(original, fm_text, new_fm_text, new_body)
+        try:
+            rel = _page_rel(vault_root, md)
+        except ValueError:
+            rel = md.as_posix()
+        # An entity page's facet claims convert to compact units in place only inside a reviewed
+        # plan: that layer sits on top of this page's other fixes, which the local apply still writes.
+        conversions = _facet_conversions(vault_root, rel, fm, body)
+        reviewed = None
+        if conversions:
+            layered_body, _ = normalize_body_wikilinks(
+                semantic_units.apply_splices(body, [splice for _, splice in conversions]),
+                vault_root,
+                resolver=resolver,
             )
-            new_text = render_frontmatter_document(
-                new_fm_text,
-                new_body,
-                newline=document_newline(original),
-                blank_line=had_blank_after_fm,
+            reviewed = PlannedWrite(
+                path=md, content=_rendered(original, fm_text, new_fm_text, layered_body), guard=original_guard
             )
-        else:
-            new_text = new_body
+        reviewed_fixes = tuple(
+            FixedFinding(
+                category="entity_facet_unaddressed",
+                path=rel,
+                detail=f"facet {target.item.heading!r} claim at line {target.item.line}: {target.item.text!r}",
+                action=f"converted in place to {splice[2].strip()!r} (reviewed plan only)",
+            )
+            for target, splice in conversions
+        )
 
         if new_text != original:
-            try:
-                rel = _page_rel(vault_root, md)
-            except ValueError:
-                rel = md.as_posix()
             # Wikilink-only canonicalizations weren't logged as fixes above;
             # surface them so the report shows the file got touched.
             if not any(f.path == rel for f in report.fixed):
@@ -619,15 +649,17 @@ def _plan_content(vault_root: Path, report: AuditFixReport, today_iso: str) -> l
                     detail="non-canonical wikilink(s) in body or frontmatter",
                     action="rewrote to full vault-rooted canonical form",
                 ))
+            report.files_rewritten += 1
+        if new_text != original or reviewed is not None:
             rewrites.append(
                 _Rewrite(
                     rel,
                     PlannedWrite(path=md, content=new_text, guard=original_guard),
                     content_hash(original),
-                    reviewed_only=reviewed_only,
+                    reviewed=reviewed,
+                    reviewed_fixes=reviewed_fixes,
                 )
             )
-            report.files_rewritten += 1
 
     # ---- Pass 2b: collapse media sidecars that nested copies of themselves ----
     # Evidence/ is skipped by the compiled-page passes above (append-only), so
@@ -689,16 +721,8 @@ def _apply_whole(vault_root: Path, kb: Path, rewrites: list[_Rewrite], report: A
     This is the local command's path: the caller holds the mutation boundary for the whole call.
     """
     # ---- Pass 3: sub-folder index refresh + top-index counts ----
-    # Rewrites a human must review first stay out of the local apply; their
-    # reported "fixed" entries move back to unapplied so the receipt stays honest.
-    withheld = [rewrite for rewrite in rewrites if rewrite.reviewed_only]
-    if withheld:
-        withheld_paths = {rewrite.rel for rewrite in withheld}
-        report.fixed = [
-            item for item in report.fixed if item.path not in withheld_paths
-        ]
-        report.files_rewritten -= len(withheld)
-    writes = [rewrite.write for rewrite in rewrites if not rewrite.reviewed_only]
+    # The reviewed-only layer stays out: it applies only through a reviewed plan.
+    writes = [rewrite.write for rewrite in rewrites if rewrite.changes_locally]
     index_pages = {
         _page_key(vault_root, kb / "index.md"),
         _page_key(vault_root, kb / "Sources" / "index.md"),
@@ -735,14 +759,14 @@ def _commit_in_chunks(vault_root: Path, kb: Path, rewrites: list[_Rewrite], repo
 
     root = Path(vault_root)
     # Colliding destinations are refused before the first write, as `_apply_whole` refuses them.
-    _compose_writes([rewrite.write for rewrite in rewrites])
+    _compose_writes([rewrite.planned for rewrite in rewrites])
     index_started = False
-    planned = {rewrite.rel: rewrite.write.content for rewrite in rewrites}
+    planned = {rewrite.rel: rewrite.planned.content for rewrite in rewrites}
     try:
         kept, skipped = maintenance_jobs.commit_pages(
             root,
             "audit_fix_chunk",
-            [(item.rel, item.write.path, item.before_hash) for item in rewrites],
+            [(item.rel, item.planned.path, item.before_hash) for item in rewrites],
             # A kept page still has the text the plan was made from, so it gets the planned text.
             lambda rel, _text: planned[rel],
         )
@@ -828,6 +852,8 @@ def audit_fix(
         maintenance_jobs.checkpoint("planning")
     rewrites = _plan_content(vault_root, report, today_iso)
     report.plan_id = _plan_id(rewrites, rebuild_embeddings)
+    if dry_run or reviewed:
+        _list_reviewed_layer(rewrites, report)
     if dry_run:
         # What the plan does to each page, so an owner reads it from the job's receipt before approving a write.
         what: dict[str, list[str]] = {}
