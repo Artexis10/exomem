@@ -7,7 +7,7 @@ Pages hold what a person knows and why. Records hold what is or was. Planning ho
 - A Records `link` field accepts any string. A row names its page as free text, such as a title, and no write checks it.
 - No page can show the rows or plan items that cite it. `read_page(links=true)` reports only Markdown wikilinks.
 - When recall finds a page, it does not show the state that lives in Records about the same thing.
-- An agent that seeds a collection is not shown the pages that already know the row's subject. A dogfood incident on 2026-11-24 recorded an agent that wrote "unknown" three times in one session over facts that existing pages already held.
+- An agent that seeds a collection is not shown the pages that already know the row's subject. An incident on 2026-11-24 recorded an agent that wrote "unknown" three times in one session over facts that existing pages already held.
 - A new collection can duplicate an existing one, and nothing points to the overlap.
 - When the same fact lives on a page and in a row, nothing finds it.
 

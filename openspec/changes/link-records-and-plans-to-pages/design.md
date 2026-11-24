@@ -51,7 +51,7 @@ Primary-source basis. The roster rows used are "The model keeps misusing a tool/
 - Link values inside child tables or object properties are not canonicalised or indexed in this change; a follow-up covers them.
 - A withheld page reads exactly like a missing one, both on write and on read.
 
-Alternative rejected: a new `page` field type. `link` already exists, renders through `link_kind`, and is what manifests use (for example the Dogfood Incidents `related_notes`). A second type would split the meaning.
+Alternative rejected: a new `page` field type. `link` already exists, renders through `link_kind`, and is what manifests already use for page links (for example a `related_notes` field on a maintenance log). A second type would split the meaning.
 
 ### D2. Plan items carry `results`
 
