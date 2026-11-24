@@ -917,6 +917,7 @@ class _Row(NamedTuple):
     in_view: bool
     src_page: str | None
     dst_page: str | None
+    src_kind: str | None  # "file" or the unit kind
     dst_kind: str | None  # "file" or the unit kind
     dst_anchor: str | None
     fragment: str | None  # how a `#fragment` target resolved; None for no fragment
@@ -1061,7 +1062,7 @@ class _Reader:
             source_end = self._endpoint(edge["src_key"])
             target_end = self._endpoint(edge["dst_key"]) if source_end is not None else None
             in_view = target_end is not None
-            src_path = source_end[0] if in_view else None
+            src_path, src_kind = source_end[:2] if in_view else (None, None)
             dst_path, dst_kind, dst_anchor = target_end if in_view else (None, None, None)
             yield _Row(
                 edge["edge_key"],
@@ -1077,6 +1078,7 @@ class _Reader:
                 in_view,
                 src_path,
                 dst_path,
+                src_kind,
                 dst_kind,
                 dst_anchor,
                 metadata.get("fragment_resolution"),
@@ -1529,8 +1531,9 @@ def _check_row(
             answered = reader.question_unit(dst_page, row.dst_kind)
         record("answers_without_question", not answered)
     if definition is not None and definition.family in _EPISTEMIC_FAMILIES:
-        # A same-page `replaces` edge is a unit supersession, not epistemic debt.
-        if not (same_page and row.has("replaces")):
+        # A unit superseding a unit on its own page corrects a claim; it is not epistemic debt.
+        units = "file" not in (row.src_kind, row.dst_kind)
+        if not (same_page and units and row.has("replaces")):
             record("same_page_epistemic", same_page)
     if row.has("opposes") and not same_page:
         record("contradicts_within_chain", chain.find(src_page) == chain.find(dst_page))
