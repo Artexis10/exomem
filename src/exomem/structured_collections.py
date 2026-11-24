@@ -3303,12 +3303,17 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
         raise CollectionError("INVALID_ITEM_SCHEMA", "link_kind must be a string")
     relation = raw.get("relation")
     if relation is not None and (kind != "link" or type(relation) is not str or not relation.strip()):
+        from . import relation_registry
+        from .collection_store import link_declarations
+
+        # The parser has no vault, so its example names a shipped relation; create and revise check the overlay.
+        admissible = link_declarations.admissible_relations(relation_registry.core_registry())
         raise CollectionError(
             "INVALID_ITEM_SCHEMA",
             "relation is a non-empty registry relation key, and only a link field declares it",
             {"field": f"{at}.relation", "received": relation if kind == "link" else f"a {kind} field",
              "expected": "a link field with relation: <registry relation key>",
-             "example": "page: {type: link, relation: cites}"},
+             "example": link_declarations.example(at.rsplit(".", 1)[-1], admissible)},
         )
     offset = raw.get("offset")
     if offset is not None and (kind != "datetime" or depth or type(offset) is not str):

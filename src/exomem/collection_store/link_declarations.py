@@ -28,10 +28,7 @@ def require_relations(root: Path, proposed: collections.CollectionManifest,
     if not named:
         return
     # An overlay the caller may not read is not consulted, so the list never names its relations.
-    registry = relation_registry.load_admitted(root) or relation_registry.core_registry()
-    definitions = (*registry.core.values(), *registry.extensions.values())
-    admissible = sorted(item.key for item in definitions
-                        if item.status == "active" and relation_registry.COLLECTION_LINK_ORIGIN in item.origins)
+    admissible = admissible_relations(relation_registry.load_admitted(root) or relation_registry.core_registry())
     for declaration in named:
         if declaration.relation not in admissible:
             raise collections.CollectionError(
@@ -40,5 +37,17 @@ def require_relations(root: Path, proposed: collections.CollectionManifest,
                 "name one of the admissible relations",
                 {"field": f"item_schema.fields.{declaration.path[0]}.relation",
                  "received": declaration.relation, "allowed": admissible[:_LISTED],
-                 "example": f"{declaration.path[0]}: {{type: link, relation: {admissible[0] if admissible else '<relation>'}}}"},
+                 "example": example(declaration.path[0], admissible)},
             )
+
+
+def admissible_relations(registry: relation_registry.RelationRegistry) -> list[str]:
+    """The active relations of ``registry`` whose origins let a collection link carry them, sorted."""
+    definitions = (*registry.core.values(), *registry.extensions.values())
+    return sorted(item.key for item in definitions
+                  if item.status == "active" and relation_registry.COLLECTION_LINK_ORIGIN in item.origins)
+
+
+def example(field: str, admissible: list[str]) -> str:
+    """A link field declaration that names the first admissible relation, for a refusal to show."""
+    return f"{field}: {{type: link, relation: {admissible[0] if admissible else '<relation>'}}}"
