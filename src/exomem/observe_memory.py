@@ -1255,6 +1255,29 @@ def _select_kind(
         language, projects
     )
     resolution = registry.resolve_kind(raw, page_type=page_type)
+    keeps_its_kind = (
+        current_unit is not None
+        and current_unit.form == "rich"
+        and current_unit.kind == resolution.resolved
+    )
+    refusal = _kind_refusal(registry, raw, resolution, keeps_its_kind=keeps_its_kind)
+    if refusal is not None:
+        raise refusal
+    return str(resolution.resolved)
+
+
+def _kind_refusal(
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    raw: str,
+    resolution: Any,
+    *,
+    keeps_its_kind: bool,
+) -> ObserveMemoryError | None:
+    """Why this tool cannot write a unit of the resolved kind, or None when it can.
+
+    `_select_kind` raises it and `_admitted_kind_keys` lists only the kinds it
+    passes, so a remediation never offers a kind that the write then refuses.
+    """
     if resolution.resolved is None or resolution.status in {
         "unregistered",
         "registry_invalid",
@@ -1262,26 +1285,19 @@ def _select_kind(
         "deprecated",
     }:
         replacement = f"; use {resolution.replacement!r}" if resolution.replacement else ""
-        raise ObserveMemoryError(
+        return ObserveMemoryError(
             "UNSUPPORTED_SEMANTIC_KIND",
             f"kind {raw!r} is not an active governed rich kind{replacement}",
         )
-    if resolution.resolved == _COMPACT_KIND:
-        return _COMPACT_KIND
-    keeps_its_kind = (
-        current_unit is not None
-        and current_unit.form == "rich"
-        and current_unit.kind == resolution.resolved
-    )
     if registry.has(resolution.resolved, "credence") and not keeps_its_kind:
         # This tool takes no holder or credence, so a new belief from it would be nobody's.
-        raise ObserveMemoryError(
+        return ObserveMemoryError(
             "UNSUPPORTED_SEMANTIC_KIND",
             f"kind {raw!r} records one holder's credence, and "
             f"{capabilities.active_tools_text('observe_memory')} takes no holder or credence",
             _belief_remediation(),
         )
-    return resolution.resolved
+    return None
 
 
 def _belief_remediation() -> str:
@@ -1301,14 +1317,14 @@ def _admitted_kind_keys(
 ) -> tuple[str, ...]:
     """The rich kind keys the page's selected registry admits for a new unit."""
     registry = semantic_language_registry.for_attached_projects(language, projects)
-    keys = {
-        key for key in registry.registry.core_kinds if key not in semantic_kinds.compact_kinds()
-    }
-    refused = {"unregistered", "registry_invalid", "scope_violation", "deprecated"}
-    for key in registry.registry.kinds:
-        if registry.resolve_kind(key, page_type=page_type).status not in refused:
-            keys.add(key)
-    return tuple(sorted(keys))
+    return tuple(sorted(
+        key
+        for key in set(registry.registry.core_kinds) | set(registry.registry.kinds)
+        if key not in semantic_kinds.compact_kinds()
+        and _kind_refusal(
+            registry, key, registry.resolve_kind(key, page_type=page_type), keeps_its_kind=False
+        ) is None
+    ))
 
 
 def _rich_kind_remediation(

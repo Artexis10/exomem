@@ -200,6 +200,25 @@ def test_links_on_a_compact_unit_list_the_admitted_kinds(tmp_path: Path) -> None
     assert "kind" in message
 
 
+def test_the_listed_kinds_leave_out_a_kind_this_write_refuses(tmp_path: Path) -> None:
+    """A credence kind needs a holder this tool cannot take, so the remediation never offers it."""
+    from exomem import semantic_language_registry
+
+    _write_page(tmp_path, source=_page_source("# Observe\n\nExisting prose.\n"))
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND") as raised:
+        commands.op_observe_memory(
+            tmp_path, path=PAGE, operation="add",
+            category="rule", content="A claim.",
+            relations=[{"kind": "supports", "target": "[[Other]]"}],
+        )
+
+    listed = set(str(raised.value).split("admitted kinds: ", 1)[1].rstrip(".").split(", "))
+    credence = semantic_language_registry.core_registry().kinds_with("credence")
+    assert credence and not listed & credence
+    assert "claim" in listed
+
+
 def test_a_kind_passed_as_category_is_named(tmp_path: Path) -> None:
     _write_page(tmp_path, source=_page_source("# Observe\n\nExisting prose.\n"))
 
