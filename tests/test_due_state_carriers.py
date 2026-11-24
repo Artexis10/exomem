@@ -638,8 +638,13 @@ def test_a_writes_governance_receipt_gains_nothing_from_the_due_state_count(
     )
 
     with request_scope(owner_principal(surface="cli")):
-        assert _due_state().served(vault)["total"] == 3
-        assert _due_state().served(quiet) is None
+        # Both vaults hold slug-named pages, so both also owe the vault-wide name-drift row; only
+        # the predictions differ.
+        def predictions(block: dict | None) -> int:
+            return 0 if block is None else block["total"] - block["categories"].get("name_drift", 0)
+
+        assert predictions(_due_state().served(vault)) == 3
+        assert predictions(_due_state().served(quiet)) == 0
 
         owing = _outcomes_on_the_mutation_receipt(
             vault, "Governed write on a vault that owes three."

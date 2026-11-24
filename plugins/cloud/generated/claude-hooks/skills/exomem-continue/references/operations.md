@@ -274,7 +274,7 @@ in its project and that question is unanswered. It carries the review item's `re
 `fingerprint` and `id`, and one `question`. The question holds the ownership test and the
 call that keeps the page where it is; it never reports a path, title, or count belonging
 to another page. It has the same advisory limits, and a response carries at most one
-`structure_suggestion`, with the ownership one first. The `structural_suggestions`
+`structure_suggestion`, with the rename one first, then the ownership one. The `structural_suggestions`
 delegation class and the `ownership_review` family disposition both withhold it.
 
 `detail="full"` adds the existing leaf result under

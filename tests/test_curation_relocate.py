@@ -17,8 +17,10 @@ from pathlib import Path
 import pytest
 
 import yaml
+from granted_writer import grant_writer
 
 from exomem import commands, curation, memory_refs, page_fields, relocate, writer_lease
+from exomem.governance.principal import owner_principal, request_scope
 from exomem.vault import find_body_wikilinks, parse_frontmatter
 
 RESEARCH = "Knowledge Base/Notes/Research"
@@ -126,6 +128,18 @@ def _maintain(vault: Path, action: str, **arguments: object) -> dict[str, object
     )
 
 
+def propose_relocation(vault: Path, **arguments: object) -> dict[str, object]:
+    """Propose a relocation as an agent does: call again while the answer asks for `relocate`.
+
+    A call that reaches its request budget keeps its prepared steps and answers `preparing`, so
+    under load a proposal can take several calls. Each call prepares at least one step.
+    """
+    result = _maintain(vault, "relocate", **arguments)
+    while result.get("next_action") == "relocate":
+        result = _maintain(vault, "relocate", **arguments)
+    return result
+
+
 def _snapshot(vault: Path, rels: list[str]) -> dict[str, bytes]:
     return {rel: (vault / rel).read_bytes() for rel in rels}
 
@@ -176,7 +190,7 @@ def test_one_relocation_and_one_approval_move_forty_pages_their_sources_and_thei
     before = _snapshot(vault, [*pages, *sources, built["overview"]])  # type: ignore[list-item]
     ids = {rel: parse_frontmatter(before[rel].decode())[0]["exomem_id"] for rel in pages}
 
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow")
 
     summary = proposed["summary"]
     assert proposed["sealed"] is True and "plan" not in proposed
@@ -281,7 +295,7 @@ def test_a_foreground_write_lands_between_two_steps_of_one_call(
     """
     built = _relocation_vault(vault)
     pages: list[str] = built["pages"][:6]  # type: ignore[index]
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow")
     coordinator = writer_lease.get_manager()._mutation_coordinator_for(vault)  # noqa: SLF001
     started: list[int] = []
     queued_at: list[int] = []
@@ -338,7 +352,7 @@ def test_an_interrupted_relocation_resumes_without_losing_or_repeating_a_step(
     """A process that dies between two steps, or a resume that replays a stored reply."""
     built = _relocation_vault(vault)
     pages: list[str] = built["pages"][:10]  # type: ignore[index]
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow")
     real = curation._execute_next  # noqa: SLF001
     calls: list[int] = []
 
@@ -385,7 +399,7 @@ def test_a_relocation_too_large_to_load_again_is_refused_before_it_seals(
     existing = set(runs.iterdir()) if runs.exists() else set()
 
     with pytest.raises(curation.CurationError) as refused:
-        _maintain(vault, "relocate", pages=built["pages"], to_project="meadow")
+        propose_relocation(vault, pages=built["pages"], to_project="meadow")
 
     assert refused.value.code == "CURATION_PLAN_TOO_LARGE"
     assert (set(runs.iterdir()) if runs.exists() else set()) == existing
@@ -396,7 +410,7 @@ def test_a_relocation_registers_the_folder_it_names_for_a_new_project(vault: Pat
     built = _relocation_vault(vault)
     pages: list[str] = built["pages"][:2]  # type: ignore[index]
 
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow", folder="Meadow Survey")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow", folder="Meadow Survey")
     result = _maintain(
         vault,
         "apply",
@@ -422,7 +436,7 @@ def test_a_rename_only_relocation_keeps_every_project_and_source(vault: Path) ->
     sources = built["sources"][:2]  # type: ignore[index]
     before = _snapshot(vault, sources)
 
-    proposed = _maintain(vault, "relocate", pages=pages)
+    proposed = propose_relocation(vault, pages=pages)
     result = _maintain(
         vault,
         "apply",
@@ -479,7 +493,7 @@ def test_a_relocation_with_many_referrers_rewrites_them_in_bounded_disjoint_step
     }
     before = _snapshot(vault, sorted(linking | set(pages)))
 
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow")
 
     plan = curation.CurationStore(vault).load_plan(proposed["run_id"])
     chunks = [step["args"]["referrers"] for step in plan["steps"] if step["kind"] == curation.REPOINT_STEP_KIND]
@@ -518,6 +532,145 @@ def test_a_relocation_with_many_referrers_rewrites_them_in_bounded_disjoint_step
     assert _snapshot(vault, list(before)) == before
 
 
+class _TwoStepBudget:
+    """A request budget that covers two prepared steps of a call: the second check runs short."""
+
+    def __init__(self) -> None:
+        self.checks = 0
+
+    def can_afford(self, _reserve: float) -> bool:
+        self.checks += 1
+        return self.checks < 2
+
+
+def test_a_proposal_that_runs_short_goes_on_from_its_prepared_steps_to_the_same_seal(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relocation whose preparation outlived the request budget, now prepared over several calls.
+
+    It catches a call that stops without keeping its steps, a later call that prepares them again,
+    a call that never stops, and a plan sealed in parts that differs from the one sealed at once.
+    """
+    monkeypatch.setattr(relocate, "REFERRERS_PER_STEP", 2)
+    built = _relocation_vault(vault)
+    pages: list[str] = built["pages"][:6]  # type: ignore[index]
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+
+    result = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    calls, prepared = 1, 0
+    while result.get("phase") == "preparing":
+        assert result["next_action"] == "relocate" and result["sealed"] is False
+        progress = result["progress"]
+        assert 1 <= progress["this_call"] <= 2
+        assert progress["prepared"] == prepared + progress["this_call"], "a kept step ran again"
+        prepared = progress["prepared"]
+        assert calls <= progress["steps"], "the proposal does not advance"
+        result = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+        calls += 1
+    assert result["sealed"] is True and result["next_action"] == "apply"
+    assert calls > 2
+
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+    at_once = propose_relocation(vault, pages=pages, to_project="meadow")
+    assert at_once["plan_fingerprint"] == result["plan_fingerprint"]
+    assert at_once["run_id"] == result["run_id"]
+
+
+def test_a_page_that_changes_after_its_step_was_kept_refuses_the_seal(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A step kept from an earlier call, sealed against bytes its page no longer holds.
+
+    It catches a kept step that reaches the seal after its page changed, and a refused proposal
+    whose stale steps the next call keeps.
+    """
+    monkeypatch.setattr(relocate, "REFERRERS_PER_STEP", 2)
+    built = _relocation_vault(vault)
+    pages: list[str] = built["pages"][:6]  # type: ignore[index]
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+    assert _maintain(vault, "relocate", pages=pages, to_project="meadow")["phase"] == "preparing"
+    first = vault / pages[0]
+    added = "A reading added between two calls."
+    first.write_text(first.read_text(encoding="utf-8") + f"\n{added}\n", encoding="utf-8")
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+
+    with pytest.raises(curation.CurationError) as refused:
+        propose_relocation(vault, pages=pages, to_project="meadow")
+    assert refused.value.code == "CURATION_BINDING_STALE"
+    resealed = propose_relocation(vault, pages=pages, to_project="meadow")
+
+    assert resealed["sealed"] is True
+    assert _apply_to_the_end(vault, resealed)["phase"] == "completed"
+    moves = _all_moves(vault, resealed["run_id"])
+    landed = next(move["to"] for move in moves if move["from"] == pages[0])
+    assert added in (vault / landed).read_text(encoding="utf-8")
+
+
+def _observed_note(title: str, finding: str) -> str:
+    return (
+        f"---\ntitle: {title}\ntype: research-note\nproject: harbor\nstatus: active\n"
+        f"exomem_id: {uuid.uuid4()}\n---\n\n## Observations\n\n- [finding] {finding} #harbor\n"
+    )
+
+
+def test_a_kept_preparation_goes_on_only_for_a_caller_under_the_same_ceiling(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preparation kept for the local owner, continued by an owner client whose connector
+    ceiling withholds one of the moved page's referrers.
+
+    It catches a client that seals the steps prepared under a wider ceiling: its proposal counts
+    the referrer withheld from it, and its apply stops on the rewrite it may not write.
+    """
+    inbox = f"{RESEARCH}/Harbor/Inbox"
+    plan = _write(vault, f"{inbox}/harbor-plan.md", _observed_note("Harbor Plan", "The plan."))
+    linking = f"See {_link(plan)}."
+    seen = _write(vault, f"{RESEARCH}/Harbor/tide-notes.md", _observed_note("Tide notes", linking))
+    withheld = _write(
+        vault, f"{INSIGHTS}/withheld-link.md", _observed_note("Withheld link", linking)
+    )
+    withheld_scope = "01ARZ3NDEKTSV4RRFFQ69G5GW6"
+    _write(
+        vault,
+        "Knowledge Base/_Governance/scopes/withheld.yaml",
+        f'governance_version: 1\nid: {withheld_scope}\nname: Withheld\n'
+        'paths: ["Notes/Insights/withheld-link.md"]\n',
+    )
+    client = grant_writer(
+        vault,
+        tmp_path,
+        monkeypatch,
+        writable_paths=["Notes/Research/Harbor/**"],
+        capture_paths=[inbox],
+        protected=[withheld_scope],
+    )("owner")
+    withheld_before = (vault / withheld).read_bytes()
+    with request_scope(client):
+        own = propose_relocation(vault, pages=[plan])
+    assert own["summary"]["referrers_rewritten"] == 1
+
+    unbounded = curation._call_budget
+    monkeypatch.setattr(curation, "_call_budget", _TwoStepBudget)
+    with request_scope(owner_principal(surface="mcp")):
+        paused = _maintain(vault, "relocate", pages=[plan])
+    assert paused["phase"] == "preparing"
+    assert paused["progress"]["prepared"] == paused["progress"]["steps"]
+    monkeypatch.setattr(curation, "_call_budget", unbounded)
+
+    with request_scope(client):
+        continued = propose_relocation(vault, pages=[plan])
+        assert continued["summary"]["referrers_rewritten"] == 1
+        assert continued["plan_fingerprint"] == own["plan_fingerprint"]
+        applied = _apply_to_the_end(vault, continued)
+
+    assert applied["phase"] == "completed", applied
+    [moved] = _all_moves(vault, continued["run_id"])
+    assert _link(moved["to"]) in (vault / seen).read_text(encoding="utf-8")
+    assert (vault / withheld).read_bytes() == withheld_before
+
+
 @pytest.mark.parametrize("folder", ["Survey/2026", "Survey: field"])
 def test_a_relocation_refuses_a_folder_that_is_not_one_portable_name(vault: Path, folder: str) -> None:
     """A folder that a path separator splits, or that YAML reads as a mapping, written into the registry."""
@@ -525,7 +678,7 @@ def test_a_relocation_refuses_a_folder_that_is_not_one_portable_name(vault: Path
     registry = (vault / REGISTRY).read_bytes()
 
     with pytest.raises(curation.CurationError) as refused:
-        _maintain(vault, "relocate", pages=built["pages"][:1], to_project="meadow", folder=folder)  # type: ignore[index]
+        propose_relocation(vault, pages=built["pages"][:1], to_project="meadow", folder=folder)  # type: ignore[index]
 
     assert refused.value.code == "INVALID_RELOCATION"
     assert (vault / REGISTRY).read_bytes() == registry
@@ -535,7 +688,7 @@ def test_a_new_project_folder_that_yaml_would_read_as_a_number_stays_a_name(vaul
     """A folder written as a bare scalar: the registry then reads `2026` back as a number, not a folder."""
     built = _relocation_vault(vault)
 
-    proposed = _maintain(vault, "relocate", pages=built["pages"][:1], to_project="meadow", folder="2026")  # type: ignore[index]
+    proposed = propose_relocation(vault, pages=built["pages"][:1], to_project="meadow", folder="2026")  # type: ignore[index]
 
     assert _apply_to_the_end(vault, proposed)["phase"] == "completed"
     registry = yaml.safe_load((vault / REGISTRY).read_text(encoding="utf-8"))
@@ -554,7 +707,7 @@ def test_a_source_cited_by_its_earlier_path_keeps_the_old_project(vault: Path) -
     )
     _page(vault, f"{RESEARCH}/Harbor/Harbor archive.md", "research-note", "Harbor archive", "project: harbor", [old])
 
-    proposed = _maintain(vault, "relocate", pages=[f"{RESEARCH}/Harbor/tide-note-03.md"], to_project="meadow")
+    proposed = propose_relocation(vault, pages=[f"{RESEARCH}/Harbor/tide-note-03.md"], to_project="meadow")
 
     summary = proposed["summary"]
     assert [row["path"] for row in summary["sources_keeping_old_key"]["shown"]] == [source]
@@ -566,7 +719,7 @@ def test_a_rename_never_takes_the_title_another_live_page_holds(vault: Path) -> 
     built = _relocation_vault(vault)
     _page(vault, f"{INSIGHTS}/gauge-digest.md", "insight", "Tide gauge reading 1", "project: harbor", [])
 
-    proposed = _maintain(vault, "relocate", pages=built["pages"][:1], to_project="meadow")  # type: ignore[index]
+    proposed = propose_relocation(vault, pages=built["pages"][:1], to_project="meadow")  # type: ignore[index]
 
     (row,) = proposed["summary"]["moves"]["shown"]
     assert row["to"].startswith(f"{RESEARCH}/Meadow/")
@@ -591,13 +744,23 @@ def test_pages_named_by_memory_ref_resolve_over_one_identity_census(
         return real_scan(*args, **kwargs)
 
     monkeypatch.setattr(memory_refs, "_scan_pages", counted)
-    by_path = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    real_propose = relocate.propose
+    calls: list[int] = []
+
+    def proposing(*args: object, **kwargs: object) -> object:
+        calls.append(1)
+        return real_propose(*args, **kwargs)
+
+    monkeypatch.setattr(relocate, "propose", proposing)
+    by_path = propose_relocation(vault, pages=pages, to_project="meadow")
     path_scans = len(scans)
     scans.clear()
-    by_ref = _maintain(vault, "relocate", pages=refs, to_project="meadow")
+    calls.clear()
+    by_ref = propose_relocation(vault, pages=refs, to_project="meadow")
 
     assert by_ref["summary"]["moves"] == by_path["summary"]["moves"]
-    assert len(scans) <= path_scans + 1, (len(scans), path_scans)
+    # A proposal that runs short takes several calls, and each call resolves its refs once.
+    assert len(scans) <= path_scans + len(calls), (len(scans), path_scans, len(calls))
 
 
 def test_a_list_field_that_gains_a_project_stays_a_list(vault: Path) -> None:
@@ -605,7 +768,7 @@ def test_a_list_field_that_gains_a_project_stays_a_list(vault: Path) -> None:
     _write(vault, REGISTRY, "projects:\n  harbor:\n    folder: Harbor\n    category: product\n")
     rel = _page(vault, f"{CONCEPTS}/Mooring Line.md", "entity", "Mooring Line", "entity_type: concept\nprojects:", [])
 
-    proposed = _maintain(vault, "relocate", pages=[rel], to_project="harbor")
+    proposed = propose_relocation(vault, pages=[rel], to_project="harbor")
 
     assert _apply_to_the_end(vault, proposed)["phase"] == "completed"
     assert parse_frontmatter((vault / rel).read_text(encoding="utf-8"))[0]["projects"] == ["harbor"]
@@ -626,7 +789,7 @@ def test_a_source_its_leaf_refuses_is_listed_and_the_relocation_goes_on(
         return real_prepare(vault_root, step, *args, **kwargs)
 
     monkeypatch.setattr(curation, "_prepare_step", refuse_one_source)
-    proposed = _maintain(vault, "relocate", pages=pages, to_project="meadow")
+    proposed = propose_relocation(vault, pages=pages, to_project="meadow")
 
     summary = proposed["summary"]
     assert proposed["sealed"] is True

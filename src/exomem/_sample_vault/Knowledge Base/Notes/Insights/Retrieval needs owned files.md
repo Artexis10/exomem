@@ -22,4 +22,4 @@ layer works in place over portable files instead of copying them into a silo.
 ## Connections
 
 - [[Knowledge Base/Entities/Concepts/Local First Knowledge]]
-- [[Knowledge Base/Notes/Research/Sample/sample-architecture]]
+- [[Knowledge Base/Notes/Research/Sample/Sample architecture]]

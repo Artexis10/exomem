@@ -15,6 +15,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from test_name_drift import without_scan_time
 
 from exomem import (
     activation,
@@ -225,8 +226,10 @@ def test_a_held_listing_equals_a_listing_computed_in_the_request(
         review_pass.stop()
         fresh = _list(vault)
 
-    def listing(reply: dict) -> dict:
-        return {key: value for key, value in reply.items() if key not in ("as_of", "refreshing")}
+    def listing(reply: dict) -> object:
+        # The listing computed now states a later name-drift scan than the held pass.
+        kept = {key: value for key, value in reply.items() if key not in ("as_of", "refreshing")}
+        return without_scan_time(kept)
 
     # Nothing is withheld from the owner, so its listing reads the held pass. The client's
     # listing runs its own audit, while the owner's pass is held.

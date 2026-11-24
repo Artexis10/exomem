@@ -68,15 +68,9 @@ def _needed(
     used_moves: set[int] = set()
     used_renames: set[int] = set()
     for rel, text in texts.items():
-        immutable = _append_only(rel)
-        for index, (old_rel, new_rel) in enumerate(moves):
-            text, count = rewrite_wikilinks_for_move(text, old_rel, new_rel)
-            if count:
-                used_moves.add(index)
-        for index, rename in enumerate(renames):
-            text, count = path_mentions.rewrite(text, (rename,), apply=not immutable)
-            if count:
-                used_renames.add(index)
+        page_moves, page_renames = _uses(rel, text, moves, renames)
+        used_moves |= page_moves
+        used_renames |= page_renames
     narrowed = [move for index, move in enumerate(moves) if index in used_moves]
     narrowed_renames = tuple(rename for index, rename in enumerate(renames) if index in used_renames)
     for rel, text in texts.items():
@@ -86,6 +80,48 @@ def _needed(
         ):
             return list(moves), tuple(renames)
     return narrowed, narrowed_renames
+
+
+def _uses(
+    rel: str,
+    text: str,
+    moves: Sequence[tuple[str, str]],
+    renames: Sequence[path_mentions.Rename],
+) -> tuple[set[int], set[int]]:
+    """The indexes of the moves and renames that change or count in this page's text."""
+    immutable = _append_only(rel)
+    used_moves: set[int] = set()
+    used_renames: set[int] = set()
+    for index, (old_rel, new_rel) in enumerate(moves):
+        text, count = rewrite_wikilinks_for_move(text, old_rel, new_rel)
+        if count:
+            used_moves.add(index)
+    for index, rename in enumerate(renames):
+        text, count = path_mentions.rewrite(text, (rename,), apply=not immutable)
+        if count:
+            used_renames.add(index)
+    return used_moves, used_renames
+
+
+def _refused(
+    code: str,
+    reason: str,
+    referrers: Mapping[str, str],
+    moves: Sequence[tuple[str, str]],
+    renames: Sequence[path_mentions.Rename],
+):
+    """The refusal of a referrer's rewrite, naming the moved pages that those referrers use.
+
+    A derived plan that may shrink leaves those pages out and keeps the rest (`relocate`).
+    """
+    named: set[str] = set()
+    for rel, text in referrers.items():
+        page_moves, page_renames = _uses(rel, text, moves, renames)
+        named.update(moves[index][0] for index in page_moves)
+        named.update(renames[index].old for index in page_renames)
+    error = fold_leaf.refuse(code, reason)
+    error.pages = tuple(sorted(named))
+    return error
 
 
 def _append_only(rel: str) -> bool:
@@ -167,7 +203,7 @@ def prepare(
     pages: dict[str, dict[str, Any]] = {}
     outcomes: list[dict[str, str]] = []
     repoints: list[pointer_write.PointerWrite] = []
-    refused: list[pointer_write.PointerWriteError] = []
+    refused: dict[str, pointer_write.PointerWriteError] = {}
     # Each live page the step rewrites in place, whose lifecycle record the step carries.
     carried: dict[str, str] = {}
     for rel, text in texts.items():
@@ -185,7 +221,7 @@ def prepare(
                 repoints.append(_repoint(root, rel, text, after, pointers, location, matcher))
             except pointer_write.PointerWriteError as error:
                 outcomes.append({"path": rel, "outcome": move_file.REFUSED, "code": error.code})
-                refused.append(error)
+                refused[rel] = error
                 continue
         outcomes.append(
             {"path": rel, "outcome": move_file.REPOINTED if append_only else move_file.REWRITTEN}
@@ -203,11 +239,16 @@ def prepare(
                 carried[rel] = text
         pages[rel] = row
     if refused:
-        raise fold_leaf.refuse(refused[0].code, refused[0].reason)
+        first = next(iter(refused.values()))
+        raise _refused(
+            first.code, first.reason, {rel: texts[rel] for rel in refused}, moves, renames
+        )
     try:
         semantic_writes.require_lifecycle_settled(root, carried)
     except semantic_writes.SemanticWriteError as error:
-        raise fold_leaf.refuse(error.code, error.reason) from error
+        raise _refused(
+            error.code, error.reason, _unsettled(root, carried), moves, renames
+        ) from error
     store_rows = move_file.store_rows_outcome(root, unchanged)
     # Each moved page is bound as the plan leaves it, rewritten or not, so the witness of the one
     # step that rewrites every referrer states where the plan's pages stand. A step that names its
@@ -231,6 +272,20 @@ def prepare(
         "preview_digest": pointer_write.preview_digest(location, repoints),
         **({"mentions_unchecked": True} if not complete else {}),
     }
+
+
+def _unsettled(root: Path, carried: Mapping[str, str]) -> dict[str, str]:
+    """The pages among `carried` whose lifecycle record a relocation cannot carry, one by one.
+
+    Asked only after the whole set refused, so a plan that prepares pays nothing for it.
+    """
+    unsettled: dict[str, str] = {}
+    for rel, text in carried.items():
+        try:
+            semantic_writes.require_lifecycle_settled(root, {rel: text})
+        except semantic_writes.SemanticWriteError:
+            unsettled[rel] = text
+    return unsettled
 
 
 def commit(vault_root: Path, prepared: Mapping[str, Any], *, operation: str) -> dict[str, Any]:
