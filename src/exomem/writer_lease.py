@@ -5092,6 +5092,8 @@ def _capture_wait_seconds(guard_seconds: float = 0.0) -> float:
 
 
 _WARMUP_POLL_SECONDS = 0.25
+#: How often a queued save's replay that waits for its turn checks whether its drainer stopped.
+_REPLAY_STOP_POLL_SECONDS = 0.25
 
 
 def _wait_out_write_warmup(
@@ -5130,10 +5132,13 @@ def _wait_out_write_warmup(
     if counted and not _take_capture_waiter_slot():
         return warming, "capture_waiters_full", 0.0
     started = time.monotonic()
+    from . import write_intake
+
+    replay_stop = write_intake.replay_stop_event()
     try:
         while warming is not None:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or replay_stop is not None and replay_stop.is_set():
                 break
             # Polled, not one long wait: a warm that finishes without marking
             # this component also ends the gate (should_defer turns false).
@@ -5221,13 +5226,20 @@ class _FairCaptureQueue:
         return ticket
 
     def wait_turn(self, ticket: object, deadline: float) -> bool:
+        from . import write_intake
+
+        # A queued save's replay also stops waiting when its drainer stops, checked once per poll.
+        replay_stop = write_intake.replay_stop_event()
         with self._condition:
-            while self._line[0] is not ticket:
+            while True:
+                if replay_stop is not None and replay_stop.is_set():
+                    return False
+                if self._line[0] is ticket:
+                    return True
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
-                self._condition.wait(remaining)
-            return True
+                self._condition.wait(remaining if replay_stop is None else min(remaining, _REPLAY_STOP_POLL_SECONDS))
 
     def leave(self, ticket: object) -> None:
         with self._condition:
