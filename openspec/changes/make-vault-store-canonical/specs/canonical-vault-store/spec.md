@@ -324,7 +324,22 @@ In store mode, once stage 2 ships, each semantic unit of a page SHALL be one sto
 - **AND** the committed page bytes are exactly the bytes the write supplied
 
 ### Requirement: Typed relationships are stored rows
-In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships. Each relationship SHALL keep its history: who added it, when, why, and what retired or superseded it. A caller SHALL see a relationship only when it may see both ends. The Markdown projection SHALL carry a bounded generated relations block per page and a generated relations file beside the page with every stored relationship of its units. The importer SHALL read relationship edits from the relations file. A store-mode answer SHALL read only the stored rows. A rebuild from the Markdown files SHALL read the relations files, and a rollback to file mode SHALL project them first.
+In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships, and a store-mode answer SHALL read them from the stored rows only.
+
+#### Scenario: A first stored relationship pins the unit's identity
+- **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
+- **THEN** the same transaction writes an anchor at the end of that unit and stores the relationship against the anchored identity
+- **AND** a later edit of the unit's text keeps the relationship attached
+
+### Requirement: A stored relationship keeps its history and two-ended visibility
+Each stored relationship SHALL record who added it, when and why, and what retired or superseded it. A caller SHALL see a stored relationship only when it may see both of its ends.
+
+#### Scenario: A restricted caller sees only relationships between visible ends
+- **WHEN** a restricted caller reads a unit whose relationship points at a page withheld from it
+- **THEN** that relationship is absent from the answer, as the withheld page is
+
+### Requirement: Stored relationships project beside their page
+The Markdown projection of a page SHALL carry a bounded generated relations block and a generated relations file beside the page with every stored relationship of its units. The importer SHALL read relationship edits from the relations file and SHALL keep a relationship whose unit an outside edit removed. A rebuild from the Markdown files SHALL read the relations files, and a rollback to file mode SHALL project them first.
 
 #### Scenario: A unit carries more relationships than its page shows
 - **WHEN** a unit carries 500 stored relationships
@@ -332,19 +347,10 @@ In store mode, once stage 2 ships, a governed operation SHALL be able to add, re
 - **AND** the relations file beside the page lists all 500
 - **AND** a reader that asks for the unit's relationships receives all 500
 
-#### Scenario: A first stored relationship pins the unit's identity
-- **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
-- **THEN** the same transaction writes an anchor at the end of that unit and stores the relationship against the anchored identity
-- **AND** a later edit of the unit's text keeps the relationship attached
-
 #### Scenario: An outside edit deletes a unit that has stored relationships
 - **WHEN** an outside edit removes a unit that carries stored relationships
 - **THEN** the importer keeps the relationships
 - **AND** opens a review item that names the lost unit
-
-#### Scenario: A restricted caller sees only relationships between visible ends
-- **WHEN** a restricted caller reads a unit whose relationship points at a page withheld from it
-- **THEN** that relationship is absent from the answer, as the withheld page is
 
 ### Requirement: Originals record their canonicity
 In store mode, once stage 2 ships, every stored file SHALL carry a canonicity record with its origin, content hash, size, format and derivation: either original, or derived from a named content hash by a named transform. A governed write SHALL be able to supersede a file recorded as original with the true original. After it, the earlier file SHALL remain stored as derived from the true original, citations SHALL resolve to the true original, and the audit trail SHALL record the change.
