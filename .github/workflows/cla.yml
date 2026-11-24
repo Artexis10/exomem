@@ -37,4 +37,4 @@ jobs:
           # The action's default locks every pull request that closes, merged or not.
           lock-pullrequest-aftermerge: false
           # Exact logins only: the action's wildcard match is an unanchored substring match.
-          allowlist: Artexis10,exomem-release-bot[bot],dependabot[bot]
+          allowlist: Artexis10,evermatter-release-bot[bot],dependabot[bot]

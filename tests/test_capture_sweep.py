@@ -599,7 +599,7 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     `test_personal_baseline_contract.py` caps every copyable instruction block at
     1,500 bytes, because that is the custom-instruction field they are pasted
-    into. The prominent blocks sit at 1,481 and 1,466 — 19 and 34 bytes of
+    into. The prominent blocks sit at 1,492 and 1,477 — 8 and 23 bytes of
     headroom — so no wording of this clause (about 190 bytes) fits, and the only way to make one
     fit is to shorten a capture class that is already there. That is precisely
     the move a KB failure note records as having silently dropped the

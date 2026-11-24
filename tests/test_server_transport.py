@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sse_starlette.sse import AppStatus
 
 from exomem import logging_config, server
 from exomem.server_assets import register_oauth_metadata_route
@@ -117,6 +118,8 @@ def fake_mcp(monkeypatch: pytest.MonkeyPatch):
     fake = _FakeMcp()
     monkeypatch.setattr(server, "build_server", lambda **_kwargs: fake)
     monkeypatch.setattr(logging_config, "configure_logging", lambda *_args, **_kwargs: None)
+    # An HTTP `run` turns sse-starlette's process-wide drain off; monkeypatch restores it afterwards.
+    monkeypatch.setattr(AppStatus, "enable_automatic_graceful_drain", AppStatus.enable_automatic_graceful_drain)
     yield fake
     # `run` freezes the heap it serves from; the test worker's later tests need theirs collected.
     gc.unfreeze()
@@ -159,7 +162,7 @@ def test_remote_http_runs_stateless(
         "host": "127.0.0.1",
         "port": 9876,
         "stateless_http": True,
-        "uvicorn_config": {"reset_contextvars": True},
+        "uvicorn_config": {"reset_contextvars": True, "timeout_graceful_shutdown": 2},
     }
     assert len(middleware) == 3
     assert middleware[0].cls is server.EdgeIngressMiddleware

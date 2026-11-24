@@ -71,6 +71,9 @@ class SubstrateSecrets:
     # characters, cellctl as base64. Same bytes, three encodings.
     cell_token_key: bytes = field(default_factory=lambda: secrets.token_bytes(32))
     admin_token: str = field(default_factory=lambda: b64url(secrets.token_bytes(32)))
+    # The workflow's principal: it may set the release image and nothing else. Its own value, so a
+    # request sent with it can never pass as the admin token.
+    deploy_token: str = field(default_factory=lambda: b64url(secrets.token_bytes(32)))
     scheduler_secret: str = field(default_factory=lambda: b64url(secrets.token_bytes(32)))
     paddle_webhook_secret: str = field(default_factory=lambda: "pdl_ntfset_" + secrets.token_hex(16))
     ingress_source_value: str = field(default_factory=lambda: b64url(secrets.token_bytes(24)))
@@ -176,6 +179,7 @@ def _app_environment(stack: Stack, substrate_secrets: SubstrateSecrets, cell_ima
         "EXOMEM_CLOUD_CELL_TOKEN_KEY": substrate_secrets.cell_token_key.hex(),
         "EXOMEM_CLOUD_CELL_IMAGE_REPOSITORY": cell_image_repository,
         "EXOMEM_ADMIN_TOKEN": substrate_secrets.admin_token,
+        "EXOMEM_DEPLOY_TOKEN": substrate_secrets.deploy_token,
         "EXOMEM_HOSTED_SCHEDULER_SECRET": substrate_secrets.scheduler_secret,
         "PADDLE_ENVIRONMENT": "sandbox",
         "PADDLE_WEBHOOK_SECRET": substrate_secrets.paddle_webhook_secret,

@@ -58,6 +58,9 @@ These tasks stay open until their named live evidence exists.
   - a workflow pushed on a branch cannot read the App key or create a `v*` tag;
   - an agent credential cannot create, move or delete a `v*` tag, or change a ruleset or environment;
   - a normal release from `main` still publishes and attests.
+- [ ] 4.7 (Moved from `automate-cloud-releases` task 5.1.) After tasks 4.1 and 4.6, decide the custody of the CI path: an ephemeral private-network peer and a revocable ServiceAccount token for the deploy identity. Then add the path, so that a release that changes `cellctl`'s build inputs and not the chart's rolls `cellctl` as an image-only change. Verify:
+  - such a release rolls `cellctl` with no presence step, and records the platform Deployment, which catches a controller-only release that still waits for a person;
+  - an unattested image and a change to anything but an image are denied, which catches a CI path that can change more than images.
 
 ## 5. Tenant lock
 
