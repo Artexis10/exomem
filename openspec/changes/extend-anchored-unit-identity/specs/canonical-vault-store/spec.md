@@ -146,12 +146,12 @@ A unit SHALL live in one home page; another page SHALL show it with a block embe
 - **THEN** the rich block's first paragraph ends with the compact line's block id
 
 ### Requirement: A unit name on a page names one unit
-An anchor or block name SHALL name one unit on its page. When two units share one, as two anchors, two block names, or an anchor and another unit's block name, `#^x` SHALL answer ambiguous; an anchor SHALL NOT win. A governed write that would create a shared block name SHALL refuse with `DUPLICATE_SEMANTIC_ANCHOR`. A hand edit that creates one SHALL open the review item for each reference it makes ambiguous. A first embed SHALL reuse only a block id unique on the page, the first in body order.
+An anchor or block name SHALL name one unit on its page. When two units share one, in any combination of anchors and block names, `#^x` SHALL answer ambiguous; an anchor SHALL NOT win. A governed write that would create one SHALL refuse with `DUPLICATE_SEMANTIC_ANCHOR`. A hand edit or the registry pass that finds one SHALL open one review item per page and name, never duplicated or reopened by a re-run. A first embed SHALL reuse only a page-unique block id, first in body order.
 
 #### Scenario: A copied block name answers ambiguous
 - **WHEN** a person copies a paragraph that ends with `^x` from one rich unit into another on the same page, and another page links to `[[Page#^x]]`
 - **THEN** the link answers ambiguous
-- **AND** a review item names the link and both units
+- **AND** one review item for that page and name names both units and lists the affected links 50 at a time with an exact total
 
 #### Scenario: A block name equal to an anchor answers ambiguous
 - **WHEN** a rich unit's body holds a block that ends with `^x` and a compact unit on the same page carries the anchor `^x`
@@ -164,7 +164,15 @@ An anchor or block name SHALL name one unit on its page. When two units share on
 #### Scenario: An existing clash is surfaced after the parser change
 - **WHEN** the registry pass under the new parser finds a block name that equals another unit's anchor, and a link names that anchor
 - **THEN** the link answers ambiguous
-- **AND** a review item names the link and both units
+- **AND** one review item for that page and name names both units and lists the affected links 50 at a time with an exact total
+
+#### Scenario: A clash on a hub opens one item
+- **WHEN** a copied paragraph shares a name on a page that 10,000 other pages link to by that name
+- **THEN** exactly one review item opens for that page and name, and a later registry pass reopens no dismissed item
+
+#### Scenario: A write that leaves an existing clash unchanged commits
+- **WHEN** a governed write edits a page that already holds a shared name and neither adds nor removes a holder of it
+- **THEN** the write commits and the item for that name stays as it was
 
 #### Scenario: Only a unique block id is reused
 - **WHEN** a rich unit's body holds `^a`, which another unit also holds, and then `^b`, which is unique, and a write adds its first embed
