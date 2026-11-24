@@ -162,7 +162,7 @@ def test_remote_http_runs_stateless(
         "host": "127.0.0.1",
         "port": 9876,
         "stateless_http": True,
-        "uvicorn_config": {"reset_contextvars": True},
+        "uvicorn_config": {"reset_contextvars": True, "timeout_graceful_shutdown": 2},
     }
     assert len(middleware) == 3
     assert middleware[0].cls is server.EdgeIngressMiddleware
