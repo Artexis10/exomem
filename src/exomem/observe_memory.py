@@ -1158,6 +1158,11 @@ def _not_a_claim(refusal: semantic_units.ClaimRefusal) -> tuple[str, str]:
                 "the span lies inside a list item that holds only links",
                 f"To change the links, edit the line with {edit}. {other}",
             )
+        case "task":
+            return (
+                "the span lies inside a task item (`- [ ] ...`), which stays a task, not a claim",
+                f"To change the task, edit its line with {edit}. {other}",
+            )
         case "inline_field":
             return (
                 "the span lies inside a Dataview inline field (`key:: value`); "

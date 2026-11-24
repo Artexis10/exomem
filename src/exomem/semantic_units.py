@@ -947,7 +947,7 @@ class ClaimItem:
 
 
 # Why a list item is no claim to convert, in the order `claim_targets` checks them.
-ClaimRefusal = Literal["relation", "links_only", "inline_field", "wraps"]
+ClaimRefusal = Literal["relation", "links_only", "task", "inline_field", "wraps"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1030,7 +1030,7 @@ def claim_targets(body: str, units: Iterable[SemanticUnit]) -> tuple[ClaimTarget
 
     An item that starts inside a parsed unit's span is that unit. Any other
     item converts unless it carries a markdown relation (the conversion would
-    delete its typed edge), holds only wikilinks, carries a Dataview inline
+    delete its typed edge), holds only wikilinks, is a task, carries a Dataview inline
     field, or wraps past its first line. Every comparison is by character
     offset, so the relation scanner's line numbering cannot drift from the items'.
     """
@@ -1066,6 +1066,10 @@ def claim_targets(body: str, units: Iterable[SemanticUnit]) -> tuple[ClaimTarget
             refusal = "relation"
         elif not _says_more_than_links(item.text, find_body_wikilinks(item.text)):
             refusal = "links_only"
+        elif _is_task_item(item.text):
+            # A task checkbox is no compact label (the parser skips `_TASK_LABELS`), and a
+            # converted line would stop being a task for task readers.
+            refusal = "task"
         elif "::" in item.text:
             # `::` is Dataview's documented inline-field separator (`key:: value`, `[key:: value]`):
             # a converted line changes what Dataview reads.
@@ -1074,6 +1078,12 @@ def claim_targets(body: str, units: Iterable[SemanticUnit]) -> tuple[ClaimTarget
             refusal = "wraps"
         targets.append(ClaimTarget(item, None, category, refusal))
     return tuple(targets)
+
+
+def _is_task_item(text: str) -> bool:
+    """Whether a list item's text opens with a task checkbox, by the compact parser's own rule."""
+    match = _COMPACT_RE.match(f"- {text}")
+    return match is not None and match.group("label").strip() in _TASK_LABELS
 
 
 def _says_more_than_links(text: str, links: Iterable[re.Match[str]]) -> bool:

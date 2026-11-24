@@ -476,6 +476,7 @@ def test_a_missing_span_refuses_saying_how_to_read_unit_ids(tmp_path: Path) -> N
         ("- supplies [[Cedar Two]]", "supplies", "relation"),
         ("- [[Cedar Two]], [[Winter catalog]]", "Winter catalog", "only links"),
         ("- rating:: high", "rating", "Dataview"),
+        ("- [ ] Buy seeds for spring", "Buy seeds", "task"),
         ("- Juniper One takes\n  preorders in November.", "Juniper One takes", "one line"),
     ],
 )
@@ -839,7 +840,8 @@ def _facet_audit_vault(root: Path) -> Path:
             "  - Cedar Two ships on Mondays.\n"
             "- [[Cedar Two]], [[Winter catalog]]\n"
             "- supplies [[Cedar Two]]\n"
-            "- rating:: high\n\n"
+            "- rating:: high\n"
+            "- [x] Call them back\n\n"
             "## Observations\n\n- [vendors] Opens at nine. ^claim-2\n"
         ),
     )
@@ -969,5 +971,6 @@ def test_the_reviewed_plan_converts_items_in_place(tmp_path: Path) -> None:
     assert "\n- [[Cedar Two]], [[Winter catalog]]\n" in text
     assert "\n- supplies [[Cedar Two]]\n" in text
     assert "\n- rating:: high\n" in text
+    assert "\n- [x] Call them back\n" in text
     # A later supersede can name the converted unit's anchor.
     assert _facet_findings(tmp_path) == []
