@@ -307,7 +307,7 @@ In store mode, an agent SHALL be able to list every held item and to resolve eac
 - **AND** a resolve refuses with `VAULT_STORE_HELD_TOO_LARGE`
 
 ### Requirement: Semantic units are first-class store rows
-In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes and SHALL NOT write anchors into a page. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
+In store mode, once stage 2 ships, each semantic unit of a page SHALL be one store row with its identity, its page, its ordinal and exact byte span in the page bytes, its category, kind and text, its provenance, its verdict and its lifecycle. The identity SHALL follow the existing semantic unit identity rule: the authored anchor when the page carries one, otherwise the fingerprint-bound reference. The store SHALL derive the identity from the page bytes. The store SHALL write an anchor into a page only for a unit that carries no anchor and becomes either end of its first stored relationship, in the governed write that adds that relationship. For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-unit rows and graph unit nodes. Typed edges SHALL be able to start or end at a unit as well as at a page. A governed write that changes a unit SHALL change the page bytes and the unit row in the same transaction.
 
 #### Scenario: A link reaches the exact unit
 - **WHEN** a page links to another page's unit by the anchor that unit carries
@@ -319,9 +319,38 @@ In store mode, once stage 2 ships, each semantic unit of a page SHALL be one sto
 - **AND** the other units on the page keep their identities and verdicts
 
 #### Scenario: A unit without an anchor keeps today's identity
-- **WHEN** a governed write adds a unit that carries no authored anchor
+- **WHEN** a governed write adds a unit that carries no authored anchor and no stored relationship
 - **THEN** the unit's identity is its fingerprint-bound reference
 - **AND** the committed page bytes are exactly the bytes the write supplied
+
+### Requirement: Typed relationships are stored rows
+In store mode, once stage 2 ships, a governed operation SHALL be able to add, retire or supersede a typed relationship from a unit to another unit or to a page as a store row, with no line of page text. The relationship type SHALL come from the relation vocabulary registry. A unit SHALL be able to carry any number of stored relationships, and a store-mode answer SHALL read them from the stored rows only.
+
+#### Scenario: A first stored relationship pins the unit's identity
+- **WHEN** a governed operation adds the first stored relationship to a unit that has no anchor
+- **THEN** the same transaction writes an anchor at the end of that unit and stores the relationship against that unit's store-assigned id
+- **AND** a later edit of the unit's text keeps the relationship attached
+
+### Requirement: A stored relationship keeps its history and two-ended visibility
+Each stored relationship SHALL record who added it, when and why, and what retired or superseded it. A caller SHALL see a stored relationship only when it may see both of its ends.
+
+#### Scenario: A restricted caller sees only relationships between visible ends
+- **WHEN** a restricted caller reads a unit whose relationship points at a page withheld from it
+- **THEN** that relationship is absent from the answer, as the withheld page is
+
+### Requirement: Stored relationships project beside their page
+The Markdown projection of a page SHALL carry a bounded generated relations block and a generated relations file beside the page with every stored relationship of its units. The importer SHALL read relationship edits from the relations file and SHALL keep a relationship whose unit an outside edit removed. A rebuild from the Markdown files SHALL read the relations files, and a rollback to file mode SHALL project them first.
+
+#### Scenario: A unit carries more relationships than its page shows
+- **WHEN** a unit carries 500 stored relationships
+- **THEN** the page's relations block shows counts per type and a bounded number of relationships
+- **AND** the relations file beside the page lists all 500
+- **AND** a reader that asks for the unit's relationships receives all 500
+
+#### Scenario: An outside edit deletes a unit that has stored relationships
+- **WHEN** an outside edit removes a unit that carries stored relationships
+- **THEN** the importer keeps the relationships
+- **AND** opens a review item that names the lost unit
 
 ### Requirement: Originals record their canonicity
 In store mode, once stage 2 ships, every stored file SHALL carry a canonicity record with its origin, content hash, size, format and derivation: either original, or derived from a named content hash by a named transform. A governed write SHALL be able to supersede a file recorded as original with the true original. After it, the earlier file SHALL remain stored as derived from the true original, citations SHALL resolve to the true original, and the audit trail SHALL record the change.
