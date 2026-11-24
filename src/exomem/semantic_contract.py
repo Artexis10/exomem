@@ -1751,7 +1751,7 @@ def _parse_page_state(
         identity_kind=identity_kind,
         identity=identity,
         source_hash=vault.content_hash(raw_source),
-        baseline_hash=activation_manifest.baseline_hash(raw_source),
+        baseline_hash=activation_manifest.baseline_hash(raw_source, frontmatter),
         language_registry_hash=(f"{language.schema_version}:{language.content_hash}"),
         relation_registry_hash=(f"{registry.core_version}:{registry.extension_hash}"),
         review_fingerprint=(

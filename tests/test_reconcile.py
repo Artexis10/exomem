@@ -193,7 +193,9 @@ def test_reconcile_keeps_a_stamped_legacy_page_grandfathered(vault: Path) -> Non
         _semantic_page("00000000-0000-4000-8000-000000000204").replace(
             "exomem_id: 00000000-0000-4000-8000-000000000204\n", ""
         ),
-        encoding="utf-8", newline="\n",)
+        encoding="utf-8",
+        newline="\n",
+    )
     reconcile_module.reconcile(vault)
     assert activation_manifest.load_manifest(vault) is not None
 

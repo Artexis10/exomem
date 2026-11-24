@@ -309,6 +309,25 @@ def test_stamping_an_exomem_id_keeps_a_legacy_page_grandfathered(
     assert not activation_manifest.is_grandfathered(tmp_path, legacy, manifest=manifest)
 
 
+def test_a_page_with_an_empty_id_keeps_the_baseline_that_recorded_its_id_line(
+    tmp_path: Path,
+) -> None:
+    # Only a stamp is exempt from the hash, and a stamp writes a valid id. A manifest written
+    # before the stamp rule recorded this page by path, with its `exomem_id:` line in the bytes.
+    page = tmp_path / "Knowledge Base/Notes/Insights/blank-id.md"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(b"---\nexomem_id:\ntype: insight\nstatus: active\n---\n\n# Blank\n\nBody.\n")
+    rel = page.relative_to(tmp_path).as_posix()
+    recorded = hashlib.sha256(page.read_bytes()).hexdigest()
+    manifest = activation_manifest.ActivationManifest(
+        schema_version=activation_manifest.SCHEMA_VERSION,
+        contract_version=activation_manifest.CONTRACT_VERSION,
+        pages=(activation_manifest.ActivationPage("path_source_hash", rel, rel, recorded),),
+    )
+
+    assert activation_manifest.is_grandfathered(tmp_path, page, manifest=manifest)
+
+
 def test_duplicate_ids_fall_back_but_sync_conflicts_do_not_create_ambiguity(
     tmp_path: Path,
 ) -> None:
