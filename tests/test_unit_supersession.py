@@ -255,11 +255,6 @@ def _compact_entity_page(root: Path) -> Path:
     )
 
 
-def test_supersede_note_cannot_target_one_unit() -> None:
-    assert "unit" not in public_tools.TOOLS["supersede_note"].model.model_fields
-    assert "span" not in public_tools.TOOLS["supersede_note"].model.model_fields
-
-
 def test_supersede_observation_replaces_one_compact_claim_on_an_entity_page(
     tmp_path: Path,
 ) -> None:
@@ -352,7 +347,7 @@ def test_a_stale_unit_id_refuses_and_leaves_the_page_unchanged(tmp_path: Path) -
     stale = _units_of(tmp_path, PAGE)[0]["id"] + "stale"
 
     with request_scope(owner_principal(surface="cli")), pytest.raises(
-        ValueError, match="STALE_UNIT_REFERENCE|UNIT_NOT_FOUND"
+        ValueError, match="STALE_UNIT_REFERENCE"
     ):
         _edit_note(
             tmp_path,

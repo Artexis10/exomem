@@ -1014,49 +1014,22 @@ def _bind_claim_id(
 ) -> tuple[str, str]:
     """The unit_ref and fingerprint of the claim `unit` names.
 
-    A supersede or assess target may name its claim by anchor — the stable name
-    a `supersedes` edge keeps — or by the versioned unit id a read returned. A
-    versioned id keeps the staleness check every other unit write uses; a bare
-    anchor names the claim as it stands.
+    A supersede or assess target may name its claim by anchor (the stable name a
+    `supersedes` edge keeps, in any form the fragment resolver takes) or by the
+    versioned unit id a read returned. An anchor names the claim as it stands, so
+    it binds through the unit's current id; every id then binds as any other unit
+    write binds it (`_bind_unit_id`), with its visibility rule and refusals.
     """
     text = str(unit).strip()
-    visible = not egress.caller_restricted(vault_root)
-    units = document.units if visible else ()
-    found = [u for u in units if u.anchor == text]
-    versioned = False
-    if not found:
-        head = text.partition(".")[0]
-        found = [
-            u for u in units
-            if u.unit_ref and page_ids.part_head(u.unit_ref) == head
-        ]
-        versioned = True
-    if not found:
-        if definitions_unavailable:
+    if not egress.caller_restricted(vault_root):
+        resolution = document.resolve_fragment(text)
+        if resolution.status == "ambiguous":
             raise ObserveMemoryError(
-                "REGISTRY_UNAVAILABLE",
-                "the selected vocabulary definitions required to resolve this unit "
-                "are unavailable",
-                "Restore admitted definitions and read the unit again.",
+                "AMBIGUOUS_UNIT_REFERENCE", f"unit {unit} names more than one unit of this note"
             )
-        raise ObserveMemoryError(
-            "UNIT_NOT_FOUND",
-            f"unit {unit} names no claim of this note; read the note's units "
-            "for the current ids",
-        )
-    if len(found) > 1:
-        raise ObserveMemoryError(
-            "AMBIGUOUS_UNIT_REFERENCE",
-            f"unit {unit} names more than one unit of this note",
-        )
-    current = found[0]
-    if versioned and unit_id(current) != text:
-        raise ObserveMemoryError(
-            "STALE_UNIT_REFERENCE",
-            f"unit id {unit} is stale; the unit now has id {unit_id(current)}. "
-            "Read the unit again and retry with the current id.",
-        )
-    return str(current.unit_ref), str(current.fingerprint)
+        if resolution.unit is not None and resolution.unit.unit_ref:
+            text = unit_id(resolution.unit)
+    return _bind_unit_id(vault_root, document, text, definitions_unavailable=definitions_unavailable)
 
 
 @dataclass(frozen=True, slots=True)
