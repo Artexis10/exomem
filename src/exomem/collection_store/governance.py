@@ -2323,8 +2323,19 @@ class OperationAuthorization:
                     or not content_available(path, None, self.access, self.access_blocked, self.tombstones)):
                 return False
             # A renderer supplies canonical metadata; editable bytes never supply this classification proof.
-            scope_ids = (membership.evaluate_metadata(metadata, self.policy) if metadata is not None else
-                         membership.evaluate_path_only(self.root, path, self.policy).require_classified())
+            if metadata is not None:
+                scope_ids = membership.evaluate_metadata(metadata, self.policy)
+            else:
+                outcome = membership.evaluate_path_only(self.root, path, self.policy)
+                if outcome.state == "classified":
+                    scope_ids = outcome.require_classified()
+                else:
+                    # A scope that selects by page metadata places a Markdown page as a read of it does,
+                    # from its own bytes; anything else it cannot place stays withheld.
+                    found = egress.page_scopes(self.root, path, self.policy)
+                    if found is None or (isinstance(content_sha256, str) and content_sha256 != found[1]):
+                        return False
+                    scope_ids, content_sha256 = found
             grants = list(self.policy.grants)
             if self.authority is not None and not self.policy.empty:
                 fingerprint = content_sha256

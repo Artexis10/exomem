@@ -16,12 +16,13 @@ from test_collection_link_values import (
     LOG,
     _ready,
     append,
+    link_warnings,
     log_text,
     page,
 )
 from test_collection_row_references import collection_text, path
 from test_collection_store_writer import store as store  # noqa: F401
-from test_governance_egress import _external, write_rule, write_scope
+from test_governance_egress import SCOPE_ID, _external, write_rule, write_scope
 
 from exomem import freshness, page_citations, record_governance, semantic_contract
 from exomem import structured_collections as collections
@@ -94,6 +95,43 @@ def test_a_withheld_page_answers_exactly_like_a_missing_one(world):
         withheld = page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)
         missing = page_citations.inbound_citations(AWAY, world.root)
     assert withheld == missing == {"state": "ready", "items": [], "count": 0, "count_complete": True, "more": None}
+
+
+def write_tag_scope(root):
+    """A scope that selects pages by a tag in their frontmatter, so no path alone places a page in or out of it."""
+    target = root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f'governance_version: 1\nid: {SCOPE_ID}\nname: Patterns\ntags: ["secret"]\n')
+
+
+def test_a_scope_that_selects_pages_by_tag_leaves_the_owner_s_citations_and_links_unchanged(world):
+    """Deciding a linked page by its path alone withheld every page from everyone once any scope read page metadata."""
+    append(world, {"page": ALPHA_REF}, key=K1)
+    write_tag_scope(world.root)
+    publish(world.root)
+    stored = append(world, {"page": "Alpha"}, key=K2)
+    _ready(world)
+    assert link_warnings(stored) == []
+    assert cited(world)["count"] == 2
+
+
+def test_a_page_that_a_tag_scope_withholds_answers_exactly_like_a_missing_one(world):
+    secret = world.root / "Knowledge Base/Notes/Secret.md"
+    secret.write_text(f"---\nexomem_id: {HIDDEN}\ntitle: Secret\ntags: [secret]\n---\n# Secret\n")
+    append(world, {"page": f"exomem://memory/{HIDDEN}"}, key=K1)
+    append(world, {"page": ALPHA_REF}, key=K2)
+    _ready(world)
+    write_tag_scope(world.root)
+    write_rule(world.root, ceiling=0)
+    publish(world.root)
+    with request_scope(_external()):
+        withheld = page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)
+        missing = page_citations.inbound_citations(AWAY, world.root)
+        untagged = page_citations.inbound_citations(ALPHA_REF, world.root)
+    assert withheld == missing == {"state": "ready", "items": [], "count": 0, "count_complete": True, "more": None}
+    assert untagged["count"] == 1
+    with request_scope(owner_principal()):
+        assert page_citations.inbound_citations(f"exomem://memory/{HIDDEN}", world.root)["count"] == 1
 
 
 def test_a_row_of_a_collection_the_caller_cannot_read_is_absent_from_items_and_count(world):

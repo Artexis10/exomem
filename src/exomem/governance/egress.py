@@ -2340,6 +2340,46 @@ def _page_bytes(vault_root: Path, rel_path: str) -> bytes:
     return (vault_root / rel_path).read_bytes() if stored is None else stored
 
 
+def _markdown_scopes(
+    vault_root: Path, rel_path: str, policy: Policy, *, raw: bytes | None, content_hash: str, mtime: float,
+) -> frozenset[str] | None:
+    """The scopes of the Markdown page whose current bytes are ``raw``; None when they do not decode.
+
+    Raises ``membership.MembershipUnresolved`` when its membership cannot be decided.
+    """
+    full_path = vault_root / rel_path
+    scope_ids = membership_module.cached_snapshot_membership(
+        vault_root, find_corpus.page_relative_path(full_path, vault_root), policy, content_hash=content_hash,
+    )
+    if scope_ids is None:
+        page = find_corpus._parse_page_after_checkpoint(full_path, mtime, vault_root, content=raw)
+        if page is None:
+            return None
+        scope_ids = membership_module.evaluate_snapshot(page, policy, content_hash=content_hash)
+    return scope_ids
+
+
+def page_scopes(vault_root: Path, rel_path: str, policy: Policy) -> tuple[frozenset[str], str] | None:
+    """The scopes of the Markdown page at ``rel_path`` and the sha256 of the bytes they were read from.
+
+    A read classifies a page from its own bytes, so a scope that selects by tag, project or type
+    places it here exactly as it does for the read. None when ``rel_path`` names no Markdown page or
+    its bytes cannot be read or decoded; raises ``membership.MembershipUnresolved`` when its
+    membership cannot be decided.
+    """
+    if not _is_markdown_path(rel_path):
+        return None
+    full_path = vault_root / rel_path
+    try:
+        st = find_corpus.page_stat(full_path, vault_root)
+        raw = _page_bytes(vault_root, rel_path)
+    except OSError:
+        return None
+    digest = hashlib.sha256(raw).hexdigest()
+    scope_ids = _markdown_scopes(vault_root, rel_path, policy, raw=raw, content_hash=digest, mtime=st.st_mtime)
+    return None if scope_ids is None else (scope_ids, digest)
+
+
 def _decision_from_scopes(
     scope_ids: Iterable[str], *, policy: Policy, audience: str, purpose: str | None,
     active_grants: Iterable[policy_module.StandingGrant],
@@ -2521,20 +2561,12 @@ def _decide_path(
             scope_ids = held.scopes[0]
         else:
             try:
-                scope_ids = membership_module.cached_snapshot_membership(
-                    vault_root, find_corpus.page_relative_path(full_path, vault_root), policy,
-                    content_hash=live_content_hash or "",
-                )
-                if scope_ids is None:
-                    page = find_corpus._parse_page_after_checkpoint(
-                        full_path, mtime, vault_root, content=raw
-                    )
-                    if page is None:
-                        # Undecodable Markdown retains the ordinary read refusal.
-                        return None
-                    scope_ids = membership_module.evaluate_snapshot(
-                        page, policy, content_hash=live_content_hash or ""
-                    )
+                found = _markdown_scopes(vault_root, rel_path, policy, raw=raw,
+                                         content_hash=live_content_hash or "", mtime=mtime)
+                if found is None:
+                    # Undecodable Markdown retains the ordinary read refusal.
+                    return None
+                scope_ids = found
             except membership_module.MembershipUnresolved:
                 # Same fail-closed signal as the stat failure above: no decision,
                 # so every consumer withholds. Reached on a TOCTOU race — the page
