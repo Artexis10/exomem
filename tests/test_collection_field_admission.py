@@ -831,3 +831,26 @@ def test_a_refused_query_column_is_named_and_the_list_holds_only_columns_the_cal
     assert {"place", "label", "context"} <= set(
         refused(OWNER, "absent").split("readable columns: ")[1].split(", ")
     )
+
+
+def test_a_withheld_query_column_refuses_like_a_missing_one_whichever_argument_names_it(store):
+    """A caller that sends column names must not learn from the reply which of them the collection declares."""
+    create(store)
+    shapes = {
+        "columns": lambda name: {"columns": [name]},
+        "filter": lambda name: {"filters": [{"column": name, "op": "eq", "value": "x"}]},
+        "sort": lambda name: {"sort_by": name},
+        "aggregate": lambda name: {"aggregate": f"sum:{name}"},
+    }
+
+    def refused(name, shape):
+        with pytest.raises(Exception, match="INVALID_RECORD_QUERY_FIELD") as raised:
+            tool(store, "record_memory", who=GUEST, action="query", collection=CID, **shapes[shape](name))
+        return str(raised.value)
+
+    for shape in shapes:
+        # Only the name the caller sent differs; the reply names no other field.
+        assert refused("place", shape).replace("'place'", "'absent'") == refused("absent", shape), shape
+    # The owner reads the field the guest is refused.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, columns=["place"])
+    assert all("place" in row for row in owner["rows"])

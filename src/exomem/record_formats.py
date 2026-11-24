@@ -2813,8 +2813,14 @@ def query_collection(
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
     late_link_projection: bool = False,
     stage_store_projection: bool = False,
+    readable: collections.CollectionManifest | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
+
+    `readable` is `manifest` after the caller's field plan. A query that names a column may
+    name only a column of `readable`, so a withheld column refuses as an undeclared one does.
+    A saved view's columns are the manifest author's, not the caller's, so they are checked
+    against `manifest`.
 
     `late_link_projection` is an internal-only opt-in from a trusted caller
     (never a value a public tool's request parameters can reach -- no tool
@@ -2867,7 +2873,7 @@ def query_collection(
         }
     selected_child = _resolve_child_selector(manifest, expand_children, expand_child)
     _validate_query_projection_fields(
-        manifest,
+        readable if readable is not None and view is None else manifest,
         selected_child=selected_child,
         filters=filters,
         columns=columns,
