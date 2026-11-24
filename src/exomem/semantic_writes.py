@@ -749,15 +749,13 @@ def evaluate_posthoc_batch(
         )
         grandfathered = bool(
             manifest is not None
-            and activation_manifest.is_grandfathered(
+            and _grandfathered(
                 root,
-                state.path,
-                source_hash=state.source_hash,
-                exomem_id=(state.identity if state.identity_kind == "exomem_id" else None),
+                state,
+                text=None,
                 manifest=manifest,
                 census=corpus.activation_census,
                 identity_census=corpus.identity_census,
-                eligible_compiled=state.eligible_compiled,
                 status_basis=status_basis,
             )
         )
@@ -1262,7 +1260,6 @@ class MovePageEvaluation:
     after_contracts: memory_schema.ResolvedMemoryContracts
     before_review: semantic_contract.RelationReviewState | None
     after_review: semantic_contract.RelationReviewState | None
-    grandfathered: bool
     transition_token: str
     contract_result: semantic_contract.SemanticContractResult
     requested_decision: relation_review.LifecycleDecision | None = None
@@ -2384,15 +2381,13 @@ def _preflight_existing(
     boundary = activation_manifest.plan_activation_boundary(
         before_corpus.activation_census, manifest=manifest, vault_root=root
     )
-    grandfathered = activation_manifest.is_grandfathered(
+    grandfathered = _grandfathered(
         root,
-        path,
-        source_hash=before.source_hash,
-        exomem_id=before.identity if before.identity_kind == "exomem_id" else None,
+        before,
+        text=before_source,
         manifest=boundary.manifest,
         census=before_corpus.activation_census,
         identity_census=before_corpus.identity_census,
-        eligible_compiled=before.eligible_compiled,
         status_basis=status_basis,
     )
     def evaluate_with(review: semantic_contract.RelationReviewState | None):
@@ -2472,17 +2467,13 @@ def _reevaluate_existing(
     manifest: activation_manifest.ActivationManifest,
     status_basis: lifecycle_statuses.Basis,
 ) -> tuple[semantic_contract.SemanticContractResult, bool]:
-    grandfathered = activation_manifest.is_grandfathered(
+    grandfathered = _grandfathered(
         preflight.before_corpus.vault_root,
-        preflight.path,
-        source_hash=preflight.before.source_hash,
-        exomem_id=(
-            preflight.before.identity if preflight.before.identity_kind == "exomem_id" else None
-        ),
+        preflight.before,
+        text=preflight.before_source,
         manifest=manifest,
         census=preflight.activation_census,
         identity_census=preflight.before_corpus.identity_census,
-        eligible_compiled=preflight.before.eligible_compiled,
         status_basis=status_basis,
     )
     result = semantic_contract.evaluate(
@@ -3612,15 +3603,18 @@ def _corpus_with_pages(
 
     A link that names a path some page left resolves by the lineage these pages hold, before the
     index has refreshed: the claims are the index's with these pages applied.
+
+    `corpus` is patched by these pages, so a move step re-derives only the links they reach, not
+    every relation in the vault (`SemanticCorpusContext.with_pages`).
     """
     status_basis = status_basis or lifecycle_statuses.Basis(root)
-    states = dict(corpus.pages)
+    delta: dict[str, semantic_contract.SemanticPageState | None] = {}
     changed: dict[str, semantic_contract.SemanticPageState] = {}
     for rel, text in pages.items():
         if text is None:
-            states.pop(rel, None)
+            delta[rel] = None
             continue
-        state = semantic_contract.build_page_state(
+        delta[rel] = changed[rel] = semantic_contract.build_page_state(
             root,
             rel,
             text,
@@ -3628,24 +3622,10 @@ def _corpus_with_pages(
             language_registry=language,
             status_basis=status_basis,
         )
-        states[rel] = state
-        changed[rel] = state
-    identity_census = corpus.identity_census.with_pages(
-        {rel: changed.get(rel) for rel in pages}, casefold_paths=vault.vault_casefolds(root)
-    )
     claims = prior_claims.current(root).with_pages(
         {rel: None if text is None else text.encode("utf-8") for rel, text in pages.items()}
     )
-    return (
-        semantic_contract.SemanticCorpusContext.from_states(
-            root,
-            states.values(),
-            registry=registry,
-            identity_census=identity_census,
-            prior_claims=claims,
-        ),
-        changed,
-    )
+    return corpus.with_pages(delta, prior_claims=claims), changed
 
 
 def _move_dependency_signature(
@@ -3843,6 +3823,80 @@ def _corpus_before_rename(
     )
 
 
+def _grandfathered(
+    root: Path,
+    page: semantic_contract.SemanticPageState,
+    *,
+    text: str | None,
+    manifest: activation_manifest.ActivationManifest | None,
+    census: activation_manifest.ActivationCensus | None,
+    identity_census: semantic_contract.StableIdentityCensus,
+    status_basis: lifecycle_statuses.Basis,
+) -> bool:
+    """Whether `page` belongs to the activation baseline, through the moves its lineage records.
+
+    A page with an exomem_id is matched by that id wherever it lives. A page without one is
+    matched by its path and bytes, and a governed move changes both: it leaves the path and
+    appends the lineage entry that names it. Removing that entry gives back the bytes the move
+    found (`page_lineage.remove_latest`), so the page still matches the entry its old path holds.
+    `text` is the page's logical text when the caller has it; otherwise it is read only for an
+    unmatched page without an id that records a move.
+
+    The old path's baseline passes only to the page that alone left it. A copy that stands
+    beside its original, or one of two copies of a moved page, inherits nothing: no page may
+    stand at the old path, and the path's prior claims must name this page only, the rule by
+    which a link to that path resolves (`prior_claims`). Every caller judges the vault's
+    current state, so the index's current claims are the ones it holds.
+    """
+    exomem_id = page.identity if page.identity_kind == "exomem_id" else None
+
+    def held(path: str, source_hash: str) -> bool:
+        return activation_manifest.is_grandfathered(
+            root,
+            path,
+            source_hash=source_hash,
+            exomem_id=exomem_id,
+            manifest=manifest,
+            census=census,
+            identity_census=identity_census,
+            eligible_compiled=page.eligible_compiled,
+            status_basis=status_basis,
+        )
+
+    if held(page.path, page.source_hash):
+        return True
+    # The frozen frontmatter holds tuples, which `page_lineage.entries` refuses, so the
+    # entries are parsed from the text below.
+    records_lineage = any(page.frontmatter.get(name) for name in page_lineage.FIELDS)
+    if (
+        exomem_id is not None or manifest is None
+        or not page.eligible_compiled or not records_lineage
+    ):
+        return False
+    if text is None:
+        try:
+            raw, _guard = vault.read_guarded_text(root, root / page.path)
+        except (OSError, UnicodeDecodeError, vault.PathGuardError):
+            return False
+        text = vault.markdown_lf(raw)
+    if vault.content_hash(text) != page.source_hash:
+        return False
+    for entry in reversed(page_lineage.entries(page_lineage.read_front(text)[0])):
+        prior = page_lineage.entry_path(entry)
+        if prior is None:
+            return False
+        try:
+            text = page_lineage.remove_latest(text, prior)
+        except page_lineage.LineageError:
+            return False
+        if held(prior, vault.content_hash(text)):
+            if vault.served_page_bytes(root, prior) is not None:
+                return False
+            claimants = prior_claims.current(root).claimants(prior.removesuffix(".md"))
+            return claimants == (page.path,)
+    return False
+
+
 def _renewed_decision(
     root: Path,
     identity: str,
@@ -3872,8 +3926,6 @@ def _evaluate_relocation(
     after_corpus: semantic_contract.SemanticCorpusContext,
     loaded_contracts: tuple[memory_schema.LoadedMemoryContract, ...],
     language: semantic_language_registry.SemanticLanguageRegistry,
-    manifest: activation_manifest.ActivationManifest | None,
-    status_basis: lifecycle_statuses.Basis,
 ) -> list[MovePageEvaluation]:
     """Judge each page a relocation changes, as `move`: the moved page as the move's own write,
     every other page as a read whose links the relocation rewrites.
@@ -3957,21 +4009,6 @@ def _evaluate_relocation(
                         )
                 except relation_review.RelationReviewError as error:
                     raise SemanticWriteError(error.code, error.reason) from error
-        grandfathered = bool(
-            before.identity_kind == "exomem_id"
-            and before.eligible_compiled
-            and activation_manifest.is_grandfathered(
-                root,
-                before.path,
-                source_hash=before.source_hash,
-                exomem_id=before.identity,
-                manifest=manifest,
-                census=before_corpus.activation_census,
-                identity_census=before_corpus.identity_census,
-                eligible_compiled=before.eligible_compiled,
-                status_basis=status_basis,
-            )
-        )
         result = semantic_contract.evaluate(
             before=before,
             after=after,
@@ -3983,7 +4020,10 @@ def _evaluate_relocation(
             after_corpus=after_corpus,
             before_review=before_review,
             after_review=after_review,
-            grandfathered=grandfathered,
+            # A relocation changes paths and link spellings, not what a page says: each page,
+            # moved or rewritten, grandfathered or not, is refused only for the error keys the
+            # relocation adds.
+            non_worsening=True,
             include_relation_disposition=applicability == "full",
             language_registry=language,
         )
@@ -4006,7 +4046,6 @@ def _evaluate_relocation(
                 after_contracts,
                 before_review,
                 after_review,
-                grandfathered,
                 token,
                 result,
                 requested_decision,
@@ -4170,8 +4209,6 @@ def preflight_move(
         after_corpus=after_corpus,
         loaded_contracts=loaded_contracts,
         language=language,
-        manifest=boundary.manifest,
-        status_basis=status_basis,
     )
     return MovePreflight(
         old_path,
@@ -4315,11 +4352,6 @@ class ProjectedMoves:
         )
         self._disk_claims = prior_claims.current(root)
         self._contracts = memory_schema.load_saved_contracts(root)
-        self._manifest = activation_manifest.plan_activation_boundary(
-            self._disk.activation_census,
-            manifest=activation_manifest.load_manifest(root),
-            vault_root=root,
-        ).manifest
         # The corpus last judged, its claims, and the text of each page it holds apart from the
         # vault's.
         self._corpus = self._disk
@@ -4358,8 +4390,6 @@ class ProjectedMoves:
             after_corpus=after_corpus,
             loaded_contracts=self._contracts,
             language=self._language,
-            manifest=self._manifest,
-            status_basis=self._status_basis,
         ))
 
     def _at(
@@ -4483,11 +4513,6 @@ def preflight_rewrites(
         language=language,
         status_basis=status_basis,
     )
-    boundary = activation_manifest.plan_activation_boundary(
-        before_corpus.activation_census,
-        manifest=activation_manifest.load_manifest(root),
-        vault_root=root,
-    )
     evaluations = _evaluate_relocation(
         root,
         pairs=tuple((rel, rel) for rel in sorted(changed)),
@@ -4497,8 +4522,6 @@ def preflight_rewrites(
         after_corpus=after_corpus,
         loaded_contracts=memory_schema.load_saved_contracts(root),
         language=language,
-        manifest=boundary.manifest,
-        status_basis=status_basis,
     )
     return RewritePreflight(rewrite_tuple, tuple(evaluations), after_corpus)
 
