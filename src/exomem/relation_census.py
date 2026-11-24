@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from . import __version__, audit, entity_types, relation_registry, request_budget
+from . import __version__, audit, capabilities, entity_types, relation_registry, request_budget
 from .collection_store.ownership import reader
 from .kbdir import managed_join, managed_relative, managed_splitter
 
@@ -655,8 +655,9 @@ def generic_share_review(vault_root: Path) -> tuple[list[audit.AuditFinding], di
             f"over {days} days; review target {target * 100:g}%. Coverage: {coverage['status']}."
         ),
         proposed_fix=(
-            "Review the recorded choices through schema_memory(subject='relations', "
-            "operation='census'). Use a specific relation when the evidence supports it; "
+            "Review the recorded choices through "
+            f"{capabilities.active_call_text('schema_memory', {'subject': 'relations', 'operation': 'census'})}. "
+            "Use a specific relation when the evidence supports it; "
             "otherwise propose a relation or write a plain link. This signal never blocks a write."
         ),
         meta={

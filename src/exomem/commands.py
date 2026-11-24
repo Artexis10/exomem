@@ -15969,7 +15969,9 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("schema_memory",),
-        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
+        {"public_title": "Inspect or change memory schemas", "surface": "advanced", "actions": ("review", "update"), "first_run_safe": True,
+         # An operation that pages takes `more`, the typed tools' name for its `continuation` cursor.
+         "field_synonyms": (("more", "continuation"),)},
     ),
     (
         "govern_memory",
@@ -16146,10 +16148,24 @@ def _validate_rendered_arguments(name: str, action: object, arguments: Mapping[s
     matching = [entry for entry in operations.entries if entry.matches(action, arguments)]
     if not matching:
         _refuse_rendered_arguments(name, "the selected operation has invalid discriminants")
-    if not any(set(arguments) <= entry.fields and all(arguments.get(key) is not None
-                                                      for key in entry.required)
-               for entry in matching):
-        _refuse_rendered_arguments(name, "the selected operation has invalid fields")
+    from .cli_ops import argument_misfit_text
+
+    # Each candidate's own misfit: the caller's names against what that entry takes.
+    misfits = [
+        (
+            set(arguments) - entry.fields,
+            {key for key in entry.required if arguments.get(key) is None},
+            entry,
+        )
+        for entry in matching
+    ]
+    if any(not unexpected and not missing for unexpected, missing, _ in misfits):
+        return
+    # The closest candidate (fewest misfits, then table order) is the one the caller likely meant.
+    unexpected, missing, entry = min(misfits, key=lambda item: len(item[0]) + len(item[1]))
+    _refuse_rendered_arguments(
+        name, argument_misfit_text(str(action), unexpected, missing, entry.fields, entry.required)
+    )
 
 
 def validate_operation_entries(commands: Iterable[Command] | None = None) -> None:
@@ -16310,7 +16326,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                 )
                 for param in params
             )
-        operation_entries.register_operations(name, params)
+        operation_entries.register_operations(name, params, meta.get("field_synonyms", ()))
         argument_rules = _ARGUMENT_RULES.get(name)
         if argument_rules is None and name in operation_entries.OPERATIONS:
             argument_rules = ArgumentRules(

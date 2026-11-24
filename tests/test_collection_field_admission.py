@@ -809,3 +809,25 @@ def test_unresolved_import_cannot_erase_another_imports_location_ancestor(store)
                   query={"version": 1})["rows"]
     assert len(result) == 2 and all(item["calories"] == 7 for item in result)
     assert all("payload" not in item and "alias" not in item for item in result)
+
+
+def test_a_refused_query_column_is_named_and_the_list_holds_only_columns_the_caller_reads(store):
+    """A caller cannot learn a withheld field's name from the list that tells it what it can read."""
+    create(store)
+
+    def refused(who, column):
+        with pytest.raises(Exception, match="INVALID_RECORD_QUERY_FIELD") as raised:
+            tool(store, "record_memory", who=who, action="query", collection=CID, columns=[column])
+        return str(raised.value)
+
+    guest = refused(GUEST, "absent")
+    assert "query field 'absent' is not available in the safe projection" in guest
+    listed = guest.split("readable columns: ")[1].split(", ")
+    assert {"title", "count", "mixed"} <= set(listed)
+    assert not {"place", "label", "context"} & set(listed)
+    # Another missing name reads the same, so the refusal does not sort names into kinds.
+    assert refused(GUEST, "other").replace("'other'", "'absent'") == guest
+    # The owner reads every declared column, so its list holds the fields the guest's lacks.
+    assert {"place", "label", "context"} <= set(
+        refused(OWNER, "absent").split("readable columns: ")[1].split(", ")
+    )

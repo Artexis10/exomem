@@ -391,3 +391,193 @@ def test_a_command_the_surface_withholds_loses_its_tools_and_door_operations_too
     assert {"query_plan_items", "add_plan_item", "edit_plan_item"} <= listed
     assert called.get("is_error") or "error" in called
     assert seams.dispatched == []
+
+
+# --- refusals an agent can act on ---------------------------------------------------------
+
+
+def _refusal(reply: dict) -> dict:
+    """The error envelope of a refused call."""
+    assert reply.get("success") is False or "error" in reply, reply
+    return reply["error"]
+
+
+PLANNING_COLLECTION_PATH = "Knowledge Base/Planning/Work/_collection.md"
+
+
+async def _create_planning_collection(client) -> None:
+    from test_planning_mutation import _manifest
+
+    created = await _call(
+        client, "manage_memory",
+        {"operation": "plans.create",
+         "arguments": {"manifest_path": PLANNING_COLLECTION_PATH, "manifest_text": _manifest(),
+                       "why": "create planning collection"}},
+    )
+    assert "error" not in created, created
+
+
+def test_a_refused_planning_call_names_the_values_the_parent_kind_and_the_readable_columns(
+    build, vault
+) -> None:
+    from exomem.planning_values import PlanningValues
+
+    statuses = ", ".join(PlanningValues(vault).values("status"))
+
+    async def add(client, **item):
+        return await _call(
+            client, "add_plan_item",
+            {"collection": PLANNING_COLLECTION_PATH, "why": "probe", "item": item},
+        )
+
+    async def scenario(client):
+        await _create_planning_collection(client)
+        bad_status = await add(client, title="Bad status", status="bogus")
+        outcome = await add(client, title="Outcome", kind="outcome")
+        ref = f"exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/{outcome['plan_id']}"
+        wrong_kind = await add(client, title="Wrong kind", kind="work-item", parent=ref)
+        missing = await add(
+            client, title="Missing", kind="work-item",
+            parent="exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/11111111-1111-4111-8111-111111111111",
+        )
+        foreign = await add(
+            client, title="Foreign", kind="work-item",
+            parent="exomem://plan/3db90f18-70df-4e41-986e-2d7d7db1caca/11111111-1111-4111-8111-111111111111",
+        )
+        bad_column = await _call(
+            client, "query_plan_items", {"collection": PLANNING_COLLECTION_PATH, "columns": ["nope"]}
+        )
+        return bad_status, wrong_kind, missing, foreign, bad_column
+
+    bad_status, wrong_kind, missing, foreign, bad_column = _session(build(), scenario)
+
+    assert f"must be one of: {statuses}" in _refusal(bad_status)["message"]
+    assert "schema_memory" not in _refusal(bad_status)["message"]
+    # The rule names the parent kind the item's own kind requires, from the registry.
+    assert "kind work-item takes an active parent of kind: initiative" in _refusal(wrong_kind)["message"]
+    # A parent that exists with the wrong kind, one that does not exist and one from another
+    # collection read the same.
+    assert _refusal(wrong_kind) == _refusal(missing) == _refusal(foreign)
+    # A refused column is named, with the columns the caller can read.
+    column = _refusal(bad_column)
+    assert column["code"] == "INVALID_RECORD_QUERY_FIELD"
+    assert "'nope'" in column["message"] and "readable columns: " in column["message"]
+    assert "title" in column["message"].split("readable columns: ")[1]
+
+
+def test_schema_inspect_pages_with_more_or_continuation(build) -> None:
+    arguments = {"subject": "planning-values", "limit": 1}
+
+    async def scenario(client):
+        first = await _call(client, "inspect_memory", {"operation": "schema.inspect", "arguments": arguments})
+        token = first["continuation"]
+        by_more = await _call(
+            client, "inspect_memory",
+            {"operation": "schema.inspect", "arguments": {"subject": "planning-values", "more": token}},
+        )
+        by_name = await _call(
+            client, "inspect_memory",
+            {"operation": "schema.inspect", "arguments": {"subject": "planning-values", "continuation": token}},
+        )
+        both = await _call(
+            client, "inspect_memory",
+            {"operation": "schema.inspect",
+             "arguments": {"subject": "planning-values", "more": token, "continuation": token}},
+        )
+        # An operation that does not page keeps the name the caller sent.
+        unpaged = await _call(
+            client, "manage_memory",
+            {"operation": "schema.save_entity_types", "arguments": {"more": token}},
+        )
+        return first, by_more, by_name, both, unpaged
+
+    first, by_more, by_name, both, unpaged = _session(build(), scenario)
+
+    assert first["returned"] == 1
+    assert by_more["entries"] and by_more["entries"][0]["key"] != first["entries"][0]["key"]
+    assert by_more == by_name
+    assert "send one" in _refusal(both)["message"]
+    assert "more" in _refusal(unpaged)["message"] and "continuation" not in _refusal(unpaged)["message"]
+
+
+def test_an_unknown_operation_argument_is_named_with_the_arguments_the_operation_takes(build) -> None:
+    async def scenario(client):
+        return await _call(
+            client, "inspect_memory",
+            {"operation": "schema.inspect", "arguments": {"subject": "planning-values", "bogus": 1}},
+        )
+
+    refused = _refusal(_session(build(), scenario))
+
+    assert refused["code"] == "INVALID_OPERATION_ARGUMENTS"
+    assert "bogus" in refused["message"]
+    allowed = refused["message"].split("inspect allowed: ")[1]
+    assert "subject" in allowed and "continuation" in allowed
+
+
+def test_a_stored_item_that_breaks_the_hierarchy_is_not_blamed_on_the_item_being_written(
+    build, vault
+) -> None:
+    """The kind rule is the writer's own to fix; a stored item's broken parent reads as a plain refusal."""
+    async def add(client, **item):
+        return await _call(
+            client, "add_plan_item",
+            {"collection": PLANNING_COLLECTION_PATH, "why": "probe", "item": item},
+        )
+
+    async def scenario(client):
+        await _create_planning_collection(client)
+        outcome = await add(client, title="Outcome", kind="outcome")
+        prefix = "exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/"
+        initiative = await add(
+            client, title="Initiative", kind="initiative", parent=prefix + outcome["plan_id"]
+        )
+        work = await add(
+            client, title="Work", kind="work-item", parent=prefix + initiative["plan_id"]
+        )
+        assert "error" not in work, work
+        (vault / "Knowledge Base/Planning/Work/Items/Initiative.md").unlink()
+        written = await add(client, title="Another outcome", kind="outcome")
+        queried = await _call(client, "query_plan_items", {"collection": PLANNING_COLLECTION_PATH})
+        return written, queried
+
+    written, queried = _session(build(), scenario)
+
+    for reply in (written, queried):
+        assert _refusal(reply)["code"] == "INVALID_PLAN_RELATION"
+        assert "takes" not in _refusal(reply)["message"], reply
+
+
+def test_a_refused_planning_value_names_the_allowed_values_or_the_fields_at_fault(build) -> None:
+    async def add(client, **item):
+        return await _call(
+            client, "add_plan_item",
+            {"collection": PLANNING_COLLECTION_PATH, "why": "probe", "item": item},
+        )
+
+    async def scenario(client):
+        await _create_planning_collection(client)
+        outcome = await add(client, title="Outcome", kind="outcome")
+        prefix = "exomem://plan/2db90f18-70df-4e41-986e-2d7d7db1caca/"
+        return (
+            await add(client, title="Lifecycle", lifecycle="gone"),
+            await add(client, title="Area", kind="area", priority="high", parent=prefix + "x"),
+            # A missing target and one of the wrong kind read the same.
+            await add(client, title="Gone", area=prefix + "11111111-1111-4111-8111-111111111111"),
+            await add(client, title="Wrong", area=prefix + outcome["plan_id"]),
+            await add(
+                client, title="Evidence",
+                progress_evidence=[{
+                    "collection": "exomem://memory/11111111-1111-4111-8111-111111111111",
+                    "role": "gone", "view": "v",
+                }],
+            ),
+        )
+
+    lifecycle, area, missing, wrong_kind, evidence = _session(build(), scenario)
+
+    assert "lifecycle must be one of: active, archived" in _refusal(lifecycle)["message"].lower()
+    assert "areas cannot carry delivery state or hierarchy: parent, priority" in _refusal(area)["message"].lower()
+    assert "area takes an active item of kind area" in _refusal(missing)["message"].lower()
+    assert _refusal(missing) == _refusal(wrong_kind)
+    assert "progress evidence role must be one of: progress, completion" in _refusal(evidence)["message"].lower()

@@ -377,7 +377,7 @@ class PublicSurface:
             op = ops[operation]
             rendering = next(r for r in self._renderings[op.command] if r.name == op.rendering)
             try:
-                fields = rendering.leaf_fields(fields)
+                fields = rendering.leaf_fields(op.kind, fields)
             except ValueError:
                 return None
             variant = rendering.variant_for(op.kind, fields)

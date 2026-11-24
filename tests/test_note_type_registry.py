@@ -332,9 +332,14 @@ def test_shipped_types_classify_the_same_under_any_overlay(vault: Path) -> None:
 
 
 def test_an_invalid_overlay_refuses_a_vault_type_write_until_fixed(vault: Path) -> None:
-    from exomem import note_types
+    from exomem import capabilities, note_types
     from exomem.cli_ops import OpError
     from exomem.governance.principal import library_scope
+
+    def _public_surface():
+        return capabilities.ActiveSurfaceDescriptor(
+            surface="mcp", profile="product", tier2_enabled=True, product_commands=(), tool_shape="public"
+        )
 
     overlay = note_types.registry_path(vault)
     overlay.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +350,13 @@ def test_an_invalid_overlay_refuses_a_vault_type_write_until_fixed(vault: Path) 
 
     # The owner can fix the overlay, so the refusal points at its findings.
     assert refused.value.code == "NOTE_TYPE_DEFINITION_UNAVAILABLE"
-    assert 'schema_memory(subject="note-types", operation="inspect")' in refused.value.remediation
+    assert "schema_memory(subject='note-types', operation='inspect')" in refused.value.remediation
+
+    # An agent on the public surface is told the tool it can call, not the grouped name.
+    with library_scope(), capabilities.active_surface(_public_surface()), pytest.raises(OpError) as public:
+        _gate_codes(vault)
+    assert "inspect_memory(operation='schema.inspect', arguments={'subject': 'note-types'})" in public.value.remediation
+    assert "schema_memory" not in public.value.remediation
 
 
 def test_an_invalid_overlay_never_refuses_a_move_for_a_page_it_only_relinks(vault: Path) -> None:

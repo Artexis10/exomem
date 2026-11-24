@@ -613,12 +613,14 @@ def resolve_invocation(
 
 def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, parsed, *, strict, subject=None):
     """Validate business fields after the public discriminator selects its command."""
+    from .cli_ops import argument_misfit_text
+
     rules = command.argument_rules
     if parsed is None:
         rules.refuse(f"{subject or rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
     try:
-        fields = rendering.leaf_fields(fields)
+        fields = rendering.leaf_fields(kind, fields)
     except ValueError as error:
         rules.refuse(str(error))
     label = operation_entries.OPERATION_KIND
@@ -644,10 +646,8 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
     rules.validate(variant.action, fields)
     unexpected = {key for key in set(fields) - variant.fields if fields[key] is not None}
     missing = {key for key in variant.required if fields.get(key) is None}
-    if unexpected:
-        rules.refuse(f"unexpected for {kind}: {', '.join(sorted(unexpected))}")
-    if missing:
-        rules.refuse(f"{kind} requires {', '.join(sorted(missing))}")
+    if unexpected or missing:
+        rules.refuse(argument_misfit_text(kind, unexpected, missing, variant.fields, variant.required))
     wrong = _type_errors(command, {**fields, **tool_arguments}, skip=rendering.selector, strict=strict)
     if wrong:
         # FastMCP's own error for the grouped call would name a tool the host cannot call.
@@ -689,7 +689,7 @@ def rendered_call_writes(
     flat = {}
     if parsed is not None:
         try:
-            flat = rendering.leaf_fields(parsed[1])
+            flat = rendering.leaf_fields(parsed[0], parsed[1])
             variant = next((v for v in rendering.variants if v.kind == parsed[0]), None)
             if rendering.selector:
                 flat[rendering.selector] = variant.action if variant is not None else parsed[0]
