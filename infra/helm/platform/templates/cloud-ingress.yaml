@@ -25,7 +25,7 @@
 # cellctl.namespace, where the signed registry already delivers the token.
 # Any namespace could name a ClusterIssuer, so exomem-cloud-issuer-scope below
 # admits a Certificate or CertificateRequest naming it only in the edge
-# namespace. The solver stays scoped by selector.dnsNames to the one hostname
+# namespace. The solver stays scoped by selector.dnsNames to the hostnames
 # it is meant to solve for.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer

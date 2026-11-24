@@ -510,6 +510,13 @@ cloudGateway:
   # (cloudIngress.cloudflareApiTokenSecretName) must be able to edit the DNS zone of
   # every listed hostname, and every listed hostname's DNS record must be DNS-only
   # (not proxied), as the primary's is.
+  # Before setting this list, the gateway image and the Substrate web app must both run
+  # a release that reads EXOMEM_CLOUD_MCP_URLS, with the same list on both. An older
+  # gateway reads only EXOMEM_CLOUD_MCP_URL, so the swap would make it refuse every token
+  # issued for the old host and sign out every connected client.
+  # One certificate covers every listed name, and cert-manager renews none of them while
+  # any one fails DNS-01. After each change, check that the Certificate is Ready with every
+  # name; remove a name that fails.
   additionalHostnames: []
   # Substrate's public origin (EXOMEM_PUBLIC_BASE_URL), and the MCP path on
   # `hostname` the gateway serves (EXOMEM_CLOUD_MCP_URL is https://hostname+path).
