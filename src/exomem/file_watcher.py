@@ -2818,13 +2818,18 @@ class FileWatcher:
         importer's whole-vault sweep, which seeds none, so nothing waits on it for recall."""
         return self._importer is None
 
+    @property
+    def seed_finished(self) -> bool:
+        """Whether the startup seed has reached its terminal result, successful or not."""
+        return self._seed_complete.is_set()
+
     def wait_until_seeded(self, timeout: float | None = None) -> bool:
         """Wait for the startup seed's terminal result.
 
         ``False`` means either the wait timed out or at least one recall scope
-        failed to become authoritative.  Callers must then keep retrieval
-        unadmitted; they must never turn the failed seed into reader-thread
-        fallback work.
+        failed to become authoritative; `seed_finished` tells the two apart.
+        Callers must then keep retrieval unadmitted; they must never turn the
+        failed seed into reader-thread fallback work.
         """
         if not self._seed_complete.wait(timeout):
             return False

@@ -540,6 +540,7 @@ def test_local_runtime_activation_bounds_failed_seed_wait_before_compute(
 
     class Watcher:
         seeds_recall_projections = True
+        seed_finished = True  # the seed ended and a scope failed to become authoritative
 
         def wait_until_seeded(self, timeout=None) -> bool:
             calls.append("watcher-seed:wait")

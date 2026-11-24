@@ -160,6 +160,132 @@ def test_readiness_only_traffic_recovers_a_failed_catalogue_publication(
             lexstore._FULL_REBUILD_REQUESTED.discard(vault.resolve())
 
 
+def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow startup seed must not leave the process unable to admit retrieval until a restart.
+
+    Under write load a large vault's seed can outlast activation's wait. The watcher that is still
+    seeding is the only thing that can make the recall projections live, so activation keeps it and
+    retrieval admits when the seed completes. A watcher stopped at the wait never seeds.
+    """
+    readiness.reset()
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "auto")
+    monkeypatch.setattr(
+        server_runtime, "CATALOGUE_RECOVERY_FIRST_BACKOFF_SECONDS", 0.05, raising=False
+    )
+    monkeypatch.setattr(
+        server_runtime, "CATALOGUE_RECOVERY_MAX_BACKOFF_SECONDS", 0.1, raising=False
+    )
+    monkeypatch.setattr(server_runtime, "RECALL_SEED_WAIT_SECONDS", 0.05)
+    vault = tmp_path / "vault"
+    page = vault / "Knowledge Base" / "probe.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Probe\n\nslowseedmarker\n", encoding="utf-8")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    initialize_vault_state_offline(vault, source="slow seed fixture")
+
+    class SlowSeedWatcher:
+        """Makes both recall projections live when its walk may finish, and never once stopped."""
+
+        seeds_recall_projections = True
+
+        def __init__(self) -> None:
+            self.seeded = threading.Event()
+            self.stopped = threading.Event()
+
+        @property
+        def seed_finished(self) -> bool:
+            return self.seeded.is_set()
+
+        def wait_until_seeded(self, timeout=None) -> bool:
+            return self.seeded.wait(timeout)
+
+        def finish_walk(self) -> None:
+            if self.stopped.is_set():
+                return
+            for scope in freshness.SCOPES:
+                freshness.seed(vault, scope, [(str(page), freshness.stat_signature(page))])
+            self.seeded.set()
+
+        def arm_optional_recovery(self) -> None:
+            pass
+
+        def finish_startup_recovery(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            self.stopped.set()
+
+    watcher = SlowSeedWatcher()
+    compute_finished = threading.Event()
+
+    def compute(root, **_kwargs):
+        readiness.begin_warm()
+        warmup.warm_retrieval_catalog(root)
+        readiness.finish_warm()
+        compute_finished.set()
+
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", compute)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _root: watcher)
+    for name in (
+        "_start_derived_drain",
+        "_start_graph_drain",
+        "_start_media_worker",
+        "_warm_request_path",
+        "_warm_embedding_matrix",
+    ):
+        monkeypatch.setattr(server_runtime, name, lambda _root: None)
+    for name in (
+        "_start_vocabulary_recovery",
+        "_start_recall_reembed",
+        "_start_dreamer",
+        "_resume_upload_sessions",
+        "_start_semantic_drain",
+    ):
+        monkeypatch.setattr(
+            server_runtime.LocalRuntimeActivation, name, lambda self, _root: None
+        )
+    activation = server_runtime.LocalRuntimeActivation(vault, fallback_seconds=60)
+
+    async def exercise():
+        app = FastMCP("slow-seed")
+        server_assets.register_health_routes(app)
+        async with activation.lifespan()(SimpleNamespace()):
+            activation.start()
+            assert await asyncio.to_thread(compute_finished.wait, 5)
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app.http_app()), base_url="http://cell.test"
+            ) as client:
+                warming = await client.get("/health/ready")
+                assert warming.status_code == 503, warming.json()
+                await asyncio.to_thread(watcher.finish_walk)
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    response = await client.get("/health/ready")
+                    if (
+                        response.status_code == 200
+                        and response.json()["retrieval"]["state"] == "ready"
+                    ):
+                        break
+                    await asyncio.sleep(0.02)
+                assert response.status_code == 200, response.json()
+                assert response.json()["retrieval"]["state"] == "ready", response.json()
+                assert lexstore.search_bm25(
+                    vault, "slowseedmarker", k=3, scope="kb", repair=False
+                )
+
+    try:
+        asyncio.run(exercise())
+    finally:
+        assert lexstore.await_repairs_idle(vault, timeout=3)
+        readiness.reset()
+        freshness.clear()
+        with lexstore._REPAIRS_LOCK:
+            lexstore._FULL_REBUILD_REQUESTED.discard(vault.resolve())
+
+
 def test_persistent_catalogue_failure_backs_off_without_duplicate_or_post_shutdown_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
