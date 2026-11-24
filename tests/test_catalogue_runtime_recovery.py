@@ -165,9 +165,9 @@ def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
 ) -> None:
     """A slow startup seed must not leave the process unable to admit retrieval until a restart.
 
-    Under write load a large vault's seed can outlast activation's wait. The watcher that is still
-    seeding is the only thing that can make the recall projections live, so activation keeps it and
-    retrieval admits when the seed completes. A watcher stopped at the wait never seeds.
+    Under write load a large vault's seed can outlast activation's bounded wait. Activation keeps
+    waiting for that seed and verifies the catalogue after it, so retrieval admits from the watcher's
+    own projections, with no second walk. A watcher stopped at the wait never seeds.
     """
     readiness.reset()
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
@@ -179,6 +179,7 @@ def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
         server_runtime, "CATALOGUE_RECOVERY_MAX_BACKOFF_SECONDS", 0.1, raising=False
     )
     monkeypatch.setattr(server_runtime, "RECALL_SEED_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(server_runtime, "RECALL_SEED_RECHECK_SECONDS", 0.01)
     vault = tmp_path / "vault"
     page = vault / "Knowledge Base" / "probe.md"
     page.parent.mkdir(parents=True)
@@ -219,9 +220,19 @@ def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
             self.stopped.set()
 
     watcher = SlowSeedWatcher()
+    compute_started = threading.Event()
     compute_finished = threading.Event()
+    rebaselines: list[Path] = []
+    real_rebaseline = freshness.rebaseline
+
+    def rebaseline(root):
+        rebaselines.append(root)  # a second whole-vault walk
+        return real_rebaseline(root)
+
+    monkeypatch.setattr(freshness, "rebaseline", rebaseline)
 
     def compute(root, **_kwargs):
+        compute_started.set()
         readiness.begin_warm()
         warmup.warm_retrieval_catalog(root)
         readiness.finish_warm()
@@ -254,13 +265,15 @@ def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
         server_assets.register_health_routes(app)
         async with activation.lifespan()(SimpleNamespace()):
             activation.start()
-            assert await asyncio.to_thread(compute_finished.wait, 5)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app.http_app()), base_url="http://cell.test"
             ) as client:
+                # Well past the bounded wait, activation is still waiting for the seed.
+                assert not await asyncio.to_thread(compute_started.wait, 0.5)
                 warming = await client.get("/health/ready")
                 assert warming.status_code == 503, warming.json()
                 await asyncio.to_thread(watcher.finish_walk)
+                assert await asyncio.to_thread(compute_finished.wait, 5)
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
                     response = await client.get("/health/ready")
@@ -275,6 +288,7 @@ def test_a_seed_that_outlasts_the_wait_admits_retrieval_once_it_completes(
                 assert lexstore.search_bm25(
                     vault, "slowseedmarker", k=3, scope="kb", repair=False
                 )
+                assert rebaselines == []
 
     try:
         asyncio.run(exercise())

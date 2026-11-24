@@ -39,10 +39,12 @@ from .vault import resolve_vault
 log = logging.getLogger(__name__)
 
 # The production Windows seed has measured about 49 seconds under pressure.
-# Give it substantial headroom, but never let one blocked watcher prevent the
-# background catalogue warm/repair path from starting indefinitely. A seed still
-# running at the bound keeps its watcher; only a failed seed downgrades recall.
+# Past this bound activation logs that the seed is slow and keeps waiting for
+# it: catalogue verification starts only after the seed ends, and only a seed
+# that ended unsuccessfully downgrades recall.
 RECALL_SEED_WAIT_SECONDS = 120.0
+# How often a slow seed's wait rechecks for shutdown.
+RECALL_SEED_RECHECK_SECONDS = 1.0
 
 # Failed catalogue publication can require another whole-vault build. Back off
 # to limit repeated I/O under persistent failure, with a cap for quiet recovery.
@@ -357,18 +359,22 @@ class LocalRuntimeActivation:
             self._downgrade_recall_runtime()
             return
         if not seeded and not watcher.seed_finished:
-            # A slow seed is not a failed one: under write load a large vault's walk can outlast the wait.
-            # The watcher keeps seeding and re-walks on its reconcile interval, and catalogue recovery
-            # admits retrieval once both projections are live. A downgrade would stop the only thing
-            # that can make them live, until the process restarts.
+            # A slow seed is not a failed one: under write load a large vault's walk can outlast the
+            # wait. Keep waiting for it. A downgrade would stop the only owner of the projections for the
+            # life of the process, and a catalogue warm started now would rebaseline the scopes, which
+            # cancels the seed and walks the vault a second time.
             log.warning(
                 "file watcher is still establishing the recall projections after %.0f s; "
-                "retrieval stays warming until they are live",
+                "retrieval stays warming until it finishes",
                 RECALL_SEED_WAIT_SECONDS,
             )
-            return
-        # The seed may have ended successfully just after the wait ran out: read its result again.
-        if not seeded and not watcher.wait_until_seeded(timeout=0):
+            while not watcher.seed_finished:
+                if self._shutdown.wait(RECALL_SEED_RECHECK_SECONDS):
+                    return
+        if not seeded:
+            # The seed has finished; read its result, which may have arrived after the bounded wait.
+            seeded = watcher.wait_until_seeded(timeout=0)
+        if not seeded:
             log.warning(
                 "file watcher did not establish both recall projections; "
                 "switching this process to exact walk-backed recall"
