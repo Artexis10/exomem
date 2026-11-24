@@ -13,7 +13,7 @@ The change ships in two stages. Stage 1 is store mode itself (D1 to D9). Stage 2
 - No repair state after a hard kill at any point of a write.
 - Markdown stays a complete, byte-exact, editable copy, and outside edits return safely.
 - In stage 1, the same derived rows as today, so recall, graph context and every reader behave the same.
-- In stage 2, unit-level rows and edges, and a canonicity record for every stored file.
+- In stage 2, unit-level rows, typed relationships stored as rows with no limit per unit, and a canonicity record for every stored file.
 - A verified, reversible migration.
 
 **Non-Goals**
@@ -206,18 +206,30 @@ Some data exists only in the store: the audit trail, queued projection intents, 
 
 For writes that Exomem commits, store mode does not need the modules that keep sidecars in step with files: `graph_sync` (4,153 lines), `graph_drain` (844), `derived_drain` (1,066), `derived_receipts` (3,408), `deferred_index` (2,733), `freshness` (2,468), `index_sync` (2,439), `pending_recall` (934), `graph_publication` (155), and the repair, witness and catch-up paths inside `lexstore` (12,289 lines in total) and `epistemic_graph` (14,880 in total). The watcher (2,564 lines) shrinks to the manifest importer. File mode keeps them until it retires; deleting them is the last phase. After the graph readers moved to the store (task 3.1), the sidecar read path (`_open_read_snapshot`'s file branch, `_open_published_read`, `graph_read_publication`, `graph_lag`) and the whole in-memory inbound-link index (its build, patch, catch-up and recovery functions) serve file mode only.
 
-### D10. Semantic units are first-class rows
+### D10. Semantic units are first-class rows; their relationships are stored rows
 
 Stage 2. Pages stay the documents people read and edit, and they are composed of semantic units. Today each unit is stored twice, as a lexical `semantic_units` row and as a graph unit node, in two files that can disagree. In store mode each unit is one row with:
-- its identity (`unit_ref`), under today's rule: the authored block anchor when the page carries one, otherwise the fingerprint-bound reference. The store derives it from the bytes and never writes anchors into a page;
+- its identity (`unit_ref`), under today's rule: the authored block anchor when the page carries one, otherwise the fingerprint-bound reference;
 - its page, ordinal and exact byte span in the page;
 - category, kind and text;
 - provenance (its sources);
 - its verdict from the existing verdict set, its lifecycle and its canonicity (D11).
 
-Typed edges run between units as well as between pages: a link to `[[Page#^anchor]]` resolves to the unit that carries that anchor. A claim-level operation, such as verifying, refuting or superseding one claim, is a governed write that changes the page bytes and the unit row in one transaction. Recall can therefore return units with their page context, and graph edges can point at the exact unit a claim lives in. That is new retrieval behaviour: it ships only after task 5.4 and the outcome evaluation's stage-2 run (task 7.3). The merged unit rows must still reproduce today's lexical unit rows and graph unit nodes for the same bytes.
+The page bytes stay the source of a unit's text, and unit rows derive from them in the same transaction.
 
-*Option kept:* page bytes are the serialisation and unit rows derive from them in the same transaction. One source of truth holds because the two cannot diverge, and the Markdown projection stays complete for editors. *Option rejected for now:* unit-canonical storage, where a page is composed from stored segments. It offers no capability beyond the rows above and makes every outside edit a segmentation problem.
+**Stored relationships (owner decision, 2026-11-24).** A unit can carry any number of typed relationships, to other units or to pages, and each relationship type comes from the relation vocabulary registry. A relationship written as a typed link in the page text derives from the bytes, as today. A relationship that a governed operation adds is a stored row, and no line of text in the page carries it. Text alone cannot carry hundreds of relationships per unit and keep the page readable, so stored rows are required.
+
+1. **Identity that survives edits.** A fingerprint-bound reference changes when someone edits the unit's text, which would strand a stored relationship. So when a unit gains its first stored relationship, the governed write that adds it also writes a block anchor (`^c-…`) at the end of that unit. This is the one case where the store writes an anchor into a page. A unit with no stored relationship keeps today's identity and its bytes unchanged.
+2. **One write path.** Every claim-level operation adds, retires or supersedes a relationship through one store function, inside the operation's one governed transaction. The page bytes, the unit rows and the relationship rows commit together.
+3. **Governance and history.** A caller sees a relationship only when it may see both ends. Each relationship keeps its own history: who added it, when, why, and what retired or superseded it.
+4. **Projection.** The Markdown projection of a page carries a generated relations block. It shows, per unit, the count of each relationship type and a bounded number of the strongest relationships. A generated relations file beside the page holds every stored relationship of the page's units, so the vault, its sync, its backup and a rollback to file mode keep them. The block is never the source: the importer reads relationship edits from the relations file.
+5. **Outside edits.** When an outside edit deletes a unit that carries stored relationships, the importer keeps those relationships and opens a review item that names the lost unit. It never drops a relationship silently.
+6. **Rebuild and rollback.** A cold derivation reads the relations files beside the page bytes, so a rebuild reproduces the stored relationships. A rollback to file mode projects every relations file first.
+7. **Scale.** Relationship rows are indexed by source unit and type and by target and type. A page's relationships load with one indexed query whatever their number, and the generated block stays bounded.
+
+Recall can therefore return units with their page context, and graph edges can point at the exact unit a claim lives in. That is new retrieval behaviour: it ships only after task 5.4 and the outcome evaluation's stage-2 run (task 7.3). The merged unit rows must still reproduce today's lexical unit rows and graph unit nodes for the same bytes.
+
+*Option chosen:* page bytes stay the source of unit text, and relationships become stored rows. *Option left open:* unit-canonical storage, where the store holds units as the source and composes each page from them. It would add composing or reusing one unit across several pages. It costs a rebuild of every write path and a segmentation of every outside edit, and nothing asks for it yet. The chosen option grows into it unchanged: relationship rows and anchored identities carry over.
 
 ### D11. Originals record their canonicity
 
@@ -284,10 +296,10 @@ On a generated vault with 312 collection views, the laptop timed five creates an
 | 1 | Embeddings keyed by store revision | 0.5 |
 | 1 | Cloud cells (projection off, export on demand) and Windows/NTFS | 1 |
 | 1 | Delete the file-mode sync machinery | 1 |
-| 2 | Semantic units as one row set, unit-level edges and claim-level writes (D10) | 1–1.5 |
+| 2 | Semantic units as one row set, stored relationships, anchored identity, relations projection and claim-level writes (D10) | 2–3 |
 | 2 | Canonicity records and the supersede-original write (D11) | 0.5–1 |
 
-**Result.** These weeks assume the Records move's pace, which landed mostly one PR at a time. About 11 to 13 weeks in total. The smallest local release, the first six stage-1 rows, is 7 to 8 weeks. Embeddings, Cloud, Windows and deletion bring stage 1 to 9.5 to 10.5 weeks; stage 2 adds 1.5 to 2.5. No cut of this table fits one month at that pace.
+**Result.** These weeks assume the Records move's pace, which landed mostly one PR at a time. About 12 to 14 weeks in total. The smallest local release, the first six stage-1 rows, is 7 to 8 weeks. Embeddings, Cloud, Windows and deletion bring stage 1 to 9.5 to 10.5 weeks; stage 2 adds 2.5 to 4, after its 2026-11-24 revision to stored relationships. No cut of this table fits one month at that pace.
 
 **Parallel schedule.** With parallel workstreams, the smallest local release, plus embeddings keyed by store revision and an acceptance run on Windows, takes about four to five weeks of elapsed time:
 
