@@ -356,14 +356,12 @@ refusals = []
 def record_stall(index):
     # A write past the incremental bound records every thread's stack, so the stall names its cause.
     frames = sys._current_frames()
-    stall_traces.append(
-        f"write {{index}} still running after {{ACK_BOUND_SECONDS}}s:\\n"
-        + "\\n".join(
-            f"thread {{ident}}:\\n" + "".join(traceback.format_stack(frame))
-            for ident, frame in frames.items()
-            if ident != threading.get_ident()
-        )
-    )
+    lines = [f"write {{index}} still running after {{ACK_BOUND_SECONDS}} seconds"]
+    for ident, frame in frames.items():
+        if ident != threading.get_ident():
+            lines.append(f"thread {{ident}}")
+            lines.append("".join(traceback.format_stack(frame)))
+    stall_traces.append("\\n".join(lines))
 
 
 for index in range(WRITE_COUNT):
