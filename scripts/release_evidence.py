@@ -23,6 +23,7 @@ FULL_EVENTS = ("workflow_dispatch", "schedule")
 RECONCILE_PREFIX = "release-reconcile/"
 # The merge queue's candidate branches and its commit status (scripts/merge_queue.py).
 MERGE_QUEUE_PREFIX = "merge-queue/"
+CUT_PREFIX = "release-cuts/"
 MERGE_QUEUE_CONTEXT = "merge queue"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
@@ -54,6 +55,23 @@ def ci_scope(event_name: str, event: dict) -> dict[str, bool]:
     queued = bool((event.get("inputs") or {}).get("queue"))
     full = event_name in FULL_EVENTS and not queued
     return {"full": full, "release": release, "reconcile": reconcile}
+
+
+def full_dispatch_refusal(event_name: str, event: dict) -> str | None:
+    """Full runs on main, on schedule and on release cuts, never on a feature branch.
+
+    A Full run takes about 90 jobs; on a feature branch it holds the shared runner pool and
+    delays the merge queue and release cuts. A merge queue dispatch is not Full.
+    """
+    if event_name != "workflow_dispatch" or (event.get("inputs") or {}).get("queue"):
+        return None
+    branch = str(event.get("ref", "")).removeprefix("refs/heads/")
+    if branch == "main" or branch.startswith(CUT_PREFIX):
+        return None
+    return (
+        f"Full runs only on main, on schedule and on release cuts, not on {branch!r}. "
+        "The merge queue runs every core and harness shard before a pull request lands."
+    )
 
 
 def event_payload() -> dict:
@@ -294,7 +312,7 @@ def cut_branch(source: str) -> str:
     # Git's SHA-1 wire format is fixed by this repository's object format.
     if len(source) != 40 or any(char not in "0123456789abcdef" for char in source):
         raise ValueError("select a full lowercase source commit SHA")
-    return f"release-cuts/{source}"
+    return f"{CUT_PREFIX}{source}"
 
 
 def reconcile_branch(source: str) -> str:
@@ -453,6 +471,10 @@ def main() -> int:
     repository = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     os.environ["GH_REPO"] = repository
     if args.command == "scope":
+        refusal = full_dispatch_refusal(os.environ["GITHUB_EVENT_NAME"], event_payload())
+        if refusal:
+            print(f"::error::{refusal}")
+            return 1
         selected = ci_scope(os.environ["GITHUB_EVENT_NAME"], event_payload())
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             for key, value in selected.items():

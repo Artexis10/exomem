@@ -282,7 +282,9 @@ tree with merged main. Release evidence is a Full run on main, or a Full run
 dispatched on the source branch whose tree equals the merged tree. Identical
 trees reuse proof after squash; a changed tree, expired receipt, or incomplete
 proof uses the Full fallback. Legacy receipt-free evidence remains eligible only
-for a scheduled or dispatched Full run at its exact main commit.
+for a scheduled or dispatched Full run at its exact main commit. A feature
+branch cannot dispatch Full (`release_evidence.py scope` refuses it), so new
+evidence comes from main, the schedule or the release cut's own Full run.
 
 A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does

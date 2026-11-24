@@ -436,6 +436,21 @@ def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatc
     assert evidence.full_inflight(source, repository)
 
 
+@pytest.mark.parametrize(
+    ("event", "payload", "refused"),
+    [
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": ""}}, True),
+        ("workflow_dispatch", {"ref": "refs/heads/main", "inputs": {"queue": ""}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/release-cuts/" + "a" * 40, "inputs": {}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/merge-queue/abc-1", "inputs": {"queue": "batch 1@" + "a" * 40}}, False),
+        ("schedule", {"ref": "refs/heads/main"}, False),
+    ],
+)
+def test_a_feature_branch_cannot_dispatch_a_full_run(event, payload, refused):
+    """Catches a Full run on a feature branch, which holds the shared runners the queue and release cuts need."""
+    assert (evidence.full_dispatch_refusal(event, payload) is not None) is refused
+
+
 def test_a_merge_queue_dispatch_is_never_full_evidence():
     """Catches a merge queue run, which runs only what a push to main runs, qualifying a release."""
     assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": "batch 1@" + "a" * 40}})["full"] is False
