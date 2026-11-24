@@ -139,7 +139,7 @@ unprotected `cla-signatures` branch, which must exist with that file before the 
 (`{"signedContributors": []}`). The repository owner, the release bot and Dependabot are
 allowlisted by exact login.
 
-Your Contribution keeps its path's licence: AGPL-3.0-or-later by default, and Apache-2.0
+Your Contribution keeps its path's licence: FSL-1.1-ALv2 by default, and Apache-2.0
 under `plugins/` and `src/exomem/_scaffold/` (the map is in the README). The CLA lets the
 maintainer relicense. It promises that each public version that includes your Contribution
 is available under an OSI-approved licence no later than two years after it is first made

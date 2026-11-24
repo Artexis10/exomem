@@ -1320,7 +1320,7 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
 def test_cloud_cell_handshake_names_its_release_and_source_repository(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AGPL section 13: the operator's service names the release it runs and where its source is."""
+    """The source offer: the operator's service names the release it runs and where its source is."""
     from exomem import __version__
 
     cloud, _ = _build_cloud_server(monkeypatch)
