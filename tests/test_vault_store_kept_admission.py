@@ -8,10 +8,12 @@ page must decide that page again, not every page of the vault.
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import closing, contextmanager
 
 import pytest
 import test_vault_store_write_cost as write_cost
+from test_collection_store_writer import CID
 from test_connector_boundary import PRIVATE, PUBLIC, RESIDUAL, configured_boundary  # noqa: F401
 from test_managed_collections_migration import coordinator_url  # noqa: F401
 from test_vault_store_admission_batches import apply_case, exception_corpus
@@ -20,8 +22,11 @@ from test_vault_store_read_write import put, stored, writer  # noqa: F401
 from test_vault_store_readers import EXTERNAL, restrict_external
 from test_vault_store_write_path import served  # noqa: F401
 
-from exomem import semantic_contract
-from exomem.collection_store import connection, preview, runtime
+from exomem import semantic_contract, writer_lease
+from exomem import structured_collections as collections
+from exomem.cli_ops import OpError
+from exomem.collection_store import connection, export, preview, runtime
+from exomem.collection_store import governance as store_governance
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance import egress, lifecycle
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
@@ -258,6 +263,234 @@ def test_a_save_after_a_save_decides_the_pages_it_changed_not_the_vault(served, 
     assert pages_2n - pages_n >= 3 * 12, report
     assert create_2n - create_n <= 2, report
     assert edit_2n - edit_n <= 2, report
+
+
+def grow_rows(store_writer, start, count):
+    """Append ``count`` rows to the Work collection and write each row's view."""
+    for number in range(start, start + count):
+        store_writer.append_record(CID, item={"title": f"Row {number}"}, item_key=row_key(number), why="growth")
+    store_writer.reconcile_views(limit=1024)
+
+
+def row_key(number):
+    return f"{number:08d}-1111-4111-8111-111111111111"
+
+
+def collection_views(root):
+    """Every page that a collection of the store writes, as its files on disk hold it."""
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        paths = [path for (path,) in reader.execute("SELECT path FROM projection_state ORDER BY path")]
+    return [path for path in paths if (root / path).is_file()]
+
+
+def projection_decisions(monkeypatch):
+    """The paths whose release the store decided afresh, rather than reading a kept decision."""
+    made = []
+    subjects = store_governance.OperationAuthorization.projection_subjects
+    monkeypatch.setattr(store_governance.OperationAuthorization, "projection_subjects",
+                        lambda operation, path: made.append(path) or subjects(operation, path))
+    return made
+
+
+def complete_an_export(coordinator):
+    """What a completed export leaves outside the store: a retired fence and the export's evidence."""
+    retired = writer_lease.CollectionStoreFenceState(writer_lease.COLLECTION_STORE_CAPABILITY, False, None, 1)
+    coordinator.setattr(writer_lease.LeaseCoordinatorClient, "collection_store_fence", lambda client: retired)
+    coordinator.setattr(export, "completed_retirement_binding",
+                        lambda root, client, sid, *, fence: ("2026-11-24T00-00-00Z", ("export evidence",)))
+
+
+@pytest.mark.timeout(300)
+def test_a_save_after_a_save_decides_no_collection_view_again(served, writer, monkeypatch):  # noqa: F811
+    """Defect: each store-mode save proved every collection view of the vault again for its corpus admission,
+    twice, because a vault commit cleared the store's release cache: 65% of a create with 334 views. A
+    create and an edit by the owner are measured at N and 2N views, each a file: the views decided afresh
+    are the ones that the save changes, plus a constant, whatever the view count."""
+    write_cost.grow(writer, 1, 8, on_disk=served)
+    runtime._SERVING.pop(served, None)
+    made = projection_decisions(monkeypatch)
+    measured = []
+    for title, start in (("First probe", 100), ("Second probe", 200)):
+        grow_rows(writer, start, 16)
+        # The views just written are new to every save's admission; the next save decides them once.
+        write_cost.edit(served, write_cost.create(served, f"Catch-up {start}"))
+        views = len(collection_views(served))
+        made.clear()
+        path = write_cost.create(served, title)
+        created = len(made)
+        made.clear()
+        write_cost.edit(served, path)
+        measured.append((views, created, len(made)))
+    report = json.dumps(measured)
+    (views_n, create_n, edit_n), (views_2n, create_2n, edit_2n) = measured
+    assert views_2n - views_n >= 16, report
+    assert create_2n - create_n <= 2, report
+    assert edit_2n - edit_n <= 2, report
+
+
+@pytest.mark.timeout(300)
+def test_a_kept_view_decision_is_the_fresh_decision_after_each_change(served, writer, monkeypatch):  # noqa: F811
+    """Defect: a view's release decision, kept from one save to the next, outlives a change that moves it, so
+    a caller's corpus admits a view that a fresh decision withholds, or loses one that it releases.
+
+    The kept decisions are warm before each change. After it, each caller's admission of every view is the
+    one that an empty release cache gives. A change that moves a verdict moved one, or this test proves
+    nothing. A save that changes no collection decides no view again, and one that changes an input a
+    decision reads outside the store decides the views again.
+    """
+    grow_rows(writer, 100, 3)
+    restrict_external(served, "tags: [secret]")
+    scope = served / "Knowledge Base/_Governance/scopes/secret.yaml"
+    policy_text = scope.read_text()
+    paths = collection_views(served)
+    edited = "Knowledge Base/Records/Work/Items/" + row_key(100) + ".md"
+    view_bytes = (served / edited).read_bytes()
+    changed = row_key(101)
+    row_body = writer.connection.execute("SELECT body FROM item_rows WHERE item_key = ?", (changed,)).fetchone()[0]
+    callers = {
+        "owner": owner_principal(surface="mcp"),
+        "restricted": RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp"),
+        "restricted audit": RequestPrincipal(audience_id=EXTERNAL.audience_id, surface="mcp", purpose="audit"),
+    }
+    tombstones = set()
+    real_tombstones = lifecycle.tombstoned_paths
+    monkeypatch.setattr(lifecycle, "tombstoned_paths", lambda root: real_tombstones(root) | frozenset(tombstones))
+    made = projection_decisions(monkeypatch)
+
+    def fresh(who):
+        writer.handle.release_cache.clear()
+        return admit(served, who, paths, kept=True)
+
+    def set_row_body(body):
+        # A store write outside the writer's own statements, as a repair or a migration makes one.
+        writer.connection.execute("UPDATE item_rows SET body = ? WHERE item_key = ?", (body, changed))
+
+    def register_a_planning_value():
+        # A manifest parse reads the vault's Planning values; the overlay is a vault page, so a vault commit.
+        overlay = "schema_version: 1\nentries:\n  horizon.release-cycle: {}\n"
+        write.commit(writer, put("Knowledge Base/_Schema/planning-values.yaml", overlay.encode()))
+
+    with pytest.MonkeyPatch.context() as coordinator:
+        events = (
+            # (event, action, whether it moves a verdict, whether the kept admission decides views again:
+            #  False for none, True for some, None for either)
+            ("no change", lambda: None, False, False),
+            ("save a note", lambda: write.commit(writer, put("Knowledge Base/Notes/Tide.md", page("title: Tide\n"))),
+             False, False),
+            ("edit a view", lambda: (served / edited).write_bytes(view_bytes + b"\nAn edit by hand.\n"), True, None),
+            ("restore the view", lambda: (served / edited).write_bytes(view_bytes), True, None),
+            ("change a row outside the writer", lambda: set_row_body("Changed in the store."), True, None),
+            ("restore the row", lambda: set_row_body(row_body), True, None),
+            ("withhold the collection from the restricted audience",
+             lambda: scope.write_text(policy_text.replace("tags: [secret]", 'paths: ["Records/Work/**"]')), True, None),
+            ("restore the policy", lambda: scope.write_text(policy_text), True, None),
+            ("tombstone a row", lambda: tombstones.add(collections.record_ref(CID, changed)), True, None),
+            ("lift the tombstone", tombstones.clear, True, None),
+            # No verdict reads the Planning values today: a manifest parse validates saved views with them.
+            ("register a vault Planning value", register_a_planning_value, False, True),
+            ("complete an export of the collection store", lambda: complete_an_export(coordinator), True, True),
+            ("enroll the store again", coordinator.undo, True, True),
+        )
+        before = {name: fresh(who) for name, who in callers.items()}
+        assert before["owner"] != before["restricted"], "each caller is withheld something different"
+        for name, who in callers.items():
+            assert admit(served, who, paths, kept=True) == before[name], ("warm-up", name)
+        for event, action, moves, again in events:
+            action()
+            made.clear()
+            kept = {name: admit(served, who, paths, kept=True) for name, who in callers.items()}
+            decided_again = list(made)
+            now = {name: fresh(who) for name, who in callers.items()}
+            assert kept == now, event
+            assert (now != before) == moves, (event, "the event must move a verdict, or a stale decision would pass")
+            assert again is None or bool(decided_again) == again, (event, "decided again", decided_again)
+            before = now
+            for who in callers.values():
+                admit(served, who, paths, kept=True)
+
+
+@pytest.mark.timeout(300)
+def test_a_view_decision_is_not_kept_past_another_connections_commit(served, writer, monkeypatch):  # noqa: F811
+    """Defect: a view's decision is kept, or served, after another connection committed to the store, which
+    this connection's change count does not show. The decision may have read rows from both sides of the
+    commit, and a kept one outlives the rows it read.
+
+    One owner operation decides a view outside any read transaction, as an operation that shares the
+    writer's release cache may. The next operation must decide that view again in both cases: a commit
+    that lands while the decision runs and that a later read in it notices, and one that lands after it.
+    """
+    view = "Knowledge Base/Records/Work/Items/Original.md"
+    content = (served / view).read_bytes()
+    made = projection_decisions(monkeypatch)
+    cache = writer.handle.release_cache
+    commit_during = []
+    subjects = store_governance.OperationAuthorization.projection_subjects
+
+    def another_connection_commits():
+        # A commit that leaves every row as it was. SQLite skips a write of equal values, so this one moves a
+        # value and moves it back.
+        with closing(sqlite3.connect(connection.store_path(served), timeout=30)) as other, other:
+            other.execute("UPDATE store_mode SET revision = revision + 1 WHERE id = 1")
+            other.execute("UPDATE store_mode SET revision = revision - 1 WHERE id = 1")
+
+    def subjects_then_commit(operation, path):
+        targets = subjects(operation, path)
+        if commit_during:
+            another_connection_commits()
+            operation.cache.check()  # A later read in the same decision, such as a history page's, notices it.
+        return targets
+
+    monkeypatch.setattr(store_governance.OperationAuthorization, "projection_subjects", subjects_then_commit)
+
+    def decide():
+        with request_scope(owner_principal(surface="mcp")):
+            operation = store_governance.OperationAuthorization(served, writer.connection, mutation=False,
+                                                                cache=cache)
+            made.clear()
+            decision = operation.projection_decision(view, content=content, manifest_for=operation.field_manifest)
+            return decision.level, len(made)
+
+    assert decide() == (6, 1)
+    assert decide() == (6, 0), "an unchanged view keeps its decision"
+    cache.clear()
+    commit_during.append(True)
+    assert decide() == (6, 1)
+    commit_during.clear()
+    assert decide() == (6, 1), "a decision that a commit landed under is decided again"
+    assert decide() == (6, 0)
+    another_connection_commits()
+    assert decide() == (6, 1), "a commit after a kept decision drops it"
+
+
+@pytest.mark.timeout(300)
+def test_a_request_that_fails_its_ownership_proof_keeps_no_view_decision(served, writer, monkeypatch):  # noqa: F811
+    """Defect: a request decides its views under one ownership proof, and an export completes before it
+    ends, so the proof fails when the request proves it again. The request's decisions stay kept, and a
+    later request that meets the first binding again serves decisions read across the change.
+    """
+    paths = collection_views(served)
+    owner = owner_principal(surface="mcp")
+    made = projection_decisions(monkeypatch)
+    subjects = store_governance.OperationAuthorization.projection_subjects
+    expected = admit(served, owner, paths, kept=True)
+    writer.handle.release_cache.clear()
+    with pytest.MonkeyPatch.context() as coordinator:
+
+        def export_meanwhile(operation, path):
+            if not made:
+                complete_an_export(coordinator)
+            return subjects(operation, path)
+
+        monkeypatch.setattr(store_governance.OperationAuthorization, "projection_subjects", export_meanwhile)
+        made.clear()
+        with pytest.raises(OpError, match="collection ownership is unavailable"):
+            admit(served, owner, paths, kept=True)
+        assert made, "the failed request decided views"
+    monkeypatch.setattr(store_governance.OperationAuthorization, "projection_subjects", subjects)
+    failed = set(made)
+    made.clear()
+    assert admit(served, owner, paths, kept=True) == expected
+    assert failed <= set(made), "a view decided by the failed request is decided again"
 
 
 @pytest.mark.timeout(300)

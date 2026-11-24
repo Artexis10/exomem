@@ -797,7 +797,8 @@ class Projector:
         """The file holds ``page``'s bytes: record it, and drop the intent unless a newer waits."""
 
         def work(writer: CollectionWriter) -> None:
-            with writer.handle.transaction() as tx:
+            # The projection manifest and queue are the vault store's own tables.
+            with writer.handle.transaction(collection_free=True) as tx:
                 record_file(tx, page.path, page.sha256, size, mtime_ns, page.revision)
                 tx.execute(
                     "DELETE FROM store_projection_queue WHERE path = ? AND revision <= ?",
@@ -1188,7 +1189,7 @@ def drop_binary_move(tx: Connection, dst: str, src: str) -> None:
 
 def _drop_intent(writer: CollectionWriter, path: str, revision: int) -> None:
     # A later commit that queued the path again holds a later revision, and its intent stays.
-    with writer.handle.transaction() as tx:
+    with writer.handle.transaction(collection_free=True) as tx:
         tx.execute(
             "DELETE FROM store_projection_queue WHERE path = ? AND revision = ?", (path, revision)
         )
