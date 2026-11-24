@@ -248,7 +248,7 @@ class SearchMemory(Wire):
     tags: list[str] | None = None
     file_types: list[str] | None = Field(
         default=None,
-        description='Only these kinds: image, video, audio, pdf or note. Set ["image", "video"] when the conversation is about a photo, screenshot or video. If unsure a picture is meant, search both with and without it.',
+        description='Kinds to keep, e.g. ["image", "video"] for a photo, screenshot or video. If unsure a picture is meant, also search without it.',
     )
     filters: dict[str, Any] | None = Field(
         default=None, description='Metadata filter, such as {"page.status": "active"}.'

@@ -66,7 +66,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # Proof files saved in one call added 166 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
 # `scope`, `category` and `description` so an evidence send saves on arrival instead of needing a held-handle save,
 # and `save_evidence` says to keep proof in the turn it arrives.
-TOTAL_BUDGET = 31_168
+# `search_memory.file_types`, which lets an agent restrict a search to pictures and tells it to search both ways
+# when unsure, added 203 B on 2026-11-24 (add-images-only-search).
+TOTAL_BUDGET = 31_400
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -94,7 +96,7 @@ TOOL_CEILINGS: dict[str, int] = {
     "save_episode": 1100,
     "save_evidence": 1320,
     "save_source": 1550,
-    "search_memory": 1050,
+    "search_memory": 1250,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).
     "supersede_note": 1400,

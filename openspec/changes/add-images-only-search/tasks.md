@@ -1,7 +1,7 @@
 ## 1. Restriction to file kinds on search_memory
 
 - [x] 1.1 `search_memory` takes `file_types` and passes it to the leaf shortcut; the field description says when to set it. Evidence: `public_tools.SearchMemory.file_types`, passed in `_search` to the `file_types` shortcut of `op_ask_memory`.
-- [x] 1.2 Regenerate the MCP tool schema baseline and record the new discovery digest as pending in the personal plugin contract. Evidence: `scripts/dump-tool-schemas.py` output in `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json`; `deploy/chatgpt/personal-plugin-contract.json` pending digest; `tests/test_mcp_schema_fidelity.py` passes.
+- [x] 1.2 Regenerate the MCP tool schema baseline and record the new discovery digest as pending in the personal plugin contract. Evidence: `scripts/dump-tool-schemas.py` output in `tests/fixtures/mcp_tool_schemas.json` and `src/exomem/tool_surface_contract.json`; `deploy/chatgpt/personal-plugin-contract.json` pending digest; `tests/test_mcp_schema_fidelity.py` passes. The field adds 203 B to the tool surface; `tests/test_tool_schema_budget.py` records the raised `search_memory` ceiling and total budget with that reason.
 - [x] 1.3 Test: an agent's `search_memory` call with `file_types` set to `["image"]` returns only image sidecars through MCP. Evidence: `test_an_agent_restricts_a_search_to_images` (fails without the change). A host that still sends `file_types` inside `options` keeps working (`test_a_host_on_a_cached_tool_surface_can_still_restrict_a_search_through_options`).
 
 ## 2. CLIP lane inside a restriction to pictures

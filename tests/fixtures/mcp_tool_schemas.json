@@ -1491,7 +1491,7 @@
             "type": "string"
           },
           "type": "array",
-          "description": "Only these kinds: image, video, audio, pdf or note. Set [\"image\", \"video\"] when the conversation is about a photo, screenshot or video. If unsure a picture is meant, search both with and without it."
+          "description": "Kinds to keep, e.g. [\"image\", \"video\"] for a photo, screenshot or video. If unsure a picture is meant, also search without it."
         },
         "filters": {
           "type": "object",
