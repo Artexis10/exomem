@@ -13,8 +13,8 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import closing
 
-from ..collection_store import typed_storage
-from ..structured_collections import declared_references
+from ..collection_store import reference_index, typed_storage
+from ..structured_collections import declared_links, declared_references
 from . import reductions, reference_resolution, runtime
 from .errors import QueryError
 from .reference_resolution import unresolved_values
@@ -111,6 +111,69 @@ def _check_collection(session, collection_id) -> list:
                        "resolved_rows": with_values - unresolved_rows, "unresolved_rows": unresolved_rows,
                        "distinct_values": len(distinct), "unresolved_values": unresolved_values(pairs)})
     return report
+
+
+def check_links(root, store_path, collection_id) -> list:
+    """Per link field: the values the citation index holds and the values it does not, under the caller's view.
+
+    A title or a path is not indexed (`reference_index.link_match`), so a field's ``not_indexed`` count
+    says how many of its values no inbound-citation read can find. ``indexed`` is None while the index
+    is warming, because the partly built index is not the count of what it will hold.
+    """
+    try:
+        with runtime.read_session(root, store_path) as session:
+            return _check_links(session, collection_id)
+    except QueryError as error:
+        return [{"incomplete": error.code}]
+
+
+def _check_links(session, collection_id) -> list:
+    report = []
+    admitted = session.admit(collection_id)
+    for declaration in declared_links(session.admit_lookup(collection_id).manifest.schema):
+        entry = {"link": declaration.dotted,
+                 **({"relation": declaration.relation} if declaration.relation is not None else {})}
+        state = session.connection.execute(
+            "SELECT ready FROM item_reference_state WHERE collection_id=? AND field_path=?",
+            (collection_id, declaration.dotted)).fetchone()
+        try:
+            sql, decode = reductions._scan_sql(
+                session, collection_id, admitted.layout, admitted.membership_sql, (declaration.path[0],))
+        except QueryError as error:
+            if error.code not in _UNAVAILABLE:
+                raise
+            report.append({**entry, "state": "unavailable"})
+            continue
+        indexed = not_indexed = 0
+        with closing(session.connection.execute(sql, (collection_id,))) as cursor:
+            for visited, raw in enumerate(cursor, 1):
+                if not visited % reductions._CHECK_EVERY:
+                    session.check()
+                try:
+                    values = declaration.values(decode(raw))
+                except (typed_storage.TypedStorageError, ValueError, TypeError) as error:
+                    raise QueryError("QUERY_UNAVAILABLE") from error
+                for value in values:
+                    if reference_index.link_match(value) is None:
+                        not_indexed += 1
+                    else:
+                        indexed += 1
+        ready = state is not None and bool(state[0])
+        report.append({**entry, "state": "ready" if ready else "warming",
+                       "indexed": indexed if ready else None, "not_indexed": not_indexed})
+    return report
+
+
+def link_warnings(report) -> list[str]:
+    """The warnings of a ``check_links`` report: a field holding values that no citation read can find."""
+    out = []
+    for entry in report:
+        if "incomplete" in entry:
+            out.append(_incomplete(entry["incomplete"]))
+        elif entry.get("not_indexed"):
+            out.append(f"LINK_UNRESOLVED: link field {entry['link']!r} holds {entry['not_indexed']} values "
+                       "that are not page or row refs, so no page lists them as citations.")
+    return out
 
 
 def _incomplete(code: str) -> str:

@@ -2467,7 +2467,7 @@ def _status(writer, job: _Job, mode: str, **extra: Any) -> dict[str, Any]:
 
 
 def _reference_report(writer, job: _Job, state: str) -> dict:
-    """On completion, a non-derived job reports its declared references' resolution.
+    """On completion, a non-derived job reports how its declared references resolve and what its link fields hold.
 
     The check reads under the caller's own admission and never fails the status call.
     """
@@ -2477,10 +2477,18 @@ def _reference_report(writer, job: _Job, state: str) -> dict:
         _, manifest, _ = writer._collection(job.collection_id)
     except collections.CollectionError:
         return {}  # the status call itself reports a collection the caller can no longer read
-    if manifest.derived or not collections.declared_references(manifest.schema):
+    if manifest.derived:
         return {}
-    report = reference_report.check_collection(writer.root, writer.handle.path, job.collection_id)
-    return {"reference_check": report, "warnings": reference_report.warnings(report)}
+    found, warnings = {}, []
+    if collections.declared_references(manifest.schema):
+        report = reference_report.check_collection(writer.root, writer.handle.path, job.collection_id)
+        found["reference_check"] = report
+        warnings += reference_report.warnings(report)
+    if collections.declared_links(manifest.schema):
+        links = reference_report.check_links(writer.root, writer.handle.path, job.collection_id)
+        found["link_check"] = links
+        warnings += reference_report.link_warnings(links)
+    return {**found, "warnings": warnings} if found else {}
 
 
 @contextmanager

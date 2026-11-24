@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from math import isfinite
 from pathlib import Path
 from typing import Any, cast
@@ -1116,6 +1117,17 @@ def _authorize(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class LinkResolution:
+    """What a link value names for one reader: `page` (with its path), `row` (with its label),
+    `ambiguous` (with the visible candidate paths) or `none`."""
+
+    kind: str
+    path: str | None = None
+    candidates: tuple[str, ...] = ()
+    label: str | None = None
+
+
 @dataclass(slots=True)
 class _LinkProjector:
     root: Path
@@ -1142,6 +1154,15 @@ class _LinkProjector:
     # The retired item paths that this projector's links name, made on the first such link. It
     # reads each linked collection once for the whole query, however many of its rows are named.
     retired_links: Any | None = None
+    # What `_decide` learned about each stripped value it let through or turned away, for `resolve`:
+    # the visible page a value named, and the visible pages an ambiguous title matched.
+    named_pages: dict[str, str] = dataclass_field(default_factory=dict)
+    ambiguous_pages: dict[str, tuple[str, ...]] = dataclass_field(default_factory=dict)
+    # The label of the row that a canonical row ref names for this reader, or None when the reader may not read
+    # it. Only a creator that reads rows through a query session supplies it
+    # (`reference_resolution.row_labeller`); without one a row ref is withheld, as it was before rows resolved.
+    row_label: Callable[[tuple[str, str, str]], str | None] | None = None
+    named_rows: dict[str, str] = dataclass_field(default_factory=dict)
 
     @classmethod
     def create(
@@ -1153,6 +1174,7 @@ class _LinkProjector:
         allow_cold_index: bool = True,
         authorize_path: Callable[[str], bool] | None = None,
         visible_path: Callable[[str], bool] | None = None,
+        row_label: Callable[[tuple[str, str, str]], str | None] | None = None,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
@@ -1172,7 +1194,7 @@ class _LinkProjector:
         # authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
         return cls(root, manifest, empty, {}, {}, None, {}, {}, policy, authorize_path,
-                   visible_path, allow_cold_index)
+                   visible_path, allow_cold_index, row_label=row_label)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -1198,6 +1220,34 @@ class _LinkProjector:
             measured[route] = 1
         self.candidate_index_complete = complete
         return complete
+
+    def index_available(self) -> bool:
+        """Whether a bare title or a memory identity can resolve for this reader at all, without a cold walk
+        when the projector was made without one."""
+        return self._candidate_index_available()
+
+    def page_with_identity(self, identity: str) -> str | None:
+        """The one page this reader may see holding the memory identity, else None.
+
+        A withheld page, a missing page and two visible pages holding it all answer None. Call
+        `index_available` first: without the index every identity answers None.
+        """
+        return self._memory_target(identity) if self._candidate_index_available() else None
+
+    def resolve(self, value: str) -> LinkResolution:
+        """What one link value names for this reader: one visible page or row, several pages, or none.
+
+        It decides as a read does, through `_decide`, so a write and a later read cannot disagree. A
+        value that names no row or page this reader may see answers `none`, whether it is withheld or missing.
+        """
+        raw = value.strip()
+        if self._allowed(raw):
+            if raw in self.named_rows:
+                return LinkResolution("row", label=self.named_rows[raw])
+            page = self.named_pages.get(raw)
+            return LinkResolution("page", page) if page is not None else LinkResolution("none")
+        candidates = self.ambiguous_pages.get(raw)
+        return LinkResolution("ambiguous", candidates=candidates) if candidates else LinkResolution("none")
 
     def _visible(self, relative: str) -> bool:
         """Whether this reader may see `relative`, decided live and once per page."""
@@ -1372,6 +1422,16 @@ class _LinkProjector:
                 target = self._memory_target(identity)
                 if target is None:
                     return self._remember(f"memory:{identity}", False)
+            elif (row := collections.parse_row_ref(raw)) is not None:
+                # A canonical row ref names a row, not a page. It resolves under this reader's own visibility of
+                # that row, and a withheld row, a missing row and an unreadable collection answer alike.
+                if self.row_label is None or raw != collections._profile_item_ref(*row):  # noqa: SLF001
+                    return False
+                label = self.row_label(row)
+                if label is None:
+                    return False
+                self.named_rows[raw] = label
+                return True
             elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
                 target = memory_refs.resolve_identifier_read_only(self.root, raw)
             elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
@@ -1404,6 +1464,9 @@ class _LinkProjector:
                         targeted_namespace_contains=self._names_file,
                         visible=visible, retired=self._retired_target,
                     )
+                except vault.AmbiguousWikilinkError as error:
+                    self.ambiguous_pages[raw] = error.candidates
+                    return False
                 except vault.WikilinkError:
                     return False
                 target = canonical.split("#", 1)[0] + ".md"
@@ -1441,13 +1504,17 @@ class _LinkProjector:
         except (memory_refs.ReferenceError, vault.PathGuardError):
             return False
         if relative in self.verdicts:
-            return self.verdicts[relative]
-        if relative in self.admitted and not self.admitted[relative]:
-            return self._remember(relative, False)
-        with call_spans.span("records.link_authorize"):
-            allowed = (self.authorize_path(relative) if self.authorize_path is not None
-                       else _authorize(self.root, relative, receipt=True, policy=self.policy))
-        return self._remember(relative, allowed)
+            allowed = self.verdicts[relative]
+        elif relative in self.admitted and not self.admitted[relative]:
+            allowed = self._remember(relative, False)
+        else:
+            with call_spans.span("records.link_authorize"):
+                allowed = self._remember(relative, (
+                    self.authorize_path(relative) if self.authorize_path is not None
+                    else _authorize(self.root, relative, receipt=True, policy=self.policy)))
+        if allowed:
+            self.named_pages[raw] = relative
+        return allowed
 
     def _names_file(self, key: str) -> bool:
         """Whether the explicit link key `key` names a Markdown file, as the target check reads it.

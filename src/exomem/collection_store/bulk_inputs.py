@@ -7,11 +7,11 @@ import uuid
 from collections import ChainMap
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .. import origin_bindings, provenance, records
 from .. import structured_collections as collections
-from . import summary, tokens, typed_storage, version_sources, views
+from . import link_values, summary, tokens, typed_storage, version_sources, views
 
 
 @dataclass
@@ -29,6 +29,7 @@ class PreparedBulk:
     source_inputs: list | None = None
     origins: list | None = None
     source_guards: dict | None = None
+    link_notes: dict = field(default_factory=dict)
 
 
 def validate(rows, why, source, on_reject):
@@ -64,10 +65,11 @@ def detach(writer, collection, arguments):
         occupied = (dict(writer.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
                     if manifest.item_filename and manifest.storage.strategy != "markdown-log"
                     and manifest.view_mode != summary.SUMMARY else {})
-        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"])
+        links = link_values.for_write(writer, manifest)
+        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"], links)
         identity = views.store_identity(writer.connection)
     return PreparedBulk(manifest, before, uuid.uuid4().hex[:12], candidates, occupied, identity,
-                        _digest, arguments), None
+                        _digest, arguments, link_notes=links.notes() if links is not None else {}), None
 
 
 def acquire(root, prepared, *, why, on_reject, lifetime):
@@ -171,7 +173,7 @@ class Candidate:
                 "source": self.source.path}
 
 
-def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
+def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list[Candidate]:
     """Resolve row values once, then fetch touched identities together under the caller's snapshot."""
     from .writer import _natural_key, _refuse_view_stamp
 
@@ -215,7 +217,8 @@ def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
         derived = collections.derived_item_key(manifest, values)
         candidate.key = records._validate_item_key(derived or str(uuid.uuid4()))
         candidate.natural_key = _natural_key(manifest, values)
-        candidate.values, candidate.body, candidate.source = values, body, resolved
+        candidate.values, candidate.body, candidate.source = (
+            values if links is None else links.apply(values)), body, resolved
         candidate.derived = derived is not None
     _current(writer, manifest.collection_id, candidates)
     return candidates

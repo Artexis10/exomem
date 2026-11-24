@@ -46,8 +46,11 @@ _OPTIONAL = frozenset(
         "execution",
         "tags",
         "motivation",
+        "results",
     }
 )
+#: Planning bounds `results` at 16 as it bounds `motivation`, so one item cannot carry an unbounded link list.
+_MAX_RESULTS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -1428,7 +1431,7 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 #: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
-_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "inbound")
+_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "links", "inbound")
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1465,6 +1468,11 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         # The same bounded report the Records inspection admits, so one shape reaches egress.
         result["references"] = record_governance.inspection_references(value["references"])
         if result["references"] is None:
+            return None
+    if "links" in value:
+        # A link report entry is scalars only, the shape that bounded reference report admits.
+        result["links"] = record_governance.inspection_references(value["links"])
+        if result["links"] is None:
             return None
     if "inbound" in value:
         result["inbound"] = record_governance.inspection_inbound(value["inbound"])
@@ -1521,7 +1529,7 @@ def update(
     )
     _validate_declared_text(manifest, final)
     _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
-    return records.update_record(
+    result = records.update_record(
         vault_root,
         manifest,
         item_key=plan_id,
@@ -1537,6 +1545,7 @@ def update(
         _validate_inputs=_validate_inputs,
         _history_binding=_history_binding,
     )
+    return _with_completion_advisory(result, vault_root, manifest, matches[0].values, final)
 
 
 def triage(
@@ -1591,7 +1600,7 @@ def triage(
     )
     _validate_declared_text(manifest, final)
     _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
-    return records.update_record(
+    result = records.update_record(
         vault_root,
         manifest,
         item_key=plan_id,
@@ -1607,6 +1616,7 @@ def triage(
         _validate_inputs=_validate_inputs,
         _history_binding=_history_binding,
     )
+    return _with_completion_advisory(result, vault_root, manifest, matches[0].values, final)
 
 
 def _validate_lifecycle(
@@ -1906,10 +1916,55 @@ def _validate_final_relationships(
 def _validate_declared_text(
     manifest: collections.CollectionManifest, values: Mapping[str, Any]
 ) -> None:
-    """Refuse unrenderable authored text before shared record hashing."""
+    """Refuse what a write cannot store before shared record hashing: unrenderable authored text, and more
+    than the bound of `results` links on a collection that declares `results` as a list."""
     for name, value in values.items():
         if name in manifest.schema.fields:
             _validate_authored_text(value, name)
+    results = manifest.schema.fields.get("results")
+    # A legacy manifest may declare `results` as free text, so only the list form is bounded.
+    if results is not None and results.type == "array":
+        listed = values.get("results")
+        if isinstance(listed, list) and len(listed) > _MAX_RESULTS:
+            _invalid(f"results holds at most {_MAX_RESULTS} links")
+
+
+def completion_advisory(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The reply addition for an update that moves an item to a done-class status while `results` is empty.
+
+    The update still commits. The advice applies only where the manifest declares `results`, because only
+    there can the caller act on it. The status class comes from the Planning values registry, never from a
+    status key, and a status the registry cannot place in a class gives no advice.
+    """
+    if before is None or before.get("status") == after.get("status") or after.get("results"):
+        return {}
+    if "results" not in manifest.schema.fields:
+        return {}
+    classes = PlanningValues(vault_root)
+    # `done` is one of the three classes the registry's class protocol fixes (`planning_values.CLASSES`).
+    if classes.planning_class(after.get("status")) != "done" or classes.planning_class(before.get("status")) == "done":
+        return {}
+    return {
+        "no_result_linked": "This item is done and has no linked result. "
+        "Set `results` to the record or page that holds its outcome."
+    }
+
+
+def _with_completion_advisory(
+    result: dict[str, Any],
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    if result.get("outcome") != "committed":
+        return result
+    return {**result, **completion_advisory(vault_root, manifest, before, after)}
 
 
 def _validate_authored_text(value: Any, name: str) -> None:

@@ -151,7 +151,8 @@ def test_the_pack_binds_seven_frontmatter_fields_and_each_bound_relation_accepts
     # The loader derives `frontmatter` from the binding; the pack no longer writes it.
     for relation in ("derived_from", "evidenced_by", "supersedes", "links_to"):
         assert core.resolve(relation, origin="frontmatter").status == "core"
-    assert core.core["links_to"].origins == {"semantic_relation", "wikilink", "frontmatter"}
+    assert core.core["links_to"].origins == {
+        "semantic_relation", "wikilink", "frontmatter", "collection_link"}
     assert core.resolve("mentions", origin="frontmatter").status == "scope_violation"
 
 

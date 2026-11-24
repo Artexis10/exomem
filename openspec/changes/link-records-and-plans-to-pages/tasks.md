@@ -1,0 +1,70 @@
+## 1. Typed links and the citation seam (Batch B)
+
+- [x] 1.1 Canonicalise `link` values on create, append, update, bulk upsert and import through the read-side link projector with the writer's visibility; warn on unresolved or ambiguous values; keep the supplied value in history.
+  - Evidence: `collection_store/link_values.py`, hooks in `record_inputs.py` (append, update) and `bulk_inputs.py` (bulk upsert and import), `_LinkProjector.resolve` in `record_governance.py`. Tests: `tests/test_collection_link_values.py` (rename-proof ref, ambiguous title, withheld equals missing, withheld twin, append, update, bulk upsert and import).
+- [x] 1.2 Index canonical link refs in `item_references` from the canonical item transaction and the existing backfill. Seed `item_reference_state` for link fields, and report title and path values as not indexed in `inspect`.
+  - Evidence: `collection_store/reference_index.py` (`link_match`, link entries in `maintain_many`, `backfill`, `unseeded`, `revise`), `query_engine/reference_report.py` (`check_links`), `structured_collections.py` (`LinkDeclaration`, `indexed_fields`). Test: `test_link_entries_rebuild_exactly_from_rows_and_inspect_counts_what_is_indexed` in `tests/test_collection_link_values.py`.
+- [x] 1.3 Add the manifest attribute `relation` on `link` fields, validated against registry relations whose `origins` include `collection_link`. Add that origin to `cites`, `evidenced_by`, `derived_from` and `links_to` in the core pack.
+  - Evidence: `FieldSpec.relation` in `structured_collections.py`, `collection_store/link_declarations.py`, `relation_registry.py`, `vocabulary/packs/core/relations.yaml`. Test: `test_a_relation_is_refused_unless_its_origins_include_collection_link` in `tests/test_collection_link_values.py`.
+- [x] 1.4 Implement `inbound_citations(ref, caller, limit, more)` and its batch form: one indexed range read, two-ended visibility, an exact visible count, a continuation and a `warming` state.
+  - Evidence: `src/exomem/page_citations.py` (`inbound_citations`, `inbound_citations_batch`), `reference_index.link_fields`. Tests: `tests/test_page_citations.py` (ready list and continuation, warming, withheld page equals missing page, withheld row absent from items and count, one statement for a batch, non-page ref unavailable).
+- [x] 1.5 Add `results` to Planning, with `no_result_linked` on a done-class transition read from the registry. Resolve `motivation` at read time.
+  - Evidence: `planning.py` (`_OPTIONAL`, `_MAX_RESULTS`, `_validate_declared_text`, `completion_advisory`; legacy and store-backed paths), `writer._item_carriers`; the Planning inspection admits `links` (`_OPTIONAL_INSPECTION_KEYS`). Tests: `tests/test_planning_results.py` (round trip and the citation on the page and the row, 17 refused, `no_result_linked` on a done transition and not on a drop, a linked result or a link-less manifest, `motivation` declared with link items is indexed and stays memory refs only). Read-time resolution of canonical record and plan refs: `reference_resolution.resolve_row`, `_LinkProjector`, tests in `tests/test_collection_link_values.py`.
+- [x] 1.6 `read_page` returns `cited_by`.
+  - Evidence: `commands.py` (`_with_cited_by`, `_cited_by_continuation`, `op_read_memory`), `page_citations.py` (`applies`, `without_page`, hex cursor). Tests: `tests/test_read_page_cited_by.py` (list and onward paging without a second page read, warming, scan and store-less vault carry none, withheld page equals missing page, malformed cursor refused); row targets in `tests/test_page_citations.py`.
+- [x] 1.7 `recall_context` and `search_memory` add `cited_by_count` and up to three citations to the top ten page hits through one batched call.
+  - Evidence: `page_citations.for_hits`, `commands._cite_search_hits` (`search_memory`), `commands._cite_packet_leads` (`recall_context` turn-slice anchors, charged to `budget.used_chars`). Tests: `tests/test_recall_citations.py` (count and first citations, no row as a hit, warming state, withheld collection absent, one `item_references` statement for 13 hits with ten cited, a lead inside the budget and fresh on the next request).
+- [x] 1.8 Tests at the public tool path:
+  - title-to-ref canonicalisation, which survives a page rename;
+  - an ambiguous-title warning;
+  - withheld and missing are identical for rows, pages and collections;
+  - `warming` is never shown as empty;
+  - `results` with `no_result_linked`;
+  - `cited_by` paging;
+  - a query-count test of one citation query per recall response.
+  - Evidence (each bullet in order, tests at the writer, `read_page`, `search_memory` and `recall_context` entry points):
+    - Title to ref and rename: `test_a_title_is_stored_as_the_ref_that_survives_a_page_rename`, `test_every_write_path_stores_the_ref_and_reports_it_as_supplied_and_stored` in `tests/test_collection_link_values.py`.
+    - Ambiguous title: `test_an_ambiguous_title_is_kept_and_the_commit_warns_with_at_most_three_candidates` and `test_a_withheld_twin_neither_makes_a_title_ambiguous_nor_appears_in_a_warning` in the same file.
+    - Withheld equals missing, rows: `test_a_row_is_cited_by_the_rows_that_link_to_it_and_a_withheld_row_answers_like_a_missing_one` and `test_a_withheld_row_of_a_collection_the_caller_can_read_is_absent_from_items_and_count` in `tests/test_page_citations.py`. Pages: `test_a_withheld_page_answers_exactly_like_a_missing_one` there, `test_a_continuation_for_a_withheld_page_answers_exactly_like_one_for_a_missing_page` in `tests/test_read_page_cited_by.py`, and `test_a_withheld_page_warns_exactly_like_a_missing_one`. Collections: `test_a_row_in_a_collection_the_caller_cannot_read_leaves_a_page_as_if_no_row_cited_it` in `tests/test_recall_citations.py` (same `cited_by` on a page read and the same recall hit as a page nothing cites), and `test_a_row_of_a_collection_the_caller_cannot_read_is_absent_from_items_and_count` in `tests/test_page_citations.py`.
+    - Warming is never empty: `test_a_warming_index_never_reads_as_an_empty_list` (`tests/test_page_citations.py`), `test_a_warming_index_reads_as_warming_never_as_no_citations` (`tests/test_read_page_cited_by.py`), `test_a_warming_index_says_so_on_the_hit_instead_of_a_zero_count` (`tests/test_recall_citations.py`).
+    - `results` with `no_result_linked`: `tests/test_planning_results.py`.
+    - `cited_by` paging: `test_a_page_read_lists_its_citing_rows_and_pages_onward_without_reading_the_page_again` and `test_a_ready_page_lists_each_citing_row_with_what_a_reader_needs`.
+    - One citation query per response: `test_a_batch_reads_the_index_once_for_all_its_pages` (`tests/test_page_citations.py`) and `test_a_response_makes_one_citation_query_however_many_page_hits_it_has` (`tests/test_recall_citations.py`).
+- [x] 1.9 Before/after latency on a generated vault of 100,000 rows and 10,000 pages for `read_page`, `recall_context` and an edit by id, on the same instrument. Bounds: the Records load target and warm public p95 under 1 s.
+  - Size measured: 21,000 rows with 10,000 pages, not 100,000 rows. The supported write path could not seed 100,000 rows: `bulk_upsert_records` (500 rows per call) slowed from about 56 rows per second at 5,000 rows to about 11 at 20,000 on both arms. That slowdown belongs to the existing write path and is tracked as its own defect. The proof stands at 21,000 rows because the change adds only per-call work: one indexed citation lookup per response and one title lookup per link value written. Neither grows with the row count, and the 5,000 and 21,000-row pairs agree.
+  - Instrument, the same for both arms: an MCP client over `exomem --transport stdio` on a store-mode vault, warm service, embeddings off, 30 samples per call, p50/p95 in milliseconds, each arm run alone. Before is the merge base `15a89af83`, after is this branch. Every tenth row links a page; the hot page has 50 citations and the cold page none.
+
+    | Call | 5,000 rows before | 5,000 rows after | 21,000 rows before | 21,000 rows after |
+    |---|---|---|---|---|
+    | `read_page`, 50 citations | 28.1 / 55.9 | 33.7 / 38.2 | 46.6 / 56.6 | 32.7 / 38.5 |
+    | `read_page`, none | 23.6 / 28.5 | 31.5 / 36.7 | 42.8 / 104.1 | 31.3 / 33.2 |
+    | `search_memory`, 4 hits | 25.5 / 27.8 | 35.9 / 39.4 | 28.0 / 37.5 | 34.1 / 39.1 |
+    | `recall_context` | 323.3 / 352.8 | 337.9 / 373.7 | 426.8 / 1381.6 | 399.8 / 425.8 |
+    | `query_records`, filter on the link field | 245.8 / 274.1 | 247.2 / 292.5 | 1428.2 / 1478.2 | 1425.3 / 1483.3 |
+    | `query_records`, filter on the natural key | 34.2 / 39.9 | 36.8 / 44.9 | 89.7 / 267.9 | 88.8 / 262.0 |
+    | `edit_record` by id, other field | 156.0 / 196.5 | 150.6 / 189.7 | 259.5 / 433.0 | 257.0 / 466.7 |
+    | `edit_record` by id, link given as a title | 157.3 / 199.0 | 172.9 / 231.1 | 262.4 / 500.4 | 273.1 / 506.6 |
+
+  - Reading: every warm public call stays under 1 s at p95 except the 21,000-row `recall_context` before (one tail of 1.38 s, a single run) and the filter on a link field, which scans the collection on both arms (1.4 s at 21,000 rows). The change adds 5 to 15 ms to a page read, a search and a recall at 5,000 rows, and nothing visible to the filter or the edit. The filter on a link field at 5,000 rows is 261 and 269 ms p95 after against 263 and 268 before (two paired runs of 60). Two paired recall runs at 21,000 rows with server timings put the change at 23 to 38 ms on the server and 11 to 12 ms outside it, though the merge base's membership graph was still warming in those runs, so they do not compare like with like.
+- [x] 1.10 Outcome check on a disposable vault: a row written with a page title stores the ref and resolves after a rename, the page lists the row, a recall hit shows it, a withheld collection's row is absent, and a plan item's `results` resolves.
+  - Evidence: run on 2026-11-24 over the real transport (`exomem --transport stdio`, driven by the MCP client of the `fastmcp` package) on a disposable store-mode vault with its own state root. 14 of 14 checks passed in 30 s: the write reply reports the title supplied and the ref stored, and the stored value is the ref. An unresolved title is stored as written with a `LINK_UNRESOLVED` warning. Completing a plan item with no result reports `no_result_linked`. After a page rename through `manage_memory` `files.move`, `read_page` still lists the two rows and the plan item in `cited_by`, the row value still reads as the page's ref, and the item's `results` resolve to it. A `search_memory` hit and a `recall_context` lead carry `cited_by_count`. The row of a collection the caller cannot read is absent from the page's `cited_by`, and the hit's count drops to match. The run is not a committed test: it needs the store-mode rig and a stdio server (30 s, the packet's limit), so it stays a run file of the batch's author.
+
+## 2. Related pages, overlap and duplicates (Batch C)
+
+- [ ] 2.1 Row creation returns `related_pages` through one batched entity and title lookup per write. Update the capture skill's Records guidance in the scaffold and the shipped plugin skills.
+- [ ] 2.2 Collection creation returns `similar_collections` with the existing reshape route and `merge_into`. Its thresholds are configuration, and the check never refuses.
+- [ ] 2.3 The duplicate-fact maintenance job: resolved row-to-page pairs only, incremental, and one `duplicates` review item per candidate. It writes no page or row.
+- [ ] 2.4 Restructure `retype_field` accepts `link` with `relation`, lossless and undoable within the restructure bounds. This lands after #3131 merges.
+- [ ] 2.5 Tests:
+  - one batched lookup for a bulk seed;
+  - hidden collections are neither compared nor named;
+  - the detector opens one item and writes nothing else;
+  - a retype refuses on one unresolved value;
+  - undo restores the titles.
+- [ ] 2.6 Real-model round (`eval-loop`, subscription models only): replay the 2026-11-24 Records seeding incident and record whether the agent reads `related_pages` before it writes an unknown.
+
+## 3. Delivery
+
+- [ ] 3.1 One blind independent review per batch PR.
+- [ ] 3.2 After the release is installed on the owner's service: retype the free-text page fields of one existing personal collection to `link`, then check that reading a page that a row names lists that row.
+- [ ] 3.3 Sync the deltas into the canonical specs and archive this change with `openspec archive`, after `openspec validate --all --strict`.

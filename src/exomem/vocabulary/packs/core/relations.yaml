@@ -8,8 +8,8 @@ relations:
   refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation], presentation_role: refinement, behaviours: [lifts, corrects]}
   duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation], behaviours: [lifts]}
   supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation], presentation_role: replacement, behaviours: [replaces, corrects], frontmatter_fields: {supersedes: forward, superseded_by: reverse}, teach: "edge to the unit or page whose current view this replaces"}
-  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit], behaviours: [sources, associative], frontmatter_fields: {sources: forward}}
-  evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation], behaviours: [lifts, bears_on, sources, associative], frontmatter_fields: {evidence: forward, evidences: forward, evidence_paths: forward}}
+  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, semantic_unit, collection_link], behaviours: [sources, associative], frontmatter_fields: {sources: forward}}
+  evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation, collection_link], behaviours: [lifts, bears_on, sources, associative], frontmatter_fields: {evidence: forward, evidences: forward, evidence_paths: forward}}
   depends_on: {description: Depends on, family: dependency, direction: directed, origins: [semantic_relation]}
   implements: {description: Implements, family: implementation, direction: directed, origins: [semantic_relation]}
   mitigates: {description: Reduces a risk or effect of, family: mitigation, direction: directed, origins: [semantic_relation]}
@@ -25,8 +25,8 @@ relations:
   mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation], behaviours: [associative]}
   about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation], behaviours: [names_subject], endpoints: {subject: [role:compiled], object: [entity:*]}}
   relates_to: {description: Has a general meaningful relationship to, family: relation, direction: symmetric, origins: [semantic_relation], presentation_role: association, generic: true}
-  links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, wikilink], presentation_role: association, behaviours: [associative, plain_link], frontmatter_fields: {related: forward}}
-  cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation], behaviours: [sources, associative]}
+  links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, wikilink, collection_link], presentation_role: association, behaviours: [associative, plain_link], frontmatter_fields: {related: forward}}
+  cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation, collection_link], behaviours: [sources, associative]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
   # A refusal lists at most four fitting relations: those whose endpoints name both pages by type first, then those that need `entity:*`; each group keeps this order.
   member_of: {description: Is a member of, family: membership, direction: directed, origins: [semantic_relation], behaviours: [membership], endpoints: {subject: [entity:person, entity:organization], object: [entity:organization]}}
