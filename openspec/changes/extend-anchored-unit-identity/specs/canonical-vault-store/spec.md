@@ -27,11 +27,15 @@ When a reader or writer saves a soft reference to an unanchored unit on a store-
 - **THEN** the store writes no anchor into it
 
 ### Requirement: A replaced reference resolves through its alias
-When the store replaces a unit's reference, by writing its anchor or moving the unit, it SHALL record an alias from the old reference to the unit's stage-2 unit id in an owner table, in the same transaction. Resolution of a fingerprint-bound reference SHALL try its alias first, with one indexed lookup; any other reference SHALL follow its alias when it no longer resolves exactly. A write SHALL follow an alias as a read does.
+When the store replaces a unit's reference, by writing its anchor or moving the unit, it SHALL record an alias from the old reference to the unit's stage-2 unit id in an owner table, in the same transaction. A reference with an alias SHALL resolve through it alone, with one indexed lookup, and SHALL NOT fall back to an exact match. A write SHALL follow an alias as a read does.
 
 #### Scenario: An identical unit does not take a saved reference
 - **WHEN** a page holds two identical unanchored units, a soft reference names the first, and the store anchors it
 - **THEN** the saved reference resolves to the first unit, not to the second unit that now has its old reference
+
+#### Scenario: An alias whose unit lost its anchor is stale
+- **WHEN** an aliased unit later loses its anchor and an identical unit then carries the old reference
+- **THEN** the saved reference answers stale and does not resolve to the identical unit
 
 #### Scenario: A moved unit resolves at its old reference
 - **WHEN** an agent moves a unit to another page and a reader later resolves the unit's old reference
@@ -65,7 +69,7 @@ For the same bytes, the unit rows SHALL reproduce file mode's lexical semantic-u
 - **AND** the other units on the page keep their identities and verdicts
 
 ### Requirement: Agents change a unit by its reference
-A writer SHALL be able to update, insert, retire, move and embed a unit by its reference, as a page write that binds the revision it read, a caller's revision being optional. An operation on an unanchored unit SHALL write its anchor in the same commit and reply with the anchored reference. A stale reference without an alias SHALL refuse with `STALE_UNIT_REFERENCE`. A move SHALL keep the unit id and rewrite inbound embeds and unit links in up to 100 pages, else refuse with `UNIT_MOVE_TOO_WIDE`.
+A writer SHALL be able to update, insert, retire, move and embed a unit by its reference, as a page write that binds the revision it read, a caller's revision being optional. An operation on an unanchored unit SHALL write its anchor in the same commit and reply with the anchored reference. A stale reference SHALL refuse with `STALE_UNIT_REFERENCE`. A move SHALL keep the unit id and rewrite inbound embeds and unit links up to a configured bound, else refuse with `UNIT_MOVE_TOO_WIDE`.
 
 #### Scenario: An edited unit keeps its reference
 - **WHEN** an agent updates the text of a unit without an anchor three times through `observe_memory`
@@ -83,11 +87,11 @@ A writer SHALL be able to update, insert, retire, move and embed a unit by its r
 - **THEN** the update refuses with `STALE_UNIT_REFERENCE` and the page is unchanged
 
 #### Scenario: A move past the bound refuses
-- **WHEN** an agent moves a unit that 150 other pages embed
-- **THEN** the move refuses with `UNIT_MOVE_TOO_WIDE` and names the count
+- **WHEN** an agent moves a unit whose referring pages in its scope exceed the move bound
+- **THEN** the move refuses with `UNIT_MOVE_TOO_WIDE`, names the count and suggests embedding the unit from the destination instead
 
 ### Requirement: A page embeds a unit of another page
-A unit SHALL live in one home page. Another page SHALL show it with a block embed and SHALL NOT hold a copy of its bytes. A rich unit's first embed SHALL add a block id equal to its `id` at the end of its first content paragraph, which the parser reads as its anchor, and a promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB, and say when it stopped.
+A unit SHALL live in one home page. Another page SHALL show it with a block embed and SHALL NOT hold a copy of its bytes. A rich unit with an `id` SHALL have a block id only at the end of its body's first paragraph: one already there, else one its first embed writes. A body with no paragraph SHALL refuse with `UNIT_EMBED_NO_PARAGRAPH`. A promotion SHALL keep a compact unit's block id. A page read SHALL expand embeds one level deep, up to 64 embeds and 256 KiB.
 
 #### Scenario: An edit at home shows everywhere
 - **WHEN** a person edits a unit in its home page and another page embeds it
@@ -100,9 +104,17 @@ A unit SHALL live in one home page. Another page SHALL show it with a block embe
 - **AND** the unit stays in its home page
 
 #### Scenario: A rich unit's embed renders
-- **WHEN** a write adds the first embed of a rich unit
-- **THEN** the unit's first content paragraph ends with a block id equal to its `id`
-- **AND** the unit's rows are the same as before
+- **WHEN** a write adds the first embed of a rich unit whose `id` is a valid block id
+- **THEN** the first paragraph of the unit's body ends with a block id equal to its `id`
+- **AND** the unit's identity, content and fingerprint stay the same
+
+#### Scenario: A person's block id is reused
+- **WHEN** the first paragraph of a rich unit's body already ends with `^xyz` and a write adds its first embed
+- **THEN** the embed names `^xyz` and the store writes no second block id
+
+#### Scenario: An id that is not a block id gets a generated one
+- **WHEN** a write adds the first embed of a rich unit whose `id` is `claim_1`
+- **THEN** the store writes a generated block id of letters, digits and hyphens, unique on the page
 
 #### Scenario: A promotion keeps an embed rendering
 - **WHEN** a write promotes an embedded compact unit to a rich block
@@ -152,25 +164,32 @@ The importer SHALL import a changed file of a page that holds referenced units o
 - **THEN** the importer commits once, after the saves stop
 
 ### Requirement: Cross-page unit answers apply two-ended visibility
-Embed expansion, alias resolution, the referenced-unit refusal, the count in `UNIT_MOVE_TOO_WIDE` and a review item's page list SHALL answer a page that the caller may not see as absent and SHALL NOT count it. A unit move SHALL rewrite referring pages under the page move's mover view. A visible referring page that the caller may not write SHALL make the move refuse with `UNIT_PAGE_NOT_WRITABLE`.
+Embed expansion, the referenced-unit refusal, the move count and review items SHALL answer a page that the caller may not see as absent and SHALL NOT count it. An alias whose unit the caller may not see SHALL answer as a stale reference. A unit move SHALL rewrite referring pages only within `MoverView.scope` and only those it may write; any other page SHALL keep its link, resolved through the alias, and SHALL appear in an owner review item.
 
 #### Scenario: An invisible home expands to nothing
 - **WHEN** a reader expands an embed whose home page the reader may not see
 - **THEN** the embed is answered as a missing unit and is not counted against the bound
 
-#### Scenario: A limited mover leaves a hidden embed
-- **WHEN** a connector-limited agent moves a unit that a page it cannot see embeds
+#### Scenario: A restricted mover leaves a hidden embed
+- **WHEN** a restricted agent, connector-limited or not, moves a unit that a page it cannot see embeds
 - **THEN** the move neither counts nor rewrites that page
 - **AND** Exomem resolves that page's embed through the alias
+- **AND** an owner review item lists that page
+
+#### Scenario: An alias to a hidden unit answers stale
+- **WHEN** a reader resolves a reference whose alias names a unit on a page that the reader may not see
+- **THEN** the answer is stale, as for a reference that matches nothing
+- **AND** a write by that reference refuses with `STALE_UNIT_REFERENCE`
 
 #### Scenario: A hidden reference does not refuse a write
 - **WHEN** a write drops a unit that only a page the writer cannot see embeds
-- **THEN** the write commits
-- **AND** the owner's review item names that page
+- **THEN** the write commits and its reply names no review item
+- **AND** the owner's review item names that page, and a reader who sees none of its referrers does not see the item
 
-#### Scenario: An unwritable visible page refuses a move
+#### Scenario: An unwritable visible page keeps its embed
 - **WHEN** an agent moves a unit that a page it may see but not write embeds
-- **THEN** the move refuses with `UNIT_PAGE_NOT_WRITABLE`, names that page and changes nothing
+- **THEN** the move commits and that page keeps its embed, which resolves through the alias
+- **AND** the reply names that page
 
 ### Requirement: Semantic-unit identity data stays in owner tables
 Every table and index that this change adds SHALL be an owner object under `vault_store_owner_schema`, named in `store_mode_objects` and created by the registry pass. It SHALL NOT add a column or an index to a collection-schema table. A build without these tables SHALL serve the store.
@@ -185,7 +204,11 @@ Every table and index that this change adds SHALL be an owner object under `vaul
 - **AND** when a build with them returns, the aliases resolve and the requests run
 
 ### Requirement: Aliases survive a rollback to file mode
-Rollback to file mode SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
+Before it projects, rollback to file mode SHALL rewrite every embed and unit-level link that resolves only through an alias to the unit's current reference. It SHALL export the aliases beside the vault with its other exports, and a later migration SHALL load them.
+
+#### Scenario: A page left on an alias matches after rollback
+- **WHEN** a restricted move leaves a hidden page's embed on the alias and the vault rolls back to file mode
+- **THEN** that page's embed names the unit's current page, and file mode's graph answer for it matches the store's
 
 #### Scenario: A round trip keeps a moved unit's old reference
 - **WHEN** an agent moves a unit, the vault rolls back to file mode and later migrates again with its export
