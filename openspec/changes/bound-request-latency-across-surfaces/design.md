@@ -458,7 +458,9 @@ A base now also keeps the introducer of each word: the first document, in key or
 
 The helper then reads the per-document lists in key order, which is the order `CorpusStatistics.from_counts` sums in. A rebuild usually costs the changed documents plus one pass over the vocabulary. A word whose introducer left or dropped it sends one forward pass over the documents after that introducer, which can walk most of the corpus. The independent review of this change measured that worst case on a synthetic corpus of the vault's size: 188 ms, against 406 ms for a full count. The unit corpus keeps each ref's winning tokens, so only the refs whose winner changed are counted again. `CorpusStatistics.of` stays the single definition, and seeded edit sequences compare every field with it bit for bit.
 
-The bounds stay as they were. With no base, or past `_ADMITTED_BASE_TERMS_MAX` or `_UNIT_BASE_BYTES_MAX`, a build counts every document in order, as before. A corpus that holds an owner-only parent's units never enters the shared unit base.
+With no base, or past `_ADMITTED_BASE_TERMS_MAX`, `_ADMITTED_BASE_WORDS_MAX` or `_UNIT_BASE_BYTES_MAX`, a build counts every document in order, as before. A corpus that holds an owner-only parent's units never enters the shared unit base.
+
+The page bound was 4 million unique-term references, and a vault-sized corpus sits near it: a 17,000-page personal vault held 3.7 million in November 2026. Past the bound every rebuild after a write tokenizes every page again. On a synthetic 15,600-page corpus of 4.5 million references with about 62,000 units, an activation after a write cost 2,590 ms of CPU past the bound and 933 ms with the base kept. The bound is now 12 million references. Measured with natural vocabularies, a base holds about 88 MiB at 3.4 million references and 196 MiB at 10.6 million. Its introducer maps grow with the vocabulary, so a corpus past 1 million words (`_ADMITTED_BASE_WORDS_MAX`) keeps no base, whatever its references.
 
 ### 12. A catch-up that writes outran stays a catch-up
 
