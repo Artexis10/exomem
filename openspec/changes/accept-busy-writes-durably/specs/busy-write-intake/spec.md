@@ -84,6 +84,16 @@ The drainer SHALL replay each save under its own durable replay identity, so a c
 - **THEN** nothing is committed by that attempt
 - **AND** the save is applied exactly once later
 
+### Requirement: A stop never waits out a replay
+
+Stopping the drainer SHALL end a replay's waits for a busy boundary, a warm-up or its own preparation. A refusal that proves nothing committed after the stop SHALL leave the save queued. While a replay still runs at the end of the stop, the service SHALL keep its writer lease.
+
+#### Scenario: A stop ends a waiting replay promptly
+
+- **WHEN** the service stops while a replay waits for a busy boundary, a warm-up or its own preparation
+- **THEN** the replay stops at its next check, within one boundary attempt, and the save stays queued
+- **AND** the next process applies the save exactly once
+
 ### Requirement: An uncertain or unauthorised replay does not block the queue
 
 A replay that reached its commit and whose commit cannot be proven or ruled out SHALL end `failed` with `MUTATION_OUTCOME_UNKNOWN`, keep its arguments, and SHALL NOT block the saves behind it. Before each replay of a save sent by a signed-in login, the drainer SHALL recheck that login: a login that has ended SHALL end the save `failed` with `INTAKE_LOGIN_REVOKED` and its arguments, and a session store that cannot be read SHALL leave the save queued.
