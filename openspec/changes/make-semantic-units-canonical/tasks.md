@@ -9,7 +9,7 @@ This change starts after the owner's vault switches to store mode and stage 2 of
 
 - [ ] 1.1 Add the unit record, placement, reference history and lineage tables, with indexes by unit id, by page and ordinal, and by reference. Declare the states and lineage kinds in the store schema. Add the tables to `VAULT_STORE_TABLES` and `store_mode_objects`, so the collection replica leaves them out and rollback can drop them.
 - [ ] 1.2 Record each page's split version, the store's parser version and a records revision per page.
-- [ ] 1.3 Add the upgrade pass. It records `vault-store-v2` first, gives every stored page a page id, then assigns records to every page that its derivation indexes, in path order, one bounded batch at a time under the derived-row authority, with its cursor in the batch's transaction. Each anchored unit adopts stage 2's unit id. A derivation of a page beyond the cursor assigns that page's records first.
+- [ ] 1.3 Add the upgrade pass. It records `vault-store-v2` first, settles the page key of every page that holds units (2.1), then assigns records to every page that its derivation indexes, in path order, one bounded batch at a time under the derived-row authority, with its cursor in the batch's transaction. Each anchored unit adopts stage 2's unit id. A derivation of a page beyond the cursor assigns that page's records first.
 - [ ] 1.4 Keep stage 2's anchor-to-id table in step from each derivation that changes an anchored record.
 - [ ] 1.5 Add `exomem store-mode upgrade-units --plan` and `--apply`. The plan prints the pages and units that the pass would assign. The CLI fence declares both.
 - [ ] 1.6 Drop history rows of a retired record 180 days after it retires, when nothing names its unit id.
@@ -17,19 +17,21 @@ This change starts after the owner's vault switches to store mode and stage 2 of
 
 ## 2. Unit derivation
 
-- [ ] 2.1 Add `page_id` to `store_pages`. Assign it when a put creates a page, keep it on a put to an existing page, and let `_move_page` carry it. Name a removed page's page id on its derivation intent.
-- [ ] 2.2 Add the kept-version table, keyed by page id and revision. In the commit, keep with one set-based statement the current bytes and the pending declaration of each page of the change that holds records or a pending declaration and has a pending intent, and, while the registry job is pending, of each page whose records are behind. Reserve room for those bytes as `_reserve_payload_pages` does for puts.
-- [ ] 2.3 Bound kept versions at 16 per page by the rule of design U3: never drop a version older than the newest declared one, merge the oldest undeclared newer one, and refuse a further declared version with `UNITS_BUSY`.
-- [ ] 2.4 Select pages for the unit derivation by their records revision and kept versions, apart from `_next_batch`'s retry times. Run it in its own transaction before the rows transaction, sharing the parse of the current bytes. Read records and kept versions with one query each, walk each page's versions in revision order and then its current bytes, write records with one set-based statement per kind, and delete the applied versions. Advance the units revision in `store_meta`, not the store revision.
-- [ ] 2.5 Map each parsed span to raw byte offsets in the split module, so CRLF, a byte-order mark and multi-byte characters keep exact placements. Keep each unit's raw bytes in its record.
-- [ ] 2.6 Match by the light rule of design U3, with its 12-character slot bound and equal units in ordinal order. Compare wikilinks found by `semantic_writes.MOVE_WIKILINK_PATTERN` by their target page's id, keeping fragment and alias; resolve an old target through the audit trail's move rows, then the resolver with its prior-path step. Match no unit across pages.
-- [ ] 2.7 Mint each new unit id as the hash of the store's id, the page id, the revision and the unit's ordinal in the first version that holds it.
-- [ ] 2.8 Carry a declaration in `PagePut` and on the derivation intent's row. Apply a declaration that fits its version's split. Fall back to the light rule for one that does not, and record `UNIT_DECLARATION_INVALID` in status and the audit trail.
-- [ ] 2.9 When a version does not parse, change no record and skip it. When the current bytes do not parse, mark the page's units `unknown`.
-- [ ] 2.10 Set records to `trashed` while their page's path lies under the trash folder (`trash_metadata.is_trash_path`), and retire the records of a removed page id. Record lineage `replaces` when exactly one new unit took a retired unit's slot.
-- [ ] 2.11 For a retired referenced unit, and for a kept referenced unit that lost its anchor, keep every reference and open one review item through stage 2's review item.
-- [ ] 2.12 Report in status the pages whose units are pending with the oldest age, the pages whose units are `unknown`, and the count of declaration mismatches.
-- [ ] 2.13 Highest-level check: replay the spike's generated hand edits on a real-vault copy through the real importer. The replaced units per 100 edits match the spike's figures for the same anchor state within the run's interval. No unit is kept wrongly by the spike's check. Every retired referenced unit, and every referenced unit that lost its anchor, has a review item. The canonical transaction runs the same number of statements as before this change. Then cover the queue cases, each against per-commit derivation: two declared commits in one request, a `no_room` row failure while identity stays current, a failed batch that the drain splits path by path, an invalid declaration, a kill before the unit transaction commits and a kill between the two transactions. Then a rename, a trash and a recovery of a page with a referenced unit, each with its batch split path by path: every unit id and relationship stays, and a unit that cites the renamed page keeps its id.
+- [ ] 2.1 Add the key table (page key, path, revision since). In the unit derivation, settle each page's key by the rules of design U3: its valid `exomem_id` unless another live page holds it; else its path's key in the path's current life; else, after a move, the source's key; else a minted UUID. Find a path's current life with one seek on the audit trail's `(path, revision)` index, by stage 1's life rule. Move a page's records when its key changes at the same path. Add no column to `store_pages`.
+- [ ] 2.2 Let `backfill-ids` stamp a page's minted key as its `exomem_id` instead of a new value.
+- [ ] 2.3 On a removal, hand the key's records to the one other live page that carries that key as its `exomem_id`, matched by the light rule; otherwise retire them.
+- [ ] 2.4 Add the kept-version table, keyed by path and revision. In the commit, keep with one set-based statement the path, current bytes and pending declaration of each page of the change that holds records or a pending declaration and has a pending intent; while the registry job is pending, of each page whose records are behind; and, with no bytes, of each removed page that holds records. Reserve room for those bytes as `_reserve_payload_pages` does for puts. Let a page whose path's life began with a move also walk the source path's versions from before the move.
+- [ ] 2.5 Bound kept versions at 16 per page by the rule of design U3: never drop a version older than the newest declared one, merge the oldest undeclared newer one, and refuse a further declared version with `UNITS_BUSY`.
+- [ ] 2.6 Add the nullable `declaration` and `units_revision` columns to the derivation queue. Select pages for the unit derivation from the intents whose `units_revision` is behind their revision, whatever their retry time, and from the kept versions; never scan stored pages. Run it in its own transaction before the rows transaction, sharing the parse of the current bytes. Read records and kept versions with one query each, walk each page's versions in revision order and then its current bytes, write records with one set-based statement per kind, and delete the applied versions. Advance the units revision in `store_meta`, not the store revision.
+- [ ] 2.7 Map each parsed span to raw byte offsets in the split module, so CRLF, a byte-order mark and multi-byte characters keep exact placements. Keep each unit's raw bytes in its record.
+- [ ] 2.8 Match by the light rule of design U3, with its 12-character slot bound and equal units in ordinal order. Compare wikilinks found by `semantic_writes.MOVE_WIKILINK_PATTERN` by their target's page key, keeping fragment and alias, and store each record's unit in that form. Resolve the new side's targets with one query over a batch's distinct targets. For a kept version whose target moved before its derivation, follow the audit trail's move rows after the version's revision and in the current store life, through a new partial index on `store_audit(from_path, revision)` over moves, one query per chain step. Match no unit across pages.
+- [ ] 2.9 Mint each new unit id as the hash of the store's id, the page key, the revision and the unit's ordinal in the first version that holds it.
+- [ ] 2.10 Carry a declaration in `PagePut` and on the derivation intent's row. Apply a declaration that fits its version's split. Fall back to the light rule for one that does not, and record `UNIT_DECLARATION_INVALID` in status and the audit trail.
+- [ ] 2.11 When a version does not parse, change no record and skip it. When the current bytes do not parse, mark the page's units `unknown`.
+- [ ] 2.12 Set records to `trashed` while their page's path lies under the trash folder (`trash_metadata.is_trash_path`), and apply a removal by 2.3. Record lineage `replaces` when exactly one new unit took a retired unit's slot.
+- [ ] 2.13 For a retired referenced unit, and for a kept referenced unit that lost its anchor, keep every reference and open one review item through stage 2's review item.
+- [ ] 2.14 Report in status the pages whose units are pending with the oldest age, the pages whose units are `unknown`, and the count of declaration mismatches.
+- [ ] 2.15 Highest-level check: replay the spike's generated hand edits on a real-vault copy through the real importer. The replaced units per 100 edits match the spike's figures for the same anchor state within the run's interval. No unit is kept wrongly by the spike's check. Every retired referenced unit, and every referenced unit that lost its anchor, has a review item. The canonical transaction runs the same number of statements as before this change. Then cover the queue cases, each against per-commit derivation: two declared commits in one request, a `no_room` row failure while identity stays current, a failed batch that the drain splits path by path, an invalid declaration, a kill before the unit transaction commits and a kill between the two transactions. Then a rename, a trash and a recovery of a page with a referenced unit, each with its batch split path by path: every unit id and relationship stays, and a unit that cites the renamed page keeps its id. Then a page without an `exomem_id` moved twice keeps its key; a copied page file gets its own key; and a held rename keeps its unit ids once keep-mine removes the old page. Each lookup of a page key or a moved target uses an index, and no selection scans the stored pages.
 
 ## 3. Writer side
 
@@ -56,7 +58,7 @@ This change starts after the owner's vault switches to store mode and stage 2 of
 ## 5. Unit step of the registry job
 
 - [ ] 5.1 Give the registry job (`rederive`) a unit step that splits each page of its batch again by the light rule, with review items that name the change as their cause. Start the job when the parser version differs from the store's, as an owner-schema bump does.
-- [ ] 5.2 While the job is pending, keep a version of each behind page of a commit (2.2), and apply the job's step to the oldest kept version of that page before the match.
+- [ ] 5.2 While the job is pending, keep a version of each behind page of a commit (2.4), and apply the job's step to the oldest kept version of that page before the match.
 - [ ] 5.3 Add `exomem store-mode resplit --page PATH`, which splits one page again against its records.
 - [ ] 5.4 Highest-level check: a registry change that removes a category, followed by an agent edit of an unrelated unit on a page that the job has not reached, does not refuse the edit; the review items name the registry change; every other unit keeps its unit id; the audit reports no defect while the job runs.
 
@@ -69,23 +71,23 @@ This change starts after the owner's vault switches to store mode and stage 2 of
 
 ## 7. Embeds
 
-- [ ] 7.1 Count embeds and unit-level links as references for 2.11 and 3.6.
+- [ ] 7.1 Count embeds and unit-level links as references for 2.13 and 3.6.
 - [ ] 7.2 Let an attach to a unit on the same page move the old anchor to it in one page write.
 - [ ] 7.3 Highest-level check: page B embeds a unit of page A; a hand edit of the unit in A shows in B without a write to B; deleting the unit in A opens a review item that names B; attaching it to another unit of A makes B's embed resolve again.
 
 ## 8. Parity, rollback and Cloud
 
 - [ ] 8.1 Check the four invariants of design U10 in migration and upgrade verification and in the rollback drills, and in a store-thread audit that runs in bounded batches with a cursor and skips the pages that U10 names. Report a failure in status and refuse unit operations on that page until `store-mode resplit` fixes it.
-- [ ] 8.2 Assign records in the file-mode migration's load step.
-- [ ] 8.3 Add rollback to stage 2: export the unit records with their bytes, the reference history, the lineage and the open review items beside the vault, drop this change's tables, and remove `vault-store-v2` after that commit.
+- [ ] 8.2 Settle page keys and assign records in the file-mode migration's load step, keys from each page's `exomem_id`.
+- [ ] 8.3 Add rollback to stage 2: export the unit records with their bytes and page keys, the key table, the reference history, the lineage and the open review items beside the vault; drop this change's tables, its two derivation-queue columns and its audit-trail index; and remove `vault-store-v2` after that commit.
 - [ ] 8.4 Add the same exports to rollback to file mode. Refuse while review items remain open unless `--export-review` exports them.
-- [ ] 8.5 In a later migration, match an identity export to the bytes by the light rule.
+- [ ] 8.5 In a later migration, and in a later upgrade after a rollback to stage 2, read an identity export: match each page by its page key, the `exomem_id` in its bytes, or by its path when its key was minted; then match its units by the light rule.
 - [ ] 8.6 Carry the identity export in a Cloud owner export and read it in an import.
 - [ ] 8.7 Highest-level check: on a real-vault copy, store to file mode, an added line at the top of a page, then store again keeps every unit id; store to stage 2 to this change keeps every byte and every relationship.
 
 ## 9. Acceptance
 
-- [ ] 9.1 On a disposable copy of a real vault: run the upgrade pass, the four checks, the replay of 2.13, hard kills during a unit derivation, the upgrade pass and the registry job's unit step, a stage-2 build started during the upgrade pass, and both rollbacks.
+- [ ] 9.1 On a disposable copy of a real vault: run the upgrade pass, the four checks, the replay of 2.15, hard kills during a unit derivation, the upgrade pass and the registry job's unit step, a stage-2 build started during the upgrade pass, and both rollbacks.
 - [ ] 9.2 Measure the hold of the vault mutation boundary before and after this change on the same instrument, for a page write and for a rename of a hub page with 10,000 linking pages. Outside the registry job the hold may not grow. Measure the same rename while the registry job runs too, and record how much the kept versions add to it.
 - [ ] 9.3 Measure the derivation time of the same writes before and after, and page reads and searches before and after; reads and searches may not be slower.
 - [ ] 9.4 Archive this change only after `make-vault-store-canonical` has archived, so its MODIFIED requirement has a base.
