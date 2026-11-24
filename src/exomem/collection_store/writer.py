@@ -3815,9 +3815,12 @@ class CollectionWriter:
             history=lambda: self.shape_history(current.collection_id),
             rows=lambda: dict(typed_storage.collection_values(self.connection, current.collection_id)),
             # A collection this split already began holds its title; the split takes it over instead (`_begun`).
+            # Only collections the caller may read hold a title: a refusal that named a withheld one would tell an
+            # author who cannot read it that it exists, so a title only it holds counts as free.
             titles=lambda: frozenset(
                 other.title
-                for other in collections.discover_collections(self.root, reject_duplicates=False)
+                for other in collections.discover_collections(
+                    self.root, authorize_path=self._operation.allows_file, reject_duplicates=False)
                 if other.collection_id not in (
                     current.collection_id, split_collection_id(current.collection_id, version, other.title))
             ),

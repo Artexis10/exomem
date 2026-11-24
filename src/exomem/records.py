@@ -2805,9 +2805,12 @@ def restructure_collection(
         resolved = restructure.resolve(
             current_text, steps=steps, undo=undo, origin=origin,
             history=lambda: shape_history(root, current.collection_id), rows=lambda: rows,
+            # Only collections the caller may read hold a title: a refusal that named a withheld one would tell an
+            # author who cannot read it that it exists, so a title only it holds counts as free.
             titles=lambda: frozenset(
                 other.title
-                for other in collections.discover_collections(root, reject_duplicates=False)
+                for other in collections.discover_collections(
+                    root, authorize_path=record_governance.full_release_filter(root), reject_duplicates=False)
                 if other.collection_id != current.collection_id
             ),
             automatic=None if not automatic else partial(

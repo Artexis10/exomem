@@ -537,3 +537,38 @@ def test_a_planning_merge_that_renames_a_core_field_is_refused(plan):
         {"step": "merge_into", "target": "Roadmap", "mapping": {"priority": "rank"}}]))
 
     assert refused["code"] == "RESTRUCTURE_STEP_REFUSED" and "Planning core field" in refused["message"]
+
+
+def test_a_retitle_or_split_answers_a_title_only_a_withheld_collection_holds_as_a_free_title(store, tmp_path, monkeypatch):
+    """The refusal of a taken title must not tell an author that a collection they cannot read exists."""
+    from test_collection_row_references import DIARY, SITES, create, diary_text, row, sites_text
+    from test_collection_store_governance import _record_writer
+    from test_governance_egress import write_rule, write_scope
+
+    from exomem.governance.principal import request_scope
+
+    create(store, SITES, sites_text(), "Sites")
+    create(store, DIARY, diary_text(""), "Diary")
+    row(store, DIARY, "00000000-0000-4000-8000-0000000000c1", {"title": "kept"})
+    row(store, DIARY, "00000000-0000-4000-8000-0000000000c2", {"title": "moved"})
+    store.reconcile_views()
+    write_scope(store.root, paths="Records/Sites/**")
+    write_rule(store.root, ceiling=0)
+    author = _record_writer(store, tmp_path, monkeypatch)
+    split = lambda title: [{"step": "split_out", "where": {"field": "title", "op": "eq", "value": "moved"},  # noqa: E731
+                            "title": title}]
+    retitle = lambda title: [{"step": "retitle", "title": title}]  # noqa: E731
+
+    def preview(steps):
+        with request_scope(author):
+            try:
+                return store.preview_restructure(DIARY, why=WHY, steps=steps)["valid"]
+            except collections.CollectionError as error:
+                return error.code, error.reason
+
+    with request_scope(author), pytest.raises(collections.CollectionError) as hidden:
+        store.inspect_collection(SITES)
+    assert hidden.value.code == "COLLECTION_NOT_FOUND"
+    assert preview(retitle("Sites")) == preview(retitle("Nothing Here")) is True
+    assert preview(split("Sites")) == preview(split("Nothing Here")) is True
+
