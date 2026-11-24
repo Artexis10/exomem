@@ -72,6 +72,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+      # Before the scope step, which runs in the locked environment, so a stale lock fails here by name.
+      - name: Check the rehearsal lockfile
+        working-directory: infra/cloud-rehearsal
+        run: uv lock --check
       # The P3 rehearsal runs on a pull request only when a changed file matches a trigger path other than the
       # runbook and cloud_deploy.py. Those two trigger this workflow for the release mode's unit tests alone, and
       # the P3 rehearsal never runs them. The step reads the trigger paths from this file, so they live once.
@@ -94,9 +98,6 @@ jobs:
           changed = [name for name in open(sys.argv[1], encoding="utf-8").read().split("\0") if name]
           print("p3=" + ("true" if any(fnmatch.fnmatch(name, path) for name in changed for path in paths) else "false"))
           PY
-      - name: Check the rehearsal lockfile
-        working-directory: infra/cloud-rehearsal
-        run: uv lock --check
       - name: Unit tests
         working-directory: infra/cloud-rehearsal
         run: uv run --frozen python -m pytest -q -p no:cacheprovider tests

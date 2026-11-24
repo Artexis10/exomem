@@ -369,3 +369,26 @@ def test_every_release_and_rollout_alert_has_a_runbook_step() -> None:
     assert len(rollout_alerts) == 4
     for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, *rollout_alerts):
         assert alert in rows, alert
+
+
+def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platform_gate(tmp_path, monkeypatch) -> None:
+    # Catches git's quoting of a non-ASCII path, which then matched no platform glob and raised no alert.
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    template = tmp_path / "infra/helm/platform/templates/café.yaml"
+    template.parent.mkdir(parents=True)
+    template.write_text("kind: ConfigMap\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "chart")
+    monkeypatch.setattr(cloud_deploy, "ROOT", tmp_path)
+
+    paths = cloud_deploy.git_changed_paths(base, git("rev-parse", "HEAD"))
+
+    assert paths == ["infra/helm/platform/templates/café.yaml"]
+    assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
