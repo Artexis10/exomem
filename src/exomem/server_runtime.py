@@ -408,7 +408,7 @@ class LocalRuntimeActivation:
 
         # First, so no queued save starts a replay while the workers below stop; a replay in
         # flight is claimed by this process and re-claimed after the restart.
-        intake_stopped = write_intake.stop(self.vault_root)
+        write_intake.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -470,9 +470,6 @@ class LocalRuntimeActivation:
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
-        if not intake_stopped:
-            # A replay still running may commit after the lease is handed back.
-            raise RuntimeError("write intake is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 

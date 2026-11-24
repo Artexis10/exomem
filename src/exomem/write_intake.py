@@ -68,17 +68,14 @@ ACCEPTED_REFUSALS = frozenset({"MUTATION_BUSY", "MUTATION_WARMING", "COLLECTION_
 #: later. An outcome-unknown or acknowledgement-pending replay resolves on a
 #: same-identity retry, which the idempotency store answers.
 #: `MUTATION_OUTCOME_UNKNOWN` is not here: the idempotency store keeps it for good, so it is final.
-#: Retry outcomes whose work may still commit after the replay ends; their requeue marks the
-#: identity as reaching its commit, so a reclaim reuses it instead of replaying under a fresh one.
-UNCERTAIN_REFUSALS = frozenset({  # nosemgrep: ep-word-set -- closed public error codes of the mutation protocol.
+RETRY_REFUSALS = ACCEPTED_REFUSALS | {  # nosemgrep: ep-word-set -- closed public error codes of the mutation protocol.
     "MUTATION_ACKNOWLEDGEMENT_PENDING",
     # Committed, terminal not persisted: its own remediation is a same-identity retry.
     "MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN",
-})
-#: The collection store is not open in this process yet, as while a worker starts: the replay
-#: waits for it, under the same identity.
-UNSERVED_REFUSALS = frozenset({"COLLECTION_STORE_UNAVAILABLE"})  # nosemgrep: ep-word-set -- closed public error code of the store runtime.
-RETRY_REFUSALS = ACCEPTED_REFUSALS | UNCERTAIN_REFUSALS | UNSERVED_REFUSALS
+}
+#: Retry outcomes whose work may still commit after the replay ends; their requeue marks the
+#: identity as reaching its commit, so a reclaim reuses it instead of replaying under a fresh one.
+UNCERTAIN_REFUSALS = frozenset(RETRY_REFUSALS - ACCEPTED_REFUSALS)
 #: The login behind a save no longer vouches for it: the save fails, with its arguments.
 LOGIN_REVOKED = "INTAKE_LOGIN_REVOKED"
 #: The session store could not say whether the login still holds: the save waits and is retried.
@@ -90,10 +87,6 @@ APPLIED_RETENTION_SECONDS = 7 * 24 * 60 * 60.0
 FIRST_BACKOFF_SECONDS = 1.0
 MAX_BACKOFF_SECONDS = 30.0
 _DEFAULT_INTAKE_WAIT_SECONDS = 15.0
-#: How long a replay waits for a busy boundary or a warm-up before it is requeued. The drainer's
-#: back-off paces the retries, and a short wait lets a stop end the drainer well inside the
-#: supervisor's stop allowance.
-REPLAY_WAIT_SECONDS = 2.0
 _MAX_INTAKE_WAIT_SECONDS = 600.0
 #: How often a drainer looks again at a row that another live process is applying.
 _OTHER_OWNER_POLL_SECONDS = 5.0
@@ -474,14 +467,12 @@ def start(vault_root: Path) -> Drainer:
     return drainer
 
 
-def stop(vault_root: Path, *, timeout: float = 10.0) -> bool:
-    """Stop this process's drainer for one vault; False when it is still running at the timeout."""
+def stop(vault_root: Path, *, timeout: float = 10.0) -> None:
     key = Path(vault_root).resolve()
     with _DRAINERS_LOCK:
         drainer = _DRAINERS.pop(key, None)
-    if drainer is None:
-        return True
-    return drainer.stop(timeout=timeout)
+    if drainer is not None:
+        drainer.stop(timeout=timeout)
 
 
 def _note_finished(vault_root: Path, origin: str | None, intake_id: str, expires_at: float | None) -> None:
@@ -560,14 +551,12 @@ class Drainer:
         self._thread = thread
         thread.start()
 
-    def stop(self, *, timeout: float) -> bool:
+    def stop(self, *, timeout: float) -> None:
         self._stop.set()
         self.notify()
         thread = self._thread
-        if thread is None or thread is threading.current_thread():
-            return True
-        thread.join(timeout)
-        return not thread.is_alive()
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
 
     def notify(self) -> None:
         with self._condition:
@@ -911,7 +900,6 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
 
     replay = _Replay(vault_root, claim)
     token = _REPLAY.set(replay)
-    wait_cap = _WAIT_CAP.set(time.monotonic() + REPLAY_WAIT_SECONDS)
     stack = ExitStack()
     try:
         command = _command_named(claim.command)
@@ -971,7 +959,6 @@ def _replay(vault_root: Path, claim: _Claim) -> tuple[Any, ...]:
         with replay.lock:
             replay.closed = True
             stack.close()
-        _WAIT_CAP.reset(wait_cap)
         _REPLAY.reset(token)
     return (APPLIED, result)
 

@@ -4,7 +4,6 @@
 - [x] 1.2 Add the drainer thread: acceptance-order application through `invoke_command` as the stored principal with the `intake:<id>` identity, contention back-off from 1 s to 30 s, failure recording, owner liveness for rows left applying by a dead process, a sticky commit-reached marker per replay identity written at the commit gate (fail closed), a fresh identity for a replay that stopped before its commit, a login recheck before each replay, an in-memory origin index, and no polling while idle.
 - [x] 1.3 Register the store in `reserved_paths` and start and stop the drainer in the serving HTTP runtime.
 - [x] 1.4 Start the drainer first in activation, before its start-up waits, so a save that meets a busy boundary while a new or promoted worker still warms up is queued too.
-- [x] 1.5 Bound each replay's wait for a busy boundary or a warm-up at 2 s, so a stop ends the drainer within the supervisor's stop allowance; report a drainer still running at stop instead of handing the lease back under it; retry a replay that meets a collection store that is still opening.
 
 ## 2. Acceptance in the dispatcher
 
