@@ -342,6 +342,8 @@ def test_a_card_followed_by_its_security_code_is_removed_with_the_code():
     assert kept.removed == ("payment_card",)
     assert "4111" not in kept.text and " 123" not in kept.text
     assert kept.text.count("[card number removed, ends 1111]") == 2
+    # Failure caught: an unbroken 19-digit reference whose first 16 digits happen to pass, removed as a card.
+    assert capture_redaction.redact("Ref 5500000000000004999").removed == ()
 
 
 def test_source_text_with_a_digest_and_a_card_is_refused_by_name(upload_env, source_schema):

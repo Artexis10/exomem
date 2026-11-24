@@ -106,7 +106,7 @@ def _mask_cards(text: str) -> tuple[str, int]:
         if _is_card_number(digits):
             count += 1
             return f"[card number removed, ends {digits[-4:]}]"
-        if len(digits) == 19 and _is_card_number(digits[:16]):
+        if len(digits) == 19 and found[4] in " \u00a0-" and _is_card_number(digits[:16]):
             # A 4-4-4-4 card followed by a 3-digit group is a card and its security code, so both go.
             count += 1
             return f"[card number removed, ends {digits[12:16]}]"

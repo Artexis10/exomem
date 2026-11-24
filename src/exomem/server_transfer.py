@@ -971,7 +971,8 @@ async def _hold_ticket_upload(vault_root: Path, request: Request, ticket: dict) 
         }
 
 
-_SEND_PAGE_SCRIPT = """
+# Raw, so a JS escape reaches the browser as written instead of being read by Python.
+_SEND_PAGE_SCRIPT = r"""
 const ticket = decodeURIComponent(location.hash.slice(1));
 history.replaceState(null, "", location.pathname);
 const out = document.getElementById("out");
