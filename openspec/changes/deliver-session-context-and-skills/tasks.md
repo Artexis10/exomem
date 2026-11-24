@@ -31,8 +31,10 @@
 
 - [x] 4.1 Run real-model cases: a skill-shaped task in a client without native skills loads the vault skill before acting; an unrelated task loads none.
   - GPT actor, client without native skills. The skill-shaped task read the vault skill before drafting in 5 of 5 runs. The unrelated task and the near-miss task loaded no skill in 0 of 8 runs. On the three-page fixture, the arm before the skills block also found the skill, so these cases prove the behaviour but do not separate the arms.
-- [ ] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
-- [ ] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
+- [x] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
+  - The catalogue shipped through an independent review, PR and main CI, the merge queue and release 0.201.0. A Full-only budget failure after merge was fixed forward before the release cut.
+- [x] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
+  - Installed 0.201.0, 2026-11-24: a recall in a new conversation, on a turn that matches a vault skill, returned `skills` ready with that skill listed, its `advice`, and `next_action` `skill_check`; reading the listed ref returned the whole skill. The first recall after the install abstained after 302 s while the index warmed (readiness overran its 50 s budget); the retry was served.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
 
 ## 5. Method activation from ordinary turns
@@ -43,7 +45,8 @@
 - [x] 5.4 Add the no-magic-word fixtures (technology discussed, experiment approved, outcome reported, Exomem failure, each with a negative twin) as session-close scenarios with scorer-only keys; record the packet-level run against base and candidate.
 - [x] 5.5 Run the fixtures through the session-close bench on real models; record whether the agent followed the contract and wrote to the keyed destination.
 - [x] 5.6 Compare method selection with no judgment, a local placement and an API placement on the same cases; record per-case exact match with intervals, and recommend a placement.
-- [ ] 5.7 Verify on the installed service: an ordinary turn serves the matching vault skill with its contract, and the owner readout shows its use evidence.
+- [x] 5.7 Verify on the installed service: an ordinary turn serves the matching vault skill with its contract, and the owner readout shows its use evidence.
+  - Installed 0.201.0, 2026-11-24: with the selector off, the turn served the skill in the catalogue and its whole contract on read. The owner `served_context` readout then showed that skill served 1 and opened 1 (observed), with followed unknown because the skill names no write destination.
 
 ## 6. Catalogue-first activation
 
