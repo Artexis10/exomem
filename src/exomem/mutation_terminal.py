@@ -3290,6 +3290,10 @@ def _valid_discard_receipt(value: Mapping[str, Any]) -> bool:
 
 # nosemgrep: ep-word-set -- the receipt keys that only a restructure's lifecycle receipt adds, a closed protocol.
 _RESTRUCTURE_EXTRAS = frozenset({"shape", "warnings"})
+# The paths a Planning lifecycle receipt names. A `revise` of a file collection can rewrite every item file, one path
+# each, and the manifest, so the receipt keeps the 513 paths it held before restructure existed. A restructure writes
+# fewer, and `restructure.MAX_REWRITTEN_ROWS` bounds it on its own.
+_PLANNING_LIFECYCLE_MAX_PATHS = 513
 
 
 def _valid_shape(value: Mapping[str, Any]) -> bool:
@@ -3505,7 +3509,7 @@ def _valid_lifecycle_planning_receipt(value: Mapping[str, Any]) -> bool:
     codes = value.get("acknowledged_gap_codes")
     if not (
         isinstance(paths, list)
-        and 1 <= len(paths) <= restructure.MAX_REWRITTEN_ROWS + 1
+        and 1 <= len(paths) <= _PLANNING_LIFECYCLE_MAX_PATHS
         and all(isinstance(path, str) and 0 < len(path.encode("utf-8")) <= 1024 for path in paths)
         and value.get("outcome") == "committed"
         and isinstance(correlation, str)
