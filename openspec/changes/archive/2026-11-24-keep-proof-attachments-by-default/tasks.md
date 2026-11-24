@@ -23,4 +23,4 @@
 ## 5. Proof
 
 - [x] 5.1 Deterministic tests for the caption, citation, save on arrival, page and redaction.
-- [ ] 5.2 Session-close real-model replay with image turns (cases c13 and c14) on base and changed code.
+- [x] 5.2 Session-close real-model replay with image turns (cases c13 and c14) on base and changed code.
