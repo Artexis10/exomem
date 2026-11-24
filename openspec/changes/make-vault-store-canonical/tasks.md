@@ -250,7 +250,7 @@
 
 - [ ] 5.1 Add the unit row table (moved from 1.1). Merge the lexical unit rows and graph unit nodes into one unit row set under today's identity rule (authored anchor, else fingerprint-bound reference), and prove it reproduces both for the same bytes.
 - [ ] 5.2 Resolve links to `[[Page#^anchor]]` as unit-level edges; make claim-level writes change the page and the unit in one transaction.
-  - Owner decision (2026-11-24): stage 2 makes relationships stored rows (D10, "Stored relationships"); unit-canonical storage stays open. Stage 2 starts after the owner's vault switches.
+  - Owner decision (2026-11-24): stage 2 makes relationships stored rows (D10, "Stored relationships") and starts after the owner's vault switches. Units as the source of each page follow as the next stage (D10), planned for December 2026 or January 2027 under their own change.
   - Planned: the claim-level operations now in development will add every relationship through one store function, so they need no change when that function starts writing rows.
 - [ ] 5.5 Add the stored relationship table with per-relationship history and two-ended visibility; route the claim-level operations' relationship writes to it; write an anchor into a unit when it gains its first stored relationship.
 - [ ] 5.6 Project a bounded relations block into each page and a complete relations file beside it; import relationship edits from that file; keep an orphaned relationship and open a review item; read relations files in a cold derivation and project them before a rollback.

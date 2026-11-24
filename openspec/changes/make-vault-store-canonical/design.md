@@ -229,7 +229,9 @@ The page bytes stay the source of a unit's text, and unit rows derive from them 
 
 Recall can therefore return units with their page context, and graph edges can point at the exact unit a claim lives in. That is new retrieval behaviour: it ships only after task 5.4 and the outcome evaluation's stage-2 run (task 7.3). The merged unit rows must still reproduce today's lexical unit rows and graph unit nodes for the same bytes.
 
-*Option chosen:* page bytes stay the source of unit text, and relationships become stored rows. *Option left open:* unit-canonical storage, where the store holds units as the source and composes each page from them. It would add composing or reusing one unit across several pages. It costs a rebuild of every write path and a segmentation of every outside edit, and nothing asks for it yet. The chosen option grows into it unchanged: relationship rows and anchored identities carry over.
+*Option chosen for stage 2:* page bytes stay the source of unit text, and relationships become stored rows.
+
+*Planned next stage: units as the source (owner decision, 2026-11-24).* After stage 2, the store becomes the source of units and composes each page from them, so a page can be composed from units, one unit can appear in several pages, and a page can be a generated view. It is planned for December 2026 or January 2027 and gets its own change when its work starts, informed by a measurement of byte-exact page reassembly. It assumes that agents write nearly every change. A hand edit of a projected page stays allowed and takes a simple, safe path: an edited unit is replaced by a new unit, and the old unit's stored relationships go to a review item. No similarity matching decides which old unit an edited paragraph was. Stage 2 carries over unchanged: relationship rows and anchored identities stay.
 
 ### D11. Originals record their canonicity
 
