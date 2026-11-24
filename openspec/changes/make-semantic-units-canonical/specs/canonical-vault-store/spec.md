@@ -18,7 +18,7 @@ In store mode, each unit of a page that its derivation gives unit rows SHALL hav
 - **THEN** the image has no unit records
 
 ### Requirement: A page's key is its exomem_id
-Unit records SHALL key on a page key: the page's valid `exomem_id` unless another live page holds it; else the key of its path in the path's current life; else, after a move, the source's key; else a minted UUID that `backfill-ids` then stamps as its `exomem_id`. This change SHALL add no column to `store_pages`. A rename, trash, recovery or hand rename SHALL keep every unit id.
+Unit records SHALL key on a page key: the page's valid `exomem_id` unless another open key entry holds it; else its path's open entry; else, after a move, the entry open at the source at the move; else a minted UUID. The commit SHALL write a move's source and revision on the destination's intent. Key rules SHALL read keyed tables only, never audit life rows. A rename, trash or recovery SHALL keep every unit id.
 
 #### Scenario: A rename keeps the page's unit ids
 - **WHEN** a page with units is renamed and the drain derives the source and destination paths one at a time
@@ -33,16 +33,27 @@ Unit records SHALL key on a page key: the page's valid `exomem_id` unless anothe
 - **THEN** the page that held the key keeps it and the copy gets a minted key
 
 #### Scenario: A page without an id gets one that backfill stamps
-- **WHEN** a person creates a page with units and no `exomem_id`, and `backfill-ids` later runs
-- **THEN** the store mints its key, and backfill stamps that same value as the page's `exomem_id`
+- **WHEN** a person creates a page with units and no `exomem_id`, and the operator later runs `backfill-ids`
+- **THEN** the store mints its key and writes no id into the page itself
+- **AND** backfill stamps that same value as the page's `exomem_id`
+
+#### Scenario: A new page at a moved page's old path gets its own key
+- **WHEN** a page without an `exomem_id` moves away and a new page is created at its old path before either path is derived
+- **THEN** the moved page keeps its key and the new page gets another, in either order of derivation
+
+#### Scenario: A duplicated id resolves as ambiguous
+- **WHEN** two pages carry one `exomem_id` and a reader resolves `exomem://memory/<id>#…`
+- **THEN** the reference index reports the reference as ambiguous
+- **AND** the key table still gives the records to one page
 
 ### Requirement: A removed page hands its key to the page that carries it
-A removal of a page SHALL keep a kept version with no bytes. Its unit derivation SHALL hand the page key's records to the one other live page that carries that key as its `exomem_id`, matched by the light rule, and SHALL otherwise retire them.
+A removal SHALL keep a kept version with no bytes. Its unit derivation SHALL find, through the identity rows' `exomem_id` index, the one other live page that carries the key and give it the key; that page's units SHALL take the removed key's unit ids by the light rule, with lineage `replaces`, and their stored relationships SHALL move to those ids. Otherwise it SHALL retire the key's records.
 
 #### Scenario: A held rename keeps its unit ids
 - **WHEN** a person renames and edits a page, the importer holds the deletion and imports the new file, and keep-mine removes the old page
 - **THEN** the new page takes the old page's key
 - **AND** each unit that the light rule matches keeps its old unit id
+- **AND** a stored relationship that an agent added to the new page's unit before keep-mine moves to that old unit id
 
 ### Requirement: A commit keeps the page versions that units need
 The canonical transaction SHALL write no unit record. In one set-based statement it SHALL keep a version, the path, current bytes and pending declaration, of each page of its change that holds records or a pending declaration and has a pending intent, or whose records are behind the registry. It SHALL reserve room for those bytes. A page with no records SHALL never be behind.
@@ -66,7 +77,7 @@ A page SHALL keep at most 16 versions. A version older than the page's newest de
 - **AND** the declared unit keeps its unit id
 
 ### Requirement: Units derive from every page version in order
-The store thread SHALL select pages for the unit derivation from the derivation intents whose units lag, whatever their retry time, and from the kept versions, never by scanning stored pages. It SHALL derive them in their own transaction before the rows, walk each page's kept versions in revision order, and not advance the store revision. A new unit id SHALL hash the store's id, the page key, the revision and the ordinal.
+The store thread SHALL select pages for the unit derivation from the derivation intents whose units lag, whatever their retry time, and from the kept versions, never by scanning stored pages, up to 32 pages per transaction. It SHALL derive them before the rows, walk each page's kept versions in revision order, and not advance the store revision. A new unit id SHALL hash the store's id, page key, revision and ordinal.
 
 #### Scenario: A failed row derivation leaves units current
 - **WHEN** a page's row derivation fails with `no_room` and waits for its retry while no other write touches the page
@@ -81,6 +92,10 @@ The store thread SHALL select pages for the unit derivation from the derivation 
 #### Scenario: A split batch gives the same identity
 - **WHEN** the drain re-runs a failed batch one path at a time
 - **THEN** every page's records equal those that the whole batch would have given
+
+#### Scenario: A hub rename derives in bounded batches
+- **WHEN** a rename rewrites 10,000 linking pages in one commit
+- **THEN** the unit derivation takes them in transactions of at most 32 pages
 
 ### Requirement: Unit identity follows the light rule
 For each page version, the unit derivation SHALL give each unit the id of an unmatched live record of the same page by, in order: equal bytes; the same anchor on exactly one record; the same slot, with only whitespace changed or one run of at most 12 characters without whitespace changed. It SHALL compare a wikilink by its target's page key, keeping fragment and alias; a record stores its links that way. It SHALL NOT match across pages or by similarity.
@@ -246,7 +261,7 @@ Before its first batch, the upgrade pass SHALL record `vault-store-v2`, and a bu
 - **THEN** the unit's record holds the unit id that stage 2 assigned
 
 ### Requirement: Unit records survive rollback
-Rollback to stage 2 and to file mode SHALL export the unit records, key table, history, lineage and open review items beside the vault, and SHALL refuse while review items are open unless `--export-review` exports them. Rollback to stage 2 SHALL drop this change's tables, queue columns and audit index, then remove `vault-store-v2`. A later migration or upgrade SHALL match an export by page key, else by path, then by the light rule.
+Rollback to stage 2 and to file mode SHALL export the unit records, key table, history, lineage and open review items beside the vault, and SHALL refuse while review items are open unless `--export-review` exports them. Rollback to stage 2 SHALL drop this change's tables, queue columns and indexes, then remove `vault-store-v2`. A later migration or upgrade SHALL match an export by page key, else by path, then by the light rule.
 
 #### Scenario: A round trip keeps unit ids
 - **WHEN** a vault rolls back to file mode, a line is added at the top of a page, the page is renamed, and the vault migrates again with its identity export
