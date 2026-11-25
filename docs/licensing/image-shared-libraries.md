@@ -13,7 +13,7 @@ Every count in this file comes from the collected records. No count is typed by 
 
 ## Status: the first FSL release
 
-This record covers the published images of the first releases under FSL-1.1-ALv2. The `lean`, `ml` and `cuda` images come from v0.202.0, the first FSL release. v0.202.0 published no `cloud` or `cellctl` image, because its arm64 licence check failed, so those two images come from v0.203.0, the first release that published them. Every platform that each release published is scanned.
+This record covers the published images of the first releases under FSL-1.1-ALv2. The `lean`, `ml` and `cuda` images come from v0.202.0, the first FSL release. v0.202.0 published no `cloud` or `cellctl` image, because its arm64 licence check could not scan the arm64 image, so those two images come from v0.203.0, the first release that published them. Every platform that each release published is scanned.
 
 Unmapped and Strong copyleft are 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` required this before the release statement.
 
@@ -49,9 +49,8 @@ In Part C the class is the one that trivy assigns from the lists in `scripts/ima
 
 ## What this record does not cover
 
-- The released images and the images built from the tree can differ. Each record names its source in the Source column. The tree's `cuda` image is not built or scanned, because its build downloads several gigabytes of CUDA wheels. Its Dockerfile stage installs the same `.[embeddings]` extra as the `ml` stage, with the CUDA build of torch. The tree's `ml` record therefore shows its other Python wheels, by reading the Dockerfile and not by a scan. The released `cuda` record shows torch and the NVIDIA wheels.
-- The `cellctl` image is scanned as released. Only its tests changed in its build context after that release.
-- Each record covers one platform. The `cuda` image publishes `linux/amd64` only. The tree images are scanned for `linux/amd64` only.
+- Every record is a released image. Each record names its release in the Source column. The image build context (`Dockerfile`, `uv.lock` and `infra/cellctl`) differs between v0.202.0 and v0.203.0 only in the version number, so the two releases describe one dependency set.
+- Each record covers one platform. The `cuda` image publishes `linux/amd64` only.
 - Static linkage inside a compiled module is not visible. For example, a PDFium or PyTorch binary can contain code from other projects. The wheel's own licence files are the evidence for those, and Part A lists them by count.
 - The scan reads files, not the dynamic linker. It does not follow `DT_NEEDED` entries to show which library each module loads.
 
@@ -66,7 +65,7 @@ In Part C the class is the one that trivy assigns from the lists in `scripts/ima
 
 The expected result is a record file with the `UNMAPPED` count at zero in every row of the Counts table. Add the missing entry to `scripts/image-licences/library-upstreams.yaml` for each library that shows as `UNMAPPED`, and render again.
 
-Steps 7 to 9 are manual checks that the generator does not run. Run them in the `cloud` image, which has the largest dependency set.
+Steps 7 to 9 are manual checks that the generator does not run. Run them in the `cloud` image, which has the most system libraries, and run step 8 also in the `ml` image, which carries the torch stack. The `cuda` image has the same Python packages as `ml`, with the CUDA build of torch and the NVIDIA wheels, and is not probed.
 
 7. Save the import probe below as `probe.py`.
 
@@ -85,7 +84,7 @@ Steps 7 to 9 are manual checks that the generator does not run. Run them in the 
 8. Run `docker run --rm -i --entrypoint python IMAGE - < probe.py`. The last line must read `loaded: []`.
 9. For each system library that Part C shows as plain `none read`, run `docker run --rm --entrypoint cat IMAGE /usr/share/doc/PACKAGE/copyright | grep -i gpl`. It must print nothing.
 
-Results on 2026-11-25, in the image of `cloud-v0.203.0-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
+Results on 2026-11-25, in the images of `cloud-v0.203.0-amd64` and `ml-v0.202.0-amd64`: step 8 printed `loaded: []` in both, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
 
 ## Images scanned
 
