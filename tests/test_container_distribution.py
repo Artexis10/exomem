@@ -92,10 +92,14 @@ def test_dockerfile_cloud_target_sets_pod_local_log_dir_and_disables_fastmcp_egr
 
 
 def test_release_workflow_publishes_cuda_tags() -> None:
-    text = _read(".github/workflows/release-please.yml")
+    import yaml
 
-    assert "target: cuda" in text
-    assert "platforms: linux/amd64" in text
+    text = _read(".github/workflows/release-please.yml")
+    legs = yaml.safe_load(text)["jobs"]["build-standard-images"]["strategy"]["matrix"]["include"]
+
+    assert {"image": "cuda", "platforms": "linux/amd64"}.items() <= next(
+        leg for leg in legs if leg["image"] == "cuda"
+    ).items()
     assert '"cuda $image_base:$version-cuda cuda"' in text
 
 
@@ -143,13 +147,40 @@ def test_release_builds_cloud_images_natively_without_discovery_tags() -> None:
     assert "github.run_attempt" not in digests["with"]["name"]
 
 
-def test_serialized_publisher_joins_and_attests_both_cloud_roles_after_recovery() -> None:
+def test_release_builds_standard_images_beside_the_cloud_images_by_digest() -> None:
+    import yaml
+
+    jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
+    standard = jobs["build-standard-images"]
+    # Waiting on the cloud builds would put the standard builds back on the critical path.
+    assert standard["needs"] == ["plan", "build-artifacts"]
+    assert standard["strategy"]["fail-fast"] is False
+    assert {leg["image"] for leg in standard["strategy"]["matrix"]["include"]} == {"lean", "ml", "cuda"}
+    assert "attestations" not in standard["permissions"]
+    steps = {step["id"]: step for step in standard["steps"] if "id" in step}
+    build = steps["build"]
+    assert "steps.recover.outcome == 'success'" in build["if"]
+    assert "fromJSON(env.IMAGES)[matrix.image].publish" in build["if"]
+    assert "push-by-digest=true" in build["with"]["outputs"]
+    assert "env.DRY_RUN != 'true'" in build["with"]["outputs"]
+    assert "tags" not in build["with"]
+    # Only a digest that passed its licence check reaches the publisher.
+    assert "steps.licences.outcome == 'success'" in steps["digests"]["if"]
+    upload = next(step for step in standard["steps"] if step.get("uses", "").startswith("actions/upload-artifact"))
+    assert "steps.digests.outcome == 'success'" in upload["if"]
+    assert upload["with"]["overwrite"] is True
+    assert "github.run_id" in upload["with"]["name"]
+    assert "github.run_attempt" not in upload["with"]["name"]
+
+
+def test_serialized_publisher_attests_every_role_built_elsewhere_after_recovery() -> None:
     import yaml
 
     jobs = yaml.safe_load(_read(".github/workflows/release-please.yml"))["jobs"]
     publisher = jobs["publish-image"]
-    assert "build-cloud-images" in publisher["needs"]
-    assert "needs.build-cloud-images.result == 'success'" not in publisher["if"]
+    for builder in ("build-cloud-images", "build-standard-images"):
+        assert builder in publisher["needs"]
+        assert f"needs.{builder}.result == 'success'" not in publisher["if"]
     assert publisher["concurrency"]["cancel-in-progress"] is False
     assert "release-image-publication" in publisher["concurrency"]["group"]
     steps = {step["id"]: step for step in publisher["steps"] if "id" in step}
@@ -167,6 +198,18 @@ def test_serialized_publisher_joins_and_attests_both_cloud_roles_after_recovery(
             f"release-image-evidence-{role}-" in step.get("with", {}).get("name", "")
             for step in publisher["steps"]
         )
+    for role in ("lean", "ml", "cuda"):
+        read = steps[f"{role}-build"]
+        assert f"standard-image-digests/{role}.digest" in read["run"]
+        assert "env.DRY_RUN != 'true'" in read["if"]
+        attestation = steps[f"{role}-attestation"]
+        assert f"steps.{role}-build.outcome == 'success'" in attestation["if"]
+        assert (
+            attestation["with"]["subject-digest"] == f"${{{{ steps.{role}-build.outputs.digest }}}}"
+        )
+    assert not any(
+        step.get("uses", "").startswith("docker/build-push-action") for step in publisher["steps"]
+    )
     finalizer = publisher["steps"][-1]
     assert "always()" in finalizer["if"] and "!cancelled()" in finalizer["if"]
     assert "env.DRY_RUN != 'true'" in finalizer["if"]
