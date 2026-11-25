@@ -192,7 +192,9 @@ names it in `sources:` covers it.
 
 1. Record one bounded recap with `save_episode()`: a
    one-line subject and summary, what was worked on, decided and left open, and at
-   most three verbatim user statements worth keeping.
+   most three verbatim user statements worth keeping. Worked on means the session's
+   own subjects; an aside answered in passing that nothing later needs stays out of the
+   recap, like any material that stays unwritten.
 2. Compile or explicitly dismiss every Decided item; the pass is complete before citation.
 3. Cite the recap from each updated compiled note; the citation records the completed pass.
 

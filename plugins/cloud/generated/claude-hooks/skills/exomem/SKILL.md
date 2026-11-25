@@ -2,7 +2,7 @@
 name: exomem
 description: Use Evermatter for governed knowledge-base recall, capture, compilation, connections, review, preservation, and the owner's standing preference profiles. Engage for Evermatter (formerly Exomem), KB, vault, Obsidian or notes, including save, log, compile, "interesting, save it", and "what did I conclude"; consult prior project/domain knowledge and capture durable outcomes according to the active engagement policy. Source and Evidence content stays immutable, and their links change only through governed moves; vault content outside the managed Knowledge Base stays read-only, and ordinary workspace files are not Evermatter's to govern.
 metadata:
-  skill_contract: 1d440f440ef9cf5c72e44e2822b1b93ec861d701e6a567847911b4ceb55cd878
+  skill_contract: 189f27c701c5dbf1e11b8173e5aa55bb4879b4916fbc421df73e79016bc0c0d4
   version: "0.32.0"
 ---
 
