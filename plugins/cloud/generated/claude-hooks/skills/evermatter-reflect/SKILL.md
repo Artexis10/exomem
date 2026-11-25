@@ -2,7 +2,7 @@
 name: evermatter-reflect
 description: Distill a session or project episode into decisions, failures, patterns, open questions, and next actions. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 92a756f2653d995199246dd41d492aac326ba4cb8b1d76b92fb16932283695d7
+  skill_contract: 39235a41700c709be5684f77064479de5859018d21fd640ff0b39f7c639b174b
   version: "0.1.0"
 ---
 

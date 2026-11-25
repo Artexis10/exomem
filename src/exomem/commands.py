@@ -12756,6 +12756,7 @@ def op_maintain_memory(
         "structured-files",
         "curation",
         "tag-variants",
+        "path-variants",
         "maintenance-job",
         "maintenance-job-cancel",
         "collections-store",
@@ -13112,6 +13113,33 @@ def op_maintain_memory(
                 vault_root, plan_id=plan_id, why=why, exclude=exclude_groups
             )
         return _carrying_batch_advisories(vault_root, reconciled)
+    if mode == "path-variants":
+        from . import path_variants as path_variants_module
+
+        if (
+            categories is not None
+            or apply is not None
+            or rebuild_embeddings
+            or rebuild_graph
+            or detail != "actionable"
+            or legacy_sample_limit != audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT
+            or collection is not None
+            or source_snapshot is not None
+        ):
+            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only dry_run, plan_id and why")
+        # Merging moves files across the whole vault, protected captures included: it is the owner's.
+        refusal = egress_module.owner_only_aggregate(vault_root)
+        if refusal is not None:
+            return refusal
+        if dry_run is not False:
+            if plan_id is not None or why is not None:
+                raise ValueError("INVALID_ARGUMENTS: a path-variants preview takes no plan_id or why")
+            return path_variants_module.preview(vault_root)
+        if plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: a path-variants merge needs dry_run=false with the preview's plan_id and a why"
+            )
+        return path_variants_module.apply(vault_root, plan_id=plan_id, why=why)
     if mode == "maintenance-job" or mode == "maintenance-job-cancel":
         from . import maintenance_jobs as maintenance_jobs_module
 
@@ -13289,7 +13317,7 @@ def op_maintain_memory(
         return original_conversion.convert(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, "
-        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, maintenance-job, "
+        "backfill-ids, capture-metadata, convert-originals, structured-files, curation, tag-variants, path-variants, maintenance-job, "
         "maintenance-job-cancel, collections-store, collections-store-adopt-local, "
         "collections-store-export, collections-cutover, or held-resolve"
     )
