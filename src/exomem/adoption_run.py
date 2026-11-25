@@ -1571,10 +1571,26 @@ def start(
         except FileExistsError:
             pass
 
-    try:
-        scan = overview_module.overview(root, path=path, include_hidden=include_hidden)
-    except overview_module.OverviewError as exc:
-        raise AdoptionRunError(exc.code, exc.reason) from exc
+    if source_run is not None and "scan_summary" in source_run and "pack_suggestions" in source_run:
+        # A later page goes on with the scan that its first page summarized, so it keeps that summary. Summarizing
+        # again read every staged note, about 1 ms per file on each page; only this page's listing is new.
+        if not (root / _clean(path)).is_dir():
+            raise AdoptionRunError("NOT_FOUND", f"no such vault path: {_clean(path) or '.'}")
+        scan_summary, pack_suggestions = source_run["scan_summary"], source_run["pack_suggestions"]
+    else:
+        try:
+            scan = overview_module.overview(root, path=path, include_hidden=include_hidden)
+        except overview_module.OverviewError as exc:
+            raise AdoptionRunError(exc.code, exc.reason) from exc
+        junk = scan.get("junk") or {}
+        scan_summary = {
+            "totals": scan.get("totals", {}),
+            "kb": scan.get("kb", {}),
+            "junk_counts": junk.get("counts", {}),
+            "junk_paths": sorted({_clean(p) for p in (junk.get("zero_byte") or [])}),
+            "skipped": scan.get("skipped", {}),
+        }
+        pack_suggestions = knowledge_packs.suggest_packs(scan, limit=6)
 
     stage = _stage_at(root, _clean(path))
     rows, remaining, hidden_files = build_inventory(
@@ -1585,8 +1601,6 @@ def start(
     created_iso = _now_iso()
     source_root = _clean(path)
     run_id = new_run_id(source_root, created_iso, inv_fp, today=run_date)
-    junk = scan.get("junk") or {}
-    junk_paths = sorted({_clean(p) for p in (junk.get("zero_byte") or [])})
 
     run = {
         "schema_version": SCHEMA_VERSION,
@@ -1599,14 +1613,8 @@ def start(
         "collection": pinned["collection"] if pinned else _collection_of(root, source_root, collection, stage),
         "stage": _recorded_stage(stage),
         "consume": consume,
-        "scan_summary": {
-            "totals": scan.get("totals", {}),
-            "kb": scan.get("kb", {}),
-            "junk_counts": junk.get("counts", {}),
-            "junk_paths": junk_paths,
-            "skipped": scan.get("skipped", {}),
-        },
-        "pack_suggestions": knowledge_packs.suggest_packs(scan, limit=6),
+        "scan_summary": scan_summary,
+        "pack_suggestions": pack_suggestions,
         "inventory": rows,
         "inventory_truncated": remaining,
         "hidden_files_skipped": hidden_files,
@@ -2000,24 +2008,25 @@ def plan(
 
         budget = _call_budget()
         handled = 0
-        while draft["next"] < len(selected):
-            if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
-                break
-            rel = selected[draft["next"]]
-            result = adoption_plan.plan_item(
-                root, rel,
-                collection=collection["label"], collection_root=collection["root"],
-                classification=classification.get(rel), taxonomy=taxonomy,
-                text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
-                date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
-                ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel), seen=seen,
-            )
-            draft["next"] += 1
-            handled += 1
-            if isinstance(result, dict):
-                draft["skipped"].append(result)
-            else:
-                draft["items"].append(result[0])
+        with lexstore.shared_reads(root):
+            while draft["next"] < len(selected):
+                if handled and not budget.can_afford(request_budget.DELIVERY_RESERVE_SECONDS):
+                    break
+                rel = selected[draft["next"]]
+                result = adoption_plan.plan_item(
+                    root, rel,
+                    collection=collection["label"], collection_root=collection["root"],
+                    classification=classification.get(rel), taxonomy=taxonomy,
+                    text_hint=(inventory.get(rel) or {}).get("form", "text") == "text",
+                    date_iso=draft["date"], destinations=destinations, index=index, notes=notes,
+                    ceiling=ceiling, vouched=adoption_consume.vouched(stage, rel), seen=seen,
+                )
+                draft["next"] += 1
+                handled += 1
+                if isinstance(result, dict):
+                    draft["skipped"].append(result)
+                else:
+                    draft["items"].append(result[0])
 
         progress = {
             "planned": draft["next"],
@@ -2838,136 +2847,137 @@ def _apply_chunk(
     invocation = _apply_invocation(run)
     publication = invocation.get("publication") if invocation else None
     prework_started = time.monotonic()
-    for planned in chunk:
-        path = planned["original_path"]
-        frozen = (publication.get("items") or {}).get(path) if publication else None
-        if frozen and planned["action"] != "copy-as-source":
-            # Only an item that stored its own bytes in place of a named Source is ever frozen under another action.
-            planned = _own_copy(planned, frozen["target_path"], frozen["artifact_path"])
-        by_rename = import_rename.renamable(stage, planned)
-        text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
-        moved = None
-        if failure is not None and failure["code"] == "NOT_FOUND":
-            # Not a failure when adoption already filed it and removed the staged copy.
-            earlier = None if frozen else _filed_and_gone(root, run, reads, planned)
-            if earlier is not None:
-                _release_hold(root, planned)
-                outcomes[path] = _already_applied(
-                    earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
-                )
-                if run.get("consume", True):
-                    outcomes[path]["consumed"] = True
-                    stats["consumed"] += 1
-                    _queue_offload(root, planned)
-                else:  # a run that opted out claims no removal, and counts its missing copy as changed
-                    _record_unchanged(root, planned, outcomes[path], stats)
-                continue
-            if by_rename:
-                # An earlier call may have renamed the file and stopped before its Source page committed.
-                replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
-                if isinstance(replay, import_rename.Refused):
-                    if frozen:
-                        raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted artifact cannot establish its rename custody")
-                    # The hold stays: the file is unbound with other bytes, and only the person's move
-                    # lifts it. The scans leave it alone and a discard of its stage refuses until then.
-                    outcomes[path] = _failed(replay.code, replay.reason)
+    with lexstore.shared_reads(root):
+        for planned in chunk:
+            path = planned["original_path"]
+            frozen = (publication.get("items") or {}).get(path) if publication else None
+            if frozen and planned["action"] != "copy-as-source":
+                # Only an item that stored its own bytes in place of a named Source is ever frozen under another action.
+                planned = _own_copy(planned, frozen["target_path"], frozen["artifact_path"])
+            by_rename = import_rename.renamable(stage, planned)
+            text, failure = _read_original(root, planned, ceiling, by_rename=by_rename)
+            moved = None
+            if failure is not None and failure["code"] == "NOT_FOUND":
+                # Not a failure when adoption already filed it and removed the staged copy.
+                earlier = None if frozen else _filed_and_gone(root, run, reads, planned)
+                if earlier is not None:
+                    _release_hold(root, planned)
+                    outcomes[path] = _already_applied(
+                        earlier.path, adoption_plan.artifact_of(root, earlier.path), planned["original_sha256"]
+                    )
+                    if run.get("consume", True):
+                        outcomes[path]["consumed"] = True
+                        stats["consumed"] += 1
+                        _queue_offload(root, planned)
+                    else:  # a run that opted out claims no removal, and counts its missing copy as changed
+                        _record_unchanged(root, planned, outcomes[path], stats)
                     continue
-                if replay is not None:
-                    moved, failure = replay, None
-        if failure is not None:
+                if by_rename:
+                    # An earlier call may have renamed the file and stopped before its Source page committed.
+                    replay = import_rename.settle(root, stage, planned, ceiling=ceiling)
+                    if isinstance(replay, import_rename.Refused):
+                        if frozen:
+                            raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted artifact cannot establish its rename custody")
+                        # The hold stays: the file is unbound with other bytes, and only the person's move
+                        # lifts it. The scans leave it alone and a discard of its stage refuses until then.
+                        outcomes[path] = _failed(replay.code, replay.reason)
+                        continue
+                    if replay is not None:
+                        moved, failure = replay, None
+            if failure is not None:
+                if frozen:
+                    raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted chunk's original bytes are unavailable or changed")
+                if by_rename and rename_journal.is_held(root, root / planned["artifact_path"]):
+                    # An earlier call renamed this member's file and could not put it back: the retry finds the
+                    # staged path changed, and the outcome must still say where the file is.
+                    failure = _failed(
+                        import_rename.UNBOUND,
+                        f"{failure['reason']}; the file stays unbound at {planned['artifact_path']}",
+                    )
+                outcomes[path] = failure
+                continue
+            if text is not None and _owes_note(planned):
+                texts[path] = text
+            if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
+                continue  # an earlier call wrote its Source; only the note is owed
             if frozen:
-                raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the interrupted chunk's original bytes are unavailable or changed")
-            if by_rename and rename_journal.is_held(root, root / planned["artifact_path"]):
-                # An earlier call renamed this member's file and could not put it back: the retry finds the
-                # staged path changed, and the outcome must still say where the file is.
-                failure = _failed(
-                    import_rename.UNBOUND,
-                    f"{failure['reason']}; the file stays unbound at {planned['artifact_path']}",
+                item = adopt_module.import_item(
+                    root, planned, text=text, date_iso=plan["date"], collection=label, source_id=frozen.get("source_id"),
                 )
-            outcomes[path] = failure
-            continue
-        if text is not None and _owes_note(planned):
-            texts[path] = text
-        if path in outcomes and outcomes[path]["status"] == _SOURCE_ONLY:
-            continue  # an earlier call wrote its Source; only the note is owed
-        if frozen:
-            item = adopt_module.import_item(
-                root, planned, text=text, date_iso=plan["date"], collection=label, source_id=frozen.get("source_id"),
+                if (
+                    frozen.get("target_path") != item.target_rel
+                    or frozen.get("artifact_path") != planned.get("artifact_path")
+                    or frozen.get("original_sha256") != item.sha256
+                    or frozen.get("source_sha256") != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
+                ):
+                    raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the chunk no longer matches its frozen post-images")
+                if moved is not None:
+                    item.artifact.placed = True
+                    placed[path] = moved
+                survivors.append((planned, item))
+                continue
+            index = reads.earlier_imports(root, run, planned)
+            if planned["action"] == "already-imported" and not planned.get("mapping"):
+                frozen = [entry for entry in index if entry.path == planned["target_path"]]
+                if _earlier_with_same_bytes(root, frozen, label, planned) is None:
+                    outcomes[path] = _failed(
+                        "PLAN_STALE", "the earlier Source or artifact is missing or changed; re-plan this import"
+                    )
+                    continue
+                outcomes[path] = _already_applied(
+                    planned["target_path"], planned.get("artifact_path"), planned["original_sha256"]
+                )
+                _hold_for_note(outcomes[path], planned)
+                settled.append(planned)
+                continue
+            earlier = _earlier_with_same_bytes(root, index, label, planned)
+            if earlier is not None:
+                outcomes[path] = _already_applied(
+                    earlier.path, adoption_plan.artifact_of(root, earlier.path),
+                    planned["original_sha256"],
+                )
+                _hold_for_note(outcomes[path], planned)
+                settled.append(planned)
+                continue
+            if planned["action"] == "duplicate-of":
+                deferred.append((planned, text))
+                continue
+            # An item that was renamed into the vault already sits at its frozen artifact path: its Source completes the filing.
+            stored = None if moved is not None else _settle_on_stored(
+                root, planned, label=label, stats=stats,
+                holder=planned["target_path"] if planned["action"] == "already-imported" else None,
             )
-            if (
-                frozen.get("target_path") != item.target_rel
-                or frozen.get("artifact_path") != planned.get("artifact_path")
-                or frozen.get("original_sha256") != item.sha256
-                or frozen.get("source_sha256") != hashlib.sha256(item.content.encode("utf-8")).hexdigest()
-            ):
-                raise AdoptionRunError("IMPORT_RECOVERY_UNRESOLVED", "the chunk no longer matches its frozen post-images")
+            if stored is not None:
+                _record_stored(root, run, reads, planned, stored, settled=settled)
+                continue
+            if planned["action"] == "already-imported":
+                if moved is not None:  # its staged file already sits at the artifact path of the Source that the plan named
+                    outcomes[path] = _failed(
+                        "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
+                    )
+                    continue
+                # The Source that the plan named for these bytes has gone or changed: this item stores its own.
+                destinations = destinations or adoption_plan.Destinations.frozen_by(root, plan["items"])
+                planned, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
+                if failure is not None:
+                    outcomes[path] = failure
+                    continue
+            occupied = [
+                target for target in (planned["target_path"], planned.get("artifact_path"))
+                if target and os.path.lexists(root / target)
+                and not (moved is not None and target == planned["artifact_path"])
+            ]
+            if occupied:
+                outcomes[path] = _failed(
+                    "TARGET_OCCUPIED",
+                    f"{occupied[0]} already exists and is not an import of this file",
+                )
+                continue
+            item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
             if moved is not None:
                 item.artifact.placed = True
                 placed[path] = moved
             survivors.append((planned, item))
-            continue
-        index = reads.earlier_imports(root, run, planned)
-        if planned["action"] == "already-imported" and not planned.get("mapping"):
-            frozen = [entry for entry in index if entry.path == planned["target_path"]]
-            if _earlier_with_same_bytes(root, frozen, label, planned) is None:
-                outcomes[path] = _failed(
-                    "PLAN_STALE", "the earlier Source or artifact is missing or changed; re-plan this import"
-                )
-                continue
-            outcomes[path] = _already_applied(
-                planned["target_path"], planned.get("artifact_path"), planned["original_sha256"]
-            )
-            _hold_for_note(outcomes[path], planned)
-            settled.append(planned)
-            continue
-        earlier = _earlier_with_same_bytes(root, index, label, planned)
-        if earlier is not None:
-            outcomes[path] = _already_applied(
-                earlier.path, adoption_plan.artifact_of(root, earlier.path),
-                planned["original_sha256"],
-            )
-            _hold_for_note(outcomes[path], planned)
-            settled.append(planned)
-            continue
-        if planned["action"] == "duplicate-of":
-            deferred.append((planned, text))
-            continue
-        # An item that was renamed into the vault already sits at its frozen artifact path: its Source completes the filing.
-        stored = None if moved is not None else _settle_on_stored(
-            root, planned, label=label, stats=stats,
-            holder=planned["target_path"] if planned["action"] == "already-imported" else None,
-        )
-        if stored is not None:
-            _record_stored(root, run, reads, planned, stored, settled=settled)
-            continue
-        if planned["action"] == "already-imported":
-            if moved is not None:  # its staged file already sits at the artifact path of the Source that the plan named
-                outcomes[path] = _failed(
-                    "PLAN_STALE", "the Source that holds these bytes is missing or changed; re-plan this import"
-                )
-                continue
-            # The Source that the plan named for these bytes has gone or changed: this item stores its own.
-            destinations = destinations or adoption_plan.Destinations.frozen_by(root, plan["items"])
-            planned, failure = _store_own_copy(root, planned, destinations, date_iso=plan["date"])
-            if failure is not None:
-                outcomes[path] = failure
-                continue
-        occupied = [
-            target for target in (planned["target_path"], planned.get("artifact_path"))
-            if target and os.path.lexists(root / target)
-            and not (moved is not None and target == planned["artifact_path"])
-        ]
-        if occupied:
-            outcomes[path] = _failed(
-                "TARGET_OCCUPIED",
-                f"{occupied[0]} already exists and is not an import of this file",
-            )
-            continue
-        item = adopt_module.import_item(root, planned, text=text, date_iso=plan["date"], collection=label)
-        if moved is not None:
-            item.artifact.placed = True
-            placed[path] = moved
-        survivors.append((planned, item))
     call_spans.record_span(
         "adoption.prework", (time.monotonic() - prework_started) * 1000.0, {"items": len(chunk)}
     )
