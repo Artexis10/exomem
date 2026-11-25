@@ -32,6 +32,11 @@ The release build SHALL assign each note to the earliest version tag whose histo
 - **WHEN** release 1.2.0 contains one new note and release 1.3.0 contains two
 - **THEN** the file lists 1.3.0 with two notes, then 1.2.0 with one
 
+#### Scenario: A note that skipped the check
+
+- **WHEN** a note file breaks the shape rule at release time
+- **THEN** the build leaves that note out, warns with the file name and does not fail
+
 #### Scenario: Release without notes
 
 - **WHEN** a release contains no new note file
@@ -39,7 +44,7 @@ The release build SHALL assign each note to the earliest version tag whose histo
 
 ### Requirement: The cell image carries its notes
 
-Each cell image SHALL carry the notes file generated for its own release as package data. A build without the file SHALL serve an empty list and never fail.
+Each cell image SHALL carry the notes file generated for its own release as package data. A build without the file SHALL serve no notes, marked as unavailable, and never fail.
 
 #### Scenario: Image for 1.3.0
 

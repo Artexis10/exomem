@@ -48,6 +48,7 @@ def _constructor_map():
         media_previews,
         memory_refs,
         ownership_rotation,
+        release_notes,
         review_state,
         served_context,
         source_imports,
@@ -107,6 +108,7 @@ def _constructor_map():
         "governance-store": (index_paths.governance_sidecar_path,),
         "due-state": (due_state.state_path,),
         "ownership-review": (ownership_rotation.asked_path, ownership_rotation.rotation_path),
+        "app-update-notices": (release_notes.state_path,),
         "review-state": (review_state.state_path,),
         "brief-watermarks": (brief_watermarks.sidecar_path,),
         "served-context": (served_context.sidecar_path,),
@@ -144,6 +146,7 @@ _FOLLOWS_ITS_TARGET = {
 # be able to agree green.  Legacy families with no current constructor remain
 # here because their names stay reserved and their bytes still migrate.
 _SOURCE_DESCRIBED_EXTERNAL_FAMILIES = {
+    "app-update-notices",
     "authorization-projections",
     "claims-store",
     "clip-store",

@@ -24,8 +24,8 @@ A `feat`, `fix` or `perf` pull request must either add a note or state that it h
 User note: none
 ```
 
-The pull-request check reads only the title type, the added files and that line. It checks the note's shape and never judges its words.
+The pull-request check reads the title type, the note files the pull request adds or changes, and that line. It checks each note's shape and never judges its words.
 
 ## How notes reach people
 
-The release build gives each note to the first release tag whose history contains the commit that added the file. Files stay in the tree after release, and no release step edits or deletes them.
+The release build gives each note to the first release tag whose history contains the commit that added the file. Files stay in the tree after release, and no release step edits or deletes them. Never rename or move a note file: the build reads a renamed file as a new note and announces it again in the next release. To reword a note, edit the file in place.

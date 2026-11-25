@@ -1331,10 +1331,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         identity["transport"] = _mcp_transport(headers)
         from . import cloud_cell
 
-        if cloud_cell.cloud_mode_enabled():
-            identity["app_id"] = cloud_cell.canonical_app_id(
-                headers.get(cloud_cell.GATEWAY_APP_ID_HEADER)
-            )
+        identity["app_id"] = gateway_app_id()
         if not identity["client_name"]:
             if cloud_cell.cloud_mode_enabled():
                 gateway_client = str(

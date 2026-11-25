@@ -2,7 +2,7 @@
 
 ### Requirement: The cell serves its release notes
 
-`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version` and `releases` from the image's notes file, newest first. It SHALL read no vault content and SHALL answer from memory after the first read.
+`bootstrap(profile="compact", section="whats_new")` SHALL return `whats_new` with the running `version`, `releases` from the image's notes file, newest first, and `notes_available`, which is `false` when the notes file is missing or unusable and `true` otherwise. It SHALL read no vault content and SHALL answer from memory after the first read.
 
 #### Scenario: Home reads the notes
 
@@ -12,7 +12,7 @@
 #### Scenario: Image without notes
 
 - **WHEN** the image carries no notes file
-- **THEN** the section returns the running version and an empty `releases` list
+- **THEN** the section returns the running version, an empty `releases` list and `notes_available` false
 
 ### Requirement: A cloud cell tells each connected app once about an update
 
@@ -33,6 +33,12 @@ On a cloud cell, the cell SHALL keep, for each canonical gateway app id, the las
 
 - **WHEN** the releases since the app's version have no notes
 - **THEN** no result carries `update_notice` and the app's version moves to the running one
+
+#### Scenario: An image without notes
+
+- **WHEN** an app told about 1.2.0 calls a tool on a cell whose image has no usable notes file
+- **THEN** the result carries no `update_notice` and the app's version stays 1.2.0
+- **AND** when a later image carries the notes, the app's next result tells the notes of every release after 1.2.0
 
 #### Scenario: The state store refuses the write
 

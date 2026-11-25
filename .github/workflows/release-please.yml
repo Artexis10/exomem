@@ -595,10 +595,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           path: .release-tools
+          # Cone mode: a file path here works because git also checks out the files that sit directly
+          # in the parent directories of each listed path, which is how `scripts/*.sh` arrive.
           sparse-checkout: |
             infra/scripts
             scripts/image-licences
             scripts/user_notes.py
+            src/exomem/release_notes_format.py
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -647,14 +650,18 @@ jobs:
           echo "IMAGES=$images" >> "$GITHUB_ENV"
 
       # The notes of this release and every older one, as package data: the image then carries exactly the
-      # notes of the release it runs. A failure leaves no file, which a cell serves as an empty list, and a
-      # later release carries the same notes again, so a failed run must not block the release.
+      # notes of the release it runs. A failure leaves no file, which a cell treats as unknown notes and
+      # not as no notes (it tells no app anything until an image has them), and a later release carries
+      # the same notes again, so a failed run must not block the release.
       - name: Write the release notes into the cloud image
         if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cloud.publish }}
         continue-on-error: true
         env:
           VERSION: ${{ steps.meta.outputs.version }}
-        run: python3 .release-tools/scripts/user_notes.py generate --version "$VERSION" --output src/exomem/user_release_notes.json
+        run: |
+          # The generator applies the note shape rule, which reads Markdown with the parser pinned in pyproject.toml.
+          python3 -m pip install --disable-pip-version-check "$(grep -o -m1 'markdown-it-py==[0-9.]*' pyproject.toml)"
+          python3 .release-tools/scripts/user_notes.py generate --version "$VERSION" --output src/exomem/user_release_notes.json
 
       - name: Build and push native cloud image
         id: cloud-build

@@ -7,7 +7,8 @@ Two subcommands share one definition of a note (openspec change tell-users-whats
             changes must have the right shape. It never judges a note's wording.
   generate  The release build. It gives each note to the earliest version tag whose history
             contains the commit that added the file, and a note in no tag to the version being
-            built. It writes the notes file that the cell image carries.
+            built. It writes the notes file that the cell image carries, in the format that
+            `src/exomem/release_notes_format.py` defines and the cell reads.
 
 Run `check` from the trusted base revision and read the pull request only as data.
 `generate` needs the full history and the version tags: a shallow clone would date every
@@ -17,11 +18,11 @@ note wrongly, so it refuses one.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
-import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -29,21 +30,50 @@ from pathlib import Path, PurePosixPath
 NOTES_DIR = "user-notes"
 NOTE_MAX_CHARS = 200
 KEEP_RELEASES = 20
-SCHEMA = 1
 NO_NOTE_LINE = "user note: none"
-# The types that release-please lists in the changelog (release-please-config.json): the closed set that
-# a user can notice, fixed by that file, not text to interpret.
-DECIDING_TYPES = frozenset({"feat", "fix", "perf"})
-# Release tags are `vX.Y.Z`: the shape of a tag name, not a reading of text.
-_RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
-_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+ROOT = Path(__file__).resolve().parents[1]
+RELEASE_CONFIG = ROOT / "release-please-config.json"
+FORMAT_MODULE = ROOT / "src" / "exomem" / "release_notes_format.py"
 
 Version = tuple[int, int, int]
 
 
-def _version_of(text: str, pattern: re.Pattern[str]) -> Version | None:
-    match = pattern.fullmatch(text)
-    return None if match is None else (int(match[1]), int(match[2]), int(match[3]))
+def deciding_types(config: Path = RELEASE_CONFIG) -> frozenset[str]:
+    """The Conventional Commit types that release-please lists in the changelog: what a user can notice.
+
+    Read from release-please-config.json, so a type added there reaches this check with no second edit.
+    """
+    try:
+        sections = json.loads(config.read_text(encoding="utf-8"))["packages"]["."]["changelog-sections"]
+        return frozenset(section["type"] for section in sections if not section.get("hidden", False))
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise SystemExit(f"cannot read the changelog sections in {config}: {error}") from error
+
+
+def _notes_format():
+    """The notes file's format, loaded by path: the release build runs this script without the package installed."""
+    name = "_release_notes_format"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, FORMAT_MODULE)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module  # a dataclass resolves its annotations through its module
+        try:
+            spec.loader.exec_module(module)
+        except OSError as error:
+            del sys.modules[name]
+            raise SystemExit(f"generate: cannot load the notes format from {FORMAT_MODULE}: {error}") from error
+    return sys.modules[name]
+
+
+def _escape(text: str, *, in_property: bool = False) -> str:
+    """Escape `text` for a GitHub workflow command, so a file name cannot start a command of its own."""
+    text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return text.replace(":", "%3A").replace(",", "%2C") if in_property else text
+
+
+def _warning(path: str, message: str) -> None:
+    """A warning that the Actions log shows against `path`. It never fails the build."""
+    print(f"::warning file={_escape(path, in_property=True)}::{_escape(message)}")
 
 
 def is_note_path(path: str) -> bool:
@@ -105,7 +135,7 @@ def has_no_note_line(body: str) -> bool:
     return any(line.strip().casefold() == NO_NOTE_LINE for line in body.splitlines())
 
 
-def check_pull_request(title: str, body: str, notes: Sequence[ChangedNote]) -> list[str]:
+def check_pull_request(title: str, body: str, notes: Sequence[ChangedNote], deciding: Collection[str]) -> list[str]:
     """What stops this pull request, one sentence each. Empty when it passes."""
     # Only the check needs the title grammar, so `generate` runs from this one file in the release job.
     from check_pr_title import conventional_type
@@ -117,7 +147,7 @@ def check_pull_request(title: str, body: str, notes: Sequence[ChangedNote]) -> l
             continue
         errors.extend(f"{note.path}: {problem}" for problem in note_problems(note.text))
     kind = conventional_type(title)
-    if kind in DECIDING_TYPES and not any(note.added for note in notes) and not has_no_note_line(body):
+    if kind in deciding and not any(note.added for note in notes) and not has_no_note_line(body):
         errors.append(
             f"a {kind} pull request needs a user note: add a file `{NOTES_DIR}/<short-name>.md` "
             f"(see {NOTES_DIR}/README.md), or put the line `User note: none` in the pull-request body"
@@ -167,12 +197,17 @@ class _Note:
     added_at: int
 
 
+def _tag_version(name: str) -> Version | None:
+    """The version of a release tag: `v` and then `X.Y.Z`, the shape the notes format gives a version."""
+    return _notes_format().parse_version(name[1:]) if name.startswith("v") else None
+
+
 def _release_tags(repo: Path) -> dict[Version, int]:
     """Each release tag's version and creation time (the commit's for a lightweight tag)."""
     tags = {}
     for line in _git(repo, "for-each-ref", "--format=%(refname:strip=2) %(creatordate:unix)", "refs/tags/v*").splitlines():
         name, _, stamp = line.partition(" ")
-        version = _version_of(name, _RELEASE_TAG)
+        version = _tag_version(name)
         if version is not None:
             tags[version] = int(stamp)
     return tags
@@ -197,7 +232,7 @@ def _add_commits(repo: Path) -> dict[str, tuple[str, int]]:
 
 def _earliest_release_containing(repo: Path, commit: str) -> Version | None:
     names = _git(repo, "tag", "--list", "v*", "--contains", commit).split()
-    versions = [version for name in names if (version := _version_of(name, _RELEASE_TAG)) is not None]
+    versions = [version for name in names if (version := _tag_version(name)) is not None]
     return min(versions, default=None)
 
 
@@ -209,9 +244,13 @@ def generate(repo: Path, version: str) -> dict:
     """The notes of every release, newest first, from the notes in `repo`'s HEAD and its tags.
 
     `version` is the release being built: it receives the notes that no tag contains yet. Within a
-    release the newest note comes first, so a reader that wants one note takes the first.
+    release the newest note comes first, so a reader that wants one note takes the first. A note
+    that breaks the shape rule is left out with a warning, since it may have skipped the pull-request
+    check; the build never fails for it. The result is checked by the notes format's own parser, the
+    one the cell uses, before it is returned.
     """
-    building = _version_of(version, _VERSION)
+    fmt = _notes_format()
+    building = fmt.parse_version(version)
     if building is None:
         raise SystemExit(f"generate: the version must read X.Y.Z, got {version!r}")
     if _git(repo, "rev-parse", "--is-shallow-repository").strip() == "true":
@@ -224,7 +263,10 @@ def generate(repo: Path, version: str) -> dict:
     for path in sorted(paths):
         text = _decode(_blob(repo, "HEAD", path))
         if path not in added or text is None or not text.strip():
-            print(f"generate: skipped {path}: no readable text, or no commit that added it", file=sys.stderr)
+            _warning(path, "left out of the release notes: no readable text, or no commit that added it")
+            continue
+        if problems := note_problems(text):
+            _warning(path, f"left out of the release notes: {'; '.join(problems)}")
             continue
         commit, stamp = added[path]
         if commit not in containing:
@@ -233,17 +275,20 @@ def generate(repo: Path, version: str) -> dict:
         releases.setdefault(release, []).append(_Note(path, text.strip(), stamp))
     head_time = int(_git(repo, "log", "-1", "--format=%ct", "HEAD").strip())
     newest_first = sorted(releases, reverse=True)[:KEEP_RELEASES]
-    return {
-        "schema": SCHEMA,
-        "releases": [
-            {
-                "version": ".".join(map(str, release)),
-                "released_on": _date(tags.get(release, head_time)),
-                "notes": [note.text for note in sorted(releases[release], key=lambda n: (-n.added_at, n.path))],
-            }
-            for release in newest_first
-        ],
-    }
+    document = fmt.document(
+        fmt.Release(
+            fmt.version_text(release),
+            release,
+            _date(tags.get(release, head_time)),
+            tuple(note.text for note in sorted(releases[release], key=lambda n: (-n.added_at, n.path))),
+        )
+        for release in newest_first
+    )
+    try:
+        fmt.parse_document(json.dumps(document))
+    except ValueError as error:
+        raise SystemExit(f"generate: the notes file would not pass the cell's reader: {error}") from error
+    return document
 
 
 def write_notes_file(output: Path, document: dict) -> None:
@@ -277,11 +322,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
-            errors = check_pull_request(args.title, args.body, changed_notes(args.repo, args.base, args.head))
+            errors = check_pull_request(
+                args.title, args.body, changed_notes(args.repo, args.base, args.head), deciding_types()
+            )
             if errors:
                 print("User note check failed:", file=sys.stderr)
                 for error in errors:
-                    print(f"  - {error}", file=sys.stderr)
+                    # A file name may hold a line break; one error stays one line of the log.
+                    print("  - " + error.replace("\n", " ").replace("\r", " "), file=sys.stderr)
                 return 1
             print("User note check passed.")
             return 0

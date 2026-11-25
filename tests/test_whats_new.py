@@ -8,6 +8,7 @@ running version are the only things replaced: they stand for the image the cell 
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from _public_call import public_call
@@ -86,10 +87,11 @@ async def read(client, app_id: str | None = APP) -> dict:
     return await call(client, "recall_context", {"turn": "anything"}, app_id=app_id)
 
 
-def test_an_app_is_told_once_about_an_upgrade_with_notes_and_a_new_app_is_told_nothing(run_cell, image):
+def test_an_app_is_told_once_about_an_upgrade_with_notes_and_a_new_app_is_told_nothing(run_cell, image, vault):
     """The assistant repeats what a result carries to the person: a notice on every call would nag,
     a notice for an app that never saw the old version would tell it news it has no baseline for,
-    and a notice that did not survive a restart would repeat itself on every restart."""
+    a notice that did not survive a restart would repeat itself on every restart, and an image
+    shipped without its notes file must not use up the notes of the release it hides."""
 
     async def scenario(client):
         seen = {"first call": await read(client)}
@@ -100,13 +102,25 @@ def test_an_app_is_told_once_about_an_upgrade_with_notes_and_a_new_app_is_told_n
         seen["new app"] = await read(client, app_id=OTHER_APP)
         release_notes._told_memo.clear()  # a restart: the process forgets, the state store does not
         seen["after restart"] = await read(client)
+        image.version = "1.3.1"
+        image.notes(None)  # an image built without its notes file
+        seen["image without notes"] = await read(client)
+        saved = state_paths.vault_state_dir(vault) / release_notes.STATE_FILENAME
+        seen["record after image without notes"] = json.loads(saved.read_text("utf-8"))["apps"][APP]
         image.version = "1.4.0"
-        image.notes([{"version": "1.4.0", "released_on": "2026-11-25", "notes": ["Fourth change."]}, *RELEASES])
+        image.notes(
+            [
+                {"version": "1.4.0", "released_on": "2026-11-25", "notes": ["Fourth change."]},
+                {"version": "1.3.1", "released_on": "2026-11-23", "notes": ["The change in the image without notes."]},
+                *RELEASES,
+            ]
+        )
         seen["second upgrade"] = await read(client)
         return seen
 
     seen = run_cell(scenario)
 
+    assert seen.pop("record after image without notes") == "1.3.0"
     assert [name for name, result in seen.items() if "update_notice" in result] == ["upgrade", "second upgrade"]
     notice = seen["upgrade"]["update_notice"]
     assert notice["version"] == "1.3.0"
@@ -116,7 +130,8 @@ def test_an_app_is_told_once_about_an_upgrade_with_notes_and_a_new_app_is_told_n
         "2 more changes: see What's new on Home."
     )
     assert list(seen["upgrade"])[-1] == "update_notice"
-    assert seen["second upgrade"]["update_notice"]["say"].endswith("Fourth change. You can read it under What's new on Home.")
+    # The release of the image without notes arrives with the next one that has them.
+    assert seen["second upgrade"]["update_notice"]["say"].endswith("Fourth change. 1 more change: see What's new on Home.")
 
 
 def test_an_upgrade_without_notes_moves_the_apps_version_and_tells_nothing(run_cell, image, vault):
@@ -202,7 +217,7 @@ def test_the_whats_new_section_gives_the_running_version_and_the_releases_newest
     first = commands.op_bootstrap(vault, section="whats_new")
     second = commands.op_bootstrap(vault, section="whats_new")
 
-    assert first == {"whats_new": {"version": "1.3.0", "releases": RELEASES}}
+    assert first == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
     assert second == first
     assert image.reads == 1
 
@@ -213,7 +228,7 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
     async def scenario(client):
         return await call(client, "bootstrap", {"profile": "compact", "section": "whats_new"})
 
-    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": RELEASES}}
+    assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
 
 
 @pytest.mark.parametrize(
@@ -226,8 +241,42 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
     ],
     ids=["no file", "not JSON", "unknown schema", "a release the cell cannot read"],
 )
-def test_an_image_without_usable_notes_serves_an_empty_list_and_never_fails(image, vault, file):
+def test_an_image_without_usable_notes_says_the_notes_are_unavailable_and_never_fails(image, vault, file):
+    """Home must tell "unknown" from "nothing to show": an empty list alone reads as the second."""
     image.version = "1.3.0"
     image.notes(file)
 
-    assert commands.op_bootstrap(vault, section="whats_new") == {"whats_new": {"version": "1.3.0", "releases": []}}
+    assert commands.op_bootstrap(vault, section="whats_new") == {
+        "whats_new": {"version": "1.3.0", "releases": [], "notes_available": False}
+    }
+
+
+def test_a_valid_notes_file_with_no_releases_is_available_and_empty(image, vault):
+    image.version = "1.3.0"
+    image.notes([])
+
+    assert commands.op_bootstrap(vault, section="whats_new") == {
+        "whats_new": {"version": "1.3.0", "releases": [], "notes_available": True}
+    }
+
+
+@pytest.mark.parametrize("file", [None, "{not json"], ids=["no file", "not JSON"])
+def test_a_cloud_cell_warns_once_when_its_notes_are_missing_or_unusable(image, vault, monkeypatch, caplog, file):
+    """A Cloud image is built with its notes, so a missing file there is a build defect to see in the log."""
+    monkeypatch.setattr(cloud_cell, "cloud_mode_enabled", lambda: True)
+    image.notes(file)
+
+    with caplog.at_level(logging.WARNING, logger=release_notes._log.name):
+        release_notes.payload()
+        release_notes.payload()
+
+    assert [record.event for record in caplog.records] == ["release_notes_unreadable"]
+
+
+def test_a_personal_service_without_a_notes_file_logs_nothing(image, vault, caplog):
+    image.notes(None)
+
+    with caplog.at_level(logging.WARNING, logger=release_notes._log.name):
+        release_notes.payload()
+
+    assert caplog.records == []

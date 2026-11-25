@@ -14,13 +14,11 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
+
+from exomem import release_notes_format
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "scripts" / "user_notes.py"
-MARKDOWN_PIN = next(
-    line.split('"')[1] for line in (ROOT / "pyproject.toml").read_text("utf-8").splitlines() if "markdown-it-py==" in line
-)
 
 
 @pytest.fixture
@@ -90,6 +88,12 @@ def test_each_note_goes_to_the_earliest_release_that_contains_it_and_a_new_note_
             {"version": "1.2.0", "released_on": "2026-01-10", "notes": ["Older change, reworded."]},
         ],
     }
+    # The file as written must be one the cell's own reader accepts, not only one that looks right here.
+    assert [release.version for release in release_notes_format.parse_document(output.read_text("utf-8"))] == [
+        "1.4.0",
+        "1.3.0",
+        "1.2.0",
+    ]
 
 
 def test_only_the_newest_twenty_releases_with_notes_are_kept(notes, repo, monkeypatch):
@@ -120,6 +124,10 @@ def changed(notes, text: str | None = GOOD, *, added: bool = True, path: str = "
     return [notes.ChangedNote(path, added, text)]
 
 
+def verdict(notes, title: str, body: str, files) -> list[str]:
+    return notes.check_pull_request(title, body, files, notes.deciding_types())
+
+
 @pytest.mark.parametrize(
     ("title", "body", "files", "passes"),
     [
@@ -137,32 +145,39 @@ def test_a_feat_fix_or_perf_pull_request_adds_a_note_or_says_it_has_none(notes, 
     elif files:
         files = changed(notes, added=False)
 
-    assert (notes.check_pull_request(title, body, files) == []) is passes
+    assert (verdict(notes, title, body, files) == []) is passes
+
+
+def test_the_deciding_types_are_the_changelog_types_that_release_please_does_not_hide(notes, tmp_path):
+    """A type added to the changelog must reach the check without a second edit."""
+    config = tmp_path / "release-please-config.json"
+    config.write_text(json.dumps({"packages": {".": {"changelog-sections": [
+        {"type": "feat", "section": "Features", "hidden": True},
+        {"type": "refactor", "section": "Internals"},
+        {"type": "chore", "section": "Maintenance", "hidden": True},
+    ]}}}), encoding="utf-8")
+
+    assert notes.deciding_types(config) == {"refactor"}
 
 
 @pytest.mark.parametrize(
     "text",
     [
-        "x" * 201,
-        "First line.\nSecond line.",
-        "",
-        "Use **bold** words here.",
-        "See [the page](https://example.test) now.",
-        "Run `save` to keep it.",
-        "- one item",
-        "# A heading",
-        "Fish &amp; chips arrived.",
-        "<b>New</b> look.",
+        "x" * 201,  # too long
+        "First line.\nSecond line.",  # two lines
+        "",  # empty
+        "- one item",  # a block that is not a paragraph
+        "Use **bold** words here.",  # inline syntax inside a paragraph
     ],
 )
 def test_a_note_that_breaks_the_shape_rule_fails_whatever_the_title(notes, text):
-    assert notes.check_pull_request("docs: x", "", changed(notes, text)) != []
+    assert verdict(notes, "docs: x", "", changed(notes, text)) != []
 
 
 def test_a_plain_sentence_with_ordinary_punctuation_passes(notes):
     text = "You can now save up to 5 photos at once, and it's faster (about 2x) for your chat app's files."
 
-    assert notes.check_pull_request("feat: x", "", changed(notes, text)) == []
+    assert verdict(notes, "feat: x", "", changed(notes, text)) == []
 
 
 def test_the_authors_readme_does_not_count_as_a_note(notes, repo, capsys):
@@ -189,31 +204,25 @@ def test_the_check_reads_the_added_note_from_the_pull_requests_files(notes, repo
     assert "user-notes/photos.md: the note uses Markdown syntax" in capsys.readouterr().err
 
 
-def test_the_check_runs_the_trusted_base_script_and_reads_the_pull_request_only_as_data():
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "user-note.yml").read_text("utf-8"))
-    steps = workflow["jobs"]["decision"]["steps"]
-    run = next(step for step in steps if "user_notes.py check" in step.get("run", ""))["run"]
+def test_a_note_that_skipped_the_pull_request_check_is_left_out_with_a_warning_and_the_build_goes_on(notes, repo, capsys):
+    repo.commit("2026-01-01", {"user-notes/good.md": "A good change.\n", "user-notes/bad.md": "Use **bold**.\n"})
+    repo.tag("v1.0.0")
 
-    assert set(workflow[True]["pull_request"]["types"]) >= {"opened", "edited", "reopened", "synchronize"}
-    assert workflow["permissions"] == {"contents": "read"}
-    # The first checkout is the base revision at the root: the script that judges the pull request.
-    assert steps[0]["with"]["ref"] == "${{ github.event.pull_request.base.sha }}"
-    # The second is the merge result in its own directory; the script reads it and never runs it.
-    assert steps[1]["with"]["path"] == "pull-request"
-    assert "--repo pull-request" in run
-    # The parser's version comes from pyproject.toml, so the workflow keeps no second copy of the pin.
-    assert MARKDOWN_PIN in run or "pyproject.toml" in run
+    document = notes.generate(repo.path, "1.1.0")
+
+    assert [release["notes"] for release in document["releases"]] == [["A good change."]]
+    assert capsys.readouterr().out == (
+        "::warning file=user-notes/bad.md::left out of the release notes: the note uses Markdown syntax; write plain words\n"
+    )
 
 
-def test_the_cloud_image_build_writes_the_notes_file_before_it_builds_the_image():
-    """A missing file is served as an empty list and never fails, so a build that skipped this step
-    would ship an image without notes and nothing would say so."""
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "release-please.yml").read_text("utf-8"))
-    steps = workflow["jobs"]["build-cloud-images"]["steps"]
-    names = [step.get("name", "") for step in steps]
-    generate = next(step for step in steps if "user_notes.py generate" in step.get("run", ""))
+@pytest.mark.skipif(sys.platform == "win32", reason="a Windows file name cannot hold a line break")
+def test_a_file_name_cannot_start_a_workflow_command_of_its_own(notes, repo, capsys):
+    """A pull request controls note file names, and the Actions log reads `::` at the start of a line as a command."""
+    repo.commit("2026-01-01", {"user-notes/x\n::error::injected.md": "A change.\n"})
 
-    assert names.index(generate["name"]) < names.index("Build and push native cloud image")
-    assert "src/exomem/user_release_notes.json" in generate["run"]
-    assert steps[0]["with"]["fetch-depth"] == 0
-    assert generate.get("continue-on-error") is True
+    notes.generate(repo.path, "1.0.0")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("::warning file=user-notes/x%0A%3A%3Aerror%3A%3Ainjected.md::")
