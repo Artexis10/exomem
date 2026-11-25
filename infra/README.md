@@ -64,6 +64,20 @@ token into Terraform configuration, variables, plans, or HCP workspace
 variables. The wrappers verify explicit local execution and the complete
 state-only workspace contract before `terraform init`.
 
+### Cloudflare credentials and their expiry
+
+Two Cloudflare tokens reach the product zones (`substratesystems.io` and
+`evermatter.ai`):
+
+- The account API token that the foundation root uses. It holds DNS edit on
+  both zones, plus the Tunnel and Access permissions. It expires on 2027-07-30.
+  Renew or replace it before 2027-07-01, then update its secret-manager entry.
+  After its expiry every foundation plan fails to authenticate.
+- The user API token behind the Cloud gateway's cert-manager DNS-01 issuer. It
+  holds Zone Read and DNS Edit on both zones and has no expiry. Every gateway
+  hostname's zone must be in its scope. A name outside its scope fails
+  issuance and stalls renewal of the whole gateway certificate.
+
 Destruction or replacement is rejected unless the apply command receives one
 `--allow-destructive <exact Terraform address>` flag for every affected
 resource. The plan is never recomputed during apply. Terraform state, saved
