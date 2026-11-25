@@ -9,6 +9,66 @@
     "html_url": "https://github.com/example-owner/example-repo/releases/tag/v0.171.0",
     "published_at": "2026-11-10T09:00:00Z"
   },
+  "github_releases": [
+    {
+      "id": 260001,
+      "tag_name": "v0.171.0",
+      "name": "v0.171.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-10T09:00:00Z"
+    },
+    {
+      "id": 260000,
+      "tag_name": "v0.170.0",
+      "name": "v0.170.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-09T09:00:00Z"
+    }
+  ],
+  "github_releases_fleet_several_behind": [
+    {
+      "id": 260001,
+      "tag_name": "v0.171.0",
+      "name": "v0.171.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-10T09:00:00Z"
+    },
+    {
+      "id": 260000,
+      "tag_name": "v0.170.3",
+      "name": "v0.170.3",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-09T21:00:00Z"
+    },
+    {
+      "id": 259999,
+      "tag_name": "v0.170.2",
+      "name": "v0.170.2",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-09T05:00:00Z"
+    },
+    {
+      "id": 259998,
+      "tag_name": "v0.170.1",
+      "name": "v0.170.1",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-08T10:00:00Z"
+    },
+    {
+      "id": 259997,
+      "tag_name": "v0.170.0",
+      "name": "v0.170.0",
+      "draft": false,
+      "prerelease": false,
+      "published_at": "2026-11-07T08:00:00Z"
+    }
+  ],
   "github_platform_deployments": [
     {
       "id": 9003,
@@ -77,7 +137,8 @@
       "cells": {
         "on_target": 41,
         "behind_target": 0,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -93,7 +154,8 @@
       "cells": {
         "on_target": 40,
         "behind_target": 0,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -109,7 +171,8 @@
       "cells": {
         "on_target": 1,
         "behind_target": 40,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -125,7 +188,8 @@
       "cells": {
         "on_target": 2,
         "behind_target": 39,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -173,7 +237,8 @@
       "cells": {
         "on_target": 41,
         "behind_target": 0,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -189,7 +254,25 @@
       "cells": {
         "on_target": 40,
         "behind_target": 0,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
+      }
+    }
+  },
+  "substrate_rollout_cell_pinned": {
+    "success": true,
+    "requestId": "req-0010",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "release": "v0.170.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": true,
+      "cells": {
+        "on_target": 41,
+        "behind_target": 0,
+        "held": 0,
+        "pinned_off_fleet": 1
       }
     }
   }

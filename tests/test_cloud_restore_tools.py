@@ -350,7 +350,6 @@ def test_a_scratch_volume_keeps_the_source_class_and_its_passphrase() -> None:
     assert secret["data"]["encryption-passphrase"] == "dnA="
 
 
-
 @pytest.mark.parametrize(("stored_key_id", "key_secret", "repository"), [
     ("stored-id", "cell-credentials", "s3:https://s3.founder.example/founder-backups/cells/"),
     ("", "cell-object-store-key", "s3:https://s3.cell-data.example/cell-data-backups/cells/"),
