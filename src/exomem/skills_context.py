@@ -48,6 +48,21 @@ def _advice() -> str:
     )
 
 
+def _names_advice() -> str:
+    """How to open an item that the catalogue names without a line, as the serving surface spells each call."""
+    query = capabilities.active_call_text("record_memory", {"action": "query", "collection": "<name>"})
+    find = capabilities.active_call_text("search_memory", {"query": "<name>"})
+    return (
+        "More of the owner's skills and collections, by name only; when one fits this turn, "
+        f"open a collection with {query} and find a skill with {find}."
+    )
+
+
+def _name_cost(item: Mapping[str, Any]) -> int:
+    """What one named item spends of `skills_names_max_chars`: its kind, its name and a separator."""
+    return len(f"{item['kind']} {item['name']}") + 2
+
+
 def _unit(item: Mapping[str, Any], path: str) -> dict[str, Any]:
     """The unit shape admission decides for one catalogue line, with its page path.
 
@@ -128,6 +143,7 @@ def compile_block(
     max_chars = conventions.budget("skills_max_chars")
     summary_chars = conventions.budget("skill_summary_max_chars")
     turn_chars = conventions.budget("skills_turn_max_chars")
+    names_chars = conventions.budget("skills_names_max_chars") or 0
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
     try:
@@ -167,14 +183,33 @@ def compile_block(
         block["items"].append(candidate.item)
         served.append(_unit(candidate.item, candidate.path))
         used += cost
-    block["state"] = "ready" if block["items"] else "empty"
-    block["generation"] = _digest({"items": block["items"], "omitted": block["omitted"]})
+    # Each item left without a line is still named while its name fits, so the agent sees every collection and
+    # skill it may choose from and decides itself; `omitted` then counts only the items not even named.
+    names: list[dict[str, Any]] = []
+    names_used = 0
+    for candidate in unlisted:
+        named = {"kind": candidate.item["kind"], "name": candidate.item["name"]}
+        if names_used + _name_cost(named) > names_chars:
+            continue
+        names.append(named)
+        # Terminal egress decides the whole unit the name comes from, so a name never outlives its page's release.
+        served.append(_unit(candidate.item, candidate.path))
+        names_used += _name_cost(named)
+    block["omitted"] -= len(names)
+    if names:
+        block["names"] = names
+    block["state"] = "ready" if block["items"] or names else "empty"
+    block["generation"] = _digest({"items": block["items"], "names": names, "omitted": block["omitted"]})
     if block["state"] == "ready" and known_generation == block["generation"]:
         # The caller holds exactly these items: repeat none of them, and keep the count they were chosen with.
         block.update(state="unchanged", items=[])
+        block.pop("names", None)
         served = []
-    elif block["items"]:
-        block["advice"] = _advice()
+    else:
+        if block["items"]:
+            block["advice"] = _advice()
+        if names:
+            block["names_advice"] = _names_advice()
     turn_items, turn_used = [], 0
     for candidate in _of_the_turn(root, unlisted, domains, reached) if unlisted and turn_chars else ():
         cost = len(vault_skills.item_line(candidate.item)) + 1

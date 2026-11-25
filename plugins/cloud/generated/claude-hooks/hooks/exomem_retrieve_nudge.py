@@ -2613,6 +2613,23 @@ def _skill_lines(items: object) -> list[str]:
     return lines
 
 
+def _skill_names_line(block: dict) -> str:
+    """The items the service names without a line, on one line after its own advice; empty when there are none.
+
+    The service bounds the names to the vault's `budgets.skills_names_max_chars`; `_SKILLS_MAX_CHARS` only caps a
+    malformed block, so a well-formed one is never cut.
+    """
+    names = [
+        f"{'collection' if item.get('kind') == 'collection' else 'skill'} {' '.join(str(item.get('name')).split())}"
+        for item in block.get("names") or () if isinstance(item, dict) and item.get("name")
+    ]
+    if not names:
+        return ""
+    advice = " ".join(str(block.get("names_advice") or "").split()) or "More of the owner's skills and collections, by name only."
+    line = f"- {advice} " + "; ".join(names) + "."
+    return line if len(line) <= _SKILLS_MAX_CHARS else ""
+
+
 def _format_skills_block(block: object) -> str:
     """The skills and collections the service lists, whole lines under one framing line, then the turn's unlisted items.
 
@@ -2622,12 +2639,14 @@ def _format_skills_block(block: object) -> str:
     if not isinstance(block, dict):
         return ""
     parts: list[str] = []
-    lines = _skill_lines(block.get("items")) if block.get("state") == "ready" else []
-    if lines:
+    ready = block.get("state") == "ready"
+    lines = _skill_lines(block.get("items")) if ready else []
+    names = _skill_names_line(block) if ready else ""
+    if lines or names:
         advice = " ".join(str(block.get("advice") or "").split()) or _SKILLS_FALLBACK_ADVICE
         omitted = block.get("omitted")
         tail = [f"- skills and collections: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
-        parts.extend([_SKILLS_FRAME + advice, *lines, *tail])
+        parts.extend([_SKILLS_FRAME + advice, *lines, *([names] if names else []), *tail])
     turn = _skill_lines(block.get("turn_items"))
     if turn:
         parts.extend([_SKILLS_TURN_HEADER, *turn])
