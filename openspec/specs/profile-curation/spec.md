@@ -16,7 +16,7 @@ The background upkeep pass SHALL raise one `upkeep_profile_curation` item for a 
 The evidence pages of a domain profile SHALL be the pages in its domain or a descendant domain, together with the pages that the profile page links to.
 The evidence pages of a global profile SHALL be the pages that it links to.
 A profile page SHALL NOT be an evidence page of any profile, because its lines are already curated.
-A unit without its own date SHALL take its page's date. A unit dated on the profile's update day SHALL count as newer unless both dates carry a time and the unit's time is not later.
+A unit without its own date SHALL take its page's date. A unit dated on the profile's update day, on a page not known to precede that update, SHALL count as newer unless both dates carry a time and the unit's time is not later.
 Links SHALL be resolved through the product's link resolution and followed one step only.
 Detection SHALL resolve roles to categories through the context-role registry. It SHALL use registered domains and typed relations only, SHALL run no model, and SHALL write nothing to the vault.
 The product SHALL hold no list of categories, roles or domains in code.

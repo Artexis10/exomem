@@ -56,6 +56,7 @@ This section was moved from task 3.3 of `deliver-session-context-and-skills`.
   - On a production-sized vault copy (3,329 notes), 48 turns with 3 alternating repeats each: activation candidate/main 1.016 [1.003, 1.029]. The profiles stage takes a median 10.0 ms (p95 13.6 ms).
 - [x] 5.3 Run the full corpus, then independent review, CI, merge, the ordinary release and installed acceptance.
   - Shipped through releases 0.187.0 to 0.199.0, each PR reviewed and green on the full CI corpus.
-  - Installed acceptance on the owner's service (0.196.0): a gaming turn served the games profile and its media ancestor, and no music profile. The next turn with the continuity token returned each held profile `unchanged`. The global profile arrived under `stance`.
-  - Installed curation (0.199.0 and later): the upkeep queue held six `upkeep_profile_curation` items, and the packet delivered them to the agent. Acceptance found two misses, fixed in the archiving PR: a narrower profile flagged its ancestor, and a unit on the profile's day whose page date had no time never counted.
-- [ ] 5.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+  - Installed acceptance on the owner's service (0.196.0): a turn in one domain served that domain's profile and its ancestor's, and no profile of an unrelated domain. The next turn with the continuity token returned each held profile `unchanged`. The global profile arrived under `stance`.
+  - Installed curation (0.199.0 and later): the upkeep queue held `upkeep_profile_curation` items, and the packet delivered them to the agent. Acceptance found two misses, fixed in the archiving PR: a narrower profile flagged its ancestor, and a unit on the profile's day whose page date had no time never counted.
+- [x] 5.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+  - Archived in the PR that fixed the two curation misses; the CI OpenSpec strict gate passed before and after.

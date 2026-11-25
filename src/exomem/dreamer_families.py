@@ -2377,7 +2377,7 @@ def _curation_candidates(
 def _new_units(
     ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, today: date, keep
 ) -> tuple[dict[str, list[str]], bool]:
-    """Live units of the curation categories dated after `since`, by page, and whether the count is partial.
+    """Live units of the curation categories not known to precede `since`, by page, and whether the count is partial.
 
     A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
     page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
@@ -2490,7 +2490,7 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     """The curation proposal on one profile page, as a caller whose predicate is `keep` sees it.
 
     Two kinds of evidence, both structural. A live unit of a `preferences` or `constraints` role category,
-    dated after the profile's own update, on a page the profile links or (for a domain profile) a page of its
+    not known to precede the profile's own update, on a page the profile links or (for a domain profile) a page of its
     domain. And a line of the profile that a typed relation supersedes or opposes, whose `until` has passed or
     whose `check_by` has passed. A global profile reads the pages it links alone, so a new unit elsewhere is
     no evidence about it. A count that stopped at a limit, or a domain whose pages are unknown, is partial.
