@@ -72,7 +72,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # refuses them without, added 77 B on 2026-11-25 (compact-add-metadata-refusal). Its `links` now says that a compact
 # observation keeps only a source citation, such as a `derived_from` link to a saved Source or Evidence page, and every
 # other relation needs a rich kind, which added 160 B the same day.
-TOTAL_BUDGET = 31_650
+# The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
+# computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
+# (keep-speech-results-in-cloud).
+TOTAL_BUDGET = 31_700
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
@@ -91,7 +94,7 @@ TOOL_CEILINGS: dict[str, int] = {
     # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
     "inspect_memory": 2230,
     "list_review_items": 750,
-    "manage_memory": 2570,
+    "manage_memory": 2650,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,

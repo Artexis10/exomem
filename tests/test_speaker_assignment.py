@@ -1,7 +1,9 @@
 """Unit tests for max-overlap segment→turn assignment (pure, torch-free)."""
 from __future__ import annotations
 
-from exomem.speaker_assignment import Turn, assign_span, assign_spans, overlap
+from types import SimpleNamespace
+
+from exomem.speaker_assignment import Turn, assign_span, assign_spans, label_transcript, overlap
 
 
 def test_overlap_basic_and_disjoint():
@@ -35,3 +37,23 @@ def test_assign_spans_maps_each():
     turns = [Turn(0.0, 5.0, "A"), Turn(5.0, 10.0, "B")]
     out = assign_spans([(1.0, 2.0), (6.0, 7.0), (20.0, 21.0)], turns)
     assert out == ["A", "B", None]
+
+
+def _segment(text, start, end, track=None):
+    return SimpleNamespace(text=text, start=start, end=end, track=track)
+
+
+def test_a_result_with_no_turns_and_no_tracks_renders_unlabelled_timed_lines():
+    text, merged = label_transcript([_segment("one", 0.0, 2.0), _segment("two", 2.0, 4.0)], [], timed=True)
+
+    assert text == "[0:00] one\n[0:02] two" and merged == []
+
+
+def test_each_track_takes_its_own_turns_and_letters_and_names_its_lines_by_track():
+    segments = [_segment("hello", 0.0, 2.0, "mic1"), _segment("hi", 0.0, 2.0, "mic2"), _segment("again", 3.0, 5.0, "mic1")]
+    turns = [Turn(0.0, 5.0, "SPEAKER_00", "mic1"), Turn(0.0, 5.0, "SPEAKER_00", "mic2")]
+
+    text, merged = label_transcript(segments, turns, timed=True)
+
+    assert text.splitlines() == ["[0:00] [mic1: Speaker A]: hello", "[0:00] [mic2: Speaker A]: hi", "[0:03] [mic1: Speaker A]: again"]
+    assert [item["speaker"] for item in merged] == ["mic1: Speaker A", "mic2: Speaker A", "mic1: Speaker A"]

@@ -14,15 +14,64 @@ import hashlib
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import lifecycle_statuses, memory_refs, preserve
+from . import extraction_parts, lifecycle_statuses, memory_refs, preserve, speaker_names, temporal
+from .asr_facts import AsrFacts
+from .capture_metadata import CaptureFacts
 from .extraction_parts import Layout
-from .vault import parse_frontmatter, with_newline, yaml_scalar
+from .ocr_facts import OcrFacts
+from .vault import MISSING_CONTENT_HASH, PathGuard, PlannedWrite, parse_frontmatter, with_newline, yaml_scalar
 
 
 def extraction_digest(content: str) -> str:
     """Identify a sidecar's extraction, so a result can name the one it replaces."""
     engine = parse_frontmatter(content)[0].get("extracted_by")
     return hashlib.sha256(f"{engine}\n{preserve.extracted_text(content)}".encode()).hexdigest()
+
+
+def whole_extraction_digest(vault_root: Path, page: Path, content: str) -> str:
+    """Identify the whole extraction of a Source page: its engine and the text of every part.
+
+    `extraction_digest` reads the first part alone, which names what a result replaces on one page.
+    This one lets a caller ask whether a stored page and an incoming one hold the same result.
+    """
+    engine = parse_frontmatter(content)[0].get("extracted_by")
+    whole = extraction_parts.whole_text(vault_root, page, content)
+    return hashlib.sha256(f"{engine}\n{whole}".encode()).hexdigest()
+
+
+#: What a speech result does to the extraction that a Source holds (`replacement`).
+FILL = "fill"  # the page holds no finished extraction: the result becomes it, and nothing is kept
+REPLACE = "replace"  # a finished extraction: the result replaces it, and the old one stays on a prior page
+REFUSE = "refuse"  # a labelled extraction and no leave to replace it: the result changes nothing
+
+
+def replacement(content: str, *, media_type: str, replace_labelled: bool = False) -> str:
+    """The one rule for whether a speech result replaces the extraction on this Source page.
+
+    A pending or failed extraction is filled. A finished one with no speaker labels and no
+    `speaker_names`, such as the cell's own transcript, is replaced and kept on a prior page. A
+    finished one with either is replaced only when the caller says so, since a person's naming
+    or a diarisation costs more than the text it labels.
+    """
+    from . import media_processing
+
+    if not media_processing.has_completed_transcript(content, media_type=media_type):
+        return FILL
+    frontmatter = parse_frontmatter(content)[0]
+    labelled = bool(frontmatter.get("speakers")) or bool(frontmatter.get("speaker_names"))
+    return REPLACE if replace_labelled or not labelled else REFUSE
+
+
+def names_of(content: str) -> list[dict[str, str]]:
+    """The `speaker_names` entries of a sidecar, each with its name, label and basis."""
+    listed = parse_frontmatter(content)[0].get("speaker_names")
+    if not isinstance(listed, list):
+        return []
+    return [
+        {key: str(item[key]) for key in ("name", "label", "basis")}
+        for item in listed
+        if isinstance(item, dict) and all(isinstance(item.get(key), str) for key in ("name", "label", "basis"))
+    ]
 
 
 def link_to(vault_root: Path, page: Path) -> str:
@@ -122,3 +171,113 @@ def render(
         # The words OCR withheld stay with the extraction they belong to.
         lines += [preserve.low_confidence_block(preserve._cap_low_confidence_text(withheld))]
     return "\n".join(lines)
+
+
+def extraction_writes(
+    vault_root: Path,
+    sidecar_path: Path,
+    before: str,
+    guard: PathGuard,
+    *,
+    binary_path: Path,
+    text: str,
+    engine: str,
+    speakers: list[dict] | None,
+    speaker_verification: str | None,
+    diarize: bool | None,
+    attempts: int | None,
+    asr: AsrFacts | None,
+    ocr: OcrFacts | None,
+    capture: CaptureFacts | None,
+    reprocessing: bool,
+    attached_digest: str | None = None,
+    given_names: list[dict[str, str]] | None = None,
+) -> tuple[tuple[PlannedWrite, ...], tuple[Path, ...]]:
+    """The writes for a finished extraction, and the part pages to retire once they commit.
+
+    The first write is the sidecar. It holds the first part of the text; the rest is on
+    part pages in the same batch. A reprocess adds the pages for the old extraction, with its
+    parts, so the sidecar always holds one extraction, and a rejected batch leaves the old
+    text where it was. The worker publishes its results here, and an attached result goes the
+    same way (`speech_attach`).
+
+    `given_names` are the names the caller already put on the labels of `text`. A reprocess
+    carries the replaced extraction's other names to the new labels by overlap, and the page
+    lists the names that no label took (`speaker_names.carry`).
+    """
+    from . import media_processing
+
+    fields: dict[str, object] = dict(
+        engine=engine,
+        diarize=diarize,
+        attempts=attempts,
+        asr=asr,
+        ocr=ocr,
+        capture=capture,
+        attached_digest=attached_digest,
+        # Both callers have just revalidated the original; a page stored with it records these.
+        binary_hints=media_processing.read_timestamp_hints(media_processing.held_path(vault_root, binary_path)),
+    )
+    entries = list(given_names or [])
+    if not reprocessing:
+        speakers, verification = _after_naming(text, speakers, speaker_verification, entries)
+        plan, write = preserve.sidecar_extraction_writes(
+            vault_root, sidecar_path, before, guard, text=text, speakers=speakers,
+            speaker_verification=verification, speaker_names=entries or None, **fields,
+        )
+        return (write, *plan.writes), plan.surplus
+    page, ordinal = next_page(sidecar_path, links_of(before))
+    date_iso = temporal.stamp(temporal.now())
+    old_text = extraction_parts.text_with_gaps(vault_root, sidecar_path, before)
+    old_pieces = extraction_parts.split(old_text)
+    old_plan = extraction_parts.plan(
+        vault_root, page, old_pieces, inherited=parse_frontmatter(before)[0], date_iso=date_iso,
+    )
+    prior_page = render(
+        before,
+        artifact_name=sidecar_path.name.removesuffix(".md"),
+        sidecar_link=link_to(vault_root, sidecar_path),
+        ordinal=ordinal,
+        date_iso=date_iso,
+        text=old_pieces[0],
+        parts=extraction_parts.layout(page, old_pieces),
+    )
+    keep = {entry["name"] for entry in entries}
+    carried = speaker_names.carry(
+        old_text, [entry for entry in names_of(before) if entry["name"] not in keep], text
+    )
+    if carried.labels:
+        text = speaker_names.rename_labels(text, carried.labels)
+        entries += carried.entries
+    speakers, verification = _after_naming(text, speakers, speaker_verification, entries, carried.labels)
+    plan, write = preserve.sidecar_extraction_writes(
+        vault_root, sidecar_path, before, guard, text=text, speakers=speakers,
+        speaker_verification=verification, speaker_names=entries or None,
+        names_not_carried=list(carried.not_carried) or None,
+        prior_extractions=(*links_of(before), link_to(vault_root, page)),
+        reset_speakers=True,
+        **fields,
+    )
+    return (
+        write,
+        PlannedWrite(page, prior_page, expected_hash=MISSING_CONTENT_HASH),
+        *old_plan.writes,
+        *plan.writes,
+    ), plan.surplus
+
+
+def _after_naming(
+    text: str,
+    speakers: list[dict] | None,
+    verification: str | None,
+    entries: list[dict[str, str]],
+    renamed: dict[str, str] | None = None,
+) -> tuple[list[dict] | None, str | None]:
+    """The turns and `speaker_verification` after names went onto the labels of `text`.
+
+    `renamed` is the label-to-name map that the caller applied to `text` after the turns were read,
+    so the turns say the names too. A person who named every label makes the extraction `human-verified`.
+    """
+    if renamed and speakers:
+        speakers = [{**turn, "speaker": renamed.get(turn.get("speaker"), turn.get("speaker"))} for turn in speakers]
+    return speakers, speaker_names.with_names(speaker_names.labels_in(text), entries, verification)

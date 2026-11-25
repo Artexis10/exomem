@@ -1227,60 +1227,20 @@ def _diarize(
         resolved_labels = resolved
         verification = "profile-matched" if resolved else "anonymous"
 
-    # First-appearance map of raw pyannote labels → "Speaker A", "Speaker B", …
-    label_names: dict[str, str] = {}
+    # Assignment, label naming and rendering live in one function, shared with attached results.
+    from .speaker_assignment import Turn, label_transcript
 
-    def _name(raw: str) -> str:
-        if resolved_labels is not None and raw in resolved_labels:
-            return resolved_labels[raw]
-        if raw not in label_names:
-            label_names[raw] = f"Speaker {chr(ord('A') + len(label_names))}"
-        return label_names[raw]
-
-    # Max-overlap segment→turn assignment (earliest-start tiebreak) via the shared, unit-tested
-    # helper — keeps assignment logic in one place for both the anonymous and named paths.
-    from .speaker_assignment import Turn, assign_span
-
-    turn_objs = [Turn(t_start, t_end, raw) for t_start, t_end, raw in turns]
-
-    def _speaker_for(start: float, end: float) -> str | None:
-        raw = assign_span(start, end, turn_objs)
-        return _name(raw) if raw is not None else None
-
-    merged: list[dict] = []
-    timed_segs: list[tuple[float, float, str, str | None]] = []
-    for seg in seg_list:
-        seg_text = seg.text.strip()
-        if not seg_text:
-            continue
-        start = float(getattr(seg, "start", 0.0) or 0.0)
-        end = float(getattr(seg, "end", start) or start)
-        speaker = _speaker_for(start, end) or "Speaker A"
-        timed_segs.append((start, end, seg_text, speaker))
-        if merged and merged[-1]["speaker"] == speaker:
-            merged[-1]["text"] += " " + seg_text
-            merged[-1]["end"] = end
-        else:
-            merged.append({"speaker": speaker, "start": start, "end": end, "text": seg_text})
-
-    if not merged:
+    labelled = label_transcript(
+        seg_list,
+        [Turn(t_start, t_end, raw) for t_start, t_end, raw in turns],
+        resolved_labels=resolved_labels,
+        timed=timestamps or _semantic_segments_enabled(),
+        require_timed=timestamps,
+        description=path.name,
+    )
+    if labelled is None:
         return None
-    # Timed rendering (EXOMEM_SEMANTIC_SEGMENTS): one line per ASR segment with the
-    # label repeated — merged multi-minute turns would destroy segmentation windows
-    # and match localization. The structured `merged` list keeps the merged-turn
-    # shape either way (speakers: frontmatter + filters are unaffected). Soft-fail
-    # to the merged-turn rendering below.
-    if timestamps or _semantic_segments_enabled():
-        try:
-            semantic_segments = _semantic_segments_module()
-            timed_text = semantic_segments.render_timed_lines(timed_segs).strip()
-            if timed_text:
-                return timed_text, merged, verification
-            if timestamps:
-                raise RuntimeError("timed diarized rendering produced no output")
-        except Exception:  # noqa: BLE001 — diarization is optional and soft-failing
-            log.warning("timed diarized rendering failed for %s; using merged turns", path.name)
-    labeled_text = "\n".join(f"[{m['speaker']}]: {m['text']}" for m in merged).strip()
+    labeled_text, merged = labelled
     return labeled_text, merged, verification
 
 

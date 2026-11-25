@@ -593,7 +593,7 @@ _TOOL_HELP = {
     "read_review": ("read", "Read review", "Read review queues, provenance, drift, backlog or one review item's bounded context. Submit meaning questions through triage_memory."),
     "triage_memory": ("write", "Triage memory", "Save a review decision or submit a meaning question. These writes do not grant mutation authority."),
     "read_media": ("read", "Read media", "Show images, video frames or stored previews, or inspect media processing status."),
-    "change_media": ("write", "Change media", "Process, retry, reprocess or replicate media."),
+    "change_media": ("write", "Change media", "Process, retry, reprocess, replicate or attach speech to media, or rename its speakers."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
     "read_schema": ("read", "Read schema", "Inspect schemas without saving changes. Use preview for a registry delta merged with its live overlay, including collision and cap checks. Pass proposal={\"upsert\":{\"<key>\":{...}}}. Use validate-document for a complete registry document."),
@@ -685,6 +685,8 @@ _REMAINING = {
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("replicate", "change_media", ("store",), ("store",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("attach-speech", "change_media", ("path", "binary_sha256", "binary_size", "segments", "turns", "engine", "asr", "names", "replace_labelled"), ("path", "binary_sha256", "binary_size", "segments", "engine"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
+        _row("rename-speakers", "change_media", ("path", "renames"), ("path", "renames"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
     )),
     "triage_memory": (None, (
         _row("decision", "triage_memory", verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
