@@ -2,7 +2,7 @@
 name: evermatter-media
 description: Search, inspect, cite, and preserve Evermatter media artifacts such as PDFs, images, audio, and video. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: 92a756f2653d995199246dd41d492aac326ba4cb8b1d76b92fb16932283695d7
+  skill_contract: 489095e41635404795ae28de5537bf913bd007e338c7331b1a668df9672d5f36
   version: "0.1.0"
 ---
 
@@ -86,6 +86,14 @@ When the languages of a recording are unknown at ingest, ask the user once: "One
 
 ## Faulty transcripts
 Read the extraction fields in the sidecar before trusting a transcript: `asr_language`, `asr_language_probability`, `asr_language_source`, `asr_language_mode` and `asr_speech_seconds`. A transcript in the wrong language, or one that repeats a line, is a processing fault, not content. Fix it with `manage_memory(operation="media.reprocess", arguments={'path': ..., 'language': <code>})` on the user's request or on that evidence, or with `'multilingual': true` when the recording mixes languages. Without either, a reprocess reuses the language or mode already pinned on the sidecar, and detects one language when none is pinned. The old extraction stays on a linked prior page.
+
+## Attaching a speech result
+On a personal install the owner's agent can transcribe or diarise a recording on its own machine and attach the result to the recording's Source, so the cell runs no speech model. Read the original through `download_files`, run the engine, then call `manage_memory(operation="media.attach_speech", arguments={'path': ..., 'binary_sha256': ..., 'binary_size': ..., 'segments': [{'start': 0.0, 'end': 4.0, 'text': ...}], 'turns': [{'start': 0.0, 'end': 4.0, 'label': 'SPEAKER_00'}], 'engine': 'model and version'})`. The call binds to the original by SHA-256 and size and is refused with `ATTACH_BINARY_MISMATCH` when either differs. `turns` and `names` are optional. A `names` entry gives a label of this call a name and says who gave it: `person` or `profile`.
+
+The attach fills a pending or failed Source. It replaces a result with no speaker labels and keeps the old one on a linked prior page. It refuses a labelled or named result with `ATTACH_REPLACES_LABELS` unless the call sets `replace_labelled`: set it only when the person asks. A repeat of the same call writes nothing. The page records the result as attached and unchecked, with the engine you named. A page whose turns are merged, with no timestamps, cannot carry names to a new result: process it again with speaker labels before an attach.
+
+## Naming the speakers
+When the person says who spoke, call `manage_memory(operation="media.rename_speakers", arguments={'path': ..., 'renames': {'Speaker A': 'name'}})`. A rename rewrites the label of each line on the page and its part pages, and nothing else; a name never holds `[`, `]` or `:`. The page keeps the names across a later reprocess when its labelled lines overlap, and lists the names that did not carry. A rename enrols no voice. Keeping a voice for later recordings is the owner's action, `enroll-speaker`, in the terminal or the Home screen: send the person there and never enrol it yourself.
 
 ## Relation governance
 Resolve typed meaning with `resolve-relation` before authoring, and name a specific
