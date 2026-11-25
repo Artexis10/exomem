@@ -292,8 +292,9 @@ attempt and names the latest successful attempt separately. Qualification does
 not rerun Full solely because a retry copied the successful gate.
 
 Releases start on their own. The `release schedule` workflow runs
-`python3 scripts/release_cuts.py schedule` when a Full run on main succeeds, and four times
-a day as a backstop, because GitHub drops many scheduled runs in this repository. It starts nothing while a controller
+`python3 scripts/release_cuts.py schedule` when a Full run on main passes (the evidence
+callback in `release evidence automation` dispatches it), and four times a day as a backstop,
+because GitHub drops most scheduled runs in this repository. It starts nothing while a controller
 run is unfinished or an open cut's Full run is running. It resumes an open cut that no run
 is working on. Otherwise it starts the cut controller from the `pick-source` commit when
 that commit has reusable Full evidence and a commit since the last release's source would
