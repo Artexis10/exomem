@@ -2075,6 +2075,24 @@ def reference_identity_snapshot_is_current(
             )
 
 
+def current_identity_paths(vault_root: Path, identity: str) -> tuple[str, ...] | None:
+    """The pages that the stable identity census holds `identity` in, or None when unknown here.
+
+    The answer is the census of the corpus the server already holds, borrowed only while its
+    identity snapshot is current, so it equals the census that a corpus build would serve now.
+    It never builds, refreshes or walks anything: None means only that this lookup cannot answer.
+    """
+    root = Path(vault_root)
+    snapshot = current_reference_identity_snapshot(root)
+    if snapshot is None:
+        return None
+    context = snapshot._cache_context_identity
+    if not isinstance(context, SemanticCorpusContext):
+        return None
+    paths = tuple(context.identity_census.paths_by_identity.get(identity, ()))
+    return paths if reference_identity_snapshot_is_current(root, snapshot) else None
+
+
 @dataclass(slots=True)
 class _WriterCensus:
     proof: tuple[Path, tuple[tuple, SemanticCorpusContext]] | None = None

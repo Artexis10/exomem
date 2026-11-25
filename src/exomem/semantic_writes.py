@@ -2040,6 +2040,43 @@ def _timed_boundary(timings: MutationTimings | None, guard: Any, *, operation: s
             _record("error")
 
 
+def proposed_page_state(
+    vault_root: Path, *, path: str, before_source: str, after_source: str
+) -> semantic_contract.SemanticPageState | None:
+    """The after state that `preflight_existing` builds for `after_source`, from this page alone.
+
+    A writer reads its rendered page back with this before the preflight builds the corpus, so a
+    page that cannot pass is refused at once. It is None when the preflight would first place or
+    normalize origin metadata in the source, since only the preflight's own state counts then.
+    """
+    root = Path(vault_root)
+    path = vault.canonical_vault_rel(root, path)
+    # `_place_origin_source` and `_normalize_origin_source` leave the source as it is exactly when
+    # the path is raw capture or the source authors no new origin metadata. Both read the logical
+    # text of the page before, as the preflight does.
+    if not source_closure._eligible_path(path):  # noqa: SLF001 -- as those two decide it
+        logical_before = before_source.replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            authored = origin_bindings._authored_origin(  # noqa: SLF001
+                after_source, logical_before
+            )
+        except provenance.OriginError:
+            return None
+        if authored is not None:
+            return None
+    with read.request_snapshot(root):
+        registry = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+    return semantic_contract.build_page_state(
+        root,
+        path,
+        after_source,
+        relation_registry=registry,
+        language_registry=language,
+        status_basis=lifecycle_statuses.Basis(root),
+    )
+
+
 def preflight_existing(
     vault_root: Path,
     *,
