@@ -318,6 +318,7 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         )
         assert "exomem/_scaffold/_Schema/references/page-types.md" in built.namelist()
         assert "exomem/semantic_authoring.py" in built.namelist()
+        assert "exomem/_plugins/claude-server.zip" in built.namelist()
         for name in skills:
             path = f"exomem/_scaffold/_Schema/workflow-skills/{name}/SKILL.md"
             _assert_contract(built.read(path).decode("utf-8"))

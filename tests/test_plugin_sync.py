@@ -199,6 +199,24 @@ def test_marketplace_points_at_the_plugin_directory() -> None:
     assert source == PLUGIN_ROOT.resolve()
 
 
+def test_every_marketplace_rename_ends_at_a_listed_plugin() -> None:
+    """A rename whose chain ends at no listed plugin leaves its users on "plugin not found".
+
+    `claude plugin validate` catches this, but CI has no `claude` CLI, so that check skips there.
+    """
+    marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
+    listed = {plugin["name"] for plugin in marketplace["plugins"]}
+    renames = marketplace.get("renames", {})
+
+    for old_name in renames:
+        name, seen = old_name, {old_name}
+        while name in renames:
+            name = renames[name]
+            assert name not in seen, f"rename chain from {old_name!r} loops at {name!r}"
+            seen.add(name)
+        assert name in listed, f"rename chain from {old_name!r} ends at unlisted {name!r}"
+
+
 def test_marketplace_moves_an_installed_exomem_plugin_to_the_evermatter_name() -> None:
     """Claude Code stores the plugin server's sign-in under the plugin and server names.
 
@@ -208,7 +226,7 @@ def test_marketplace_moves_an_installed_exomem_plugin_to_the_evermatter_name() -
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    assert marketplace["renames"] == {"exomem": "evermatter"}
+    assert marketplace["renames"]["exomem"] == "evermatter"
     assert marketplace["name"] == "exomem"  # the marketplace id stays: users added it by this name
     assert manifest["name"] == "evermatter"
     assert set(manifest["mcpServers"]) == {"evermatter"}

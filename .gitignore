@@ -36,6 +36,9 @@ build/
 .exomem-private/
 *.egg-info/
 
+# The release build writes each cell image's user notes here (scripts/user_notes.py generate).
+/src/exomem/user_release_notes.json
+
 # Local-only maintainer scratch that may hold real personal tokens — never commit.
 scripts/generic/leakguard.txt
 scripts/generic/substitutions.txt

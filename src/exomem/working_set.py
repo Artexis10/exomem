@@ -1515,13 +1515,21 @@ def task_candidates(
     Returns the leads, the missing reasons and the catalogue entries a lead's links may name, for
     `attach_task_links` once the leads are projected. Each lane records a child span of
     `working_set.task_context`, so a slow recall names its stage.
+
+    The leads follow the lanes' fused ranking, the reciprocal-rank fusion `search_memory` uses at its
+    adopted ranking config, not the order the lanes ran in. The keyword and dense lanes read as deep as
+    search's own lanes do, and the method lane keeps the lead limit. So a page that two lanes rank well
+    outranks a page that one lane alone ranks first, and the keyword lane alone cannot fill every lead.
+    A collection the turn routes to stays first.
     """
     from . import (
         bm25,
         collection_claims,
         context_task,
         context_views,
+        find,
         find_types,
+        fusion,
         lexstore,
         record_governance,
     )
@@ -1593,6 +1601,12 @@ def task_candidates(
             found[path]["origins"].append(origin)
 
     method_queries: list[tuple[str, str]] = []
+    # Search's adopted config, so an operator's tuned fusion constant or depth moves both alike.
+    ranking = find._active_ranking()
+    depth = max(limit * ranking.candidate_multiplier, ranking.candidate_floor)
+    # Each lane's hits, best first, per origin; the leads come from their fusion.
+    rankings: list[list[str]] = []
+    routed: list[str] = []
     # Origin values name the two request input segments, not inferred intent.
     for origin, query in (("turn", turn), ("focus", focus)):
         if not query.strip():
@@ -1610,6 +1624,7 @@ def task_candidates(
                 route = collection_claims.route(working_set_index.terms_of(query), targets or ())
             if route is not None:
                 add(str(route["collection"]), origin)
+                routed.append(str(route["collection"]))
         if restricted:
             selected, _counted, _dropped = lexstore.select_query_units(
                 bm25.token_units(query_text, query=True), statistics.document_frequency,
@@ -1631,7 +1646,7 @@ def task_candidates(
             lexstore.stopping_at_budget(),
         ):
             result = lexstore.search_bm25_result(
-                vault_root, query_text, limit + 1, freshness=fresh, recall_checkpoint=checkpoint,
+                vault_root, query_text, depth + 1, freshness=fresh, recall_checkpoint=checkpoint,
                 allowed_paths=allowed, admitted_paths=allowed, allow_delta=False,
                 exclude_navigation=True, term_budget=working_set_runtime.material_term_budget(),
             )
@@ -1644,10 +1659,11 @@ def task_candidates(
             missing.append({"role": "task_context", "reason": "lane_failed"})
         else:
             hits = result.value or []
-            if len(hits) > limit:
+            if len(hits) > depth:
                 missing.append({"role": "task_context", "reason": "lane_truncated"})
-            for path, _score in hits[:limit]:
+            for path, _score in hits[:depth]:
                 add(path, origin)
+            rankings.append([path for path, _score in hits[:depth]])
         if budget_exhausted("working_set.task_context_vector"):
             missing.append({"role": "task_context", "reason": "budget"})
             break
@@ -1655,11 +1671,12 @@ def task_candidates(
         # material term with the turn. It reads only the resident recall matrix and an encoder already in
         # memory: it never loads a model or a matrix on this thread.
         with find_types.timing_span(timings, "working_set.task_context_vector"):
-            vector_paths, vector_state = _resident_vector_paths(vault_root, query, allowed, limit)
+            vector_paths, vector_state = _resident_vector_paths(vault_root, query, allowed, depth)
         if vector_state == "lane_failed":
             missing.append({"role": "task_context", "reason": "lane_failed"})
         for path in vector_paths:
             add(path, origin)
+        rankings.append(list(vector_paths))
         if categories:
             method_queries.append((origin, query_text))
     if restricted:
@@ -1698,12 +1715,18 @@ def task_candidates(
         else:
             for hit in (methods.value or [])[:limit]:
                 add(hit.parent_path, origin)
+            rankings.append([hit.parent_path for hit in (methods.value or [])[:limit]])
     if len(found) > limit:
         missing.append({"role": "task_context", "reason": "lane_truncated"})
     with find_types.timing_span(timings, "working_set.task_context_order"):
-        ordered = list(found.values()) if restricted else [
-            found[path] for path in _compiled_first(vault_root, list(found), visible=caller.visible)
-        ]
+        if restricted:
+            ordered = list(found.values())
+        else:
+            fused = [path for path, _score in fusion.reciprocal_rank_fusion(rankings, k=ranking.rrf_k)]
+            leading = list(dict.fromkeys(path for path in (*routed, *fused) if path in found))
+            ordered = [
+                found[path] for path in _compiled_first(vault_root, leading[:depth], visible=caller.visible)
+            ]
     ordered = ordered[:limit]
     # A restricted caller's leads list no links, so it gets no link targets.
     link_targets: Mapping[str, Any] = {} if restricted else by_path

@@ -61,9 +61,13 @@ def release_version() -> str:
         return RELEASE_PLACEHOLDER
 
 
-def render_shipped_markdown(text: str) -> str:
-    """Fill the release placeholder in shipped skill markdown."""
-    return text.replace(RELEASE_PLACEHOLDER, release_version())
+def render_shipped_markdown(text: str, release: str | None = None) -> str:
+    """Fill the release placeholder in shipped skill markdown.
+
+    A template that is rendered again at run time passes ``RELEASE_PLACEHOLDER``
+    as its release, so it keeps the placeholder.
+    """
+    return text.replace(RELEASE_PLACEHOLDER, release or release_version())
 
 
 def copy_shipped_file(src: Path, dest: Path) -> None:
@@ -151,19 +155,21 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
     return target
 
 
-def _core_payload(vault: Path | None) -> dict[str, str]:
+def _core_payload(vault: Path | None, release: str | None = None) -> dict[str, str]:
     """Files for the core skill archive, keyed by archive-relative path."""
     workflow_skills.validate_contract_projection(
         workflow_skills.CORE_SKILL_NAME, _SKILL_SRC, core=True
     )
     payload: dict[str, str] = {
-        "SKILL.md": render_shipped_markdown((_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8"))
+        "SKILL.md": render_shipped_markdown(
+            (_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8"), release
+        )
     }
 
     for folder in _CORE_EXTRAS:
         for ref in sorted((_SKILL_SRC / folder).glob("*.md")):
             payload[f"{folder}/{ref.name}"] = render_shipped_markdown(
-                ref.read_text(encoding="utf-8")
+                ref.read_text(encoding="utf-8"), release
             )
 
     for name in _CORE_FILES:
@@ -188,25 +194,29 @@ def _core_payload(vault: Path | None) -> dict[str, str]:
     return payload
 
 
-def _workflow_payload(name: str) -> dict[str, str]:
+def _workflow_payload(name: str, release: str | None = None) -> dict[str, str]:
     source = workflow_skills.source_dir(name)
     workflow_skills.validate_contract_projection(name, source)
     payload = {
-        "SKILL.md": render_shipped_markdown((source / "SKILL.md").read_text(encoding="utf-8"))
+        "SKILL.md": render_shipped_markdown(
+            (source / "SKILL.md").read_text(encoding="utf-8"), release
+        )
     }
     for reference in sorted((_SKILL_SRC / "references").glob("*.md")):
         payload[f"references/{reference.name}"] = render_shipped_markdown(
-            reference.read_text(encoding="utf-8")
+            reference.read_text(encoding="utf-8"), release
         )
     return payload
 
 
-def skill_payload(name: str, *, vault: Path | None = None) -> dict[str, str]:
+def skill_payload(
+    name: str, *, vault: Path | None = None, release: str | None = None
+) -> dict[str, str]:
     """Return the complete canonical payload for a core or workflow skill."""
     return (
-        _core_payload(vault)
+        _core_payload(vault, release)
         if name == workflow_skills.CORE_SKILL_NAME
-        else _workflow_payload(name)
+        else _workflow_payload(name, release)
     )
 
 

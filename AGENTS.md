@@ -76,6 +76,10 @@ regenerate that baseline only to shrink it or to carry a renamed requirement)
 before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
+## A user-visible change adds a user note
+
+A pull request whose change a person using Evermatter would notice adds one file under `user-notes/`, written as `user-notes/README.md` says: one plain sentence, no internal terms, no Markdown. A `feat`, `fix` or `perf` pull request with no such change puts the line `User note: none` in its body. The `User note decision` check requires that decision and never judges the wording.
+
 ## OpenSpec is the sole specification system
 
 <!-- spec-system:openspec-only -->

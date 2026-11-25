@@ -16,7 +16,7 @@
 
 - [x] 3.1 Operator choice on D6 (sign-in cost of renaming a plugin or an HTTP registration, Cloud plugin included) recorded in the design.
 - [x] 3.2 Emit the server key (for a new registration) and the serverInfo name `evermatter`. Rename the skills to `evermatter-*` in the workflow-skill index and the core skill. Regenerate the plugin trees.
-- [ ] 3.3 Release C1: rename the local plugin to `evermatter` with a `renames` entry in `marketplace.json`, and run `claude plugin validate .`. Make `setup --migrate` rename URL registrations and print each client's sign-in step. Show the one-time sign-in notice from the plugin's SessionStart hook.
+- [x] 3.3 Release C1: rename the local plugin to `evermatter` with a `renames` entry in `marketplace.json`, and run `claude plugin validate .`. Make `setup --migrate` rename URL registrations and print each client's sign-in step. Show the one-time sign-in notice from the plugin's SessionStart hook.
 - [ ] 3.4 Release C2: rename `exomem-cloud` to `evermatter-cloud` with a `renames` entry, and move its address to `https://mcp.evermatter.ai/mcp`, once the Cloud serves that host and the service notice has gone out.
 - [x] 3.5 Add `evermatter setup --migrate` (D5) for stdio registrations, and skip each URL registration. Make doctor list user-written rules and hooks that name the old prefix in a client with no `exomem` server.
 - [x] 3.6 Write the new managed-block markers and the readiness service name `evermatter`.

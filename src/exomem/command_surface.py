@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from pydantic import Field, TypeAdapter, ValidationError, WithJsonSchema
 
@@ -1097,6 +1098,7 @@ def bind_vault(
                     )
                 # Last, after the egress filter: the notice is the gateway's own text, never vault content.
                 result = with_service_notice(result)
+                result = with_update_notice(result, injected[0])
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
@@ -1329,10 +1331,7 @@ def mcp_caller_identity() -> dict[str, str | None]:
         identity["transport"] = _mcp_transport(headers)
         from . import cloud_cell
 
-        if cloud_cell.cloud_mode_enabled():
-            identity["app_id"] = cloud_cell.canonical_app_id(
-                headers.get(cloud_cell.GATEWAY_APP_ID_HEADER)
-            )
+        identity["app_id"] = gateway_app_id()
         if not identity["client_name"]:
             if cloud_cell.cloud_mode_enabled():
                 gateway_client = str(
@@ -1426,6 +1425,52 @@ def with_service_notice(result: typing.Any) -> typing.Any:
     if notice is None:
         return result
     return {key: item for key, item in result.items() if key != "service_notice"} | {"service_notice": notice}
+
+
+def gateway_app_id() -> str | None:
+    """The canonical id of the connected app that made this request, or None.
+
+    Cloud mode only: the id is the gateway's authenticated grant UUID, which no caller can send
+    (the gateway refuses every caller header that starts with `x-exomem-`).
+    """
+    from . import cloud_cell
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    dependencies = _request_dependencies()
+    if dependencies is None:
+        return None
+    try:
+        return cloud_cell.canonical_app_id(dependencies.get_http_headers().get(cloud_cell.GATEWAY_APP_ID_HEADER))
+    except (LookupError, RuntimeError):
+        return None
+
+
+def with_update_notice(result: typing.Any, vault_root: Path) -> typing.Any:
+    """`result` with `update_notice` added as its last field the first time a release with notes
+    reaches the calling app, when it is a JSON object.
+
+    Like `with_service_notice`: the assistant reads the whole result and tells the person once, the
+    result is copied and never changed in place, and a result that is not an object is returned as
+    it is, without using up the notice. A call without a canonical app id gets nothing. The cell
+    records the app's version before this adds the field (`release_notes.update_notice`), and any
+    failure there leaves the call's result as it was.
+    """
+    if not isinstance(result, dict):
+        return result
+    app_id = gateway_app_id()
+    if app_id is None:
+        return result
+    from . import release_notes
+
+    try:
+        notice = release_notes.update_notice(vault_root, app_id)
+    except Exception:  # noqa: BLE001 - the notice is a courtesy; it must not fail the call
+        _log.debug("update notice skipped", exc_info=True)
+        return result
+    if notice is None:
+        return result
+    return {key: item for key, item in result.items() if key != "update_notice"} | {"update_notice": notice}
 
 
 def peek_request_id() -> str | None:

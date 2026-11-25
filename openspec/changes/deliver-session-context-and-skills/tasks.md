@@ -62,3 +62,16 @@
 - [x] 6.7 Make the shipped skill's description ask for recall on subjects of the user's own life or work, for clients that defer tools and hide server instructions; prove it on the incident regression cases and on fresh cases with a client that behaves that way.
   - Skill description only; proved in the bench's `deferred-skill` client mode on the incident regression cases and on fresh cases with the off level unchanged (run records `deferred-skill-description-s1` and `-s2`; design, "A client that defers tools and hides server instructions"). The live claude.ai check follows the release.
 - [ ] 6.8 Name every item an overflowing catalogue could not list, within `skills_names_max_chars`, so a collection that declares no topic and shares no word with the turn still reaches the agent; prove it on the installed service with the turn that exposed the miss.
+
+## 7. Task leads rank like search
+
+- [x] 7.1 Order task leads by the reciprocal-rank fusion of the discovery lanes, at search's fusion constant and lane depth; verify that a page both readings rank leads when more keyword matches than leads crowd it.
+- [x] 7.2 Replay the 2026-11-24 broad-question miss and the development cases on a vault copy, main against the fix; record where each needed page lands and the task-discovery latency.
+  - Model-free replay on a production-sized vault copy: release 0.202.0 against the same release with this change, every lane warm, main run again last to show drift.
+  - The 2026-11-24 question moved from lead 7 to lead 3.
+  - Development cases (24): the needed page reached the first five leads in 4 on main and 5 with the change, +0.04 [−0.08, +0.17]. One case gained a page from no lead to lead 1. One case lost a page that only the keyword lane ranked, from lead 5 to below the first five.
+  - Frozen held-out cases (10): 4 against 5, +0.10 [0, 0.30], one gained and none lost.
+  - Task-discovery median on the development cases: 886 ms against 860 ms, −5.5 ms [−87, +54]. Main's own rerun drifted +145 ms.
+  - On the held-out cases: +97 ms [+6, +301], with no drift rerun, so it does not separate the change from drift. Ordering itself costs under 1 ms. A paired timing of the keyword lane alone (`lexstore.search_bm25_result` at k=13 and k=61, interleaved, on the synthetic corpus of `scripts/activation_lexical_latency.py` at 4,000 and 16,000 pages) showed no difference.
+  - Run records stay outside the repository, with the private cases.
+- [ ] 7.3 Verify on the installed service that the broad question from the 2026-11-24 miss serves its compiled note among the rendered leads.
