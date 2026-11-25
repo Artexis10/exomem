@@ -9,11 +9,11 @@
     "offline_access"
   ],
   "registered_tool_surface_sha256": "819750430dc72129da8bc51c1163eccf6c0c536a04d1b72fcde265e0e54814b9",
-  "pending_tool_surface_sha256": "733fde764662154058ade1379c1f153e7e9d117bffc850e4276c3267a74bbea9",
+  "pending_tool_surface_sha256": "56df66784589f25e5b4d2c38b8b48aff32340c9d72c01754955888f6fdf35ab9",
   "records_pending_acceptance": {
     "profile": "hosted-alpha-agent-v2",
     "minimum_records_reader_version": 2,
-    "pending_tool_surface_sha256": "733fde764662154058ade1379c1f153e7e9d117bffc850e4276c3267a74bbea9",
+    "pending_tool_surface_sha256": "56df66784589f25e5b4d2c38b8b48aff32340c9d72c01754955888f6fdf35ab9",
     "state": "awaiting-post-deploy-v2-acceptance",
     "evidence": null
   },

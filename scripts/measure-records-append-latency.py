@@ -114,6 +114,25 @@ Synthetic collection for latency measurement.
 
 
 
+def _seed_pages(vault: Path, pages: int, size: int, appends: int) -> None:
+    """Write `pages` invented pages and build the page-name index that a Records write reads for related pages.
+
+    The pages named like the measured rows (the warm-up row and the appended ones) are the lookups that hit.
+    """
+    from exomem import working_set_index
+
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    hit_titles = [f"Widget {size + index:05d}" for index in (5000, *range(appends))]
+    for number in range(pages):
+        title = hit_titles[number] if number < len(hit_titles) else f"Topic {number:05d}"
+        identity = f"{number + 1:08d}-0000-4000-8000-000000000000"
+        (notes / f"{title}.md").write_text(f"---\nexomem_id: {identity}\ntitle: {title}\n---\n# {title}\n", encoding="utf-8")
+    index = working_set_index.WorkingSetIndex(vault)
+    index.rebuild(freshness_stamp="latency")
+    index.close()
+
+
 def _committed(result: dict) -> bool:
     """A write reply's commit state: top level on legacy replies, under diagnostics on full ones."""
     diagnostics = result.get("diagnostics")
@@ -643,6 +662,9 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
                 or fixture["partial_inspect_rows"] != size - fixture["selected_refs"]):
             raise RuntimeError("public inspection does not prove the synthetic release split")
 
+    if args.pages:
+        _seed_pages(vault, args.pages, size, args.appends)
+
     # Warm-up: imports, first-call caches, and one-time state directory creation.
     one_append(5000, False, None)
 
@@ -658,7 +680,7 @@ def _measure_child(args: argparse.Namespace, tmp: Path, cleanup: contextlib.Exit
 
     n = args.appends
     out: dict[str, object] = {
-        "size": size, "appends": n, "seed_seconds": round(seed_seconds, 2),
+        "size": size, "appends": n, "pages": args.pages, "seed_seconds": round(seed_seconds, 2),
         "storage_mode": args.storage, "phase_acceptance": False,
         "command_path": {"lease": "vault-scoped", "coordinator": "disabled in isolated diagnostic",
                          "inspect": "full public",
@@ -1003,6 +1025,8 @@ def _parent(args: argparse.Namespace) -> int:
                     str(args.appends),
                     "--storage",
                     args.storage,
+                    "--pages",
+                    str(args.pages),
                     *(["--lift-caps"] if args.lift_caps else []),
                     *(["--phase-probes"] if args.phase_probes else []),
                 ],
@@ -1031,6 +1055,8 @@ def main() -> int:
     parser.add_argument("--sizes", default="10,100,1000")
     parser.add_argument("--appends", type=int, default=30)
     parser.add_argument("--out", default="records-append-latency.json")
+    parser.add_argument("--pages", type=int, default=0,
+                        help="seed this many invented pages and build the page-name index before the appends")
     parser.add_argument("--storage", choices=("files", "store"), default="files")
     parser.add_argument("--phase-probes", action="store_true",
                         help="add store-only 10%% ref-withheld and bulk-500 diagnostics")

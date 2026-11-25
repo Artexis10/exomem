@@ -22,16 +22,17 @@ import httpx2
 from fastmcp.client.auth import OAuth
 from platformdirs import user_state_dir
 
-from . import cloud_import_envelope, import_selection, import_stage
+from . import cloud_address, cloud_import_envelope, import_selection, import_stage
 from .cell_init import _ensure_private_directory
 from .cli_progress import Progress, human_bytes
 from .cloud_import import ARCHIVE_TOO_LARGE, DEFAULT_MAX_MEMBERS, DEFAULT_RESERVE_BYTES
 from .cloud_import_job import _private_json
 
-# The production Cloud endpoints, defined here once for `exomem cloud import` and `exomem cloud export`.
-# The Cloud owner confirmed both. The MCP URL is the resource of the Cloud plugin definition, which a
-# test compares. The API base is Substrate's public origin, where the Cloud routes under /api/exomem are served.
-PRODUCTION_MCP_URL = "https://exomem.substratesystems.io/mcp"
+# The production Cloud endpoints for `exomem cloud import` and `exomem cloud export`. The Cloud owner
+# confirmed both. The MCP URL is defined in `cloud_address`, and it is the resource of the Cloud plugin
+# definition, which a test compares. The API base is Substrate's public origin, where the Cloud routes
+# under /api/exomem are served.
+PRODUCTION_MCP_URL = cloud_address.MCP_URL
 PRODUCTION_API_BASE_URL = "https://substratesystems.io"
 
 # Where a run is when it fails; the failure report names it.

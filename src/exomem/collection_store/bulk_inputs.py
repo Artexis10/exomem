@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from .. import origin_bindings, provenance, records
 from .. import structured_collections as collections
-from . import link_values, summary, tokens, typed_storage, version_sources, views
+from . import link_values, related_pages, summary, tokens, typed_storage, version_sources, views
 
 
 @dataclass
@@ -30,6 +30,7 @@ class PreparedBulk:
     origins: list | None = None
     source_guards: dict | None = None
     link_notes: dict = field(default_factory=dict)
+    related: related_pages.RelatedPages | None = None
 
 
 def validate(rows, why, source, on_reject):
@@ -68,8 +69,12 @@ def detach(writer, collection, arguments):
         links = link_values.for_write(writer, manifest)
         candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"], links)
         identity = views.store_identity(writer.connection)
+        # An import job reports itself, not each batch, so only a direct bulk upsert has a reply to list pages in.
+        related = None if arguments["_import"] is not None else related_pages.for_write(
+            writer, manifest, [(c.key, c.values) for c in candidates if c.error is None and c.before is None])
     return PreparedBulk(manifest, before, uuid.uuid4().hex[:12], candidates, occupied, identity,
-                        _digest, arguments, link_notes=links.notes() if links is not None else {}), None
+                        _digest, arguments, link_notes=links.notes() if links is not None else {},
+                        related=related), None
 
 
 def acquire(root, prepared, *, why, on_reject, lifetime):

@@ -57,8 +57,8 @@ BREAK_GLASS = "break-glass"  # the kubectl context name the runbook's blocks pas
 KIND = "file"
 DEVIATIONS = (
     "the scratch restore renders cellctl's manifests as rehearsal step 11 does, not with "
-    "`cloud_restore_manifests.py scratch`, because that command reads object-store keys a new cell's "
-    "credentials Secret does not hold",
+    "`cloud_restore_manifests.py scratch`, which gained custodian-key support after this rehearsal "
+    "was written",
     "the break-glass identity is the disposable cluster's admin kubeconfig with its context renamed "
     "`break-glass`, run with the runner's kubectl",
     "the blocks run from the checkout root with `CELLCTL_PYTHON` set to this interpreter, which imports cellctl",

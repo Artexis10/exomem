@@ -16,6 +16,7 @@ import logging
 import re
 import shlex
 from dataclasses import dataclass, field
+from typing import Protocol
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives import serialization
@@ -1789,6 +1790,29 @@ def render_restic_verify_job(
             "template": {"metadata": {"labels": labels}, "spec": pod},
         },
     }
+
+
+class BackupStores(Protocol):
+    """The two object stores cellctl's configuration names for cell backups."""
+
+    @property
+    def object_storage_bucket(self) -> str: ...
+    @property
+    def object_storage_endpoint(self) -> str: ...
+    @property
+    def cell_data_backup_bucket(self) -> str: ...
+    @property
+    def cell_data_endpoint(self) -> str: ...
+
+
+def backup_store(stores: BackupStores, *, stored_key: bool) -> dict[str, str]:
+    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
+    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
+    which only the locked cell-data bucket accepts (D9). The operator restore tools use this rule too."""
+
+    if stored_key:
+        return {"bucket_name": stores.object_storage_bucket, "endpoint": stores.object_storage_endpoint}
+    return {"bucket_name": stores.cell_data_backup_bucket, "endpoint": stores.cell_data_endpoint}
 
 
 def render_restore_job(

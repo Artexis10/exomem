@@ -18,7 +18,7 @@ import mcp.types
 from fastmcp import FastMCP
 from starlette.background import BackgroundTask
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from . import runtime_readiness as runtime_readiness_module
 from . import tool_surface as tool_surface_module
@@ -553,6 +553,39 @@ def register_asset_routes(
             headers={
                 "Cache-Control": "public, max-age=31536000, immutable",
                 **_STUDIO_SECURITY_HEADERS,
+            },
+        )
+
+
+def register_claude_plugin_route(mcp_app: FastMCP, *, base_url: str) -> None:
+    """Serve the one-upload Claude plugin that connects to this server's public origin.
+
+    The archive holds the release's public plugin bytes and this server's own address,
+    so it needs no sign-in; a server without a public origin has nothing to serve.
+    """
+    from . import self_hosted_plugin
+
+    if not base_url:
+        return
+
+    @mcp_app.custom_route(self_hosted_plugin.ROUTE, methods=["GET"])
+    async def _claude_plugin(request: Request):  # noqa: ARG001
+        try:
+            archive = await asyncio.to_thread(self_hosted_plugin.build, base_url)
+        except (OSError, ValueError) as error:
+            log.warning("claude plugin build failed: %s", error)
+            return JSONResponse(
+                {"error": "The Claude plugin is unavailable on this server; its log names the cause."},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        filename = self_hosted_plugin.archive_filename(base_url)
+        return Response(
+            archive,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache",
             },
         )
 

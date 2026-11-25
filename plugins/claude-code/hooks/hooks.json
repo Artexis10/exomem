@@ -51,6 +51,15 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\" --client claude"
           }
         ]
+      },
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/evermatter-sign-in-notice.sh\""
+          }
+        ]
       }
     ]
   }

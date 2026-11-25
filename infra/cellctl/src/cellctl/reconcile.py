@@ -98,6 +98,7 @@ from .manifests import (
     UPGRADE_WINDOW_AT_ANNOTATION,
     CellManifestSpec,
     ResourceSettings,
+    backup_store,
     check_artifact_broker_url,
     check_grant_public_key,
     check_media_slot_url,
@@ -3740,7 +3741,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_backup_job(
                         spec,
-                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
+                        **backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         **_backup_source(decision, spec),
                     ),
                     job_refused,
@@ -3751,7 +3752,7 @@ async def _reconcile_row(
                     row.cell_id,
                     render_restore_job(
                         spec,
-                        **_backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
+                        **backup_store(cluster_config, stored_key=bool(spec.b2_key_id)),
                         snapshot_id=decision.run_restore_job_snapshot,
                     ),
                     job_refused,
@@ -3835,17 +3836,6 @@ def _staged_objects(cluster_config: ClusterConfig, secrets_config: SecretsConfig
     return StagedObjects(_staging_client(cluster_config, secrets_config), cluster_config.cell_data_staging_bucket)
 
 
-def _backup_store(cluster_config: ClusterConfig, *, stored_key: bool) -> dict[str, str]:
-    """The bucket and S3 endpoint a cell's backup and restore Jobs reach. An old cell keeps the
-    founder-account bucket its stored key was minted for; a new cell reads the custodian's key,
-    which only the locked cell-data bucket accepts (D9)."""
-
-    if stored_key:
-        return {"bucket_name": cluster_config.object_storage_bucket,
-                "endpoint": cluster_config.object_storage_endpoint}
-    return {"bucket_name": cluster_config.cell_data_backup_bucket, "endpoint": cluster_config.cell_data_endpoint}
-
-
 async def _sync_restic_work(
     cluster: ClusterGateway, config: ClusterConfig, rows: list[CellRow], observations: dict[str, ClusterObservation],
     now: datetime, *, conflicts: set[str], allow_start: bool, runtime: VerificationRuntime,
@@ -3862,7 +3852,7 @@ async def _sync_restic_work(
         if observation.namespace_cell_label != row.cell_id or not observation.statefulset_uid:
             continue
         namespace = namespace_name(row.cell_id)
-        location = _backup_store(config, stored_key=bool(row.b2_key_id and row.has_stored_object_store_key))
+        location = backup_store(config, stored_key=bool(row.b2_key_id and row.has_stored_object_store_key))
         repository = restic_verification_repository(row.cell_id, **location)
         eligible = bool(
             row.cell_id in selected and row.cell_id not in conflicts and all(location.values())

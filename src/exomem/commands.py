@@ -9361,10 +9361,7 @@ def op_observe_memory(
             )
             if refusal is not None:
                 raise refusal from error
-        message = f"{error.code}: {error.reason}"
-        if error.remediation:
-            message += f" Remediation: {error.remediation}"
-        raise ValueError(message) from error
+        raise error.leaf_error() from error
 
 
 def op_replace_memory(
@@ -15714,6 +15711,18 @@ def busy_intake_applies(command: Command, arguments: Mapping[str, Any]) -> bool:
     if operations.selector is not None:
         action = _resolved_invocation_selector(command, dict(arguments), operations.selector)
     return operations.queues_when_busy(action, arguments)
+
+
+def refusal_before_queueing(command: Command, arguments: Mapping[str, Any]) -> ValueError | None:
+    """The refusal that a save's arguments alone are certain to get, or None.
+
+    A queued receipt promises a save, and a replay that the arguments already condemn would
+    fail only later. The check reads no page; `observe_memory` is the one command that has it.
+    """
+    if command.name != "observe_memory":
+        return None
+    error = observe_memory_module.argument_refusal(arguments)
+    return None if error is None else error.leaf_error()
 
 
 _MCRC = frozenset({"mcp", "rest", "cli"})
