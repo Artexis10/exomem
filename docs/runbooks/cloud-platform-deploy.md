@@ -732,7 +732,7 @@ Load `EXOMEM_ADMIN_TOKEN`, `EXOMEM_SUBSTRATE_URL` and `EXOMEM_CELLCTL_DSN` into 
    FLEET_IMAGE=$(curl --fail-with-body -sS -H "Authorization: Bearer $EXOMEM_ADMIN_TOKEN" "$EXOMEM_SUBSTRATE_URL/api/exomem/admin/cloud-release/rollout" | jq -r .view.cell_image)
    ```
 
-2. List each running or read-only cell whose own image is another:
+2. List each running or read-only cell whose own image is another. The rollout view counts the same cells but does not name them:
 
    ```bash
    psql "$EXOMEM_CELLCTL_DSN" --command "SELECT cell_id, desired_image FROM exomem_cloud_cells WHERE desired_state IN ('running','read_only') AND desired_image IS NOT NULL AND desired_image <> '$FLEET_IMAGE' ORDER BY cell_id"

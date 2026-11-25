@@ -65,8 +65,9 @@ FAILING_ALERT = "cloud-deploy-failing"
 # A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
 RELEASE_BEHIND_DEFAULT_HOURS = 48
 # The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
+PAUSED_STOP = "ROLLOUT_PAUSED"
 # cellctl raises cloud-rollout-paused for a pause, so the pause stop counts as having its own alert.
-OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, "ROLLOUT_PAUSED")
+OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, PAUSED_STOP)
 # The off switch: a run without the deploy token does nothing, and sends no alert.
 NOT_CONFIGURED = "CLOUD_DEPLOY_NOT_CONFIGURED"
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
@@ -169,7 +170,10 @@ class GitHub:
         }, None)
         if status != 200:
             raise Stop("GITHUB_API_FAILED", ok=False, detail=str(status))
-        return json.loads(body)
+        try:
+            return json.loads(body)
+        except ValueError as error:
+            raise Stop("GITHUB_API_FAILED", ok=False, detail="not JSON") from error
 
     def latest_release(self) -> str:
         release = self._get(f"/repos/{self.settings.repository}/releases/latest")
@@ -522,7 +526,7 @@ def refuse_paused(view: dict) -> None:
     """Stop with the pause's code, and nothing else, when the rollout view says it is paused."""
 
     if view.get("paused") is True:
-        raise Stop("ROLLOUT_PAUSED", ok=False, detail=_code(view.get("error_code")))
+        raise Stop(PAUSED_STOP, ok=False, detail=_code(view.get("error_code")))
 
 
 def finish(stop: Stop) -> int:

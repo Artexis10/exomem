@@ -55,7 +55,7 @@ class Recorded:
     def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None,
                  releases: str = "github_releases") -> None:
         self.rollout = [copy.deepcopy(ANSWERS[name]) for name in rollout]
-        self.releases = None if releases == "unavailable" else copy.deepcopy(ANSWERS[releases])
+        self.releases = releases if releases in ("unavailable", "garbled") else copy.deepcopy(ANSWERS[releases])
         self.put = ANSWERS[put]
         self.deployments = ANSWERS["github_platform_deployments"] if deployments is None else deployments
         self.calls: list[tuple[str, str, bytes | None]] = []
@@ -66,7 +66,11 @@ class Recorded:
         if path == "/repos/example-owner/example-repo/releases/latest":
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
         if path == f"/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}":
-            return (502, b"{}") if self.releases is None else (200, json.dumps(self.releases).encode())
+            if self.releases == "unavailable":
+                return 502, b"{}"
+            if self.releases == "garbled":
+                return 200, b"<html>busy</html>"
+            return 200, json.dumps(self.releases).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments?"):
             return 200, json.dumps(self.deployments).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments/") and "/statuses?" in path:
@@ -560,9 +564,10 @@ def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platfo
     assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
 
 
-def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys) -> None:
-    # Catches a read that only feeds the lag alert stopping a deploy for a day.
-    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases="unavailable")
+@pytest.mark.parametrize("releases", ["unavailable", "garbled"])
+def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys, releases) -> None:
+    # Catches a read that only feeds the lag alert stopping a deploy for a day, whether it fails or answers 200 with no JSON.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases=releases)
 
     code, log, _ = _run(recorded, capsys)
 
