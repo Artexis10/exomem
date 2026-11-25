@@ -1587,33 +1587,41 @@ def test_a_source_erasure_during_the_build_declines_the_publication(
     assert store.path.stat().st_ino == live_inode
 
 
-def test_a_rebuild_keeps_no_revision_or_journal_history_of_a_page_deleted_during_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("deleted", ["before the build", "during the build"])
+def test_a_rebuild_keeps_no_revision_or_journal_history_of_a_deleted_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, deleted: str
 ) -> None:
-    """A page deleted while the build runs leaves no unit revision in the replacement, and the copied journal
-    history does not survive it: a Source erasure may have restarted the live journal since the copy."""
+    """A page deleted before the build (the copy's reconcile drops it) or during it (the replay drops it)
+    leaves no unit revision in the replacement, and the copied journal history does not survive it: a
+    Source erasure may have restarted the live journal since the copy."""
     kept = _kb_file(tmp_path, "kept.md", "- [config] keptcontent ^u1")
-    deleted = _kb_file(tmp_path, "deleted.md", "- [config] deletedcontent ^u2")
-    _seed(tmp_path, [kept, deleted])
+    gone = _kb_file(tmp_path, "deleted.md", "- [config] deletedcontent ^u2")
+    _seed(tmp_path, [kept, gone])
     lexstore.ensure_fresh(tmp_path)
     store = lexstore.get_store(tmp_path)
     kept_rel = kept.relative_to(tmp_path).as_posix()
-    deleted_rel = deleted.relative_to(tmp_path).as_posix()
+    deleted_rel = gone.relative_to(tmp_path).as_posix()
     with sqlite3.connect(store.path) as live:
         assert live.execute(f"SELECT count(*) FROM {lexstore.CHANGE_JOURNAL} WHERE path = ?", (kept_rel,)).fetchone()[0]
     live.close()
 
-    real_fold = lexstore.LexicalStore._fold_to_single_file
-    state = {"deleted": False}
+    def delete_page() -> None:
+        gone.unlink()
+        freshness.on_files_changed(tmp_path, changed=[], deleted=[gone])
 
-    def fold_then_delete(conn: Any) -> bool:
-        if not state["deleted"]:
-            state["deleted"] = True
-            deleted.unlink()
-            freshness.on_files_changed(tmp_path, changed=[], deleted=[deleted])
-        return real_fold(conn)
+    if deleted == "before the build":
+        delete_page()  # The live catalogue keeps the page: no read has applied the deletion to it.
+    else:
+        real_fold = lexstore.LexicalStore._fold_to_single_file
+        state = {"deleted": False}
 
-    monkeypatch.setattr(store, "_fold_to_single_file", fold_then_delete)
+        def fold_then_delete(conn: Any) -> bool:
+            if not state["deleted"]:
+                state["deleted"] = True
+                delete_page()
+            return real_fold(conn)
+
+        monkeypatch.setattr(store, "_fold_to_single_file", fold_then_delete)
     published = store.rebuild_atomic()
     monkeypatch.undo()
 

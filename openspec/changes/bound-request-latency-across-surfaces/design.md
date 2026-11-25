@@ -514,11 +514,11 @@ The journal names a page's path after the page's rows are gone, so a Source eras
 
 A repair rebuild must not bring those rows back. It copies the live catalogue or parses the files, and replays the writes that land while it builds, so it can still name the erased page. Three rules close that:
 
-- The rebuild reads the Source retirement generation when it starts, and declines to publish when an erasure advanced it since, as a detached catalogue's adoption does.
+- The rebuild reads the Source retirement generation when it starts, and declines to publish when an erasure advanced it since, as a detached catalogue's adoption does. It declines before it builds when it cannot read the generation.
 - A rebuild that copies the live catalogue starts its own journal, so it never carries history that the live journal has since dropped.
-- The eraser advances the generation before it restarts the journal. A rebuild that publishes before the restart is restarted with the live catalogue. One that publishes after it either started before the advance and declines, or started after the page's rows were dropped.
+- The eraser advances the generation once, before it restarts the journal. A rebuild that publishes before the restart is restarted with the live catalogue. One that publishes after it either started before the advance and declines, or started after the page's rows were dropped. A caller that repeats a refused restart does not advance again, because each advance makes the repair rebuild that the refusal schedules decline.
 
-The rebuild's replay of a deleted page now also drops the page's unit revision, as the live delete path does.
+The delete triggers stamp a page a unit revision even when its rows go, and that revision names the page. Every delete now drops it in the two primitives that remove a page's rows or its units, so no delete path keeps it: not the live delete, not the replay, and not the reconcile that drops a copied page whose file is gone.
 
 The recall rows, the page identities and their fingerprint, and the unit revisions and their fingerprint are now derived from that state. They hold the same values in the same order as before, so every cache key and every result is unchanged. Each state fill records the span `lexical.catalogue_rows`, with `patched` and `paths_read`. SQLite's session extension records changesets, but Python's `sqlite3` module does not expose it. `sqlite3_update_hook` sees only the writes of its own connection.
 

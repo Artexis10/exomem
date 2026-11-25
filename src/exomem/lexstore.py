@@ -6517,9 +6517,21 @@ def _delete_unit_rows(conn: sqlite3.Connection, parent_path: str) -> None:
         for (rowid,) in rowids:
             conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+    # A parent left with no rows keeps no revision (see `_delete_page_rowid`); one with a page row keeps it.
+    conn.execute(
+        "DELETE FROM unit_revisions WHERE parent_path = ? AND NOT EXISTS (SELECT 1 FROM pages WHERE path = ?)",
+        (parent_path, parent_path),
+    )
 
 
 def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
+    """Remove one page row with its full-text and unit rows, and the parent's unit revision.
+
+    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist. Every delete
+    path comes here or to `_delete_unit_rows`, so none leaves a revision behind: a reader asks only for the
+    parents it admits, a write that inserts rows again stamps a new one, and a derivation from the files makes
+    none for a page with no rows. A Source erasure relies on it: no row may name the erased page.
+    """
     row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
     if row is not None:
         _delete_unit_rows(conn, row[0])
@@ -6527,17 +6539,16 @@ def _delete_page_rowid(conn: sqlite3.Connection, rowid: int) -> None:
         conn.execute("DELETE FROM fts WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM tri WHERE rowid = ?", (rowid,))
     conn.execute("DELETE FROM pages WHERE rowid = ?", (rowid,))
+    if row is not None:
+        conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (row[0],))
 
 
 def delete_page_rows(conn: sqlite3.Connection, rel: str) -> None:
-    """Remove one page's rows: page, full-text and unit rows (the caller owns the transaction).
-
-    The delete triggers stamp the parent a fresh revision, which names rows that no longer exist,
-    so it goes too: a reader asks only for the parents it admits, rows that a write inserts again
-    stamp a new one, and a derivation from the files makes none for a page with no rows.
-    """
+    """Remove one page's rows: page, full-text and unit rows, and its unit revision (the caller owns the
+    transaction; see `_delete_page_rowid`)."""
     for (rowid,) in conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchall():
         _delete_page_rowid(conn, rowid)
+    # A revision left with no page row to delete through goes too.
     conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
 
 
@@ -9164,8 +9175,6 @@ class LexicalStore:
                         self._delete_rowid(conn, row[0])
                     else:
                         self._delete_semantic_units(conn, rel)
-                    # The delete triggers stamped a fresh revision for rows that no longer exist (see delete_page_rows).
-                    conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
                 for rel in suppressed:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
@@ -9781,6 +9790,11 @@ class LexicalStore:
                 "lexical atomic rebuild baseline deferred (%s); live sidecar preserved", e
             )
             return self._decline_rebuild("transient_failure")
+        if retired_through is None:
+            # An unreadable retirement generation cannot rule out a Source erasure, so the build would be declined
+            # at publication anyway (see `_build_and_publish`). Declining before the walk spends nothing. The cost
+            # when it fires wrongly: the catalogue goes unrepaired while vault state stays unreadable.
+            return self._decline_rebuild("source_changed")
         temp_path = self.path.with_name(f"{self.path.name}.rebuild-{uuid.uuid4().hex}.tmp")
         # The build holds an advisory lock on its temp from before the temp
         # exists until after it is cleaned up, so a sweep never takes a live
@@ -11484,9 +11498,6 @@ class LexicalStore:
                 self._delete_rowid(conn, row[0])
             else:
                 self._delete_semantic_units(conn, rel)
-            # As on the live delete path: the delete triggers stamped a revision for rows that are gone, and a
-            # page inserted again below stamps a new one.
-            conn.execute("DELETE FROM unit_revisions WHERE parent_path = ?", (rel,))
         for sp in delta.changed:
             path = Path(sp)
             if self._rel(path) is None:
