@@ -3254,11 +3254,14 @@ def test_a_link_filter_after_a_page_write_answers_once_the_warm_its_refusal_star
          content="# Later note\n\n- [operating constraint] Notes arrive monthly.\n",
          relation_disposition="reviewed_none", relation_review_reason="an unrelated fixture page")
 
-    def behind() -> bool:
-        lent, reason = semantic_contract.borrow_link_snapshot(service.root)
-        return lent is None and reason == semantic_contract.CHECKPOINT_DIFFERS
-
-    _until(behind)
+    # The watcher may deliver the write's event late, or miss it until the next reconcile, so the
+    # test drives the decline itself: one that finds the corpus behind must start the warm that ends it.
+    scheduled = []
+    schedule = find.schedule_link_index_warm
+    monkeypatch.setattr(find, "schedule_link_index_warm", lambda root: scheduled.append(root) or schedule(root))
+    assert semantic_contract.link_corpus_coming(service.root, semantic_contract.CHECKPOINT_DIFFERS)
+    assert scheduled == [service.root]
+    assert find.await_recall_resolver_warm()
     try:
         answered = call(service.root, "record_memory", **by_link)
     except OpError as refused:
