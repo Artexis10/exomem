@@ -20,17 +20,6 @@ product name, Evermatter.
 
 ## ADDED Requirements
 
-### Requirement: Stored and Configured Identifiers Keep the Internal Name
-
-State and config paths, vault frontmatter keys, the MCP server key that the installer writes,
-and plugin and skill identifiers SHALL keep the `exomem` name.
-
-#### Scenario: Agent tool names stay stable
-
-- **WHEN** a new install connects an agent client
-- **THEN** the installer writes the server key `exomem`
-- **AND** the client exposes the tools under the same prefix as an install made before the rename
-
 ### Requirement: Evermatter Is the Product Name on Every External Surface
 
 Every surface that a person reads or types to find, install, run or connect the product SHALL

@@ -7,7 +7,7 @@ The product name changes from Exomem to Evermatter before the commercial launch.
 ## What Changes
 
 - Every surface that a person reads or types says Evermatter. That covers the PyPI distribution, the CLI, the README and docs, the MCP server title, plugin and skill descriptions, image names, the MCP registry entry, the repository name and the product website.
-- Internal identifiers keep the `exomem` name. That covers the Python import package, `EXOMEM_*` settings, state and config paths, vault frontmatter keys such as `exomem_id`, database identifiers, the MCP server key that clients store (and so the `mcp__exomem__*` tool prefix), plugin and skill identifiers, and wire names such as cookies and token audiences.
+- Internal identifiers keep the `exomem` name. That covers the Python import package, `EXOMEM_*` settings, state and config paths, vault frontmatter keys such as `exomem_id`, database identifiers, and wire names such as cookies and token audiences. The MCP server key and the plugin and skill identifiers stayed `exomem` in the rename release; `rename-agent-surfaces-to-evermatter` renames them.
 - The old names keep working through a compatibility window:
   - each release is published under both the `evermatter` and the `exomem` PyPI names;
   - the `exomem` and `kb` commands stay;
