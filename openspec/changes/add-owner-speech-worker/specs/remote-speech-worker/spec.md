@@ -105,11 +105,33 @@ The speech worker SHALL verify each original's size and SHA-256 before it transc
 - **THEN** the speech worker stops the job and deletes its copy and partial transcript
 
 ### Requirement: The owner sets up a speech worker with one command
-`evermatter speech-worker setup` SHALL sign the owner in with the speech scope, detect the GPU, prepare the speech engines and the diarizer, and install a user service on Linux and WSL. The speech worker SHALL run one job per GPU and SHALL resume from its own recorded progress when it regains the same lease.
+Home SHALL offer a person one command or installer per supported system to set up a speech worker. Setup SHALL approve the device through a browser sign-in with a code, with no token to copy, and SHALL install a background service for the signed-in user. The speech worker SHALL run with or without a GPU, run one job per GPU, and resume from its own recorded progress when it regains the same lease.
+
+#### Scenario: A person without a GPU sets it up
+- **WHEN** a person runs the setup command on a laptop with no GPU and approves the device in the browser
+- **THEN** the worker starts as a background service, transcribes on CPU, and skips speaker labels unless the owner turned them on
 
 #### Scenario: Short sleep mid-recording
 - **WHEN** the owner's machine sleeps during a long recording and wakes before the lease expires
 - **THEN** the speech worker resumes from its recorded progress and completes the item once
+
+### Requirement: The speech worker yields the machine to its owner
+The speech worker SHALL pause before a claim and between chunks of a job while another process uses the GPU above the configured share, while a full-screen application has focus where the system reports it, or outside the owner's configured hours. It SHALL resume when those conditions clear. A pause longer than the lease SHALL release the item. The worker SHALL run at the lowest CPU and I/O priority the system offers.
+
+#### Scenario: The owner starts a game
+- **WHEN** a full-screen game starts while the worker transcribes
+- **THEN** the worker pauses at the next chunk boundary and resumes after the game exits
+
+#### Scenario: A long pause releases the item
+- **WHEN** the worker stays paused longer than its lease
+- **THEN** it releases the item, so another speech worker or the fallback can take it
+
+### Requirement: Speaker labels are optional per job
+A speech job that does not ask for speaker labels SHALL complete with segments only, and the speech worker SHALL run no diarisation or voice embedding for it.
+
+#### Scenario: Transcript only
+- **WHEN** an owner uploads a recording without asking for speaker labels
+- **THEN** the worker transcribes it and runs no diarisation
 
 ### Requirement: The owner sees remote speech in status
 Status SHALL report the speech items that wait and since when, the last speech worker contact with the authorization's display name, and each transcript produced by the fallback, marked as having no speaker labels. An unknown speech worker state SHALL be shown as unknown, never as idle.

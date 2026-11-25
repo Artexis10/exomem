@@ -26,7 +26,6 @@ The design follows Anthropic's engineering article on scaling managed agents: ke
 **Non-Goals:**
 - A platform GPU pool, rented GPUs, or any third-party speech API.
 - Diarisation on cell CPUs (D10).
-- Windows-native and macOS service installers. The command runs there; the user service is Linux and WSL first.
 - Other media stages on the speech worker.
 
 ## Terms
@@ -46,20 +45,20 @@ A claim waits up to a bounded time for work, then returns `204` when none is rea
 
 *Alternative rejected:* the cell pushes to a registered speech worker URL. It needs inbound reachability, and a sleeping laptop turns each push into a timeout.
 
-### D2. Leases with their own expiry
+### D2. The speech item is a ledger row with a lease
 
-A speech item has a state (`pending`, `leased`, `done`), a `revision`, the leasing principal and `lease_expires_at`.
+A speech item is a row in the existing `jobs` ledger with its own `media_type`, `speech`, as offload (`binary`) and preview rows already are. Its `running` state is the lease. The row gains the leasing principal and `lease_expires_at`, and keeps the existing `claim_revision` fence. `record_result`, the stale-input check and `finalize_result` therefore apply to it unchanged, and publication has one owner.
 
-- A claim takes one item that is `pending`, or `leased` with `lease_expires_at` in the past. It sets `leased`, increments `revision`, records the principal, and sets the expiry ten minutes ahead. The expiry check lives in the claim query itself.
-- A heartbeat by the same principal and revision extends the expiry and records progress. Otherwise it answers `lease_lost`.
-- `recover_interrupted` and every other ledger recovery leave speech items alone, so the media child's starts and exits never take a lease back.
+- A claim takes one `speech` row that is `pending`, or `running` with `lease_expires_at` in the past. It sets `running`, increments `claim_revision`, records the principal, and sets the expiry ten minutes ahead. The expiry check lives in the claim query itself.
+- A heartbeat by the same principal at the same revision extends the expiry and records progress. Otherwise it answers `lease_lost`.
+- `recover_interrupted` skips `speech` rows, so the media child's starts and exits never take a lease back. Only the claim query expires a lease.
 - A cell grants at most two live leases per principal.
 
-### D3. A speech item, separate from the media job row
+### D3. The speech stage leaves the recording's media row
 
-In remote speech, the cell keeps creating the speech stage for each recording, as it does in-cell. It records that stage as a speech item instead of running it in the media worker. The recording's media job row keeps its other stages, such as a video's frame vectors, and the media worker runs them as before. A lease covers only the speech item.
+In remote speech, the cell keeps creating the speech stage for each recording, as it does in-cell, but as its own `speech` row instead of a stage of the recording's media row. The media row keeps its other stages, such as a video's frame vectors, and the media worker runs them as before. A lease covers only the `speech` row.
 
-When the media worker finishes the other stages first, the sidecar shows them, and the transcript follows when the speech item completes. When the speech engine is switched off for the cell, the cell creates no speech item, as today. Reconciliation creates no second speech item for a recording that has one in `pending` or `leased`.
+When the media worker finishes the other stages first, the sidecar shows them, and the transcript follows when the speech row completes. When the speech engine is switched off for the cell, the cell creates no speech row, as today. Reconciliation creates no second `speech` row for a recording that has one in `pending` or `running`.
 
 ### D4. Completion: the cell renders, then publishes once
 
@@ -69,7 +68,7 @@ A completion carries the item, its `revision` and the original's SHA-256 that th
 - A SHA-256 that differs from the sidecar's `binary_sha256` answers `original_changed`.
 - The cell validates the payload against a schema with bounds. Segment count and text bytes scale with the recording's duration, every timestamp lies within it, and the body is at most 32 MiB.
 - The cell renders the transcript, speaker labels and timed text with the merge from `extract._diarize`. This change extracts that merge into one pure function, so in-cell and remote results go through the same code. The cell records the rendered payload with `record_result`, together with the sidecar hash captured at claim time. The parent publishes it with the existing stale-input check.
-- The cell keeps a receipt per accepted completion: the item, revision and result digest, for 30 days. A repeat answers `already_completed` with that digest and no second publication.
+- `finalize_result` deletes the row after publication, so the cell keeps a receipt per accepted completion: the recording, revision and result digest, for 30 days. A repeat answers `already_completed` with that digest and no second publication.
 
 *Alternative rejected:* the speech worker uploads rendered text. That puts a second copy of the merge, labelling and timed rendering on every speech worker.
 
@@ -122,7 +121,7 @@ The command reuses the personal install's backends (`FasterWhisperBackend`, the 
 
 ### D10. Diarisation on CPU: personal installs yes, Cloud cells no
 
-A personal install diarises on CPU through the diarizer sidecar. pyannote 3.1 on CPU runs at RTF 1.13 to 1.26, about 80 times slower than on a GPU, with a 2.9 GiB peak.
+A personal install diarises on CPU through the diarizer sidecar. Two measurements bound its cost. The `diarization-cpu-sidecar` acceptance measured about 23 times the GPU time on one recording (18 minutes against 47 seconds). The ONNX diarisation evaluation of 2026-11-01 measured RTF 1.13 to 1.26 on CPU, against RTF 0.015 on a GPU for a different, longer call, about 80 times. Both peak near 2.9 GiB.
 
 A Cloud cell cannot run it:
 - The image has no PyTorch runtime, and a build gate keeps it that way, under the no-PyTorch contract in `add-cloud-multimodal-processing` design.md. pyannote 3.1 needs PyTorch.
@@ -142,6 +141,46 @@ Each claim runs one indexed query over the speech items, by state and expiry, bo
 
 The repository records no load target for Cloud cells, and this change reports that as debt. It sizes for one cell with 10,000 pending speech items and four speech workers.
 
+### D13. Transcription first, speaker labels optional
+
+Transcription is the product's first job. Speaker labels are optional per cell and per upload, through the existing per-upload label choice. A speech row whose job asks for no labels skips diarisation and embeddings, and completes with segments only. The speech worker claims rows in ledger order. Each row runs diarisation only when its job asks for labels and its track holds more than one voice (D14).
+
+### D14. Multitrack recordings
+
+A recording can carry its voices on separate tracks. Speech handles three sources of tracks:
+1. A container with several audio streams. Each stream is a track.
+2. One stream whose channels are independent microphones, such as a wireless kit recording each transmitter to its own channel. Channels are treated as tracks only when the upload, the owner or the agent says so, or the device's own metadata says so. Otherwise a multi-channel stream is one mixed track, as today. No measurement of the audio decides this.
+3. Several files from one session, such as two transmitters that each record their own file. An agent or the owner groups them as one session with a governed operation that names each file's track. When the files' device metadata carries a shared start time or timecode, the operation uses it to align them. Otherwise they start together.
+
+Each track is transcribed on its own. The transcript merges the tracks' segments by time and labels each turn with its track's speaker name. That name comes from the device or track metadata, or from the owner or agent. A track that holds several voices, such as one room microphone at a wedding, is also diarised within the track when the job asks for labels, and its turns read "<track name>: Speaker A". A track with one voice is never diarised.
+
+Multitrack applies wherever speech runs: in a personal install, in a cell, and on a speech worker. The payload of D4 carries segments and turns per track.
+
+### D15. Naming speakers after the fact
+
+An agent-facing operation names the speakers of one recording, for example "Speaker B is the bride". It takes the recording and a mapping from current labels to names, and rewrites that recording's transcript labels through the governed writer. It is the agent's way to help Evermatter understand who spoke, when the person tells the agent.
+
+When the recording's per-label embedding is available, the operation can also keep the voice: it enrols or updates a voice profile with that embedding, so later recordings are named automatically. That uses the existing voice-profile store and its rules (`speaker-diarization`). On Cloud, the cell keeps a recording's per-label embeddings only while the owner has naming on, and only to support this operation.
+
+### D16. A speech worker on a customer's own machine
+
+The speech worker runs on Windows, macOS and Linux, with or without a GPU. Without a GPU it transcribes on CPU and skips diarisation unless the owner turns it on. Setup suits a non-technical person:
+1. Home offers "Use this computer for transcription" with one command per system to copy, or a downloadable installer.
+2. The command installs the worker and opens a browser to approve the device with a sign-in code. Nobody pastes a token.
+3. The worker installs as a background service for the signed-in user and starts at login.
+
+Linux and WSL ship first, then macOS and Windows native, in that order.
+
+### D17. Yield the GPU to the owner
+
+The owner's GPU machine is often also the machine they play games or edit video on. The speech worker yields:
+- It pauses before claiming, and between chunks of a job, while another process uses the GPU above a configured share, or while a full-screen application has focus on systems that report it.
+- It resumes when the machine is idle again.
+- The owner can set hours when the worker runs, and pause it from its status command or the tray.
+- While paused it keeps its lease for up to the lease's length. After that it releases the item, so another speech worker or the fallback can take it.
+
+The worker runs at the lowest CPU and I/O priority the system offers.
+
 ## Risks / Trade-offs
 
 - **The speech worker sees plaintext originals.** It runs on the owner's own machine under the owner's credential, the same trust as their local vault. A platform pool changes this and needs its own decision.
@@ -156,9 +195,9 @@ The repository records no load target for Cloud cells, and this change reports t
 2. Archive `add-cloud-multimodal-processing` first. This change modifies its requirement "A Cloud cell extracts media inside the cell".
 3. Rehearse remote speech in the Cloud rehearsal with a CPU-sized model.
 4. Under an operator-approved live change, set the owner's cell to `remote` with a fallback. Run the speech worker on the owner's GPU machine.
-5. Undo: set the cell back to `in_cell`. The cell drops pending speech items into in-cell speech jobs. Published transcripts stay.
+5. Undo: set the cell back to `in_cell`. The cell ends every live lease at once, so the next heartbeat or completion answers `lease_lost`, and the speech worker deletes its copies. Pending and formerly leased `speech` rows then run in the media worker. Published transcripts stay.
 
 ## Open Questions
 
 1. The claim's wait bound, after measuring the gateway's idle limit on the claim path (task 2.1).
-2. When Windows-native and macOS service installers matter.
+2. Which recorder metadata fields identify a transmitter and a shared start time, per device family (task 5.2 records them).

@@ -14,21 +14,27 @@ This change lets the owner's own GPU machine do the speech work for their Cloud 
 - **A narrow, revocable credential.** A new OAuth scope, `exomem.speech`, reaches only the speech routes. The gateway signs those requests with a new proof purpose, so a cell built before this change refuses them. Home lists and revokes speech authorizations.
 - **`evermatter speech-worker`.** One command sets up the owner's GPU machine (Linux or WSL first) and installs a user service. The service claims, downloads with verification, transcribes, labels speakers, completes, and deletes its local copy.
 - **Status.** Status shows waiting speech items, the last speech worker contact, and fallback transcripts.
+- **Transcription first.** Speaker labels stay optional per cell and per upload; a job without labels skips diarisation.
+- **Multitrack recordings.** Separate audio streams, channels marked as separate microphones, and separate files grouped as one session are transcribed per track and labelled by track. A track with several voices is also diarised within the track.
+- **Naming speakers after the fact.** An agent-facing operation renames a recording's speaker labels ("Speaker B is the bride") and can keep the voice for later recordings.
+- **Any owner's machine.** The speech worker runs on Windows, macOS and Linux, with or without a GPU, installs from one command or installer with a sign-in code, and yields the GPU while the owner plays or works.
 - **Principal-neutral contract.** A later platform-operated speech worker would be one more principal under the same contract. This change builds none.
 
 ## Capabilities
 
 ### New Capabilities
 - `remote-speech-worker`: the speech work contract, the worker credential, the owner's worker command and the worker status.
+- `multitrack-speech`: per-track transcription, track labels, session grouping and diarisation within a track.
 
 ### Modified Capabilities
+- `speaker-diarization`: naming a recording's speakers after the fact, and keeping the voice.
 - `cloud-multimodal-processing` (from `add-cloud-multimodal-processing`, which archives first): a Cloud cell in remote speech hands its speech stage to the owner's authorized speech worker.
 
 ## Impact
 
-- Cell: a speech item table with leases, `/speech/*` routes behind a new `speech` proof purpose, a pure merge function extracted from `extract._diarize`, completion receipts, status fields.
+- Cell: `speech` rows with leases in the job ledger, `/speech/*` routes behind a new `speech` proof purpose, a pure merge function extracted from `extract._diarize`, completion receipts, status fields.
 - Substrate: gateway routes, the `speech` proof purpose and scope admission for `/speech/*` only; the OAuth scope; Home's authorization list.
 - cellctl and chart: per-cell `speech_mode` and `remote_speech_fallback_after` through the engine settings.
 - CLI: `evermatter speech-worker setup|run|status`.
 - Cloud rehearsal: a remote speech scenario with a CPU-sized model.
-- No change to personal installs, which keep running speech in-process.
+- Personal installs keep running speech in-process, and gain multitrack and naming after the fact.
