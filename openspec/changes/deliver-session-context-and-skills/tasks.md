@@ -13,11 +13,9 @@
 - [x] 2.4 Project admitted skill pages as `kind: "skill"` method items with the full description; verify against a real turn that names no skill.
 - [x] 2.5 Keep a skill's other files one `read_page` away by the paths its body names, with no directory listing: a listing that is both bounded and blind to hidden pages needs an indexed folder read the catalogue does not have.
 - [x] 2.6 Render the catalogue and skill methods in the start-of-turn hook and pass the client's native skill names; verify the hook output for a Claude Code and a Codex home.
-- [x] 2.7 Prove recall latency before and after on the recall latency instrument.
-  - Instrument: `activate_context` duration on the installed personal service, served and abstained outcomes, latency boundary `activation-leaf-v1`, over one UTC day each.
-  - Before the catalogue change (#3098), 2026-11-22 13:16 to 2026-11-23 13:16, n=533: p50 5873 ms, p95 67914 ms, p99 127692 ms, max 345566 ms.
-  - After, on the release that carries it, 2026-11-24 11:44 to 2026-11-25 11:05, n=630: p50 2009 ms, p95 30652 ms, p99 60039 ms, max 74089 ms.
-  - The two days carried different traffic, so the drop is not attributed to #3098 alone; the claim is that adding the catalogue did not slow recall.
+- [ ] 2.7 Prove recall latency before and after on the recall latency instrument.
+  - Interim, from the installed service's activation log on release 0.201.0 (2026-11-24 11:44 to 2026-11-25 11:05 UTC, served and abstained, boundary `activation-leaf-v1`): the skills and catalogue stages cost a median 15 ms and 32 ms of a 222 ms hook activation (n=351, a median 28% of the call), and 50 ms and 38 ms of a 7859 ms MCP activation (n=279, about 1%).
+  - Still open: a paired before and after on the recall latency instrument. Whole-call percentiles from live logs do not answer this task, because the traffic mix between hook and MCP calls changes from day to day.
 
 ## 3. Deliver context on every turn
 
@@ -36,7 +34,7 @@
 - [x] 4.1 Run real-model cases: a skill-shaped task in a client without native skills loads the vault skill before acting; an unrelated task loads none.
   - GPT actor, client without native skills. The skill-shaped task read the vault skill before drafting in 5 of 5 runs. The unrelated task and the near-miss task loaded no skill in 0 of 8 runs. On the three-page fixture, the arm before the skills block also found the skill, so these cases prove the behaviour but do not separate the arms.
 - [x] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
-  - The catalogue shipped through an independent review, PR and main CI, the merge queue and release 0.201.0. A Full-only budget failure after merge was fixed forward before the release cut.
+  - The catalogue shipped through an independent review, its PR checks and release 0.201.0. A Full-only budget failure after merge was fixed forward, and the Full run on the release-cut commit passed.
 - [x] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
   - Installed 0.201.0, 2026-11-24: a recall in a new conversation, on a turn that matches a vault skill, returned `skills` ready with that skill listed, its `advice`, and `next_action` `skill_check`; reading the listed ref returned the whole skill. The first recall after the install abstained after 302 s while the index warmed (readiness overran its 50 s budget); the retry was served.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
