@@ -235,7 +235,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "MCP server for your Evermatter Cloud account or your own Evermatter server. "
                 "This edition adds lifecycle hooks and skills and bundles no MCP server, so "
                 "it uses the Evermatter connection your account already has. Install the "
-                "full Evermatter plugin instead if you have not connected Evermatter. "
+                "Evermatter Cloud plugin instead if you have not connected Evermatter. "
             )
             + "Then chat normally. "
             "When something is worth keeping, ask Evermatter to remember it; in a new chat, "
@@ -306,8 +306,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "inside the versioned package. Hook logs contain metadata only, "
                     "not prompt or assistant snippets. Hooks do not execute in Claude Chat. "
                     "By default the capture check runs after a turn that lands work (a commit, "
-                    "push, merge, pull request or a file handed over). To also check after a "
-                    "substantial reply, at most once every five minutes, set "
+                    "push, merge, pull request or a file handed over). To check after each "
+                    "substantial reply instead, within a short per-session cooldown, set "
                     "`EXOMEM_PROMINENCE=maximal` in the session's environment.\n"
                 )
         if provider == "claude":
