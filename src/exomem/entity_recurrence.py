@@ -50,7 +50,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType, SimpleNamespace
 from typing import Any
 
-from . import markdown_relations
+from . import foreground_priority, markdown_relations
 from .entity_candidates import _aliases as alias_values
 from .entity_candidates import identity_key
 from .entity_types import EntityTypeRegistry
@@ -1616,6 +1616,12 @@ def collect_pages(
     """The full sweep: `collect_evidence` over pages the caller has already parsed."""
     cues = cue_grammar(entity_types)
     by_path = {str(page.rel_path): page for page in pages}
+
+    def complete(head: PageEvidence) -> PageEvidence:
+        # One unit per eligible page. The sweep holds only pages it already read, so a review pass may wait here.
+        foreground_priority.yield_in_bulk()
+        return page_evidence(by_path[head.path], cues=cues, keys=False)
+
     return collect_evidence(
         [page_head(page) for page in by_path.values()],
         vault_root=vault_root,
@@ -1625,7 +1631,7 @@ def collect_pages(
         indexable=indexable,
         make_resolver=make_resolver,
         # The connection check reaches few pages, so only those read their link keys.
-        complete=lambda head: page_evidence(by_path[head.path], cues=cues, keys=False),
+        complete=complete,
         attachment_probe=attachment_probe,
         registry=registry,
         connection=lambda evidence: connection_keys(by_path[evidence.path], evidence),
