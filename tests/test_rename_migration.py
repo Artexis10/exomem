@@ -40,13 +40,25 @@ class FakeClaude:
     """Stands in for `claude mcp remove` and `claude mcp add-json` over a `.claude.json`.
 
     The user scope is the top-level `mcpServers`; the local scope is the one under `projects`
-    for ``project``.
+    for ``project``. ``tokens`` names the servers that hold a stored sign-in; like Claude Code
+    2.1.332, `remove` deletes the sign-in of the http server it removes, and the config files
+    do not hold it, so restoring them cannot bring it back.
     """
 
-    def __init__(self, config: Path, project: Path, *, fail_add: bool = False) -> None:
+    def __init__(
+        self,
+        config: Path,
+        project: Path,
+        *,
+        fail_add: bool = False,
+        fail_remove: bool = False,
+        tokens: tuple[str, ...] = (),
+    ) -> None:
         self.config = config
         self.project = project
         self.fail_add = fail_add
+        self.fail_remove = fail_remove
+        self.tokens = set(tokens)
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
@@ -59,7 +71,10 @@ class FakeClaude:
             else data["mcpServers"]
         )
         if argv[2] == "remove":
-            del servers[argv[3]]
+            if self.fail_remove:
+                return subprocess.CompletedProcess(argv, 1, "", "remove refused")
+            if "url" in servers.pop(argv[3]):
+                self.tokens.discard(argv[3])
         elif argv[2] == "add-json":
             if self.fail_add:
                 return subprocess.CompletedProcess(argv, 1, "", "add refused")
@@ -167,7 +182,7 @@ def test_migrate_renames_a_claude_url_server_and_prints_the_sign_in_step(tmp_pat
     code, out = install.migrate(claude)
 
     assert code == 0
-    assert "sign in again: run /mcp in Claude Code and choose evermatter" in out
+    assert "If `evermatter` shows as not connected, run /mcp in Claude Code and choose evermatter." in out
     assert "codex mcp login" not in out  # the Codex entry here is stdio: no sign-in to renew
     servers = json.loads(install.config.read_text(encoding="utf-8"))["mcpServers"]
     assert servers["evermatter"] == HTTP
@@ -180,7 +195,7 @@ def test_migrate_renames_a_codex_url_server_and_prints_the_sign_in_step(tmp_path
     code, out = install.migrate()
 
     assert code == 0
-    assert "sign in again: codex mcp login evermatter" in out
+    assert "If `evermatter` shows as not connected, codex mcp login evermatter." in out
     assert "run /mcp" not in out  # the Claude entry here is stdio: no sign-in to renew
     config = tomllib.loads((install.codex_home / "config.toml").read_text(encoding="utf-8"))
     assert config["mcp_servers"] == {"evermatter": {"url": "https://memory.example/mcp"}}
@@ -197,7 +212,7 @@ def test_migrate_keeps_a_claude_cloud_url_and_renames_a_url_that_is_not_the_clou
 
     assert code == 0
     assert CLOUD_KEPT in out
-    assert out.count("sign in again: run /mcp in Claude Code") == 1  # the local scope only
+    assert out.count("shows as not connected, run /mcp in Claude Code") == 1  # the local scope only
     config = json.loads(install.config.read_text(encoding="utf-8"))
     assert config["mcpServers"]["exomem"] == CLOUD_HTTP
     assert config["projects"][str(install.project)]["mcpServers"] == {"evermatter": HTTP}
@@ -256,14 +271,31 @@ def test_migrate_reports_a_scope_with_both_keys_and_other_projects_it_did_not_to
     assert "/elsewhere" in out and "other project(s) keep a local `exomem` registration" in out
 
 
-def test_a_refused_claude_add_restores_the_registration_the_user_had(tmp_path: Path) -> None:
-    install = Install(tmp_path)
+def test_a_refused_claude_add_removes_nothing_so_the_stored_sign_in_survives(
+    tmp_path: Path,
+) -> None:
+    install = Install(tmp_path, claude=HTTP)
     before = install.config.read_bytes()
+    claude = FakeClaude(install.config, install.project, fail_add=True, tokens=("exomem",))
 
-    code, out = install.migrate(FakeClaude(install.config, install.project, fail_add=True))
+    code, out = install.migrate(claude)
 
     assert code == 1
     assert install.config.read_bytes() == before
+    assert claude.tokens == {"exomem"}  # `mcp remove` would have deleted it
+    assert "restored the previous registration" in out
+
+
+def test_a_refused_claude_remove_after_a_good_add_restores_the_files(tmp_path: Path) -> None:
+    install = Install(tmp_path, claude=HTTP)
+    before = install.config.read_bytes()
+    claude = FakeClaude(install.config, install.project, fail_remove=True, tokens=("exomem",))
+
+    code, out = install.migrate(claude)
+
+    assert code == 1
+    assert install.config.read_bytes() == before  # the added `evermatter` key is gone again
+    assert claude.tokens == {"exomem"}
     assert "restored the previous registration" in out
 
 

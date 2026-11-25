@@ -33,6 +33,7 @@ MESSAGE = (
 def notice(environ: dict[str, str]) -> str | None:
     """Return the notice to show now, or None. Writes the marker when it returns the notice."""
     # Claude Code reserves the `sdk` prefix for its SDK entry points (`sdk-cli` is `-p`), so a prefix test is sound.
+    # Wrong firing costs little: an SDK-built interface never shows this notice, but `/mcp` still says it needs sign-in.
     if environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk-"):
         return None  # No one reads a headless run's message, and it must not use up the marker.
     if not environ.get("CLAUDE_PLUGIN_OPTION_MCP_URL", "").strip():

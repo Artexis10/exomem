@@ -20,6 +20,7 @@ import pytest
 
 from exomem import client_config
 from exomem import package_skills as package_module
+from exomem._hooks import evermatter_sign_in_notice as sign_in_notice
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "claude-code"
@@ -270,6 +271,28 @@ def test_sign_in_notice_waits_out_a_headless_run_for_a_session_a_person_reads(
 
     assert headless == ""
     assert "systemMessage" in interactive  # the headless run left no marker behind
+
+
+def test_the_notice_wrapper_starts_no_interpreter_once_the_notice_was_shown(tmp_path: Path) -> None:
+    probe = tmp_path / "bin"
+    probe.mkdir()
+    started = tmp_path / "interpreter-started"
+    for name in ("python3", "python"):
+        (probe / name).write_text(f"#!/bin/sh\ntouch '{started}'\n", encoding="utf-8")
+        (probe / name).chmod(0o755)
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / sign_in_notice.MARKER).write_text("shown\n", encoding="utf-8")
+
+    out = _run_sign_in_notice(
+        tmp_path,
+        CLAUDE_PLUGIN_OPTION_MCP_URL="https://memory.example/mcp",
+        CLAUDE_PLUGIN_DATA=str(data),
+        PATH=f"{probe}{os.pathsep}{os.environ['PATH']}",
+    )
+
+    assert out == ""
+    assert not started.exists()
 
 
 @needs_python

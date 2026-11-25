@@ -688,8 +688,8 @@ def test_an_enabled_plugin_without_an_mcp_server_does_not_block_setup(
         setup_wizard.doctor_module, "doctor", lambda **kw: SimpleNamespace(success=True, checks=[])
     )
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
-    hooks_only = [{"id": "evermatter-hooks@exomem", "enabled": True}]
-    recorder = Recorder(results={"plugin list --json": (0, json.dumps(hooks_only), "")})
+    self_hosted_only = [{"id": "evermatter-self-hosted@exomem", "enabled": True}]
+    recorder = Recorder(results={"plugin list --json": (0, json.dumps(self_hosted_only), "")})
 
     _code, out = _setup(vault, home, recorder, mcp_url="https://kb.example.com/mcp")
 

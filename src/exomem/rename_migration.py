@@ -4,7 +4,7 @@ Every reader accepts both names, so an install made before the rename keeps work
 nothing here runs unasked. The user runs it to adopt the new names. It changes only what
 setup wrote: the server key in Claude Code and Codex, the managed instruction block and the
 explicit checkpoint bindings. Both clients store a URL (HTTP) server's sign-in under its key, so
-renaming one signs the user out once; the command prints the sign-in step for each. A URL that
+renaming one can sign the user out once; the command prints the sign-in step for each. A URL that
 points at Evermatter Cloud keeps its key, because the Cloud plugin's address changes in a later
 release and one rename now would sign that user in twice. A rule or hook the user wrote stays as
 it is and is listed.
@@ -27,6 +27,12 @@ _CLOUD_KEPT = (
     "kept `{old}` for {url}: it moves with the Cloud plugin's address change, "
     "so you sign in once"
 )
+
+
+def _sign_in_line(client: str) -> str:
+    """The step for a renamed URL server. Its sign-in is OAuth only when the server asks for one,
+    which the command cannot tell, so the line is conditional."""
+    return f"  If `{client_config.SERVER_NAME}` shows as not connected, {client_config.SIGN_IN_STEPS[client]}."
 
 
 def _migrate_claude_servers(
@@ -89,9 +95,11 @@ def _migrate_claude_servers(
         backup(file)
         payload = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         failure = ""
+        # Add before remove: `claude mcp remove` deletes an http or sse server's stored sign-in, and
+        # restoring the two files cannot bring that back. A refused add then removes nothing.
         for argv in (
-            [claude, "mcp", "remove", old_key, "--scope", scope],
             [claude, "mcp", "add-json", "--scope", scope, new_key, payload],
+            [claude, "mcp", "remove", old_key, "--scope", scope],
         ):
             try:
                 result = run_fn(argv, **run_kwargs)
@@ -112,7 +120,7 @@ def _migrate_claude_servers(
             continue
         report(f"claude-{scope}", f"[done] renamed to `{new_key}` in {file.name}")
         if "url" in entry:
-            print_fn(f"  sign in again: {client_config.SIGN_IN_STEPS['claude']}")
+            print_fn(_sign_in_line("claude"))
         if scope == "project":
             print_fn("  Claude Code asks you to approve the renamed project server again.")
 
@@ -162,7 +170,7 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         return
     setup_wizard._report_file_outcome("codex", outcome, path=path, print_fn=print_fn, report=report)
     if outcome.get("url"):
-        print_fn(f"  sign in again: {client_config.SIGN_IN_STEPS['codex']}")
+        print_fn(_sign_in_line("codex"))
 
 
 def _migrate_instruction_blocks(*, claude_home: Path, codex_home: Path, print_fn, report) -> None:

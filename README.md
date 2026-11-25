@@ -126,7 +126,7 @@ evermatter setup --migrate
 ```
 
 1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex, for stdio and URL servers.
-2. For each URL server it renames, setup prints the sign-in step. Both clients store a sign-in under the server name, so you sign in once.
+2. For each URL server it renames, setup prints the sign-in step to use if the server shows as not connected. Both clients store a sign-in under the server name, so you sign in once.
    A URL server that points at Evermatter Cloud keeps its `exomem` key. It moves with the Cloud plugin's address change, so you sign in once.
 3. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
 4. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
@@ -138,12 +138,14 @@ the one for the current directory and lists the others. Run it in each of those
 directories. A new install registers the `evermatter` key from the start, because
 a new registration has no stored sign-in.
 
-After the rename, sign in again:
+After the rename, if a server shows as not connected, sign in:
 
 - In Claude Code, run `/mcp` and choose `evermatter`.
 - In Codex, run `codex mcp login evermatter`.
 
-The old token stays valid, and the hooks keep captures in a queue until you sign in.
+The old token stays valid on the server, and the hooks keep captures in a queue until you sign in.
+`claude mcp remove` deletes Claude Code's local copy of that token, so a restore from the
+`.exomem-bak` backup also needs a new sign-in.
 
 Setup never edits a permission rule or hook that you wrote. A rule that names
 `mcp__exomem__*` stops matching for a server that the command renamed. Change it to
