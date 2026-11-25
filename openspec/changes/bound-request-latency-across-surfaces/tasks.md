@@ -163,6 +163,8 @@
   - Verify: wall and own-CPU p50 and p90 of `recall.dataset_values` in `search_memory`, split by whether a write landed since the previous search, with bootstrap intervals.
 - [x] 3.27 Keep the page statistics base for a vault-sized corpus: raise `_ADMITTED_BASE_TERMS_MAX` to 12 million references and add `_ADMITTED_BASE_WORDS_MAX` (design decision 11).
   - Verify: on a synthetic 15,600-page corpus of 4.5 million references with about 62,000 units, an activation after a write costs less CPU with the base kept than past the old bound; a corpus past the word bound keeps no base and ranks exactly (`tests/test_working_set_carry_bounds.py`).
+- [x] 3.28 Make a rebuild after a write cost the change, not the vocabulary or the unit corpus: keep ordered counts and their idf sum per introducer, patch the unit merge from the previous build of the same admitted set, and read a changed page's text by its key (design decision 11).
+  - Verify: on a synthetic 15,600-page corpus of about 232,000 words and 62,000 units, the request-thread CPU that a write adds to the next activation falls (bench); the idf floor equals `rank_bm25` to the last bit over seeded edits; each seeded unit build equals a store that kept nothing (`tests/test_working_set_carry_bounds.py`, `tests/test_semantic_unit_index_freshness.py`).
 
 ## 4. Verify installed behavior and deliver
 

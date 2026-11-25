@@ -66,6 +66,7 @@ import hashlib
 import itertools
 import json
 import logging
+import operator
 import os
 import sqlite3
 import sys
@@ -3448,11 +3449,13 @@ class _AdmittedStatisticsEntry:
 #: 15,600-page corpus of 4.5 million references (2026-11-24). On synthetic Zipf corpora a base holds about 88 MiB
 #: at 3.4 million references and 218,000 words, and about 196 MiB at 10.6 million references and 465,000 words.
 #: Under both bounds the worst case, a uniform vocabulary of a million words, holds about 290 MiB for one base and
-#: its statistics entry, and about 540 MiB for four. A 17,000-page live vault held 3.7 million references.
+#: its statistics entry, and about 540 MiB for four bases of one scope, which share page entries. A 17,000-page live
+#: vault held 3.7 million references.
 _ADMITTED_BASE_TERMS_MAX = 12_000_000
 #: Words a kept base may count. Its introducer maps (`_DocumentFrequency`) grow with the vocabulary, not with the
 #: references, so a corpus whose text is mostly unique tokens, such as hashes or identifiers, keeps no base.
-#: The 17,000-page live vault held 244,000 distinct stemmed words at its 3.7 million references (2026-11-24).
+#: The 17,000-page live vault's KB scope held 244,000 distinct stemmed words at its 3.7 million references
+#: (2026-11-24).
 _ADMITTED_BASE_WORDS_MAX = 1_000_000
 #: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
 #: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
@@ -3493,11 +3496,11 @@ class _AdmittedBase:
 _UNIT_BASE_BYTES_MAX = 64 << 20
 _UNIT_BYTES = 370
 _TOKEN_BYTES = 8
-#: A counted unit corpus (`_UnitCorpus`) adds about this much per ref (a slot in its token, term and introduced
-#: mappings, and a distinct-term tuple for a unit that repeats a token) and per word of its vocabulary (a slot in
-#: its frequency and introducer mappings and in an introduced tuple).
+#: A counted unit corpus (`_UnitCorpus`) adds about this much per ref (a slot in its token, term, introduced and
+#: ordered-count mappings, and a distinct-term tuple for a unit that repeats a token) and per word of its
+#: vocabulary (a slot in its frequency and introducer mappings and in an introduced and an ordered-count tuple).
 _REF_BYTES = 160
-_WORD_BYTES = 120
+_WORD_BYTES = 128
 
 
 def _keeps_interpretation(view: Any, path: str) -> bool:
@@ -3526,10 +3529,37 @@ class _UnitContribution(NamedTuple):
 
 
 class _ParentUnits(NamedTuple):
-    """One parent's units as one revision of the parent held them."""
+    """One parent's units as one revision of the parent held them, and their `_units_bytes`."""
 
     revision: str
     units: tuple[_UnitContribution, ...]
+    size: int
+
+
+def _parent_units(revision: str, units: tuple[_UnitContribution, ...]) -> _ParentUnits:
+    return _ParentUnits(revision, units, _units_bytes(units))
+
+
+@dataclass(frozen=True, slots=True)
+class _UnitMerge:
+    """What one build merged its parents into, so the next build of the same admitted set merges only the parents
+    that moved: the inputs it read (`digest` of the admitted set, the interpretations' `dependency`, each parent's
+    revision and units), and each ref's winning tokens, first occurrence and every occurrence.
+
+    `corpus`, `representatives` and `occurrences` are that build's own, which its statistics entry also holds while
+    `_admitted_statistics` keeps it. `revisions` is the merge's alone, and after a stopped or owner-only build the
+    merge also keeps the parents it read. At 62,400 units over 15,600 parents, `revisions`, `representatives` and
+    `occurrences` held about 12.5 MiB on synthetic data (2026-11-24). `_UNIT_BASE_BYTES_MAX` does not count it; one
+    merge per scope bounds it.
+    """
+
+    digest: str
+    dependency: Any
+    revisions: Mapping[str, str]
+    parents: Mapping[str, _ParentUnits]
+    corpus: Mapping[str, tuple[str, ...]]
+    representatives: Mapping[int, str]
+    occurrences: Mapping[str, tuple[tuple[int, str, str], ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -3547,6 +3577,8 @@ class _UnitBase:
     #: The unit corpus of the scope's last build whose parents all entered `parents`, so the next build counts
     #: only the refs whose winning tokens moved. A build that read an owner-only parent keeps the earlier one.
     counted: _UnitCorpus | None = None
+    #: The same build's merge, kept and dropped with `counted`.
+    merged: _UnitMerge | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -3567,9 +3599,12 @@ def _distinct(tokens: tuple[str, ...]) -> tuple[str, ...]:
 
 
 def _unit_corpus_statistics(
-    corpus: Mapping[str, tuple[str, ...]], base: _UnitCorpus | None
+    corpus: Mapping[str, tuple[str, ...]], base: _UnitCorpus | None, changed: Set[str] | None = None,
 ) -> tuple[Any, _UnitCorpus]:
-    """`CorpusStatistics.of(corpus)` (ref -> winning tokens), counting only the refs whose tokens differ from the base's."""
+    """`CorpusStatistics.of(corpus)` (ref -> winning tokens), counting only the refs whose tokens differ from the base's.
+
+    `changed`, when given, holds every ref whose tokens may differ from the base's, so no other ref is compared.
+    """
     from . import bm25 as bm25_module
 
     if base is None:
@@ -3577,9 +3612,15 @@ def _unit_corpus_statistics(
         counted = _document_frequency(terms, None, {}, ())
     else:
         terms = dict(base.terms)
-        left = {ref: terms.pop(ref) for ref in base.tokens.keys() - corpus.keys()}
+        if changed is None:
+            gone: Iterable[str] = base.tokens.keys() - corpus.keys()
+            compared: Iterable[tuple[str, tuple[str, ...]]] = corpus.items()
+        else:
+            gone = [ref for ref in changed if ref not in corpus and ref in base.tokens]
+            compared = [(ref, corpus[ref]) for ref in changed if ref in corpus]
+        left = {ref: terms.pop(ref) for ref in gone}
         entered = []
-        for ref, tokens in corpus.items():
+        for ref, tokens in compared:
             if base.tokens.get(ref) != tokens:
                 if ref in terms:
                     left[ref] = terms[ref]
@@ -3587,9 +3628,56 @@ def _unit_corpus_statistics(
                 entered.append(ref)
         counted = _document_frequency(terms, base.counted, left, entered)
     statistics = bm25_module.CorpusStatistics.from_counts(
-        len(corpus), sum(map(len, corpus.values())), counted.frequency
+        len(corpus), sum(map(len, corpus.values())), counted.frequency, counted.terms_sum
     )
     return statistics, _UnitCorpus(corpus, terms, counted)
+
+
+def _patched_merge(
+    merged: _UnitMerge, revisions: Mapping[str, str], held: Mapping[str, _ParentUnits],
+    fresh: Mapping[str, tuple[_UnitContribution, ...]], reread: Set[str],
+) -> tuple[dict[str, tuple[str, ...]], dict[int, str], dict[str, tuple[tuple[int, str, str], ...]], set[str]]:
+    """The merge of `revisions`' parents, from an earlier merge of the same admitted set that differs only in the
+    parents whose revision moved: each ref's winning tokens, first occurrences, every occurrence, and the refs whose
+    occurrences moved. It equals a merge of every parent in `(parent path, unit order)`."""
+
+    def units_now(path: str) -> tuple[_UnitContribution, ...]:
+        return fresh.get(path, ()) if path in reread else held[path].units
+
+    tokens_of: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    moved = {path for path, _revision in revisions.items() ^ merged.revisions.items()}
+    corpus = dict(merged.corpus)
+    representatives = dict(merged.representatives)
+    occurrences = dict(merged.occurrences)
+    entering: dict[str, list[tuple[int, str, str]]] = {}
+    changed: set[str] = set()
+    for path in moved:
+        # A parent the merge read but did not keep, an owner-only one that emitted no unit, added no unit.
+        if (parent := merged.parents.get(path)) is not None and path in merged.revisions:
+            changed.update(unit.ref for unit in parent.units)
+        if path in revisions:
+            for unit in units_now(path):
+                changed.add(unit.ref)
+                entering.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+    for ref in changed:
+        earlier = merged.occurrences.get(ref, ())
+        if earlier and representatives.get(earlier[0][0]) == ref:
+            del representatives[earlier[0][0]]
+        # Occurrences run in parent path order, each parent's in its own unit order: a stable sort by path keeps it.
+        combined = [entry for entry in earlier if entry[1] not in moved] + entering.get(ref, [])
+        combined.sort(key=operator.itemgetter(1))
+        if not combined:
+            corpus.pop(ref, None)
+            occurrences.pop(ref, None)
+            continue
+        occurrences[ref] = tuple(combined)
+        rowid, path, _key = combined[0]
+        representatives[rowid] = ref
+        if (tokens := tokens_of.get(path)) is None:
+            tokens = tokens_of[path] = {unit.rowid: unit.tokens for unit in units_now(path)}
+        corpus[ref] = tokens[rowid]
+    return corpus, representatives, occurrences, changed
 
 
 def _unit_corpus_bytes(counted: _UnitCorpus | None) -> int:
@@ -3628,17 +3716,23 @@ def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
 
 @dataclass(frozen=True, slots=True)
 class _DocumentFrequency:
-    """A corpus's document frequencies in the order `CorpusStatistics.of` gives, and what fixes that order.
+    """A corpus's document frequencies, the order `CorpusStatistics.of` meets its words in, and their idf sum.
 
     The first document, in sorted key order, that holds a word introduces it, and `of` meets the words in the
     order of their introducers, each introducer's words in its own term order. So `introduced` (key -> the words
-    that document introduces) read in key order is the order of `frequency`, and a change places again only the
-    words that the changed documents hold or introduced.
+    that document introduces) read in key order is the order the idf floor sums in, and a change places again
+    only the words that the changed documents hold or introduced. `frequency` is for lookup: its own order is
+    not that order once a change moved a word.
     """
 
     frequency: dict[str, int]
     introducer: Mapping[str, str]
     introduced: Mapping[str, tuple[str, ...]]
+    #: Each introducer's counts aligned with its `introduced` words, so the counts read in key order without a
+    #: lookup a word, and the `bm25.idf_sum` of their terms in that order: `CorpusStatistics.from_counts`'s
+    #: `terms_sum`.
+    ordered: Mapping[str, tuple[int, ...]]
+    terms_sum: float
 
 
 def _first_seen(documents: Mapping[str, Sequence[str]], keys: Iterable[str]) -> tuple[Counter, dict]:
@@ -3660,7 +3754,7 @@ def _document_frequency(
     left: Mapping[str, Sequence[str]],
     entered: Iterable[str],
 ) -> _DocumentFrequency:
-    """The document counts of `documents` (key -> distinct terms), in the order `CorpusStatistics.of` gives.
+    """The document counts of `documents` (key -> distinct terms), and the order `CorpusStatistics.of` meets them in.
 
     With no base, every document is counted. With a base, `left` maps each document the base counted that is now
     gone or changed to the terms the base counted for it, and `entered` names each new or changed document; every
@@ -3668,14 +3762,18 @@ def _document_frequency(
     again. Usually the cost follows the change and the vocabulary; a word whose introducer left or dropped it
     sends one forward scan over the documents after that introducer, which can walk most of the corpus.
     """
+    pages = len(documents)
     if base is None:
         counts, introduced = _first_seen(documents, sorted(documents))
         introducer = {word: key for key, words in introduced.items() for word in words}
-        return _DocumentFrequency(dict(counts), introducer, introduced)
+        return _in_order(dict(counts), introducer, introduced, pages, None, ())
     entered = sorted(entered)
-    counts = Counter(base.frequency)
-    counts.subtract(itertools.chain.from_iterable(left.values()))
-    counts.update(itertools.chain.from_iterable(documents[key] for key in entered))
+    # Copied, not rebuilt: a copy of a vocabulary-sized mapping costs a fraction of inserting every word again.
+    counts = dict(base.frequency)
+    for word in itertools.chain.from_iterable(left.values()):
+        counts[word] -= 1
+    for word in itertools.chain.from_iterable(documents[key] for key in entered):
+        counts[word] = counts.get(word, 0) + 1
     _entered_counts, first_entered = _first_seen(documents, entered)
     candidates = {word: key for key, words in first_entered.items() for word in words}
     introducer = dict(base.introducer)
@@ -3728,8 +3826,50 @@ def _document_frequency(
             introduced[key] = words
         else:
             introduced.pop(key, None)
-    ordered_words = itertools.chain.from_iterable(map(introduced.__getitem__, sorted(introduced)))
-    return _DocumentFrequency({word: counts[word] for word in ordered_words}, introducer, introduced)
+    touched = set(itertools.chain.from_iterable(left.values()))
+    touched.update(itertools.chain.from_iterable(documents[key] for key in entered))
+    for word in touched:
+        # A word no document holds any more leaves the counts; its introducer left with it.
+        if not counts[word]:
+            del counts[word]
+    moved = losing | gaining | set(entered) | left.keys()
+    changed = (word for word in touched if counts.get(word) != base.frequency.get(word) and word in counts)
+    return _in_order(counts, introducer, introduced, pages, (base, moved), changed)
+
+
+def _in_order(
+    frequency: dict[str, int], introducer: Mapping[str, str], introduced: Mapping[str, tuple[str, ...]],
+    pages: int, earlier: tuple[_DocumentFrequency, set[str]] | None, changed: Iterable[str],
+) -> _DocumentFrequency:
+    """The counts with their order kept per introducer, and their idf sum. `earlier` is a base and the keys whose
+    introduced words moved since it; then only those keys and the `changed` words' counts are read again."""
+    from . import bm25 as bm25_module
+
+    if earlier is None:
+        ordered = {key: tuple(map(frequency.__getitem__, words)) for key, words in introduced.items()}
+    else:
+        base, moved = earlier
+        ordered = dict(base.ordered)
+        for key in moved:
+            if words := introduced.get(key):
+                ordered[key] = tuple(map(frequency.__getitem__, words))
+            else:
+                ordered.pop(key, None)
+        patched: dict[str, tuple[list[int], dict[str, int]]] = {}
+        for word in changed:
+            key = introducer[word]
+            if key in moved:
+                continue
+            if (found := patched.get(key)) is None:
+                found = patched[key] = (list(ordered[key]), {word: index for index, word in enumerate(introduced[key])})
+            block, place = found
+            block[place[word]] = frequency[word]
+        for key, (block, _place) in patched.items():
+            ordered[key] = tuple(block)
+    counts = itertools.chain.from_iterable(map(ordered.__getitem__, sorted(ordered)))
+    return _DocumentFrequency(
+        frequency, introducer, introduced, ordered, bm25_module.idf_sum(bm25_module.idf_terms(pages, counts))
+    )
 
 
 def _admitted_corpus(
@@ -3740,7 +3880,7 @@ def _admitted_corpus(
     A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
     and the word counts and their order move by exactly the pages that left or entered (`_document_frequency`).
     `rows` need hold only those pages.
-    The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    The result equals `CorpusStatistics.of` over the same texts: the same counts and the same idf floor, to the last bit.
     """
     from . import bm25 as bm25_module
 
@@ -3762,16 +3902,16 @@ def _admitted_corpus(
             {path: kept.terms for path, kept in held.items() if pages.get(path) is not kept},
             [path for path, page in pages.items() if held.get(path) is not page],
         )
-        frequency = counted.frequency
+        frequency, terms_sum = counted.frequency, counted.terms_sum
         # The word maps grow with the vocabulary, so a corpus past the word bound keeps no base either.
         retained = _AdmittedBase(pages, counted) if len(frequency) <= _ADMITTED_BASE_WORDS_MAX else None
     else:
         # No base is kept, so its introducers would be thrown away: count every page in first-seen order only.
         counts, _introduced = _first_seen({path: page.terms for path, page in pages.items()}, sorted(pages))
-        frequency = dict(counts)
+        frequency, terms_sum = dict(counts), None
         retained = None
     statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page.length for page in pages.values()), frequency
+        len(pages), sum(page.length for page in pages.values()), frequency, terms_sum
     )
     # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
     postings = bm25_module.CorpusPostings(
@@ -11517,11 +11657,13 @@ class LexicalStore:
         """The stemmed text of each of `paths` in the scope."""
         if not paths:
             return {}
-        # The pages lead the join: `_FTS_PAGES` leads with the full-text table, which a MATCH needs, but here it
-        # would read every full-text row to keep a few.
+        # The wanted paths lead the join, each found by its key. Led by the full-text table (`_FTS_PAGES`, which
+        # a MATCH needs), or by `pages`, SQLite read every row of the scope to keep a few: 19 ms for one page of
+        # a 15,600-page catalogue (2026-11-24).
         return dict(conn.execute(
-            f"SELECT p.path, fts.stemmed FROM pages p CROSS JOIN fts ON fts.rowid = p.rowid "
-            f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+            "SELECT p.path, fts.stemmed FROM json_each(?) AS wanted "
+            "CROSS JOIN pages p ON p.path = wanted.value CROSS JOIN fts ON fts.rowid = p.rowid "
+            f"WHERE p.{col} = 1",
             (json.dumps(sorted(paths), ensure_ascii=False),),
         ))
 
@@ -11673,65 +11815,93 @@ class LexicalStore:
             same_key = base is not None and base.key == base_key
             held = base.parents if same_key else {}
             finished: dict[str, tuple[_UnitContribution, ...]] = {}
+            reread = [
+                path for path, revision in revisions.items()
+                if (kept := held.get(path)) is None or kept.revision != revision
+            ]
             try:
-                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
-                    path for path, revision in revisions.items()
-                    if (kept := held.get(path)) is None or kept.revision != revision
-                ], finished)
+                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", reread, finished)
             except sqlite3.Error:
                 # The read stopped, as the request budget does (`stopping_at_budget`). Statistics over a part of the
                 # corpus would be wrong, so none are kept; the parents it finished are, so the next build resumes.
                 self._keep_unit_parents(scope, base_key, view, revisions, finished)
                 raise
             view.require_complete()
-            corpus: dict[str, tuple[str, ...]] = {}
-            representatives: dict[int, str] = {}
-            occurrences: dict[str, list[tuple[int, str, str]]] = {}
-            kept_parents: dict[str, _ParentUnits] = {}
-            kept_bytes = 0
-            private = False
-            for path, revision in revisions.items():
-                parent = held.get(path)
-                if parent is None or parent.revision != revision:
-                    units = fresh.get(path, ())
-                    # A parent of an owner-only instance is interpreted by its caller alone, on every request,
-                    # even when its interpretation emitted no unit: another caller may be refused that instance.
-                    # Only a parent with no stored row holds no interpretation at all.
-                    parent = (
-                        _ParentUnits(revision, units)
-                        if path not in interpreted or _keeps_interpretation(view, path) else None
-                    )
-                else:
-                    units = parent.units
-                for unit in units:
-                    if unit.ref not in corpus:
-                        corpus[unit.ref] = unit.tokens
-                        representatives[unit.rowid] = unit.ref
-                    # Retain identities without text; ambiguous hit precedence still
-                    # belongs to the original candidate SQL traversal.
-                    occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
-                if parent is not None:
-                    kept_parents[path] = parent
-                    kept_bytes += _units_bytes(units)
-                elif units:
-                    # An owner-only parent that emitted no unit leaves nothing of its own in the corpus.
-                    private = True
-            # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
-            # parents this build did not read. Each is used again only at its own revision; a deleted or
-            # renamed page's entry stays until the byte bound drops the base.
-            for path, parent in held.items():
-                if path not in revisions:
-                    kept_parents[path] = parent
-                    kept_bytes += _units_bytes(parent.units)
+            merged = base.merged if same_key else None
+            changed: set[str] | None = None
+            if (
+                merged is not None and merged.digest == digest and merged.dependency == dependency
+                # A parent that the view interprets for its caller alone and that emits a unit sends the build
+                # through every parent; one that emits none adds nothing and is never kept.
+                and all(
+                    path not in interpreted or _keeps_interpretation(view, path) or not fresh.get(path)
+                    for path in reread
+                )
+            ):
+                corpus, representatives, occurrences, changed = _patched_merge(
+                    merged, revisions, held, fresh, set(reread)
+                )
+                kept_parents = dict(held)
+                kept_parents.update(
+                    (path, _parent_units(revisions[path], fresh.get(path, ()))) for path in reread
+                    if path not in interpreted or _keeps_interpretation(view, path)
+                )
+                private = False
+            else:
+                corpus: dict[str, tuple[str, ...]] = {}
+                representatives: dict[int, str] = {}
+                listed: dict[str, list[tuple[int, str, str]]] = {}
+                kept_parents: dict[str, _ParentUnits] = {}
+                private = False
+                for path, revision in revisions.items():
+                    parent = held.get(path)
+                    if parent is None or parent.revision != revision:
+                        units = fresh.get(path, ())
+                        # A parent of an owner-only instance is interpreted by its caller alone, on every request,
+                        # even when its interpretation emitted no unit: another caller may be refused that instance.
+                        # Only a parent with no stored row holds no interpretation at all.
+                        parent = (
+                            _parent_units(revision, units)
+                            if path not in interpreted or _keeps_interpretation(view, path) else None
+                        )
+                    else:
+                        units = parent.units
+                    for unit in units:
+                        if unit.ref not in corpus:
+                            corpus[unit.ref] = unit.tokens
+                            representatives[unit.rowid] = unit.ref
+                        # Retain identities without text; ambiguous hit precedence still
+                        # belongs to the original candidate SQL traversal.
+                        listed.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+                    if parent is not None:
+                        kept_parents[path] = parent
+                    elif units:
+                        # An owner-only parent that emitted no unit leaves nothing of its own in the corpus.
+                        private = True
+                # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
+                # parents this build did not read. Each is used again only at its own revision; a deleted or
+                # renamed page's entry stays until the byte bound drops the base.
+                for path, parent in held.items():
+                    if path not in revisions:
+                        kept_parents[path] = parent
+                occurrences = {ref: tuple(rows) for ref, rows in listed.items()}
+            kept_bytes = sum(parent.size for parent in kept_parents.values())
             earlier = base.counted if same_key else None
-            statistics, counted = _unit_corpus_statistics(corpus, earlier)
+            # A patched merge names every ref whose tokens can differ from the corpus it started from.
+            same_corpus = earlier is not None and merged is not None and earlier.tokens is merged.corpus
+            statistics, counted = _unit_corpus_statistics(corpus, earlier, changed if same_corpus else None)
             entry = _AdmittedStatisticsEntry(
-                current_fingerprint, statistics, MappingProxyType(representatives),
-                MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
+                current_fingerprint, statistics, MappingProxyType(representatives), MappingProxyType(occurrences),
+            )
+            merge = None if private else _UnitMerge(
+                digest, dependency, revisions, kept_parents, corpus, representatives, occurrences,
             )
             with self._term_frequency_cache_lock:
                 # An owner-only parent's units never enter the shared base, so neither does a corpus holding them.
-                self._store_unit_base(scope, base_key, kept_parents, kept_bytes, earlier if private else counted)
+                self._store_unit_base(
+                    scope, base_key, kept_parents, kept_bytes, earlier if private else counted,
+                    (base.merged if same_key else None) if private else merge,
+                )
         with self._term_frequency_cache_lock:
             # Equivalent snapshot aliases must not evict another admitted corpus.
             for retained_key, other in tuple(self._admitted_statistics.items()):
@@ -11754,7 +11924,7 @@ class LexicalStore:
         """
         # A finished parent was resolved by the read, so `instance` answers from the view's memory.
         kept = {
-            path: _ParentUnits(revisions[path], units) for path, units in finished.items()
+            path: _parent_units(revisions[path], units) for path, units in finished.items()
             if path not in view.parents.unavailable and _keeps_interpretation(view, path)
         }
         if not kept:
@@ -11766,19 +11936,23 @@ class LexicalStore:
             merged = dict(base.parents) if same_key else {}
             merged.update(kept)
             self._store_unit_base(
-                scope, base_key, merged, sum(_units_bytes(parent.units) for parent in merged.values()),
-                base.counted if same_key else None,
+                scope, base_key, merged, sum(parent.size for parent in merged.values()),
+                base.counted if same_key else None, base.merged if same_key else None,
             )
 
     def _store_unit_base(
         self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int,
-        counted: _UnitCorpus | None,
+        counted: _UnitCorpus | None, merged: _UnitMerge | None,
     ) -> None:
-        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock."""
+        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock.
+
+        `merged` is the build that `counted` came from; it is kept only with `counted`."""
         if kept_bytes <= _UNIT_BASE_BYTES_MAX:
             # The counted corpus fits in what the parents leave, or the next build counts every ref.
-            fits = kept_bytes + _unit_corpus_bytes(counted) <= _UNIT_BASE_BYTES_MAX
-            self._unit_bases[scope] = _UnitBase(base_key, parents, counted if fits else None)
+            fits = counted is not None and kept_bytes + _unit_corpus_bytes(counted) <= _UNIT_BASE_BYTES_MAX
+            self._unit_bases[scope] = _UnitBase(
+                base_key, parents, counted if fits else None, merged if fits else None
+            )
         else:
             self._unit_bases.pop(scope, None)
 

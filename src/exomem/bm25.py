@@ -34,9 +34,11 @@ The same stemmer is exposed to find.py for its stem-aware gates.
 
 from __future__ import annotations
 
+import functools
 import heapq
 import logging
 import math
+import operator
 import re
 import sys
 import threading
@@ -372,14 +374,41 @@ def _unknown_error_streak(vault_root: Path, error_class: str | None) -> int:
         return streak
 
 
+def idf_term(pages: int, count: int) -> float:
+    """A word's Okapi idf before the floor, as `rank_bm25.BM25Okapi` 0.2.2 computes it."""
+    return math.log(pages - count + 0.5) - math.log(count + 0.5)
+
+
+class _TermsByCount(dict):
+    """`idf_term` by count for one corpus size, each computed when a lookup first meets its count."""
+
+    def __init__(self, pages: int) -> None:
+        super().__init__()
+        self.pages = pages
+
+    def __missing__(self, count: int) -> float:
+        term = self[count] = idf_term(self.pages, count)
+        return term
+
+
+def idf_terms(pages: int, counts: Iterable[int]) -> Iterator[float]:
+    """`idf_term` of each count. A corpus holds few distinct counts, so each is computed once and shared."""
+    return map(_TermsByCount(pages).__getitem__, counts)
+
+
+def idf_sum(terms: Iterable[float]) -> float:
+    """The terms' sum as the library takes it: from 0, left to right, so another order gives another last bit."""
+    return functools.reduce(operator.add, terms, 0)
+
+
 @dataclass(frozen=True)
 class CorpusStatistics:
     """One admitted corpus's Okapi figures, as `rank_bm25.BM25Okapi` 0.2.2 derives them.
 
     It keeps only what scoring a candidate needs, so a retained copy costs one
-    vocabulary-sized mapping rather than every document's term counts. The
-    document frequencies keep the library's first-seen order, so the idf floor's
-    average sums in the same order and every score matches it exactly.
+    vocabulary-sized mapping rather than every document's term counts. The idf
+    floor's average sums in the library's first-seen order of the words, so every
+    score matches it exactly; the document frequencies are only looked up.
     """
 
     pages: int
@@ -402,28 +431,31 @@ class CorpusStatistics:
         return cls.from_counts(len(tokens_by_path), length, frequency)
 
     @classmethod
-    def from_counts(cls, pages: int, length: int, frequency: dict[str, int]) -> CorpusStatistics:
+    def from_counts(
+        cls, pages: int, length: int, frequency: dict[str, int], terms_sum: float | None = None
+    ) -> CorpusStatistics:
         """The figures of a corpus of `pages` documents with `length` tokens in all.
 
-        `frequency` holds each word's document count in the order `of` gives, which is the
-        first-seen order of the words over the documents sorted by path: the idf floor sums
-        over it in that order, so another order gives a different last bit.
+        The idf floor averages `idf_term` over the words in the order `of` gives, which is the first-seen
+        order of the words over the documents sorted by path; another order gives a different last bit.
+        Without `terms_sum`, `frequency` holds each word's document count in that order. A caller that
+        keeps the terms in that order passes their `idf_sum` as `terms_sum`, and `frequency` is then only
+        looked up.
         """
-        idf_sum = 0
-        for count in frequency.values():
-            idf_sum += math.log(pages - count + 0.5) - math.log(count + 0.5)
+        if terms_sum is None:
+            terms_sum = idf_sum(idf_terms(pages, frequency.values()))
         return cls(
             pages=pages,
             average_length=length / pages if pages else 0.0,
             document_frequency=MappingProxyType(frequency),
-            idf_floor=0.25 * (idf_sum / len(frequency)) if frequency else 0.0,
+            idf_floor=0.25 * (terms_sum / len(frequency)) if frequency else 0.0,
         )
 
     def _idf(self, word: str) -> float:
         count = self.document_frequency.get(word)
         if count is None:
             return 0
-        idf = math.log(self.pages - count + 0.5) - math.log(count + 0.5)
+        idf = idf_term(self.pages, count)
         return self.idf_floor if idf < 0 else idf
 
     def score(

@@ -1865,6 +1865,55 @@ def test_an_owner_only_page_without_units_leaves_the_owner_its_unit_counts(
     assert lexstore.get_store(vault)._unit_bases["kb"].counted is not None
 
 
+def test_an_owner_only_page_without_units_that_leaves_its_project_still_ranks(
+    configured_boundary, private_instances, vault
+):
+    """The owner's next build after that page becomes public merges it like any parent.
+
+    The earlier build read the owner-only page but kept nothing of it. A build that expects every
+    read parent among the kept ones fails on it, and every later search of the set fails too.
+    """
+    from exomem import epistemic_graph, find as find_module, freshness, lexstore
+    from exomem.governance import principal
+    from exomem.vocabulary import instances, registry_spec
+
+    def write(name: str, extra: str, number: int, content: str) -> str:
+        path = f"Knowledge Base/Notes/Insights/{name}.md"
+        (vault / path).parent.mkdir(parents=True, exist_ok=True)
+        (vault / path).write_text(
+            f"---\ntype: insight\n{extra}exomem_id: {number}8888888-8888-4888-8888-888888888888\n---\n"
+            f"# {name}\n\n{content}\n"
+        )
+        return path
+
+    public = write("counted-public", "", 1, "- [fact] harbor gauges read depth ^gauges")
+    private = write(
+        "counted-private", "project: private-project\n", 2, "## Harbor notes\n\nHarbor tides rise in the evening."
+    )
+    full = private_instances("full")
+    both = {public, private}
+
+    def search() -> list[str]:
+        hits = lexstore.search_semantic_units(
+            vault, "harbor depth tides", 5, scope="kb", admitted_parent_paths=both,
+            released_parent_paths=both, _validate_current=False, repair=False,
+        )
+        return [hit.parent_path for hit in hits]
+
+    with principal.request_scope(full):
+        overlay = instances.select(vault, registry_spec("categories"), SCOPE).overlay(vault)
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("schema_version: 1\ncategories: {}\nkinds:\n  protocol:\n    description: Local procedure\n")
+        assert all(freshness.rebaseline(vault).values())
+        epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+        lexstore.ensure_fresh(vault)
+        assert search() == [public]
+        write("counted-private", "", 2, "- [fact] harbor tides rise in the evening ^tides")
+        find_module.clear_cache()
+        lexstore.ensure_fresh(vault)
+        assert set(search()) == both
+
+
 def test_a_stopped_unit_build_keeps_the_public_parents_it_finished_and_never_a_private_one(
     configured_boundary, private_instances, vault, monkeypatch
 ):
