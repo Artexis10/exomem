@@ -44,6 +44,7 @@ from .report import read_rows
 from .session_close import (
     DEFAULT_CLIENT_MODE,
     DEFAULT_HOOK_INJECT,
+    HOOKLESS_MODES,
     Case,
     client_mode_error,
     load_cases,
@@ -459,7 +460,7 @@ def recall_evidence(row: dict, key: dict | None = None) -> tuple[str, list[dict]
 
     fresh = row.get("fresh")
     mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
-    if mode == "tool-only" and (client_mode_error(mode, row) or not fresh or fresh.get("client_mode", DEFAULT_CLIENT_MODE) != mode or client_mode_error(mode, fresh)):
+    if mode in HOOKLESS_MODES and (client_mode_error(mode, row) or not fresh or fresh.get("client_mode", DEFAULT_CLIENT_MODE) != mode or client_mode_error(mode, fresh)):
         return checks.UNKNOWN, []
     if not fresh or fresh.get("error") or (fresh.get("server_connected") or {}).get(checks.SERVER) != "connected":
         return checks.UNKNOWN, []
@@ -636,7 +637,7 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
             mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
             capture_error = client_mode_error(mode, row)
             recall_error = (row.get("fresh") or {}).get("error")
-            if mode == "tool-only" and row.get("recall_enabled"):
+            if mode in HOOKLESS_MODES and row.get("recall_enabled"):
                 recall_error = capture_error or client_mode_error(mode, row.get("fresh") or {})
             answers = native_answers(case, key, row, mapping, imported) if not automatic_judge else None
             result = score_row(case, key, row, judge_model=judge_model, executable=executable, scratch=scratch, answers=answers, automatic_judge=automatic_judge)

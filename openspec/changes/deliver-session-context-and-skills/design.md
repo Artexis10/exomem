@@ -151,3 +151,15 @@ Evidence, 2026-11-23, tool-only Sonnet client, one draw, at the balanced level, 
 - The 24 scale cases, against the earlier shipped run (an older base, before the recall tool description was trimmed): exact unchanged at 12/24. Positives fully delivered rose from 14/16 to 16/16, but the gain is the two cases the text was tuned on; on the other 22, exact went up on 2 and down on 3. No write was attempted to a wrong collection on either arm.
 - Precision: 7 of 8 scale negatives made an Exomem call, against 6 of 8. The new text also recalled once on a general first turn of a fresh case. The cost is one recall's latency on some general turns, with no writes.
 - One fresh case still makes no call after a general first turn on either arm.
+
+## A client that defers tools and hides server instructions
+
+Some chat apps list a third-party server's tools only through tool search and do not show its server instructions. There the only Exomem text the agent holds up front is the skill's description, which triggered on the knowledge base, the vault and notes. The shipped description now names the subjects of the user's own life and work and asks for recall before the agent recommends, asks for a fact or writes. The engagement level that a tool reports still wins: at off, the agent searches only when the user asks.
+
+The session-close bench stands in for such a client with its `deferred-skill` mode: no hooks, only the tool-search and skill built-ins, the skill staged as a project skill, and the server started without its instructions. It is stricter than such an app, which shows the instructions once a tool loads.
+
+Evidence, 2026-11-24, Sonnet client in that mode, one draw, run records `deferred-skill-description-s1` (first text) and `deferred-skill-description-s2` (the text that ships):
+
+- The off level: the first text asked for recall without a condition and searched memory in 5 of 5 off sessions, against 0 of 5 on main. The text that ships says the level a tool reports wins, and searched memory in 0 of 5.
+- Regression cases built from two real misses: own-subject cases read memory 1 of 5 times on main and 5 of 5 with the text that ships. General cases made no call on either.
+- 12 fresh cases against main: exact 9/12 against 4/12, +0.42 [+0.17, +0.67]; the keyed item was used in 8 of 8 keyed cases against 1 of 8. General cases made no call on either arm. Every attempted write targeted the keyed collection; the bench vault has no collection store and refused most of them.

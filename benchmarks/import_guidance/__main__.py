@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         "--scenario", default="all", help="a scenario id, an id prefix such as 03, or all"
     )
     run.add_argument("--case-dir", type=Path, help="session-close case inputs; a seed in <case-dir>/seeds wins over a shipped seed of the same name")
-    run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill")
+    run.add_argument("--client-mode", choices=session_close.CLIENT_MODES, help="session-close client configuration; default plugin installs hooks and skill, tool-only requests disabled hooks and omits skill, deferred-skill stands in for a chat app (deferred tools, no server instructions, the skill by its description)")
     run.add_argument(
         "--ready-graph",
         action="store_true",
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--case-dir applies to the session-close suite only")
     if args.ready_graph and args.suite != session_close.SUITE:
         raise SystemExit("--ready-graph applies to the session-close suite only; a replay scenario carries its own")
-    if args.hook_turn and args.client_mode == "tool-only":
+    if args.hook_turn and args.client_mode in session_close.HOOKLESS_MODES:
         raise SystemExit("--hook-turn requires --client-mode plugin")
     if args.hook_turn and args.suite != session_close.SUITE:
         raise SystemExit("--hook-turn applies to the session-close suite only")
@@ -344,7 +344,7 @@ def run_session_close(args: argparse.Namespace, arms: list) -> int:
         hook_inject=args.hook_inject,
         activation_packet=args.activation_packet,
     )
-    return 1 if any(row["error"] or (args.client_mode == "tool-only" and (row.get("fresh") or {}).get("error")) for row in rows) else 0
+    return 1 if any(row["error"] or (args.client_mode in session_close.HOOKLESS_MODES and (row.get("fresh") or {}).get("error")) for row in rows) else 0
 
 
 if __name__ == "__main__":

@@ -51,9 +51,22 @@ from .scripted_replies import SCENARIO_DIR
 from .session_seed import READY_SECONDS
 
 SUITE = "session-close"
-# Client modes are a closed harness protocol, not vault vocabulary.
-CLIENT_MODES = ("plugin", "tool-only")
+# Client modes are a closed harness protocol, not vault vocabulary. `deferred-skill` stands in for a chat app such as
+# claude.ai: no hooks, the MCP tools deferred behind tool search, the server instructions not shown, and the skill seen
+# by its description until the agent loads it.
+CLIENT_MODES = ("plugin", "tool-only", "deferred-skill")
 DEFAULT_CLIENT_MODE = CLIENT_MODES[0]
+#: The modes whose runs must show no hook activity.
+HOOKLESS_MODES = ("tool-only", "deferred-skill")
+#: The built-in tools each mode allows; every other mode allows none.
+CLIENT_TOOLS = {"deferred-skill": "ToolSearch,Skill"}
+#: Starts the arm's stdio server with its initialize instructions removed. claude.ai shows a third-party server's
+#: instructions to the model only after a tool loads (operator check, 2026-11-24), so this mode must not send them.
+#: This relies on `build_server` reading the module global at call time.
+INSTRUCTIONLESS_SERVER = (
+    "import runpy, sys; import exomem.server as server; server.SERVER_INSTRUCTIONS = None; "
+    "sys.argv = ['exomem', *sys.argv[1:]]; runpy.run_module('exomem', run_name='__main__', alter_sys=True)"
+)
 SEED_WORKER = Path(__file__).resolve().parent / "session_seed.py"
 #: The engagement levels, read from the product so the list lives in one place; a typo would
 #: silently read as balanced.
@@ -403,11 +416,20 @@ def hook_env(work: Path, engagement: str, inject: str = DEFAULT_HOOK_INJECT) -> 
 def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
     """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
+    server = ["-c", INSTRUCTIONLESS_SERVER] if client_mode == "deferred-skill" else ["-m", "exomem"]
     mcp.write_text(json.dumps({"mcpServers": {checks.SERVER: {
-        "command": sys.executable, "args": ["-m", "exomem", "--transport", "stdio"], "env": env,
+        "command": sys.executable, "args": [*server, "--transport", "stdio"], "env": env,
     }}}), encoding="utf-8")
     files = {"mcp": mcp, "settings": work / "settings.json"}
     settings = {"disableAllHooks": True}
+    if client_mode == "deferred-skill":
+        # A project skill, so the agent sees its description and loads the body through the Skill tool.
+        schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
+        skill_dir = work / "cwd" / ".claude" / "skills" / "exomem"
+        shutil.rmtree(skill_dir, ignore_errors=True)
+        shutil.copytree(schema, skill_dir, ignore=shutil.ignore_patterns("project-keys.yaml"))
+        files["project_skill"] = skill_dir / "SKILL.md"
+        settings = {"disableAllHooks": True, "env": {"ENABLE_TOOL_SEARCH": "true"}}
     if client_mode == DEFAULT_CLIENT_MODE:
         schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
         files["skill"] = work / "skill.md"
@@ -417,7 +439,7 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
     return files
 
 
-def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: CreditsRun | None = None) -> list[str]:
+def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: CreditsRun | None = None, client_mode: str = DEFAULT_CLIENT_MODE) -> list[str]:
     shared = [
         "--include-hook-events",
         "--strict-mcp-config",
@@ -428,9 +450,9 @@ def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: Cr
         "--setting-sources",
         "project",
         "--allowedTools",
-        f"mcp__{checks.SERVER}",
+        ",".join(filter(None, (f"mcp__{checks.SERVER}", CLIENT_TOOLS.get(client_mode, "")))),
         "--tools",
-        "",
+        CLIENT_TOOLS.get(client_mode, ""),
         "--max-turns",
         "40",
     ] + (["--append-system-prompt-file", str(files["skill"])] if "skill" in files else [])
@@ -699,14 +721,16 @@ def replies_by_turn(stdout: str) -> list[str]:
 def client_mode_error(client_mode: str, result: dict) -> str | None:
     """A no-hook measurement needs a complete connected trace; contamination preserves evidence as unknown."""
     error = result.get("error")
-    if error is not None or client_mode != "tool-only":
+    if error is not None or client_mode not in HOOKLESS_MODES:
         return error
     count = result.get("hook_invocations")
     starts = result.get("hook_starts")
     if type(count) is not int or count < 0 or type(starts) is not int or starts < 0 or (result.get("server_connected") or {}).get(checks.SERVER) != "connected":
-        return "tool-only hook observations are unavailable; no-hook acceptance is unknown"
+        return f"{client_mode} hook observations are unavailable; no-hook acceptance is unknown"
     if count or starts:
-        return f"tool-only observed {count} completed hook invocation(s) and {starts} hook start(s); no-hook acceptance is unknown"
+        return f"{client_mode} observed {count} completed hook invocation(s) and {starts} hook start(s); no-hook acceptance is unknown"
+    if client_mode == "deferred-skill" and (checks.SERVER not in (result.get("init_skills") or ()) or "ToolSearch" not in (result.get("init_tools") or ())):
+        return "deferred-skill did not list the skill or tool search at start; the chat-app stand-in is unproven"
     return None
 
 
@@ -732,6 +756,8 @@ def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str 
         "capture_nudges": firings,
         "session_id": init_field(done.stdout, "session_id"),
         "actor_version": init_field(done.stdout, "claude_code_version"),
+        "init_skills": init_field(done.stdout, "skills"),
+        "init_tools": init_field(done.stdout, "tools"),
         "replies": replies_by_turn(done.stdout),
         "calls": trail["calls"],
         "compile_blocks": trail["compile"],
@@ -773,7 +799,7 @@ def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Pa
             (fresh / name).mkdir(parents=True)
         row["before"] = snapshot(work / "vault")
         files = stage_agent_files(arm, fresh, env, client_mode)
-        row.update(argv=agent_argv(executable, files, model, credits), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
+        row.update(argv=agent_argv(executable, files, model, credits, client_mode), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
         done = drive_session(
             row["argv"],
             fresh / "cwd",
@@ -810,7 +836,7 @@ def run_session(
     hook_inject: str = DEFAULT_HOOK_INJECT,
     activation_packet: str | None = None,
 ) -> dict:
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     work = out / "work" / client_mode / model / arm.label / f"{case.id}-{repeat}"
     shutil.rmtree(work, ignore_errors=True)
@@ -818,7 +844,7 @@ def run_session(
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case, activation_packet)
     files = stage_agent_files(arm, work, env, client_mode)
-    argv = agent_argv(executable, files, model, credits)
+    argv = agent_argv(executable, files, model, credits, client_mode)
     row: dict = {
         "scenario": case.id,
         "repeat": repeat,
@@ -833,7 +859,7 @@ def run_session(
         "hook_invocations": None,
         "hook_starts": None,
         "product_sha": stamp["product_shas"][arm.label],
-        "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest() if "skill" in files else None,
+        "skill_sha256": hashlib.sha256(skill.read_bytes()).hexdigest() if (skill := files.get("skill") or files.get("project_skill")) else None,
         "engagement": case.engagement,
         "turns": list(case.turns),
         # Which turns carried images, as file names; left out when none did, so the row of a text-only case keeps its shape.
@@ -908,7 +934,7 @@ def run_all(
     activation_packet: str | None = None,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     if (error := hook_inject_error(hook_inject)) is not None:
         raise ValueError(error)
@@ -973,7 +999,7 @@ def dry_run(
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
     problems found."""
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     problems: list[str] = []
     work = scratch / client_mode / f"{arm.label}-{case.id}"
