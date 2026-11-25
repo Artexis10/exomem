@@ -10,7 +10,7 @@ Keep profiles accurate without asking the person to maintain them by hand.
 
 The background upkeep pass SHALL raise one `upkeep_profile_curation` item for a domain profile when either condition holds:
 
-- live units exist on an evidence page, dated after the profile page's last update, whose categories belong to the registry roles `preferences` or `constraints`;
+- live units exist on an evidence page, not known to precede the profile page's last update, whose categories belong to the registry roles `preferences` or `constraints`;
 - a profile line is superseded, is contradicted by a typed relation, has expired, or is past its `check_by` date.
 
 The evidence pages of a domain profile SHALL be the pages in its domain or a descendant domain, together with the pages that the profile page links to.

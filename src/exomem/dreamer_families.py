@@ -2354,7 +2354,7 @@ def _curation_candidates(
     # A profile page is never evidence, the subject included: its lines are already curated, and a narrower
     # profile serves beside its ancestors rather than feeding them.
     profiles = frozenset(_profile_paths(ctx))
-    candidates = sorted(path for path in pages if path not in profiles and _visible(keep, path))
+    candidates = sorted(path for path in pages if path != subject and path not in profiles and _visible(keep, path))
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
