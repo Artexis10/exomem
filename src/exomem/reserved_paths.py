@@ -1487,8 +1487,11 @@ def _require_literal_source_entries(
                 raise ReservedPathLeafError("IDENTITY_CHANGED")
 
 
-#: Folder listings that one scope reuses, keyed by the folder's held version. See `folder_listing_scope`.
-_FOLDER_LISTINGS: ContextVar[dict[held_fs.FileVersion, dict[str, tuple[str, ...]]] | None] = ContextVar(
+#: The newest listing of each folder that one scope reuses, keyed by the folder's held identity and
+#: kept with the version it was taken at. See `folder_listing_scope`.
+_FOLDER_LISTINGS: ContextVar[
+    dict[held_fs.StableIdentity, tuple[held_fs.FileVersion, dict[str, tuple[str, ...]]]] | None
+] = ContextVar(
     "reserved_paths_folder_listings", default=None,
 )
 #: A folder changed this recently can change again within one timestamp tick, so its version cannot
@@ -1522,7 +1525,8 @@ def _scoped_leaf_names(
     if not before.ok:
         return None
     version = before.require()
-    by_leaf = listings.get(version)
+    kept = listings.get(version.identity)
+    by_leaf = kept[1] if kept is not None and kept[0] == version else None
     if by_leaf is None:
         if time.time_ns() - max(version.mtime_ns, version.change_time_ns) < _SETTLED_FOLDER_NS:
             return None
@@ -1535,7 +1539,8 @@ def _scoped_leaf_names(
         after = filesystem.directory_version(parent)
         if not after.ok or after.require() != version:
             return None
-        by_leaf = listings[version] = {key: tuple(names) for key, names in grouped.items()}
+        by_leaf = {key: tuple(names) for key, names in grouped.items()}
+        listings[version.identity] = (version, by_leaf)
     return by_leaf.get(leaf, ())
 
 

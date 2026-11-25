@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import document_containers, find_corpus, memory_refs, originals, reserved_paths
+from .. import document_containers, find_corpus, held_fs, memory_refs, originals, reserved_paths
 from ..find_types import ParsedPage
 from ..kbdir import managed_root_rel, managed_split_parts
 from . import companions
@@ -709,14 +709,17 @@ def held_scope_basis(
     if edge is not None and edge.kind == FRAME_EDGE:
         return own, {"kind": FRAME_EDGE, "parent": edge.parent}
     claim = page.frontmatter.get("container_member")
-    if claim is not None and page.vault_root is not None and document_containers.parent_for_page(
-            page.vault_root, page.rel_path, page.frontmatter) is not None:
+    if claim is not None and page.vault_root is not None:
         try:
-            info = os.stat(page.vault_root / claim["artifact_path"], follow_symlinks=False)
+            payload = page.vault_root / claim["artifact_path"]
+            before = held_fs.stat_witness(os.stat(payload, follow_symlinks=False))
         except (OSError, TypeError, KeyError):
             return None  # A payload held elsewhere has no local witness: the full path proves it.
-        witness = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
-        return own, {"kind": CONTAINER_INHERITANCE, "claim": claim, "artifact_witness": witness}
+        if document_containers.parent_for_page(page.vault_root, page.rel_path, page.frontmatter) is not None:
+            # The proof above read these payload bytes only if the version did not move around it.
+            if held_fs.stat_witness(os.stat(payload, follow_symlinks=False)) != before:
+                return None
+            return own, {"kind": CONTAINER_INHERITANCE, "claim": claim, "artifact_witness": list(before)}
     return evaluate_snapshot(page, policy, content_hash=content_hash), None
 
 
@@ -732,8 +735,8 @@ def live_inherited_scopes(
         return evaluate(_read_parent_path(root, inherited["parent"]), policy), None
     if kind == CONTAINER_INHERITANCE:
         try:
-            info = os.stat(root / inherited["claim"]["artifact_path"], follow_symlinks=False)
-            if [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns] != inherited["artifact_witness"]:
+            payload = root / inherited["claim"]["artifact_path"]
+            if list(held_fs.stat_witness(os.stat(payload, follow_symlinks=False))) != inherited["artifact_witness"]:
                 raise MembershipUnresolved("container payload changed")
             binding = document_containers._parent_binding_for_page(
                 root, path, {"container_member": inherited["claim"]}, artifact_proven=True,

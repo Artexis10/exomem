@@ -148,10 +148,11 @@ def _changes_leave_report(
 ) -> bool:
     """Whether every change since the build started leaves its report as it is.
 
-    A change alters the report when it touches the Source or a report row, adds or removes a page with
-    the Source's file stem (which decides whether a bare-name link resolves), or leaves a page that now
-    links to the Source or names its path. The access policy and the caller's authority are bound
-    separately. Anything this cannot prove, such as lost change history, counts as a change.
+    A change alters the report when it touches the Source or a page the build read (``in_report``),
+    adds or removes a page with the Source's file stem (which decides whether a bare-name link
+    resolves), or leaves a page that now links to the Source or names its path. The access policy and
+    the caller's authority are bound separately. Anything this cannot prove, such as lost change
+    history, counts as a change.
     """
     try:
         instance, generation, triple = basis["vault"]  # type: ignore[index]
@@ -268,10 +269,11 @@ def _build(
             if (not original or _digest({key: result.get(key) for key in original["keys"]}) != original["digest"]
                     or stop.is_set() or _authority_binding(root, who) != authority):
                 raise _not_found()
-            if _snapshot_key(root) != snapshot_key:
-                rows = {path for _, path, _ in _entries(result)}
-                if not _changes_leave_report(root, basis, args["path"], lambda touched: bool(touched & rows)):
-                    raise reclassify_source.preview_warming()
+            read = held.read_paths | {path for _, path, _ in _entries(result)}
+            if _snapshot_key(root) != snapshot_key and not _changes_leave_report(
+                    root, basis, args["path"], lambda touched: bool(touched & read)):
+                raise reclassify_source.preview_warming()
+            basis["reads"] = sorted(read)
             if (auth_sessions.origin_revalidates_in_background(who)
                     and auth_sessions.origin_login_state_sync(who) is not auth_sessions.OriginLogin.VALID):
                 raise _not_found()

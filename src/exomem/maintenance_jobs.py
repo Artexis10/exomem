@@ -87,6 +87,7 @@ _SOURCE_PREVIEW_FAILED = "RECLASSIFICATION_PREVIEW_FAILED"
 _SOURCE_PREVIEW_PAGE_ROWS = 128
 _ENTRY_INSERT = "INSERT INTO entries (run_id, chunk, kind, path, value) VALUES (?, ?, ?, ?, ?)"
 _HELD_INSERT = "INSERT OR REPLACE INTO held_evidence (run_id, path, record) VALUES (?, ?, ?)"
+_READ_INSERT = "INSERT OR IGNORE INTO preview_reads (run_id, path) VALUES (?, ?)"
 
 
 @dataclass(frozen=True)
@@ -285,6 +286,11 @@ def _open(
                 "CREATE TABLE IF NOT EXISTS held_evidence ("
                 "run_id TEXT NOT NULL, path TEXT NOT NULL, record TEXT NOT NULL, "
                 "PRIMARY KEY (run_id, path))"
+            )
+            # Every page a completed preview's build read: the pages whose change can alter its report.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS preview_reads ("
+                "run_id TEXT NOT NULL, path TEXT NOT NULL, PRIMARY KEY (run_id, path)) WITHOUT ROWID"
             )
             conn.commit()
         reserved_paths._publish_sqlite_owner_family(root, path, _STORE_ID, conn)
@@ -762,15 +768,17 @@ def source_preview_basis(vault_root: Path, run_id: str) -> Mapping[str, Any] | N
 
 
 def source_preview_rows_among(vault_root: Path, run_id: str, paths: Iterable[str]) -> bool | None:
-    """Whether any of ``paths`` is a row of the completed preview's report; None when unknown."""
+    """Whether the completed preview's build read any of ``paths`` or reports it; None when unknown."""
     wanted = sorted(set(paths))
     if not wanted:
         return False
     try:
         with request_budget.locked(_LIVE_LOCK), _store(vault_root, create=False, bounded=True) as conn:
+            marks = ",".join("?" * len(wanted))
             row = conn.execute(
-                f"SELECT 1 FROM entries WHERE run_id = ? AND path IN ({','.join('?' * len(wanted))}) LIMIT 1",
-                (run_id, *wanted),
+                f"SELECT 1 FROM preview_reads WHERE run_id = ? AND path IN ({marks}) "
+                f"UNION ALL SELECT 1 FROM entries WHERE run_id = ? AND path IN ({marks}) LIMIT 1",
+                (run_id, *wanted, run_id, *wanted),
             ).fetchone()
     except (FileNotFoundError, sqlite3.OperationalError):
         return None
@@ -970,6 +978,7 @@ def _prune(conn: sqlite3.Connection) -> None:
     params = (RUNNING, cutoff, RETAIN_NEWEST)
     conn.execute(f"DELETE FROM entries WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
     conn.execute(f"DELETE FROM held_evidence WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
+    conn.execute(f"DELETE FROM preview_reads WHERE run_id IN (SELECT run_id FROM jobs WHERE {stale})", params)
     conn.execute(f"DELETE FROM jobs WHERE {stale}", params)
 
 
@@ -1011,6 +1020,7 @@ def _run_source_preview(
     published = None
     held: list[tuple[str, str]] | None = None
     basis = None
+    reads: list[str] | None = None
     try:
         with foreground_priority.background_job(), foreground_priority.bulk(stop=live.stop):
             _JOB.set(live)
@@ -1018,7 +1028,8 @@ def _run_source_preview(
             summary, entries = built[0], built[1]
             if len(built) > 2 and built[2]:
                 held = sorted((path, _canonical(record)) for path, record in built[2].items())
-            basis = built[3] if len(built) > 3 else None
+            basis = dict(built[3]) if len(built) > 3 and built[3] is not None else None
+            reads = sorted(set(basis.pop("reads", ()))) if basis is not None else None
             buffer = []
             limit = query_data.MAX_RESPONSE_BYTES // 2
             for kind, path, value in entries:
@@ -1047,7 +1058,8 @@ def _run_source_preview(
             state = FAILED
             error_code = _source_preview_error_code(error.code if isinstance(error, OpError) else None)
     finally:
-        _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held)
+        _finish(live, state, error_code, outcome, preview_entries=published, preview_held=held,
+                preview_reads=reads)
 
 
 def _stopped(live: _Live) -> tuple[str, str]:
@@ -1148,6 +1160,7 @@ def _finish(
     live: _Live, state: str, error_code: str | None, outcome: dict[str, Any],
     *, preview_entries: list[tuple[str, str, str | None]] | None = None,
     preview_held: list[tuple[str, str]] | None = None,
+    preview_reads: list[str] | None = None,
 ) -> None:
     """Record the terminal, then leave the live registry, so a sweep never sees a finished job as an orphan."""
     try:
@@ -1156,11 +1169,14 @@ def _finish(
                 _prune(conn)
             if preview_entries is not None and live.stop.is_set():
                 state, error_code = _stopped(live)
-                outcome, preview_entries, preview_held = {}, None, None
+                outcome, preview_entries, preview_held, preview_reads = {}, None, None, None
             saved = conn.execute(
                 "UPDATE jobs SET state = ?, ended_at = ?, error_code = ?, outcome = ? WHERE run_id = ? AND state = ?",
                 (state, time.time(), error_code, _canonical(outcome), live.run_id, RUNNING),
             )
+            if preview_entries is not None and preview_reads and saved.rowcount:
+                # A report with no rows still counts the pages it read, so they are kept even then.
+                conn.executemany(_READ_INSERT, ((live.run_id, path) for path in preview_reads))
             if preview_entries and saved.rowcount:
                 conn.executemany(_ENTRY_INSERT, (
                     (live.run_id, 0, kind, path, value) for kind, path, value in preview_entries
@@ -1172,6 +1188,7 @@ def _finish(
                 if live.stop.is_set():
                     conn.execute("DELETE FROM entries WHERE run_id = ?", (live.run_id,))
                     conn.execute("DELETE FROM held_evidence WHERE run_id = ?", (live.run_id,))
+                    conn.execute("DELETE FROM preview_reads WHERE run_id = ?", (live.run_id,))
                     state, error_code = _stopped(live)
                     conn.execute(
                         "UPDATE jobs SET state = ?, error_code = ?, outcome = ? WHERE run_id = ?",

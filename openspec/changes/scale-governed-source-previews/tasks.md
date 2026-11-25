@@ -9,6 +9,7 @@
 - [x] 2.2 Give the background build its own budget or checkpointed progress, chosen from the 1.1 measurement, and prove that cancellation and writer liveness still hold.
   - Chosen: a separate ten-minute build budget. With 2.1 the same governed build takes 28-29 s and is linear in referrers, so checkpointed progress would add machinery for no measured need.
 - [x] 2.3 Bind the final snapshot check to the generations that can change the report, with one test that an unrelated generation move keeps the report and one that a relevant change refuses it.
+  - Evidence: the rule tests changes against the pages the build read, stored per job. Tests cover an unrelated write during the referrer loop, an unrelated write after completion, a new citing page, and a deleted bare-name referrer that is counted but not a row.
 - [x] 2.4 Return a typed public error for an interrupted or cancelled preview job.
 
 ## 3. Dependent release

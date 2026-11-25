@@ -49,6 +49,7 @@ from . import (
     file_watcher,
     foreground_priority,
     freshness,
+    held_fs,
     originals,
     page_lineage,
     path_mentions,
@@ -762,8 +763,13 @@ def _propose(
             raise preview_warming() from None
         current_inbound = _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
                                                    candidate_limit=candidate_limit, visible=visible)
-        if current_inbound != inbound or _preview_generation(vault_root) != generation:
+        # A paged build hands its read set to the job, which judges each change since the build
+        # began against it (`reclassification_preview`): a change elsewhere keeps the report.
+        if current_inbound != inbound or (
+                held_sink is None and _preview_generation(vault_root) != generation):
             raise preview_warming()
+        if held_sink is not None:
+            held_sink.read_paths = frozenset(read_hashes)
     return ReclassifyProposal(
         path=rel,
         current_kind=current_kind,
@@ -1025,6 +1031,8 @@ def _read_inline_text(root: Path, path: Path) -> tuple[str, PathGuard]:
 class _HeldSink(dict):
     """path -> release record, plus the build's identity context, computed once on first use."""
 
+    #: Every page the build read: the Source and each inbound or named page it examined.
+    read_paths: frozenset[str] = frozenset()
     context_ready = False
     context_usable = False
     compiled = None
@@ -1071,7 +1079,7 @@ def _load_held_context(sink: _HeldSink, vault_root: Path, who: RequestPrincipal)
 
 
 def _stat_witness(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return held_fs.stat_witness(info)
 
 
 def _record_held_row(

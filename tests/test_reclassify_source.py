@@ -524,11 +524,11 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         maintenance_jobs.stop_all(vault)
 
 
-def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
+def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer, bare_link=None):
     """A served MCP preview of a Source with three referrers whose background build pauses mid-loop.
 
     ``pause_at_referrer(stop)`` runs on the build thread as it reads its first referrer, with the
-    job's stop event.
+    job's stop event. ``bare_link`` names one more page that cites the Source by its file stem.
     """
     from exomem import (
         file_watcher,
@@ -546,6 +546,8 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
         (vault / f"{KB}/Notes/measurement-{index}.md").write_text(
             f"See [[{source}]].\n", encoding="utf-8",
         )
+    if bare_link is not None:
+        (vault / bare_link).write_text(f"Also [[{Path(source).stem}]].\n", encoding="utf-8")
     for scope, directory in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
             (str(path), freshness.stat_signature(path))
@@ -557,11 +559,12 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
     monkeypatch.setattr(file_watcher, "observing_inbound_recovery_stop", lambda _: watcher_stop)
     witnessed_read, paused = rc._witnessed_read, []
 
-    def pausing_read(*args):
-        if not paused:
+    def pausing_read(reader, sink, root, page, *rest):
+        # The Source's own read comes first; the pause waits for a referrer.
+        if not paused and Path(page) != vault / source:
             paused.append(True)
             pause_at_referrer(foreground_priority.cancellation_event())
-        return witnessed_read(*args)
+        return witnessed_read(reader, sink, root, page, *rest)
 
     monkeypatch.setattr(rc, "_witnessed_read", pausing_read)
     return server.build_server(require_auth=False), source
@@ -2494,3 +2497,93 @@ def test_completed_paged_report_stores_held_evidence_only_privately(
         assert record.witness == rc._stat_witness(os.stat(vault / rel))
         assert record.sha256 not in wire
     assert evidence[held_rel].scopes == (frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"}),)
+
+
+def _completed(client, source, run_id):
+    async def poll():
+        async with asyncio.timeout(12):
+            while True:
+                status = await _preview_call(client, source, preview_run_id=run_id)
+                code = status.get("error", {}).get("code")
+                if status.get("state") != "running" and code != "RECLASSIFICATION_PREVIEW_WARMING":
+                    return status
+                await asyncio.sleep(0.1)
+    return poll()
+
+
+def _changed(vault, page, *, deleted=False):
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    rel = page.relative_to(vault).as_posix()
+    if deleted:
+        freshness.on_files_changed(vault, deleted=[page])
+        vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[rel])
+    else:
+        freshness.on_files_changed(vault, changed=[page])
+        vault_module.on_inbound_files_changed(vault, changed_rels=[rel], deleted_rels=[])
+    lexstore.ensure_fresh(vault)
+
+
+def test_an_unrelated_write_during_the_build_keeps_its_report(vault, source_schema, monkeypatch):
+    from fastmcp import Client
+
+    unrelated = vault / KB / "Notes" / "unrelated.md"
+    paused, resume = threading.Event(), threading.Event()
+
+    def hold_the_referrer_loop(_stop):
+        paused.set()
+        assert resume.wait(20)
+
+    mcp, source = _served_preview(
+        vault, source_schema, monkeypatch, pause_at_referrer=hold_the_referrer_loop,
+    )
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            queued = await _preview_call(client, source)
+            assert queued.get("state") == "running", queued
+            assert await asyncio.to_thread(paused.wait, 10)
+            # Another writer saves an unrelated page while the build is inside its referrer loop.
+            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
+            _changed(vault, unrelated)
+            resume.set()
+            status = await _completed(client, source, queued["run_id"])
+            assert status.get("state") == "completed", status
+            assert status["snapshot_current"] and status["result"]["preview_digest"], status
+
+    asyncio.run(exercise())
+
+
+def test_losing_a_counted_reference_refuses_a_kept_report(vault, source_schema, monkeypatch):
+    """A page counted by the report without being one of its rows still binds the report."""
+    from fastmcp import Client
+
+    bare = f"{KB}/Notes/bare-citation.md"
+    mcp, source = _served_preview(
+        vault, source_schema, monkeypatch, pause_at_referrer=lambda _stop: None, bare_link=bare,
+    )
+
+    async def exercise():
+        async with Client(mcp, timeout=15) as client:
+            queued = await _preview_call(client, source)
+            assert "run_id" in queued, queued
+            status = await _completed(client, source, queued["run_id"])
+            assert status.get("state") == "completed", status
+            rows = await _entries(client, source, queued["run_id"], status.get("next_cursor"))
+            assert bare not in {entry["path"] for entry in rows}
+            (vault / bare).unlink()
+            _changed(vault, vault / bare, deleted=True)
+            stale = await _preview_call(client, source, preview_run_id=queued["run_id"])
+            assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
+
+    asyncio.run(exercise())
+
+
+async def _entries(client, source, run_id, cursor):
+    entries = []
+    while cursor is not None:
+        page = await _preview_call(client, source, preview_run_id=run_id, cursor=cursor)
+        entries.extend(page["entries"])
+        cursor = page.get("next_cursor")
+    return entries

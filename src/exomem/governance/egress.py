@@ -54,6 +54,7 @@ from .. import (
     call_spans,
     capture_metadata,
     find_corpus,
+    held_fs,
     memory_refs,
     originals,
     request_budget,
@@ -6313,8 +6314,7 @@ def _held_fast_evidence(vault_root: Path, rel_path: str) -> Any | None:
             return None
         if lifecycle.is_tombstoned(vault_root, rel_path):
             return None
-        info = os.stat(Path(vault_root) / rel_path)
-        if (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != tuple(held.witness):
+        if held_fs.stat_witness(os.stat(Path(vault_root) / rel_path)) != tuple(held.witness):
             return None
         if not scope.identity_ready:
             scope.identity_ready = True
