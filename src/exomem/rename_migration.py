@@ -18,7 +18,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import client_config, prominence, setup_wizard
+from . import client_config, cloud_address, prominence, setup_wizard
 from . import install_hook as hook_module
 from . import install_skill as install_module
 
@@ -55,7 +55,7 @@ def _migrate_claude_servers(
                 f"claude-{scope}",
                 f"[skipped: holds both `{old_key}` and `{new_key}`; remove the one you do not use]",
             )
-        elif "url" in old and client_config.is_cloud_url(str(old["url"])):
+        elif "url" in old and cloud_address.is_cloud_url(str(old["url"])):
             report(f"claude-{scope}", f"[skipped: {_CLOUD_KEPT.format(old=old_key, url=old['url'])}]")
         else:
             to_rename[scope] = old
@@ -145,9 +145,7 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         return
     path = setup_wizard._resolve_codex_home(codex_home) / "config.toml"
     try:
-        outcome = client_config.rename_codex_mcp_server(
-            path=path, keep_url=client_config.is_cloud_url
-        )
+        outcome = client_config.rename_codex_mcp_server(path=path)
     except (ValueError, OSError) as exc:
         report("codex", f"[failed: {exc}]")
         return
@@ -189,7 +187,7 @@ def _migrate_instruction_blocks(*, claude_home: Path, codex_home: Path, print_fn
 
 
 def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
-    """Add the new tool prefix beside each old one in the explicit checkpoint bindings."""
+    """Add each new tool prefix, plugin prefix included, beside its old one in the checkpoint bindings."""
     from ._hooks import exomem_retrieve_nudge as retrieve
 
     step = f"bindings-{client}"
@@ -200,12 +198,12 @@ def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
         report(step, f"[skipped: {reason}]")
         return
     bindings = list(prior["bindings"])
-    old, new = client_config.LEGACY_TOOL_PREFIX, client_config.TOOL_PREFIX
     for binding in prior["bindings"]:
-        if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
-            bindings.append(added)
+        for old, new in client_config.TOOL_PREFIX_RENAMES.items():
+            if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
+                bindings.append(added)
     if len(bindings) == len(prior["bindings"]):
-        report(step, "[skipped: no binding names the old prefix, or the new one is already bound]")
+        report(step, "[skipped: no binding names an old prefix, or its new one is already bound]")
         return
     try:
         result = hook_module.install_hook(

@@ -20,11 +20,12 @@ import json
 import os
 import shutil
 import tomllib
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
+
+from . import cloud_address
 
 SERVER_NAME = "evermatter"
 #: The server key an install made before the rename holds.
@@ -40,6 +41,11 @@ LEGACY_TOOL_PREFIX = f"mcp__{LEGACY_SERVER_NAME}__"
 TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
 LEGACY_PLUGIN_TOOL_PREFIX = f"mcp__plugin_{LEGACY_SERVER_NAME}_{LEGACY_SERVER_NAME}__"
 PLUGIN_TOOL_PREFIX = f"mcp__plugin_{SERVER_NAME}_{SERVER_NAME}__"
+#: Each old tool-name prefix with the prefix that replaces it.
+TOOL_PREFIX_RENAMES = {
+    LEGACY_TOOL_PREFIX: TOOL_PREFIX,
+    LEGACY_PLUGIN_TOOL_PREFIX: PLUGIN_TOOL_PREFIX,
+}
 #: What a user does after a client renames a URL server, which signs the user out once: Claude
 #: Code and Codex both store the sign-in under the server key. `evermatter setup --migrate` prints
 #: the step for each URL registration it renames. The plugin's notice hook holds the Claude Code
@@ -50,23 +56,6 @@ SIGN_IN_STEPS = {
 }
 #: The suffix that `_write_user_file` and `evermatter setup --migrate` give a file's backup copy.
 BACKUP_SUFFIX = ".exomem-bak"
-
-
-def is_cloud_url(url: str) -> bool:
-    """Whether ``url`` points at the Evermatter Cloud host, which the Cloud definition fixes once.
-
-    `evermatter setup --migrate` keeps a registration that points there under its old key: the
-    Cloud plugin's address changes in a later release, and renaming now would sign that user in
-    twice. The host comes from `cloud_import_client.PRODUCTION_MCP_URL`; the import is lazy
-    because that module loads the MCP client stack, which no other setup path needs.
-    """
-    from .cloud_import_client import PRODUCTION_MCP_URL
-
-    try:
-        host = urlsplit(url).hostname
-    except ValueError:
-        return False
-    return host is not None and host == urlsplit(PRODUCTION_MCP_URL).hostname
 
 
 def normalize_mcp_url(raw: str) -> str:
@@ -434,16 +423,14 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
     return {"action": action, "path": str(path), "diff": diff, "backup": backup}
 
 
-def rename_codex_mcp_server(
-    *, path: Path | None = None, keep_url: Callable[[str], bool] = lambda url: False
-) -> dict:
+def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
     """Rename Codex's legacy `exomem` server section, sub-tables included, to ``SERVER_NAME``.
 
     Only the section headers change, so the server's settings and the tool approvals
     under its sub-tables move with it. Returns {"action", "path", "diff", "backup"} where
     ``action`` is "renamed", "current" (no legacy key, nothing written), "conflict" (both keys
-    hold a section, nothing written), "kept" (the legacy server is a URL that ``keep_url``
-    accepts; nothing written, ``url`` holds it) or "manual" (the legacy key is not a plain
+    hold a section, nothing written), "kept" (the legacy server is a URL on an Evermatter Cloud
+    host, which moves with the Cloud plugin; nothing written, ``url`` holds it) or "manual" (the legacy key is not a plain
     section the rename can move, such as an inline table, nothing written). A renamed URL
     server carries its ``url`` in the outcome: Codex stores the sign-in under the server key,
     so the user signs in again.
@@ -467,7 +454,7 @@ def rename_codex_mcp_server(
         return {"action": "conflict", **outcome}
     registered = servers[LEGACY_SERVER_NAME]
     url = str(registered["url"]) if isinstance(registered, dict) and "url" in registered else None
-    if url is not None and keep_url(url):
+    if url is not None and cloud_address.is_cloud_url(url):
         return {"action": "kept", "url": url, **outcome}
     legacy = _section_bounds(original, f"[mcp_servers.{LEGACY_SERVER_NAME}]")
     if legacy is None:
@@ -693,7 +680,7 @@ class UserReference:
     @property
     def replacement(self) -> str:
         """The prefix the rule should name now."""
-        return PLUGIN_TOOL_PREFIX if self.prefix == LEGACY_PLUGIN_TOOL_PREFIX else TOOL_PREFIX
+        return TOOL_PREFIX_RENAMES[self.prefix]
 
 
 def _strings(node: object, trail: tuple[str, ...] = ()):

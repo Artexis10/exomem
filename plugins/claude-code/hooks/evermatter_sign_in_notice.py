@@ -20,17 +20,21 @@ from pathlib import Path
 
 #: The step Claude Code offers for a server that needs a sign-in. `client_config.SIGN_IN_STEPS`
 #: holds the same text for `evermatter setup --migrate`; this hook cannot import the package, and
-#: `tests/test_rename_migration.py` fails when the two differ.
+#: `tests/test_plugin_sync.py` fails when the two differ.
 SIGN_IN_STEP = "run /mcp in Claude Code and choose evermatter"
 MARKER = "sign-in-notice-shown"
+# One text for a renamed install, whose sign-in the rename dropped, and a new one, which never had it.
 MESSAGE = (
-    "Evermatter now uses the server name `evermatter`, so Claude Code asks you to sign in "
-    f"again once. If it shows as not connected, {SIGN_IN_STEP}."
+    "Evermatter's server in this plugin is now named `evermatter`. "
+    f"If Evermatter shows as not connected, {SIGN_IN_STEP}, then sign in."
 )
 
 
 def notice(environ: dict[str, str]) -> str | None:
     """Return the notice to show now, or None. Writes the marker when it returns the notice."""
+    # Claude Code reserves the `sdk` prefix for its SDK entry points (`sdk-cli` is `-p`), so a prefix test is sound.
+    if environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith("sdk-"):
+        return None  # No one reads a headless run's message, and it must not use up the marker.
     if not environ.get("CLAUDE_PLUGIN_OPTION_MCP_URL", "").strip():
         return None  # No URL: the plugin's server is inert and has no sign-in to renew.
     data = environ.get("CLAUDE_PLUGIN_DATA", "")

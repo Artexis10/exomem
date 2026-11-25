@@ -221,7 +221,12 @@ def _run_sign_in_notice(tmp_path: Path, **plugin_env: str) -> str:
         for entry in document["hooks"]["SessionStart"]
         if entry.get("matcher") == "startup"
     )
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_PLUGIN_")}
+    # A test run inside Claude Code inherits its entry point, which would silence the hook.
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("CLAUDE_PLUGIN_") and k != "CLAUDE_CODE_ENTRYPOINT"
+    }
     env.update({"CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT), **plugin_env})
     done = subprocess.run(
         ["bash", "-c", command], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=30
@@ -249,6 +254,22 @@ def test_sign_in_notice_names_the_step_once_and_not_a_second_time(tmp_path: Path
     # The hook cannot import the package, so it holds its own copy of the step.
     assert client_config.SIGN_IN_STEPS["claude"] in json.loads(first)["systemMessage"]
     assert second == ""
+
+
+@needs_python
+def test_sign_in_notice_waits_out_a_headless_run_for_a_session_a_person_reads(
+    tmp_path: Path,
+) -> None:
+    plugin_env = {
+        "CLAUDE_PLUGIN_OPTION_MCP_URL": "https://memory.example/mcp",
+        "CLAUDE_PLUGIN_DATA": str(tmp_path / "data"),
+    }
+
+    headless = _run_sign_in_notice(tmp_path, CLAUDE_CODE_ENTRYPOINT="sdk-cli", **plugin_env)
+    interactive = _run_sign_in_notice(tmp_path, CLAUDE_CODE_ENTRYPOINT="cli", **plugin_env)
+
+    assert headless == ""
+    assert "systemMessage" in interactive  # the headless run left no marker behind
 
 
 @needs_python

@@ -13,10 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from exomem import client_config, doctor, install_hook, rename_migration
+from exomem import client_config, cloud_address, doctor, install_hook, rename_migration
 from exomem.__main__ import main
 from exomem._hooks import exomem_retrieve_nudge as retrieve
-from exomem.cloud_import_client import PRODUCTION_MCP_URL
 
 LEGACY_BLOCK = (
     f"{client_config.LEGACY_LEARNING_BEGIN}\nold wording\n{client_config.LEGACY_LEARNING_END}\n"
@@ -72,9 +71,9 @@ class FakeClaude:
 STDIO = {"type": "stdio", "command": "exomem", "args": [], "env": {"A": "1"}}
 HTTP = {"type": "http", "url": "https://memory.example/mcp"}
 CODEX_HTTP_CONFIG = '[mcp_servers.exomem]\nurl = "https://memory.example/mcp"\n'
-CLOUD_HTTP = {"type": "http", "url": PRODUCTION_MCP_URL}
+CLOUD_HTTP = {"type": "http", "url": cloud_address.LEGACY_MCP_URL}
 CLOUD_KEPT = (
-    f"kept `exomem` for {PRODUCTION_MCP_URL}: it moves with the Cloud plugin's address change, "
+    f"kept `exomem` for {cloud_address.LEGACY_MCP_URL}: it moves with the Cloud plugin's address change, "
     "so you sign in once"
 )
 
@@ -205,7 +204,7 @@ def test_migrate_keeps_a_claude_cloud_url_and_renames_a_url_that_is_not_the_clou
 
 
 def test_migrate_keeps_a_codex_cloud_url_where_it_is(tmp_path: Path) -> None:
-    cloud_config = f'[mcp_servers.exomem]\nurl = "{PRODUCTION_MCP_URL}"\n'
+    cloud_config = f'[mcp_servers.exomem]\nurl = "{cloud_address.LEGACY_MCP_URL}"\n'
     install = Install(tmp_path, codex=cloud_config)
 
     code, out = install.migrate()
@@ -214,6 +213,16 @@ def test_migrate_keeps_a_codex_cloud_url_where_it_is(tmp_path: Path) -> None:
     assert CLOUD_KEPT in out
     assert "codex mcp login" not in out
     assert (install.codex_home / "config.toml").read_text(encoding="utf-8") == cloud_config
+
+
+def test_a_registration_on_the_legacy_cloud_host_stays_recognised_once_the_cloud_address_moves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cloud_address, "MCP_URL", "https://cloud.example.net/mcp")
+
+    assert cloud_address.is_cloud_url(cloud_address.LEGACY_MCP_URL)
+    assert cloud_address.is_cloud_url("https://cloud.example.net/mcp")
+    assert not cloud_address.is_cloud_url("https://memory.example/mcp")
 
 
 def test_migrating_two_scopes_leaves_the_backup_holding_the_original_file(tmp_path: Path) -> None:
@@ -295,7 +304,7 @@ def test_migrate_leaves_the_rules_and_hooks_the_user_wrote_and_lists_them(tmp_pa
     assert "Bash(ls)" not in out
 
 
-def test_migrate_adds_the_new_prefix_beside_the_old_one_in_checkpoint_bindings(
+def test_migrate_adds_each_new_prefix_beside_its_old_one_in_checkpoint_bindings(
     tmp_path: Path,
 ) -> None:
     install = Install(tmp_path)
@@ -304,17 +313,23 @@ def test_migrate_adds_the_new_prefix_beside_the_old_one_in_checkpoint_bindings(
         activation_mode="mcp",
         hook_dir=install.claude_home / "hooks",
         settings_path=install.claude_home / "settings.json",
-        refresh_bindings=("exomem",),
+        refresh_bindings=("exomem", client_config.LEGACY_PLUGIN_TOOL_PREFIX),
     )
 
-    code, _out = install.migrate()
+    code, out = install.migrate()
 
     assert code == 0
     metadata, status = retrieve.refresh_metadata(
         install.claude_home / "hooks", "claude", install.claude_home
     )
     assert metadata is not None, status
-    assert metadata["bindings"] == ["mcp__exomem__", "mcp__evermatter__"]
+    assert metadata["bindings"] == [
+        "mcp__exomem__",
+        client_config.LEGACY_PLUGIN_TOOL_PREFIX,
+        "mcp__evermatter__",
+        client_config.PLUGIN_TOOL_PREFIX,
+    ]
+    assert f"bound mcp__evermatter__, {client_config.PLUGIN_TOOL_PREFIX}" in out
 
 
 def test_setup_migrate_runs_through_the_command_line(

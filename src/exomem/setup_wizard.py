@@ -196,7 +196,9 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         plugin_id = str(plugin.get("id") or plugin.get("name") or "")
-        if not any(name in plugin_id.casefold() for name in client_config.SERVER_NAMES):
+        # Only the plugin that carries the MCP server is checked; it takes the server's name, and a
+        # sibling such as `evermatter-hooks@exomem` has no server by design.
+        if plugin_id.partition("@")[0].casefold() not in client_config.SERVER_NAMES:
             continue
         entry = client_config.server_entry(plugin.get("mcpServers"))
         if entry is None:
