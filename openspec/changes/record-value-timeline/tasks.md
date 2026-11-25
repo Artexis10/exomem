@@ -25,25 +25,33 @@
 
 ## 3. Store schema 21
 
-- [ ] 3.1 Add migration 21: `version_effective` and `timeline_points` with append-only triggers; `txns.timeline_version` through `ALTER TABLE ... ADD COLUMN`; `field_span_state` and `field_spans` with their indexes, listed in `DERIVED_INDEX_TABLES`. Record the state compatibility id for schema 21.
+- [x] 3.1 Add migration 21: `version_effective` and `timeline_points` with append-only triggers; `txns.timeline_version` through `ALTER TABLE ... ADD COLUMN`; `field_span_state` and `field_spans` with their indexes, listed in `DERIVED_INDEX_TABLES`. Record the state compatibility id for schema 21.
   - Check: a migration test from schema 20 on a JSON and a typed collection with dynamic tables: `foreign_key_check` is clean, `txns` is identical in its existing columns, `item_versions` and `audit_effects` are row-identical, every row reads, and the chain verifies from the first transaction.
-- [ ] 3.2 Add the `timeline` member to the event material when `timeline_version` is 1, and rebuild it in `history.verify` from the two tables.
+  - Evidence: `tests/test_record_timeline_schema.py::test_migration_keeps_every_row_version_and_proof` migrates a schema-20 store with a JSON and a typed collection, both written by the maintained writer; `tests/test_collection_store_schema.py` covers the four new tables and the append-only triggers. `schema.compatibility_ids` derives the schema-21 id from `SCHEMA_VERSION`.
+- [x] 3.2 Add the `timeline` member to the event material when `timeline_version` is 1, and rebuild it in `history.verify` from the two tables.
   - Check: tests in which a changed effective time, an added point, a removed point and a cleared marker each fail verification at their transaction; a cold reopen of a sound store verifies.
+  - Evidence: `tests/test_record_timeline_schema.py::test_a_timeline_fact_changed_outside_the_writer_fails_verification_at_its_write` (4 cases, each asserting the failing `commit_seq`) and `::test_a_sound_store_with_timeline_facts_verifies_after_a_cold_reopen`.
 
 ## 4. Timeline facts on writes
 
-- [ ] 4.1 Write one span function that turns a row's versions and timeline facts into per-field points and spans. The writer, the direct path and the index build all call it.
+- [x] 4.1 Write one span function that turns a row's versions and timeline facts into per-field points and spans. The writer, the direct path and the index build all call it.
   - Check: unit tests for each branch: change semantics, the coarser-precision tie, ordering after the followed point, a kept zero-length span, a correction that replaces a point, and the merge of equal values.
-- [ ] 4.2 Accept `effective_at` on `append`, `update` and `bulk_upsert` (per row and for the batch). Refuse `EFFECTIVE_AT_INVALID`. Add the receipt's `timeline` block and keep it in the stored receipt.
+  - Evidence: `tests/test_record_timeline_fold.py` (8 tests, 14 cases with the effective-time bounds). The writer and store history call `timeline.fold`; the direct query path and the index build call it when 5.2 and 5.4 land.
+- [x] 4.2 Accept `effective_at` on `append`, `update` and `bulk_upsert` (per row and for the batch). Refuse `EFFECTIVE_AT_INVALID`. Add the receipt's `timeline` block and keep it in the stored receipt.
   - Check: tests for a late move, a defaulted write reported `written`, a future date refused, a date one day ahead of UTC accepted, and a request-id replay that returns the same block.
-- [ ] 4.3 Place each field of an `update` as `current` or `past`. Write a new row version for every timeline write. Refuse a past placement in `append` and `bulk_upsert` with `EFFECTIVE_BEFORE_CURRENT`.
+  - Evidence: the six 4.2 tests in `tests/test_record_timeline_writes.py`, from `test_a_move_recorded_late_keeps_its_real_date` to `test_a_bulk_rows_own_effective_time_wins_over_the_batchs`.
+- [x] 4.3 Place each field of an `update` as `current` or `past`. Write a new row version for every timeline write. Refuse a past placement in `append` and `bulk_upsert` with `EFFECTIVE_BEFORE_CURRENT`.
   - Check: tests for a missed move, one edit with two placements, the same-day date rule, and a bulk `abort` batch that writes nothing.
-- [ ] 4.4 Accept `corrects` on `update`. Refuse `TIMELINE_POINT_NOT_FOUND` and `TIMELINE_ORDER_CONFLICT`.
+  - Evidence: the five 4.3 tests in `tests/test_record_timeline_writes.py`, including `test_bulk_upsert_refuses_a_past_placement_and_an_abort_writes_nothing` and `test_reviving_a_retracted_row_before_its_latest_point_writes_nothing`.
+- [x] 4.4 Accept `corrects` on `update`. Refuse `TIMELINE_POINT_NOT_FOUND` and `TIMELINE_ORDER_CONFLICT`.
   - Check: tests for a corrected current value with no change shown between the two values, a re-date with no values, a corrected past value, a correction of a correction, and each refusal writing nothing.
-- [ ] 4.5 Report `effective_at`, `effective_basis`, `placements`, `past_values`, `corrects` and `replaced_by` in store history revisions. Keep an unchanged-payload update that records a fact. Show a stated effective time on the generated history page.
+  - Evidence: the 4.4 tests in `tests/test_record_timeline_writes.py`, with `test_a_refused_correction_writes_nothing` covering TIMELINE_POINT_NOT_FOUND twice, TIMELINE_ORDER_CONFLICT and INVALID_RECORD_CHANGES.
+- [x] 4.5 Report `effective_at`, `effective_basis`, `placements`, `past_values`, `corrects` and `replaced_by` in store history revisions. Keep an unchanged-payload update that records a fact. Show a stated effective time on the generated history page.
   - Check: a test in which a corrected move shows both revisions, each naming the other.
-- [ ] 4.6 Refuse `effective_at`, `corrects` and `timeline` with `TIMELINE_UNAVAILABLE` on file-canonical, dataset and derived collections. Make the export preview name each collection with timeline facts and how many the export drops.
+  - Evidence: `tests/test_record_timeline_writes.py::test_history_shows_a_corrected_move_and_its_correction_each_naming_the_other`, which also checks a revision that changed only a past point and the page's effective times.
+- [x] 4.6 Refuse `effective_at`, `corrects` and `timeline` with `TIMELINE_UNAVAILABLE` on file-canonical, dataset and derived collections. Make the export preview name each collection with timeline facts and how many the export drops.
   - Check: tests for each refused kind writing nothing, and for an export preview that names the dropped count of a collection with a past point.
+  - Evidence: `tests/test_record_timeline_writes.py::test_a_file_collection_refuses_a_timeline_argument_and_writes_nothing` (file-canonical and dataset, add and edit), `::test_a_derived_collection_refuses_a_timeline_argument_and_writes_nothing` and `tests/test_collection_store_export.py::test_an_export_preview_names_the_timeline_facts_it_drops`. The `timeline` query argument arrives with 5.1, which adds its refusal.
 
 ## 5. Timeline queries
 
