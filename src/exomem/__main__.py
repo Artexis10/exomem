@@ -134,9 +134,7 @@ def _main(argv: list[str] | None) -> int:
     bootstrap()
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
-    serving = (not raw or raw[0].startswith("-")) and not any(
-        item in {"--version", "--help", "-h"} for item in raw
-    )
+    serving = (not raw or raw[0].startswith("-")) and not env_compat.asks_only_to_identify(raw)
     try:
         return _run_cli(argv)
     finally:
@@ -164,7 +162,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
         from .install_info import print_version
 
         return print_version(as_json="--json" in raw)
-    env_compat.refuse_process_conflicts()
+    if not env_compat.asks_only_to_identify(raw):  # help acts on no setting
+        env_compat.refuse_process_conflicts()
     if raw and raw[0] == "find":
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.

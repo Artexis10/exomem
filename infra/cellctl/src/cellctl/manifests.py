@@ -44,6 +44,7 @@ from .export_layout import (
     staging_claim_name,
     verification_secret_name,
 )
+from .setting_alias import canonical_name
 from .storage.topolvm import FamilyRequest
 from .storage_config import GROWTH_THRESHOLD_PERCENT, LEGACY_CLASS
 
@@ -933,10 +934,13 @@ def check_model_env(model_env: object) -> None:
             raise ValueError(f"cell model environment has an invalid name: {key!r}")
         if not isinstance(model_env[key], str):
             raise ValueError(f"cell model environment value for {key} must be a string")
+        # The cell reads an EVERMATTER_ or KB_MCP_ name as the EXOMEM_ name, so it is refused
+        # exactly as that name is.
+        internal = canonical_name(key)
         if (
-            key in MODEL_ENV_FORBIDDEN_KEYS
-            or key.startswith(MODEL_ENV_FORBIDDEN_PREFIXES)
-            or key.endswith(MODEL_ENV_FORBIDDEN_SUFFIXES)
+            internal in MODEL_ENV_FORBIDDEN_KEYS
+            or internal.startswith(MODEL_ENV_FORBIDDEN_PREFIXES)
+            or internal.endswith(MODEL_ENV_FORBIDDEN_SUFFIXES)
         ):
             raise ValueError(f"cell model environment may not set {key}")
 

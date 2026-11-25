@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import io
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from benchmark_capabilities import (
@@ -4293,3 +4295,22 @@ def test_a_settings_conflict_skips_the_event_and_logs_the_variable(monkeypatch, 
 
     assert len(reached) == 1
     assert "EVERMATTER_PROMINENCE" in (tmp_path / "exomem-capture-nudge.log").read_text("utf-8")
+
+
+def test_the_hook_home_flag_wins_over_an_inherited_product_prefix_name(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The failure: the flag's value disagrees with the inherited EVERMATTER_ name, and the hook skips the event."""
+    reached: list[tuple] = []
+    monkeypatch.setattr(checkpoint, "_dispatch_core", lambda *args, **kwargs: reached.append(args))
+    payload = {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"}
+    monkeypatch.delenv("EXOMEM_HOOK_HOME", raising=False)
+    monkeypatch.setenv("EVERMATTER_HOOK_HOME", str(tmp_path / "inherited-home"))
+    monkeypatch.setenv("EXOMEM_PROMINENCE", "balanced")
+    monkeypatch.setattr(
+        sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(payload).encode("utf-8")))
+    )
+
+    assert checkpoint.main(["--client", "claude", "--hook-home", str(tmp_path)]) == 0
+
+    assert [Path(args[1]) for args in reached] == [tmp_path]

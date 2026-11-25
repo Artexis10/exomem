@@ -28,6 +28,7 @@ from .manifests import ResourceSettings, check_model_env
 from .media_edge import MediaEdgeConfig
 from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .restic_verification import VerificationConfig
+from .setting_alias import setting
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
 from .storage_config import StorageConfig, parse_storage_config
@@ -114,7 +115,7 @@ def build_reconcile_config() -> ReconcileConfig:
         # C6 names this setting. Substrate reads the same variable to state the time limit, so set both alike.
         ("export_ttl", "EXOMEM_EXPORT_TTL_HOURS", "hours"),
     ):
-        raw = _setting(variable)
+        raw = setting(variable)
         if raw is not None:
             amount = int(raw)
             if amount <= 0:
@@ -131,32 +132,6 @@ def build_reconcile_config() -> ReconcileConfig:
     # cannot read stops it here, rather than letting an attempt cross it unseen.
     kwargs["upgrade_barriers"] = load_barriers(_required_env("CELLCTL_UPGRADE_BARRIERS"))
     return ReconcileConfig(**kwargs)
-
-
-# The product's closed naming history, in precedence order after EXOMEM_. cellctl cannot import
-# the substrate's env_compat, so it holds this one rule for the one EXOMEM_ name it reads.
-_SETTING_ALIAS_PREFIXES = ("EVERMATTER_", "KB_MCP_")
-
-
-def _setting(name: str) -> str | None:
-    """The value of `name`; an EXOMEM_ name also reads its alias names when it is unset.
-
-    `name` wins over its aliases. A differing EVERMATTER_ value logs one warning that names both
-    variables, never the values.
-    """
-    value = os.environ.get(name)
-    if not name.startswith("EXOMEM_"):
-        return value
-    for prefix in _SETTING_ALIAS_PREFIXES:
-        alias = prefix + name[len("EXOMEM_") :]
-        alias_value = os.environ.get(alias)
-        if alias_value is None:
-            continue
-        if value is None:
-            value = alias_value
-        elif prefix == "EVERMATTER_" and alias_value != value:
-            logging.getLogger(__name__).warning("%s and %s differ; using %s", alias, name, name)
-    return value
 
 
 def _required_env(name: str) -> str:

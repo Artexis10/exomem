@@ -463,6 +463,22 @@ def test_model_env_may_not_relocate_state_config_or_a_writable_directory() -> No
     render_statefulset(_spec(model_env={"EXOMEM_EMBED_BACKEND": "onnx", "EXOMEM_WHISPER_MODEL": "base"}))
 
 
+def test_model_env_refuses_the_product_and_legacy_spellings_of_a_denied_name() -> None:
+    # The cell reads an EVERMATTER_ or KB_MCP_ name as the EXOMEM_ name, so a chart-wide alias would
+    # otherwise reach every cell past the denylist.
+    import pytest
+
+    for key in (
+        "EVERMATTER_SOURCE_ERASURE_POLICY",
+        "KB_MCP_SOURCE_ERASURE_POLICY",
+        "EVERMATTER_CLOUD_CELL_ID",
+        "EVERMATTER_STATE_ROOT",
+    ):
+        with pytest.raises(ValueError, match=key):
+            render_statefulset(_spec(model_env={key: "elsewhere"}))
+    render_statefulset(_spec(model_env={"EVERMATTER_EMBED_BACKEND": "onnx"}))
+
+
 def test_a_cell_serves_passages_from_a_resident_matrix_by_default() -> None:
     # Without the ceiling every passage search reads its vectors from disk, and
     # four concurrent searches miss the cell's latency budget.

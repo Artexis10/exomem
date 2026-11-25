@@ -1340,6 +1340,8 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(argv or [])
     except SystemExit:
         return 0
+    # Inherited names are renamed first, so a flag below wins over every name for its setting.
+    conflicts = _normalize_env_aliases()
     if args.hook_home_env is not None:
         args.hook_home = os.environ.get(args.hook_home_env)
         if not args.hook_home or not args.hook_home.strip():
@@ -1351,7 +1353,6 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if value is not None:
             os.environ[name] = value
-    conflicts = _normalize_env_aliases()
     if conflicts:  # never pick between two values: skip this turn's nudge
         _log_conflict(conflicts)
         return 0

@@ -4685,9 +4685,11 @@ def dispatch_event(
     payload: Mapping[str, object],
     *,
     environ: Mapping[str, str] | None = None,
+    flags: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     env = dict(os.environ if environ is None else environ)
     conflicts = _rename_aliases(env)
+    env.update(flags or {})  # command-line flags apply after the rename, so they win over every name
     event = normalize_event(client, payload)
     if event is None or _disabled(env):
         return None
@@ -4720,10 +4722,8 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return 0
-        env = dict(os.environ)
-        if args.hook_home is not None:
-            env["EXOMEM_HOOK_HOME"] = args.hook_home
-        output = dispatch_event(args.client, payload, environ=env)
+        flags = {"EXOMEM_HOOK_HOME": args.hook_home} if args.hook_home is not None else {}
+        output = dispatch_event(args.client, payload, flags=flags)
         if output is not None:
             sys.stdout.write(json.dumps(output, ensure_ascii=False, separators=(",", ":")))
         return 0

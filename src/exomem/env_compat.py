@@ -8,13 +8,18 @@ precedence rules apply, and the renamed source no longer holds the alias names.
 So a source never lets an alias beat an explicit `EXOMEM_X`, a value that code
 writes later wins, a child process inherits one name, and a conflict between two
 sources is seen under one name.
+
+Renaming the process environment removes the alias names from it, `KB_MCP_*`
+included: a process that read `KB_MCP_X` before the package imported finds it
+gone afterwards and reads `EXOMEM_X`. A child process never sees a `KB_MCP_*` name.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Iterable, Mapping
+import sys
+from collections.abc import Iterable, Mapping, Sequence
 from typing import NamedTuple, TypeVar
 
 log = logging.getLogger(__name__)
@@ -63,6 +68,17 @@ class SettingsConflict(ValueError):
             f"{pairs} are set to different values in {source}, so it is unclear which to use. "
             "Delete one name of each pair, then run it again."
         )
+
+
+# The flags a command line uses to identify itself without acting. argparse and the CLI define
+# them, so the set is closed; a refusal that would block them only hides the conflict message.
+# nosemgrep: ep-word-set -- the three flags are fixed by argparse and the CLI, not by data
+IDENTIFICATION_FLAGS = frozenset({"--version", "--help", "-h"})
+
+
+def asks_only_to_identify(args: Iterable[str]) -> bool:
+    """Whether a command line asks only for the version or help, which acts on no setting."""
+    return any(arg in IDENTIFICATION_FLAGS for arg in args)
 
 
 def is_placement(conflict: Conflict) -> bool:
@@ -188,6 +204,49 @@ def refuse_process_conflicts(*, every_setting: bool = False) -> None:
     refused = [c for c in _process_conflicts if every_setting or is_placement(c)]
     if refused:
         raise SettingsConflict(refused, "the process environment")
+
+
+def refuse_program_entry_conflicts(orig_argv: Sequence[str] | None = None) -> None:
+    """Exit with code 2 when `python -m exomem.<module>` starts on a placement conflict.
+
+    The managed supervisor, the lease coordinator, the upgrade and import jobs and the media
+    children are run as modules, so none passes through the CLI's own refusal. They share one
+    check at package import, which cannot raise for a library user: it acts only when the
+    interpreter was started with `-m exomem.<module>`. `-m exomem` refuses in its own `main`,
+    and a version or help request runs.
+    """
+    argv = list(sys.orig_argv if orig_argv is None else orig_argv)
+    if "-m" not in argv[:-1]:
+        return
+    position = argv.index("-m")
+    module, arguments = argv[position + 1], argv[position + 2 :]
+    if not module.startswith("exomem.") or module == "exomem.__main__":
+        return
+    if asks_only_to_identify(arguments):
+        return
+    try:
+        refuse_process_conflicts()
+    except SettingsConflict as conflict:
+        print(f"{module}: not run. {conflict}", file=sys.stderr)
+        raise SystemExit(2) from conflict
+
+
+def refuse_placement_conflicts_across(sources: Iterable[Mapping[str, str]], *, source: str) -> None:
+    """Treat `sources` that one process reads together as one source for placement conflicts.
+
+    A later source's value for a name replaces an earlier one's, as an environment file
+    replaces what its supervisor inherited. An `EVERMATTER_X` then refuses when it disagrees with
+    the `EXOMEM_X` in force: a conflict between the supervisor and a file, or between two files,
+    would otherwise give two processes of one service two places. Each source's own conflicts
+    are settled by `canonical_settings`.
+    """
+    merged: dict[str, str] = {}
+    for settings in sources:
+        merged.update(settings)
+    _, conflicts = rename_settings(merged)
+    refused = [c for c in conflicts if is_placement(c)]
+    if refused:
+        raise SettingsConflict(refused, source)
 
 
 def dotenv_settings(
