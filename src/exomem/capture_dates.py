@@ -38,8 +38,9 @@ _PATTERN_LIMIT = 400
 _NAME_LIMIT = 255
 _FIRST_YEAR = 1990
 #: A leading set number such as `01-`: it orders a set of files and never states a date, so it is
-#: stripped by its shape before the name is matched against the registry's formats.
-_ORDINAL_PREFIX = re.compile(r"\d{1,3}-")
+#: stripped by its shape before the name is matched against the registry's formats. Only at the
+#: start: a number inside a name (`IMG12-2023...`) is part of the maker's own shape.
+_ORDINAL_PREFIX = re.compile(r"^\d{1,3}-")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 

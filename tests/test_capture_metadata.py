@@ -362,3 +362,19 @@ def test_the_upload_receipt_says_when_an_image_arrives_without_camera_metadata(v
     )
 
     assert (preserve.NO_CAMERA_METADATA_WARNING in receipt.warnings) is noticed
+
+
+def test_a_screenshot_or_diagram_arrives_with_no_notice_to_send_the_original(vault, tmp_path):
+    """A PNG never carried camera metadata, so telling the user to send the original would be noise."""
+    from PIL import Image
+
+    from exomem import preserve
+
+    diagram = tmp_path / "diagram.png"
+    Image.new("RGB", (64, 48), (200, 30, 30)).save(diagram)
+
+    receipt = preserve.preserve_bytes(
+        vault, scope="Rental", category="image", filename="diagram.png", data=diagram.read_bytes()
+    )
+
+    assert preserve.NO_CAMERA_METADATA_WARNING not in receipt.warnings

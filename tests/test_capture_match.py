@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from exomem import capture_match
-from exomem.capture_match import AMBIGUOUS, NO_MATCH, Fingerprint, Original, Pool
+from exomem.capture_match import AMBIGUOUS, NO_MATCH, Fingerprint, Location, Original, Pool
 
 BASE = int.from_bytes(bytes(range(0, 256, 8)), "big") ^ int.from_bytes(b"\xa5" * 32, "big")
 COPY = Fingerprint(BASE, 640, 480)
@@ -11,7 +13,9 @@ COPY = Fingerprint(BASE, 640, 480)
 
 def _original(distance: int, time: str, origin: str, *, width: int = 640, height: int = 480) -> Original:
     """An original whose fingerprint differs from the copy's in exactly `distance` bits."""
-    return Original(Fingerprint(BASE ^ ((1 << distance) - 1), width, height), time, time[:10], origin)
+    return Original(
+        Fingerprint(BASE ^ ((1 << distance) - 1), width, height), time, time[:10], origin, Location(Path(origin), ".jpg")
+    )
 
 
 def _pool(*originals: Original) -> Pool:
@@ -63,3 +67,9 @@ def test_an_original_of_another_shape_is_neither_a_match_nor_a_rival():
 
 def test_an_empty_pool_matches_nothing():
     assert Pool().find(COPY) == NO_MATCH
+
+
+def test_a_candidate_that_cannot_be_read_again_is_not_confirmed(tmp_path):
+    gone = Location(tmp_path / "moved-away.jpg", ".jpg")
+
+    assert not capture_match.confirm(gone, _original(0, "2021-05-06T07:08:09", "a"))

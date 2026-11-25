@@ -232,18 +232,26 @@ def with_name_date(
     )
 
 
-def lacks_camera_metadata(vault_root: Path, path: Path, name: object) -> bool:
-    """Whether the image at `path` decodes yet states no capture time, position or camera, and `name` states no time.
+#: The formats a camera writes an EXIF block into. A screenshot, a diagram or an export in another
+#: format never had one, so its missing camera metadata is no loss to warn about. A closed set that
+#: the formats' own specifications fix (file extensions), not vocabulary.
+_CAMERA_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".heic", ".heif"})
 
-    False whenever the file cannot be judged (no decoder, a corrupt file): an unknown never reads as a gap.
+
+def lacks_camera_metadata(vault_root: Path, path: Path, name: object) -> bool:
+    """Whether the camera photo at `path` decodes yet states no capture time, position or camera, and `name` states no time.
+
+    False for any other format, and whenever the file cannot be judged (no decoder, a corrupt file):
+    an unknown never reads as a gap. The name is read before the file is decoded.
     """
-    if not available("image", path):
+    if not isinstance(name, str) or Path(name).suffix.lower() not in _CAMERA_PHOTO_EXTS:
+        return False
+    if capture_dates.from_file_name(vault_root, name) is not None or not available("image", path):
         return False
     facts = read(path, "image")
     if facts is None:
         return False
-    states_camera = facts.time or facts.lat is not None or facts.make or facts.model
-    return not states_camera and capture_dates.from_file_name(vault_root, name) is None
+    return not (facts.time or facts.lat is not None or facts.make or facts.model)
 
 
 # ---------------------------------------------------------------- images

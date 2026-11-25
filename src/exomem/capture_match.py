@@ -2,8 +2,8 @@
 
 A chat client or a photo export often re-encodes a picture without its EXIF block. The original, with
 its date, may sit elsewhere in the vault or in an archive the owner keeps. This module fingerprints
-images and accepts a match only when it is unique: wrong dates are worse than missing ones, so a
-doubtful match is refused with its reason. It reads files and never writes, moves or copies one.
+images and accepts a match only when it is unique and confirmed at a finer scale: wrong dates are worse
+than missing ones, so a doubtful match is refused with its reason. It reads files and never writes, moves or copies one.
 """
 
 from __future__ import annotations
@@ -13,15 +13,19 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from . import capture_metadata, image_codecs, media_types
 from .perceptual_hash import average_hash, hamming
 
 #: The hash is `HASH_SIDE` squared bits: fine enough to tell two scenes of one place apart, coarse enough
 #: to survive a resize and a re-encode.
 HASH_SIDE = 16
-#: The farthest a copy may be from its original, in bits of 256 (about 9%): re-encoding and resizing move
-#: a hash a few bits, so a distance beyond this is another picture.
-MAX_DISTANCE = 24
+#: The farthest a copy may be from its original, in bits of 256 (about 5%). Resized, re-encoded copies of
+#: test pictures at 320 px and up landed within 5 bits; this is more than twice that. A 200 px thumbnail
+#: of a text page reached 16 and goes unmatched, the safe miss. The hash is only the first filter:
+#: pictures of one kind (printed pages) often sit within 24 bits of each other, so `confirm` decides.
+MAX_DISTANCE = 12
 #: How much farther the next original with a different capture time must be. Two shots of one scene a
 #: second apart sit within a few bits of each other, and a copy that cannot be told apart from both has
 #: no unique date.
@@ -31,21 +35,33 @@ ASPECT_TOLERANCE = 0.02
 #: A hash with fewer set or clear bits than this encodes little structure (a near-flat picture), so many
 #: unrelated pictures would match it. Such an image is never matched.
 MIN_BITS_EACH = 64
+#: A candidate is confirmed at a finer scale before it gives its date: the correlation of both pictures as
+#: `DETAIL_SIDE` squared grayscale pixels. Resized, re-encoded copies of test pages scored 0.974 or more;
+#: different pages that passed the hash scored 0.82 at most. The bound sits between, nearer the copies.
+DETAIL_SIDE = 64
+MIN_CORRELATION = 0.95
 _DRAFT_SIDE = HASH_SIDE * 8
-_ORIENTATION = 0x0112
-_SIDEWAYS = frozenset({5, 6, 7, 8})
 #: Files that a walk of an archive reads between two stops for the job's own checkpoint.
 _WALK_STRIDE = 25
 
 NO_MATCH = "no original within the match distance"
 AMBIGUOUS = "another original with a different capture time is nearly as close"
 NO_STRUCTURE = "the picture is too uniform to match"
+NOT_CONFIRMED = "the closest original differs from the picture at a finer scale"
+
+
+@dataclass(frozen=True, slots=True)
+class Location:
+    """Where an image's bytes can be read again: a path, and the format its name states (a stored blob has none)."""
+
+    path: Path
+    suffix: str
 
 
 @dataclass(frozen=True, slots=True)
 class Fingerprint:
     bits: int
-    #: The upright dimensions of the full-size image.
+    #: The upright size of the reduced-scale decode that was hashed; only its ratio is compared.
     width: int
     height: int
 
@@ -59,25 +75,55 @@ class Original:
     date: str
     #: Where it lives: a page id, or a path relative to the archive root.
     origin: str
+    #: Where its bytes are, so a candidate can be confirmed against the copy.
+    location: Location
 
 
-def fingerprint(path: Path) -> Fingerprint | None:
-    """The fingerprint of the image at `path`, or None when it has no structure to match.
+def _upright_gray(location: Location):
+    """The picture, upright and grayscale, decoded at a reduced scale where the format allows it.
 
     Raises what the decoder raises for a file it cannot read; the caller counts that as unreadable.
     """
-    from PIL import Image, ImageOps
+    from PIL import ImageOps
 
-    with image_codecs.open_image(path) as image:
-        width, height = image.size
-        if image.getexif().get(_ORIENTATION) in _SIDEWAYS:
-            width, height = height, width
+    with image_codecs.open_image(location.path, suffix=location.suffix) as image:
         image.draft("L", (_DRAFT_SIDE, _DRAFT_SIDE))  # a JPEG decodes at reduced scale; other formats ignore it
-        bits = average_hash(ImageOps.exif_transpose(image), size=HASH_SIDE, resample=Image.Resampling.BOX)
+        return ImageOps.exif_transpose(image).convert("L")
+
+
+def fingerprint(location: Location) -> Fingerprint | None:
+    """The fingerprint of the image at `location`, or None when it has no structure to match."""
+    from PIL import Image
+
+    gray = _upright_gray(location)
+    bits = average_hash(gray, size=HASH_SIDE, resample=Image.Resampling.BOX)
     ones = bits.bit_count()
     if ones < MIN_BITS_EACH or HASH_SIDE * HASH_SIDE - ones < MIN_BITS_EACH:
         return None
-    return Fingerprint(bits, width, height)
+    return Fingerprint(bits, *gray.size)
+
+
+def confirm(copy: Location, original: Original) -> bool:
+    """Whether the copy and the original agree at a finer scale than the hash.
+
+    The hash keeps the pictures of one kind (printed pages, screenshots of one app) close together, so a
+    near hash alone would hand one picture's date to another. A picture that cannot be read again is
+    not confirmed.
+    """
+    from PIL import Image
+
+    try:
+        vectors = []
+        for location in (copy, original.location):
+            small = _upright_gray(location).resize((DETAIL_SIDE, DETAIL_SIDE), Image.Resampling.BOX)
+            pixels = np.asarray(small, dtype=np.float32).ravel()
+            vectors.append(pixels - pixels.mean())
+    except MemoryError:
+        raise
+    except Exception:  # noqa: BLE001 - untrusted bytes: an image that no decoder reads again is not confirmed
+        return False
+    norm = float(np.linalg.norm(vectors[0]) * np.linalg.norm(vectors[1]))
+    return norm > 0 and float(vectors[0] @ vectors[1]) / norm >= MIN_CORRELATION
 
 
 def _same_shape(first: Fingerprint, second: Fingerprint) -> bool:
@@ -149,10 +195,11 @@ def add_archive(pool: Pool, root: Path, *, tick: Callable[[int], None] | None = 
         facts = capture_metadata.read(path, "image")
         if facts is None or not facts.time or facts.date is None:
             continue
+        location = Location(path, path.suffix)
         try:
-            fingerprinted = fingerprint(path)
+            fingerprinted = fingerprint(location)
         except Exception:  # noqa: BLE001 - untrusted bytes: a decoder failure means this file is not an original to match
             continue
         if fingerprinted is not None:
-            pool.add(Original(fingerprinted, facts.time, facts.date, path.relative_to(root).as_posix()))
+            pool.add(Original(fingerprinted, facts.time, facts.date, path.relative_to(root).as_posix(), location))
     return read

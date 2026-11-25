@@ -71,7 +71,10 @@ class _Plan:
         #: and is still updated with what its own file states.
         self.unmatched: dict[str, int] = {}
         self.unmatched_listed: list[tuple[str, str]] = []
-        self.source_of: dict[str, str | None] = {}
+        #: What the plan gives each page to rewrite, as the receipt's row shows it: source, time and origin of a match.
+        self.gives: dict[str, str] = {}
+        #: Pages that would take a date from another file, bounded like the skips.
+        self.matches: list[dict[str, str]] = []
 
     def skip(self, page: str, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -93,7 +96,7 @@ class _Recovery:
     """What `recover` adds to one pass: the originals a copy may match, and the copies waiting for the pool to be complete."""
 
     pool: capture_match.Pool
-    waiting: list[tuple[str, str, CaptureFacts | None, capture_match.Fingerprint]]
+    waiting: list[tuple[str, str, CaptureFacts | None, capture_match.Fingerprint, capture_match.Location]]
 
 
 def backfill(
@@ -135,10 +138,11 @@ def backfill(
         "skipped_listed": [{"path": page, "reason": reason} for page, reason in plan.listed],
     }
     if recovering:
+        report["matched_listed"] = plan.matches
         report["unmatched"] = dict(plan.unmatched)
         report["unmatched_listed"] = [{"path": page, "reason": reason} for page, reason in plan.unmatched_listed]
     if dry_run:
-        maintenance_jobs.record_planned((rel, plan.source_of.get(rel)) for rel, _path, _digest in plan.pages)
+        maintenance_jobs.record_planned((rel, plan.gives.get(rel)) for rel, _path, _digest in plan.pages)
         maintenance_jobs.record_planned(plan.listed, kind=maintenance_jobs.SKIPPED_PAGE)
         return report
     if plan_id is not None:
@@ -215,10 +219,10 @@ def _read_plan(root: Path, archive_folder: Path | None, recovering: bool) -> _Pl
         _plan_page(root, plan, rel, data.decode("utf-8"), fields, snapshot, recovery)
     if recovery is not None:
         total = len(recovery.waiting)
-        for done, (rel, text, facts, copy) in enumerate(recovery.waiting):
+        for done, (rel, text, facts, copy, location) in enumerate(recovery.waiting):
             if done % 50 == 0:
                 maintenance_jobs.checkpoint("matching", done, total)
-            _settle_copy(root, plan, recovery.pool, rel, text, facts, copy)
+            _settle_copy(root, plan, recovery.pool, rel, text, facts, copy, location)
     return plan
 
 
@@ -238,8 +242,10 @@ def _plan_page(
     copy: capture_match.Fingerprint | str | None = None
     with _local_view(snapshot) as view:
         facts = capture_metadata.read(view, kind) if view is not None else None
+        # The bytes' own place, not the private view, so a candidate can be read again after this block ends.
+        location = capture_match.Location(snapshot.local_path or snapshot.path, snapshot.path.suffix)
         if recovery is not None and view is not None and kind == "image":
-            copy = _prepare_recovery(recovery, rel, fields, facts, view)
+            copy = _prepare_recovery(recovery, rel, fields, facts, location)
     if view is None or (facts is None and not _still_local(root, snapshot)):
         plan.skip(rel, BYTES_NOT_ON_VOLUME)  # it left the volume between the census and the read
         return
@@ -247,13 +253,13 @@ def _plan_page(
     if isinstance(copy, str):
         plan.no_match(rel, copy)
     elif recovery is not None and copy is not None:
-        recovery.waiting.append((rel, text, facts, copy))
+        recovery.waiting.append((rel, text, facts, copy, location))
         return
     _finish_page(root, plan, rel, text, facts)
 
 
 def _prepare_recovery(
-    recovery: _Recovery, rel: str, fields: dict[str, Any], facts: CaptureFacts | None, view: Path,
+    recovery: _Recovery, rel: str, fields: dict[str, Any], facts: CaptureFacts | None, location: capture_match.Location,
 ) -> capture_match.Fingerprint | str | None:
     """Add a camera-dated image to the pool, or fingerprint an undated one that a match could still improve.
 
@@ -268,23 +274,27 @@ def _prepare_recovery(
     if not camera_dated and keeps_recorded:
         return None
     try:
-        fingerprint = capture_match.fingerprint(view)
+        fingerprint = capture_match.fingerprint(location)
     except MemoryError:
         raise
     except Exception:  # noqa: BLE001 - untrusted bytes: an image that no decoder reads cannot be matched
         return None if camera_dated else UNREADABLE_FOR_MATCHING
     if camera_dated:
         if fingerprint is not None:
-            recovery.pool.add(capture_match.Original(fingerprint, facts.time, facts.date, str(fields.get("exomem_id") or rel)))
+            recovery.pool.add(
+                capture_match.Original(fingerprint, facts.time, facts.date, str(fields.get("exomem_id") or rel), location)
+            )
         return None
     return fingerprint or capture_match.NO_STRUCTURE
 
 
 def _settle_copy(
     root: Path, plan: _Plan, pool: capture_match.Pool, rel: str, text: str, facts: CaptureFacts | None,
-    copy: capture_match.Fingerprint,
+    copy: capture_match.Fingerprint, location: capture_match.Location,
 ) -> None:
     found = pool.find(copy)
+    if not isinstance(found, str) and not capture_match.confirm(location, found):
+        found = capture_match.NOT_CONFIRMED
     if isinstance(found, str):
         plan.no_match(rel, found)
     else:
@@ -309,17 +319,24 @@ def _finish_page(root: Path, plan: _Plan, rel: str, text: str, facts: CaptureFac
             raise
         plan.skip(rel, f"{refused.code}: {refused.reason}")
         return
-    source = _count_source(plan, updated)
+    dated = _count_source(plan, updated)
     if updated == text:
         plan.already_current += 1
         return
     plan.pages.append((rel, root / rel, vault.content_hash(text)))
     plan.facts[rel] = json.dumps(facts.as_payload(), sort_keys=True, separators=(",", ":"))
-    plan.source_of[rel] = source
+    if dated is not None:
+        plan.gives[rel] = f"{capture_dates.recorded_source(dated.date_source)} {dated.time}" + (
+            f" from {dated.date_matched_from}" if dated.date_matched_from else ""
+        )
+        if dated.date_matched_from and len(plan.matches) < LISTED_SKIPS:
+            plan.matches.append(
+                {"path": rel, "time": dated.time, "from": dated.date_matched_from}
+            )
 
 
-def _count_source(plan: _Plan, final_text: str) -> str | None:
-    """Count the source of the date that `final_text` carries, and return it; a page without a date is undated."""
+def _count_source(plan: _Plan, final_text: str) -> CaptureFacts | None:
+    """Count the source of the date that `final_text` carries and return what it records; None when it has no date."""
     try:
         recorded = capture_metadata.recorded(vault.parse_frontmatter(final_text, custody=True)[0])
     except vault.FrontmatterError:
@@ -329,7 +346,7 @@ def _count_source(plan: _Plan, final_text: str) -> str | None:
         return None
     source = str(capture_dates.recorded_source(recorded.date_source))
     plan.by_source[source] = plan.by_source.get(source, 0) + 1
-    return source
+    return recorded
 
 
 def _reads_capture(original: str) -> bool:

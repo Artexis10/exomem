@@ -14,7 +14,7 @@ import pytest
 from test_capture_backfill import _backfill, _file
 from test_capture_metadata_index import _reset
 
-from exomem import capture_dates, lexstore
+from exomem import capture_dates, capture_match, lexstore, maintenance_jobs
 from exomem import find as find_module
 from exomem.cli_ops import OpError
 from exomem.vault import parse_frontmatter
@@ -35,6 +35,26 @@ def _scene(seed: int, *, patch: bool = False):
     if patch:
         scene.paste((255, 255, 255), (300, 200, 360, 260))
     return scene
+
+
+def _page(seed: int, *, jitter: int = 0):
+    """A photographed printed page: rows of word-sized dark bars on paper. Two different pages look alike to a coarse hash."""
+    import random
+
+    from PIL import Image, ImageDraw
+
+    rnd = random.Random(seed)
+    image = Image.new("L", (640, 480), 235)
+    draw = ImageDraw.Draw(image)
+    y = 40 + rnd.randint(-jitter, jitter)
+    while y < 440:
+        x = 50 + rnd.randint(-jitter, jitter)
+        while x < 550:
+            width = rnd.randint(18, 70)
+            draw.rectangle((x, y, min(x + width, 590), y + 12), fill=45)
+            x += width + 10
+        y += 24
+    return image.convert("RGB")
 
 
 def _jpeg(image, *, taken: str | None = None, size: tuple[int, int] | None = None, quality: int = 90) -> bytes:
@@ -223,3 +243,47 @@ def test_a_plan_made_for_one_archive_is_refused_for_another(vault, library, arch
         _backfill(vault, dry_run=False, plan_id=preview["plan_id"], recover=True, originals_root=str(other))
 
     assert stale.value.code == "STALE_MAINTENANCE_PLAN"
+
+
+def test_a_look_alike_page_is_not_given_the_date_of_a_different_picture(vault, tmp_path):
+    """Catches a recovery that dates a photo of one page from the original photo of another page.
+
+    The two pages pass the coarse hash (the copy's reason is the finer check, not "no original within the
+    match distance"), so only the finer-scale comparison keeps the copy undated.
+    """
+    folder = tmp_path / "phone-archive"
+    folder.mkdir()
+    (folder / "IMG_0100.jpg").write_bytes(_jpeg(_page(33), taken="2021:03:04 05:06:07"))
+    _, other_page = _file(vault, "another-page", _jpeg(_page(29, jitter=12), size=(320, 240), quality=70))
+
+    preview, _written = _recover(vault, folder)
+
+    assert preview["dated_by_source"] == {}
+    assert preview["unmatched_listed"] == [{"path": other_page, "reason": capture_match.NOT_CONFIRMED}]
+    assert "capture_date" not in _fields(vault, other_page)
+
+
+def test_the_preview_lists_each_match_with_its_source_date_and_origin_before_anything_is_written(
+    vault, library, archive, monkeypatch
+):
+    """Catches a preview that hides which original gave which date, so the owner cannot check a match."""
+    planned: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(maintenance_jobs, "record_planned", lambda items, **_kw: planned.extend(items))
+    original_id = _fields(vault, library["original"][1])["exomem_id"]
+
+    preview = _backfill(vault, recover=True, originals_root=str(archive))
+
+    matches = {item["path"]: item for item in preview["matched_listed"]}
+    assert matches == {
+        library["copy-of-original"][1]: {
+            "path": library["copy-of-original"][1], "time": "2021-05-06T07:08:09", "from": original_id,
+        },
+        library["copy-of-archived"][1]: {
+            "path": library["copy-of-archived"][1], "time": "2020-02-03T04:05:06", "from": "2020/IMG_0001.jpg",
+        },
+    }
+    rows = dict(planned)
+    assert rows[library["copy-of-original"][1]] == f"matched-original 2021-05-06T07:08:09 from {original_id}"
+    assert rows[library["copy-of-archived"][1]] == "matched-original 2020-02-03T04:05:06 from 2020/IMG_0001.jpg"
+    assert rows[library["Screenshot from 2026-07-04 09-15-30"][1]] == "file-name 2026-07-04T09:15:30"
+    assert "capture_date" not in _fields(vault, library["copy-of-original"][1])  # a preview writes nothing

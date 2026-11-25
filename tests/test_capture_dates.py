@@ -30,7 +30,7 @@ def _overlay(root: Path, text: str) -> None:
     [
         ("Screenshot from 2026-07-04 09-15-30.png", "2026-07-04T09:15:30", "gnome-screenshot"),
         ("20200314_101112.jpg", "2020-03-14T10:11:12", "android-camera"),
-        ("PXL_20230102_030405678.MP.jpg", "2023-01-02T03:04:05", "android-camera"),
+        ("IMG_20230102_030405678.MP.jpg", "2023-01-02T03:04:05", "android-camera"),
         ("Screenshot_20240229-235959_Chrome.jpg", "2024-02-29T23:59:59", "android-screenshot-compact"),
         ("Screenshot_2024-02-29-23-59-59-123_com.example.app.jpg", "2024-02-29T23:59:59", "android-screenshot-dashed"),
         # A raw-protected capture is stored with a marker in front of the client's name.
@@ -52,6 +52,8 @@ def test_a_shipped_format_reads_the_time_a_name_states(vault, name, time, format
         "1696150000000.jpg",  # an epoch save time
         "20201332_101112.jpg",  # month 13 is not a moment
         "18500101_101112.jpg",  # before any camera in this registry
+        "PXL_20230102_030405678.jpg",  # a Pixel name states UTC, and the registry has no clock basis
+        "IMG12-20230115_123456.jpg",  # a number inside a name is the maker's own shape, never a set number
         "holiday.jpg",
         "",
     ],
@@ -92,22 +94,32 @@ def test_a_malformed_overlay_leaves_the_shipped_formats_in_force(vault):
     assert snapshot.findings and "hour" in str(snapshot.findings[0]["detail"])
 
 
+def _pack() -> list[registry.Entry]:
+    return list(registry.pack_entries(capture_dates.SOURCES_PACK))
+
+
 def test_precedence_follows_the_pack_order_and_never_downgrades():
-    assert capture_dates.outranks("camera-exif", "matched-original")
-    assert capture_dates.outranks("matched-original", "file-name")
-    assert not capture_dates.outranks("file-name", "camera-exif")
-    assert not capture_dates.outranks("camera-exif", "camera-exif")
-    # A fallback and an unknown key are never evidence, so neither takes precedence nor is displaced.
-    assert not capture_dates.outranks("source-date", "file-name")
-    assert not capture_dates.outranks("file-name", "source-date")
-    assert not capture_dates.outranks("camera-exif", "hand-edited")
+    pack = _pack()
+    evidence = [entry.key for entry in pack if entry.attributes["class"] == "evidence"]
+    fallback = [entry.key for entry in pack if entry.attributes["class"] == "fallback"]
+    assert len(evidence) > 1 and fallback  # the pack states an order to read and a fallback to leave out
+    for earlier, key in enumerate(evidence):
+        for later in evidence[earlier + 1:]:
+            assert capture_dates.outranks(key, later)
+            assert not capture_dates.outranks(later, key)
+        assert not capture_dates.outranks(key, key)
+        # A fallback and an unknown key are never evidence, so neither takes precedence nor is displaced.
+        assert not capture_dates.outranks(key, "hand-edited")
+        for other in fallback:
+            assert not capture_dates.outranks(key, other) and not capture_dates.outranks(other, key)
 
 
-def test_each_producer_writes_exactly_one_source():
-    assert capture_dates.source_for("file-metadata") == "camera-exif"
-    assert capture_dates.is_evidence("matched-original")
-    assert not capture_dates.is_evidence("source-date")
-    assert capture_dates.is_known("source-date") and not capture_dates.is_known("hand-edited")
+def test_each_source_is_written_by_its_own_producer_and_carries_the_pack_class():
+    for entry in _pack():
+        assert capture_dates.source_for(entry.attributes["producer"]) == entry.key
+        assert capture_dates.is_evidence(entry.key) == (entry.attributes["class"] == "evidence")
+        assert capture_dates.is_known(entry.key)
+    assert not capture_dates.is_known("hand-edited")
 
 
 def _sidecar(**facts) -> str:
