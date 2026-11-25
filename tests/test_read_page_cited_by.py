@@ -20,7 +20,7 @@ from test_collection_row_references import path
 from test_collection_store_writer import store as store  # noqa: F401
 from test_page_citations import publish
 
-from exomem import commands
+from exomem import commands, page_citations
 from exomem.collection_store import connection
 from exomem.governance.principal import owner_principal, request_scope
 
@@ -79,7 +79,7 @@ def test_a_continuation_for_a_withheld_page_answers_exactly_like_one_for_a_missi
     publish(world.root)
     append(world, {"page": f"exomem://memory/{HIDDEN}"})
     (world.root / "Knowledge Base/_access.yaml").write_text('excluded: ["Private/Secret.md"]\n')
-    cursor = commands.page_citations_module._encode((LOG, "page", 1))
+    cursor = page_citations._encode((LOG, "page", 1))
 
     def withheld_and_missing():
         return (read(world, "Knowledge Base/Private/Secret.md", continuation=cursor),

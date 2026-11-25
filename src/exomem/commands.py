@@ -119,7 +119,6 @@ from . import note as note_module
 from . import observe_memory as observe_memory_module
 from . import ocr_facts as ocr_facts_module
 from . import overview as overview_module
-from . import page_citations as page_citations_module
 from . import page_ids as page_ids_module
 from . import page_names as page_names_module
 from . import plan_memory as plan_memory_module
@@ -495,6 +494,13 @@ _COMMAND_SURFACE_EXPORTS = (
     mcp_tool_annotations,
 )
 
+
+
+def _page_citations():
+    """The citation read seam, imported on first use: it loads the collection store, which a plain CLI call never needs."""
+    from . import page_citations
+
+    return page_citations
 
 def _preserve_module():
     from . import preserve as preserve_module
@@ -7157,9 +7163,9 @@ def _cite_packet_leads(vault_root: Path, packet: dict[str, Any]) -> None:
         if packet.get("abstained"):
             return
         slice_items = (packet.get("turn_slice") or {}).get("items") or []
-        leads = [lead for lead in (slice_items or packet.get("anchors") or [])[: page_citations_module.RECALL_HITS]
+        leads = [lead for lead in (slice_items or packet.get("anchors") or [])[: _page_citations().RECALL_HITS]
                  if isinstance(lead, dict)]
-        found = page_citations_module.for_hits([lead.get("ref") for lead in leads], vault_root)
+        found = _page_citations().for_hits([lead.get("ref") for lead in leads], vault_root)
         budget = packet.setdefault("budget", {})
         for lead in leads:
             added = found.get(lead.get("ref"))
@@ -7181,9 +7187,9 @@ def _cite_search_hits(vault_root: Path, hits: list) -> None:
 
     Only a page hit carries them: a row or a plan item that cites a page is never a hit of its own.
     """
-    top = [hit for hit in hits[: page_citations_module.RECALL_HITS] if isinstance(hit, dict)]
+    top = [hit for hit in hits[: _page_citations().RECALL_HITS] if isinstance(hit, dict)]
     try:
-        found = page_citations_module.for_hits([hit.get("ref") for hit in top], vault_root)
+        found = _page_citations().for_hits([hit.get("ref") for hit in top], vault_root)
     except Exception:  # noqa: BLE001 - a citation never breaks a search; each page hit says its count is unknown
         log.debug("page citations: search hit citations unavailable", exc_info=True)
         found = {hit["ref"]: {"cited_by_state": "unavailable"} for hit in top
@@ -8834,11 +8840,11 @@ def _with_cited_by(vault_root: Path, result: dict, *, frontmatter_only: bool) ->
         or "content_hash" not in result
         or result.get("release_level", egress_module.LEVEL_FULL) != egress_module.LEVEL_FULL
         or memory_refs_module.parse_memory_ref(result.get("ref")) is None
-        or not page_citations_module.applies(vault_root)
+        or not _page_citations().applies(vault_root)
     ):
         return result
     try:
-        cited_by = page_citations_module.inbound_citations(result["ref"], vault_root, limit=_CITED_BY_LIMIT)
+        cited_by = _page_citations().inbound_citations(result["ref"], vault_root, limit=_CITED_BY_LIMIT)
     except Exception:  # noqa: BLE001 - a citation never breaks a page read; the read says its citations are unknown
         log.debug("page citations: page read citations unavailable", exc_info=True)
         cited_by = {"state": "unavailable"}
@@ -8853,15 +8859,15 @@ def _cited_by_continuation(vault_root: Path, page: str, token: str, *, conflicti
     them apart. A token that is no citation cursor, or a vault with no collection store to have issued one,
     is the refusal every continuation shares.
     """
-    if conflicting or not page_citations_module.applies(vault_root):
+    if conflicting or not _page_citations().applies(vault_root):
         raise context_views_module.invalid_continuation()
     ref = page if memory_refs_module.parse_memory_ref(page) is not None else next(iter(
         ref for ref in memory_refs_module.ReferenceIndex(vault_root).refs_for_paths(list(
             get_page_module.spellings(page_names_module.resolve_page(vault_root, page, serve_stale=True)))).values()
         if ref), None)
     try:
-        answer = (page_citations_module.without_page(vault_root, token) if ref is None
-                  else page_citations_module.inbound_citations(ref, vault_root, limit=_CITED_BY_LIMIT, more=token))
+        answer = (_page_citations().without_page(vault_root, token) if ref is None
+                  else _page_citations().inbound_citations(ref, vault_root, limit=_CITED_BY_LIMIT, more=token))
     except ValueError as error:
         raise context_views_module.invalid_continuation() from error
     return {"cited_by": answer}
