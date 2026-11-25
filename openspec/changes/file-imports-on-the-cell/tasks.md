@@ -14,6 +14,8 @@
 - [x] 3.3 Update the `import_memory` and `observe_transfer` tool text and the skill scaffold reference: the cell finishes a registered import, and the filing view reports it.
 - [x] 3.4 Make the filing view carry `progress.total` (staged members without the series file, null when unknown), `left_out` and `remaining` in `progress`, a structured `needs`, `left_out` on `done` (reason counts, up to 100 items, `truncated`), and a `rate` that appears only once two samples cover filed work. Store what `done` needs in the filing record, so the read stays one record read. Verify: tests for a done stage that left files out, a stage with no manifest, a stage filed in one call after its registration, and 100 or more left-out files.
 - [x] 3.5 Let `adoption_studio` `file` with `wait: false` register the stage under the caller's principal and answer the filing view with no filing call in the request. Verify: a test registers a stage after its login ended, spies on `file`, and sees only the filer thread call it. A login the cell cannot replay is refused and registers nothing.
+- [x] 3.6 Treat `CLOUD_CELL_READ_ONLY` as a wait: park with a `read_only` need, keep the stored call and check again every minute. Verify: a test refuses the call with read-only mode on, sees `needs` of `read_only` and a 60 s check, and then files the stage once the mode ends.
+- [x] 3.7 Prove that the public doors reach the filing view and the wake, and name both calls in the `observe_transfer` text and the skill reference. Verify: a test drives the in-process MCP server with `inspect_memory` `imports.status` (`view: "filing"`) and `manage_memory` `imports.file` (`wait: false`), and the cell then files the stage. The test fails when the door drops `wait`.
 
 ## 4. CLI parity
 
