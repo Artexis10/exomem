@@ -44,6 +44,7 @@ from .state import (
     CellRow,
     ClusterObservation,
     Decision,
+    MediaStorage,
     RolloutRow,
     row_hold_kind,
 )
@@ -96,6 +97,10 @@ class ReconcileConfig:
     # up hourly. Under an hour, so its newest backup is never more than an
     # hour old plus the time one backup takes (RPO <= 1 h).
     snapshot_backup_interval: timedelta = timedelta(minutes=55)
+    # add-cloud-media-store D10: the oldest storage record that a backup report may carry and still publish its
+    # figures. The cell rewrites it every quarter hour (media_storage_record.REFRESH_SECONDS), and a backup takes at
+    # most backup_deadline, so a record older than this means the cell stopped writing it. Its figures are unknown.
+    media_storage_max_age: timedelta = timedelta(hours=1)
     # D8: the nightly backup window, as [start_hour, end_hour) UTC.
     backup_window: tuple[int, int] = DEFAULT_BACKUP_WINDOW
     # D8: at most this many backup holds run at once across the fleet.
@@ -356,6 +361,37 @@ def usage_updates(used: int | None, total: int | None, observed_at: datetime | N
     if used is None or total is None or observed_at is None or not 0 <= used <= total or total == 0:
         return {}
     return {"used_bytes": used, "filesystem_bytes": total, "usage_observed_at": observed_at}
+
+
+def media_usage_updates(
+    *,
+    served: bool,
+    allowance_bytes: object,
+    report: MediaStorage | None,
+    observed_at: datetime | None,
+    now: datetime,
+    max_age: timedelta,
+) -> dict[str, object]:
+    """add-cloud-media-store D10 task 4.9: the four media usage columns for one backup report, written together.
+
+    A cell whose store the edge does not serve writes all four NULL: it has no media store to report. A served cell
+    writes its allowance and the time, and each figure that its record gives. A figure is NULL, which Home shows as
+    unknown and never 0, when the Job reported no readable record, the record is more than `max_age` from now (the
+    cell stopped writing it), or the cell itself could not read the figure. A policy with no allowance leaves that
+    column NULL. A served cell's write waits for a backup that has a time to state.
+    """
+    if not served:
+        return {"vault_used_bytes": None, "media_used_bytes": None, "media_allowance_bytes": None,
+                "media_usage_observed_at": None}
+    if observed_at is None:
+        return {}
+    current = report is not None and abs(now - report.captured_at) <= max_age
+    return {
+        "vault_used_bytes": report.vault_bytes if current else None,
+        "media_used_bytes": report.media_used_bytes if current else None,
+        "media_allowance_bytes": allowance_bytes if type(allowance_bytes) is int and allowance_bytes >= 0 else None,
+        "media_usage_observed_at": observed_at,
+    }
 
 
 def nightly_backup_due(

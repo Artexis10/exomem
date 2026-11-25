@@ -47,6 +47,7 @@ from .decide import (
     claim_missing,
     decide,
     hourly_backup_due,
+    media_usage_updates,
     nightly_backup_due,
     planned_move_volume,
     relocation_volume,
@@ -586,6 +587,9 @@ class ClusterConfig:
     # Whether the schema has the media key columns. run_loop observes it on each connect; it is
     # never configured.
     media_key_columns: bool = False
+    # Whether the schema has the media usage columns (task 4.9). run_loop observes it on each connect; without
+    # them a backup report leaves the cell's storage figures unpublished.
+    media_usage_columns: bool = False
     # automate-cell-storage-deletion D1: whether the schema has Substrate's `deletion_grant` column. run_loop
     # observes it on each connect; without it the relay leaves the grants' ConfigMap as it stands.
     deletion_grant_column: bool = False
@@ -3799,6 +3803,17 @@ async def _reconcile_row(
     # Bounded writes: a column whose value is unchanged is not written again.
     row_updates = {column: value for column, value in row_updates.items() if getattr(row, column) != value}
     changed = await _write_observed(connection, row, row_updates, now)
+    if cluster_config.media_usage_columns and "last_backup_snapshot" in decision.row_updates:
+        # Every recorded backup also publishes the storage figures its Job copied from the cell. They are written
+        # apart from the observed columns: the row type does not carry them and nothing reads them back.
+        edge = cluster_config.media_edge
+        served = _media_mode(cluster_config, row) == MEDIA_SERVED
+        media_usage = media_usage_updates(
+            served=served, allowance_bytes=edge.store_policy.get("allowance_bytes") if served and edge else None,
+            report=observation.backup_job_media_storage, observed_at=decision.row_updates.get("last_backup_at"),
+            now=now, max_age=config.media_storage_max_age)
+        if media_usage:
+            await db.write_observed(connection, row.cell_id, media_usage)
     if decision.rollout_updates and not pause_first:
         await db.write_rollout(connection, decision.rollout_updates)
     return changed or decision.apply_manifests
@@ -4121,6 +4136,14 @@ async def _observe_media_key_columns(connection: asyncpg.Connection, cluster_con
     return dataclass_replace(cluster_config, media_key_columns=present)
 
 
+async def _observe_media_usage_columns(connection: asyncpg.Connection, cluster_config: ClusterConfig) -> ClusterConfig:
+    present = await db.has_media_usage_columns(connection)
+    if not present:
+        logger.warning("cellctl: exomem_cloud_cells has no media usage columns: a backup report leaves a cell's "
+                       "vault and media storage figures unpublished until the Substrate migration and its grants apply")
+    return dataclass_replace(cluster_config, media_usage_columns=present)
+
+
 async def run_loop(
     dsn: str,
     cluster: ClusterGateway,
@@ -4172,6 +4195,7 @@ async def run_loop(
                     if gaps:
                         raise SchemaGap("cellctl refuses to start; the schema is missing: " + "; ".join(gaps))
                     cluster_config = await _observe_media_key_columns(connection, cluster_config)
+                    cluster_config = await _observe_media_usage_columns(connection, cluster_config)
                     cluster_config = dataclass_replace(
                         cluster_config, deletion_grant_column=await db.has_deletion_grant_column(connection))
                     backoff = RECONNECT_BACKOFF_INITIAL_SECONDS

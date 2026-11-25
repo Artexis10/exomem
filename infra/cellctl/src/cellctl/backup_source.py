@@ -12,10 +12,12 @@ and runs the command against the real exomem package.
 
 The media census is the same kind of command: it names `exomem cell-media-census`
 in the cell image, which prints the record the cell wrote (tests/test_media_drain_record.py runs it,
-and checks that the cell's record parses here). So are the media manifest and the collection of
+and checks that the cell's record parses here). So is the storage report, `exomem cell-media-storage`
+(tests/test_media_storage_record.py). So are the media manifest and the collection of
 collect-released-media, which name `exomem cell-media-manifest` and `exomem cell-media-collect`.
 """
 
+import json
 import re
 import shlex
 from datetime import datetime
@@ -55,6 +57,27 @@ def media_census_command(captured_at: str) -> str:
         f"{{ census=$(timeout {MEDIA_CENSUS_SECONDS} exomem cell-media-census --vault /data/vault)"
         f" || census={shlex.quote(unknown)}; "
         "printf '\\n%s' \"$census\" >> /dev/termination-log || true; }"
+    )
+
+
+# add-cloud-media-store D10: like the census, the storage record is one file that the cell wrote. The Job reports it as
+# unknown, with the hold start, when the cell image has no such command or its record is missing or unreadable.
+MEDIA_STORAGE_SECONDS = 10
+
+
+def media_storage_command(captured_at: str) -> str:
+    """Append the cell's storage record to the termination message, on a line of its own after the census.
+
+    The cell image prints the JSON line that the cell wrote beside its media ledger (media_storage_record), with the
+    bytes of vault storage, the bytes of media storage and its reading time. A record that is missing, linked, oversize
+    or malformed, an image without the command, or a timeout, leaves both figures null and the hold start.
+    """
+    unknown = json.dumps({"captured_at": captured_at, "vault_bytes": None, "media_used_bytes": None},
+                         separators=(",", ":"))
+    return (
+        f"{{ storage=$(timeout {MEDIA_STORAGE_SECONDS} exomem cell-media-storage --vault /data/vault)"
+        f" || storage={shlex.quote(unknown)}; "
+        "printf '\\n%s' \"$storage\" >> /dev/termination-log || true; }"
     )
 
 
@@ -116,6 +139,33 @@ def parse_media_collection(line: str) -> tuple[str, str, int | None, int | None,
     hidden, candidates, skipped = (None if match[key] == "?" else int(match[key])
                                    for key in ("hidden", "candidates", "skipped"))
     return match["outcome"], match["reason"], hidden, candidates, skipped
+
+
+# Substrate holds each storage figure in a bigint column.
+_MAX_FIGURE = 2**63 - 1
+
+
+def parse_media_storage(line: str) -> tuple[int | None, int | None, datetime] | None:
+    """The record a report line carries as (vault bytes, media bytes, reading time), a figure None when null; None when
+    the line is not a JSON object with a reading time that carries a time zone and two figures that are null or byte counts.
+    A key beyond these is ignored, so a newer cell image reports as before."""
+    try:
+        fields = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if type(fields) is not dict:
+        return None
+    try:
+        captured_at = datetime.fromisoformat(fields["captured_at"])
+        vault_bytes, media_used_bytes = fields["vault_bytes"], fields["media_used_bytes"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if captured_at.tzinfo is None:
+        return None
+    for figure in (vault_bytes, media_used_bytes):
+        if figure is not None and (type(figure) is not int or not 0 <= figure <= _MAX_FIGURE):
+            return None
+    return vault_bytes, media_used_bytes, captured_at
 
 
 def parse_media_census(line: str) -> tuple[int | None, int | None, datetime] | None:

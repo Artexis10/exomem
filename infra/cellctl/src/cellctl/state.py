@@ -69,6 +69,18 @@ class MediaCensus:
     captured_at: datetime
 
 
+@dataclass(frozen=True)
+class MediaStorage:
+    """add-cloud-media-store D10: a backup Job's copy of the cell's storage record (task 4.9).
+
+    A figure is None when the cell could not read it: unknown, never 0. `captured_at` is the cell's reading time, as
+    the cell wrote it into its record. For a record the Job could not read, both figures are None and it is the hold start."""
+
+    vault_bytes: int | None
+    media_used_bytes: int | None
+    captured_at: datetime
+
+
 IDENTITY_CONFLICT = "IDENTITY_CONFLICT"
 INIT_DEADLINE_EXCEEDED = "INIT_DEADLINE_EXCEEDED"
 BACKUP_FAILED = "BACKUP_FAILED"
@@ -367,8 +379,11 @@ class ClusterObservation:
     # add-cloud-media-store D12: the evicted originals the finished backup Job
     # counted, and when it captured the volume. None when it reported none.
     backup_job_media_census: MediaCensus | None = None
+    # add-cloud-media-store D10: the cell's storage record as the finished backup Job copied it, the termination
+    # message's third line. None when the Job reported none that cellctl can read.
+    backup_job_media_storage: MediaStorage | None = None
     # collect-released-media D5: the result line of the finished backup Job's collector, the termination message's
-    # third line. None when the Job ran no collection or reported a line that cellctl cannot read.
+    # fourth line. None when the Job ran no collection or reported a line that cellctl cannot read.
     backup_job_media_collection: MediaCollection | None = None
     # D5: a failed backup Job's own value-free code (backup_source.py), or
     # None when it left none.
