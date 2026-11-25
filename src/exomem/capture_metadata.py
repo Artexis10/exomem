@@ -16,12 +16,14 @@ import math
 import re
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from . import capture_dates
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +31,8 @@ log = logging.getLogger(__name__)
 CAPTURE_TIME = "capture_time"
 CAPTURE_DATE = "capture_date"
 CAPTURE_DATE_BASIS = "capture_date_basis"
+CAPTURE_DATE_SOURCE = "capture_date_source"
+CAPTURE_DATE_MATCHED_FROM = "capture_date_matched_from"
 CAPTURE_LAT = "capture_lat"
 CAPTURE_LON = "capture_lon"
 CAMERA_MAKE = "camera_make"
@@ -36,8 +40,8 @@ CAMERA_MODEL = "camera_model"
 PIXEL_WIDTH = "pixel_width"
 PIXEL_HEIGHT = "pixel_height"
 FIELDS: tuple[str, ...] = (  # nosemgrep: ep-word-set -- sidecar protocol fields, not vault vocabulary
-    CAPTURE_TIME, CAPTURE_DATE, CAPTURE_DATE_BASIS, CAPTURE_LAT, CAPTURE_LON,
-    CAMERA_MAKE, CAMERA_MODEL, PIXEL_WIDTH, PIXEL_HEIGHT,
+    CAPTURE_TIME, CAPTURE_DATE, CAPTURE_DATE_BASIS, CAPTURE_DATE_SOURCE, CAPTURE_DATE_MATCHED_FROM,
+    CAPTURE_LAT, CAPTURE_LON, CAMERA_MAKE, CAMERA_MODEL, PIXEL_WIDTH, PIXEL_HEIGHT,
 )
 #: The fields that place the original. A caller who may not download the original never receives them.
 LOCATION_FIELDS: frozenset[str] = frozenset({CAPTURE_LAT, CAPTURE_LON})  # nosemgrep: ep-word-set -- sidecar protocol fields
@@ -49,6 +53,8 @@ BASIS_UTC = "utc"
 KINDS: frozenset[str] = frozenset({"image", "video"})  # nosemgrep: ep-word-set -- closed extraction kinds of the media registry
 
 TEXT_LIMIT = 128
+#: A matched original is named by a page id or an archive path, which can be longer than camera text.
+MATCHED_FROM_LIMIT = 512
 SIDE_LIMIT = 1_000_000
 _LAT_LIMIT, _LON_LIMIT = 90.0, 180.0
 
@@ -72,6 +78,10 @@ class CaptureFacts:
     time: str | None = None
     date: str | None = None
     date_basis: str | None = None
+    #: A key of the `capture-date-sources` pack: how the date was found. `None` for a sidecar written before sources were recorded.
+    date_source: str | None = None
+    #: Where a matched original lives: a page id, or an archive path relative to the owner's originals root.
+    date_matched_from: str | None = None
     lat: float | None = None
     lon: float | None = None
     make: str | None = None
@@ -83,6 +93,7 @@ class CaptureFacts:
         """The stated values by sidecar field name, in `FIELDS` order."""
         values = {
             CAPTURE_TIME: self.time, CAPTURE_DATE: self.date, CAPTURE_DATE_BASIS: self.date_basis,
+            CAPTURE_DATE_SOURCE: self.date_source, CAPTURE_DATE_MATCHED_FROM: self.date_matched_from,
             CAPTURE_LAT: self.lat, CAPTURE_LON: self.lon, CAMERA_MAKE: self.make,
             CAMERA_MODEL: self.model, PIXEL_WIDTH: self.width, PIXEL_HEIGHT: self.height,
         }
@@ -106,6 +117,7 @@ class CaptureFacts:
             raise ValueError("capture facts must be a mapping of the known fields")
         facts = _facts(
             time=value.get(CAPTURE_TIME), date=value.get(CAPTURE_DATE), basis=value.get(CAPTURE_DATE_BASIS),
+            source=value.get(CAPTURE_DATE_SOURCE), matched_from=value.get(CAPTURE_DATE_MATCHED_FROM),
             lat=value.get(CAPTURE_LAT), lon=value.get(CAPTURE_LON), make=value.get(CAMERA_MAKE),
             model=value.get(CAMERA_MODEL), width=value.get(PIXEL_WIDTH), height=value.get(PIXEL_HEIGHT),
         )
@@ -125,6 +137,18 @@ def _render(value: str | int | float) -> str:
         text = f"{value:.6f}".rstrip("0")  # `_number` rounds a coordinate to six places
         return text + "0" if text.endswith(".") else text
     return str(value)
+
+
+def recorded(frontmatter: Mapping[str, Any]) -> CaptureFacts:
+    """The capture facts a sidecar's frontmatter records, bounded as a fresh read is."""
+    return _facts(
+        time=frontmatter.get(CAPTURE_TIME), date=frontmatter.get(CAPTURE_DATE),
+        basis=frontmatter.get(CAPTURE_DATE_BASIS), source=frontmatter.get(CAPTURE_DATE_SOURCE),
+        matched_from=frontmatter.get(CAPTURE_DATE_MATCHED_FROM),
+        lat=frontmatter.get(CAPTURE_LAT), lon=frontmatter.get(CAPTURE_LON),
+        make=frontmatter.get(CAMERA_MAKE), model=frontmatter.get(CAMERA_MODEL),
+        width=frontmatter.get(PIXEL_WIDTH), height=frontmatter.get(PIXEL_HEIGHT),
+    )
 
 
 def without_position(frontmatter: Mapping[str, Any]) -> dict[str, Any]:
@@ -183,7 +207,52 @@ def read(path: Path, media_type: str) -> CaptureFacts | None:
     except Exception:  # noqa: BLE001 - untrusted bytes: any decoder failure means "states nothing"
         log.debug("capture metadata unreadable for %s", Path(path).name, exc_info=True)
         return None
+    if facts.time:
+        # What the file itself states is camera evidence; the key is the pack's, not a literal here.
+        facts = replace(facts, date_source=capture_dates.source_for("file-metadata"))
     return facts or None
+
+
+def with_name_date(
+    vault_root: Path, facts: CaptureFacts | None, media_type: str, name: object,
+) -> CaptureFacts | None:
+    """`facts`, plus the capture time that the original's file name states when the file states none.
+
+    The name is the one the client sent, recorded on the sidecar; a time the file itself states always
+    wins, and a file time (mtime) is never a capture time. Only an image or a video is read.
+    """
+    if media_type not in KINDS or (facts is not None and facts.time):
+        return facts
+    stated = capture_dates.from_file_name(vault_root, name)
+    if stated is None:
+        return facts
+    return replace(
+        facts or CaptureFacts(), time=stated.time, date=stated.date,
+        date_source=capture_dates.source_for("file-name"),
+    )
+
+
+#: The formats a camera writes an EXIF block into. A screenshot, a diagram or an export in another
+#: format never had one, so its missing camera metadata is no loss to warn about. A closed set that
+#: the formats' own specifications fix (file extensions), not vocabulary. When it fires wrongly, a photo
+#: that a client re-encoded to another format (PNG, WebP) gets no notice and the user is not told to resend it.
+_CAMERA_PHOTO_EXTS = frozenset({".jpg", ".jpeg", ".heic"})
+
+
+def lacks_camera_metadata(vault_root: Path, path: Path, name: object) -> bool:
+    """Whether the camera photo at `path` decodes yet states no capture time, position or camera, and `name` states no time.
+
+    False for any other format, and whenever the file cannot be judged (no decoder, a corrupt file):
+    an unknown never reads as a gap. The name is read before the file is decoded.
+    """
+    if not isinstance(name, str) or Path(name).suffix.lower() not in _CAMERA_PHOTO_EXTS:
+        return False
+    if capture_dates.from_file_name(vault_root, name) is not None or not available("image", path):
+        return False
+    facts = read(path, "image")
+    if facts is None:
+        return False
+    return not (facts.time or facts.lat is not None or facts.make or facts.model)
 
 
 # ---------------------------------------------------------------- images
@@ -336,19 +405,24 @@ def _utc_creation(value: object) -> str | None:
 
 
 def _facts(
-    *, time: object = None, date: object = None, basis: object = None, lat: object = None,
-    lon: object = None, make: object = None, model: object = None, width: object = None,
-    height: object = None,
+    *, time: object = None, date: object = None, basis: object = None, source: object = None,
+    matched_from: object = None, lat: object = None, lon: object = None, make: object = None,
+    model: object = None, width: object = None, height: object = None,
 ) -> CaptureFacts:
     """The facts whose values stay in bounds; a value out of bounds is dropped, not repaired."""
     stated_time = time if _is_time(time) else None
     latitude, longitude = _number(lat, 90.0), _number(lon, 180.0)
+    # A source qualifies a stated date. Only an evidence key that the shipped pack names is stored: a
+    # fallback date is derived at read time and never written.
+    stated_source = source if stated_time and capture_dates.is_evidence(source) else None
     if latitude is None or longitude is None:
         latitude = longitude = None  # half a position places nothing
     return CaptureFacts(
         time=stated_time,
         date=date if stated_time and date == stated_time[:10] else None,
         date_basis=basis if stated_time and basis == BASIS_UTC else None,
+        date_source=stated_source,
+        date_matched_from=_text(matched_from, MATCHED_FROM_LIMIT) if stated_source else None,
         lat=latitude, lon=longitude,
         make=_text(make), model=_text(model),
         width=_side(width), height=_side(height),
@@ -380,8 +454,8 @@ def _side(value: object) -> int | None:
     return value
 
 
-def _text(value: object) -> str | None:
+def _text(value: object, limit: int = TEXT_LIMIT) -> str | None:
     if not isinstance(value, str):
         return None
-    cleaned = _CONTROL.sub("", value).strip()[:TEXT_LIMIT].strip()
+    cleaned = _CONTROL.sub("", value).strip()[:limit].strip()
     return cleaned or None

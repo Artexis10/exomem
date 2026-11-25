@@ -53,6 +53,7 @@ def test_a_phone_photo_states_its_local_time_with_offset_place_camera_and_size(t
     assert facts.fields() == {
         "capture_time": "2024-06-01T14:03:22+03:00",
         "capture_date": "2024-06-01",
+        "capture_date_source": "camera-exif",
         "capture_lat": 60.175,
         "capture_lon": 24.9375,
         "camera_make": "Acme",
@@ -280,7 +281,7 @@ def test_extraction_writes_exactly_the_stated_fields_into_the_sidecar(vault, tmp
     stated = {key: value for key, value in parse_frontmatter(sidecar)[0].items() if key in capture_metadata.FIELDS}
     assert stated == {
         "capture_time": "2024-06-01T14:03:22+03:00", "capture_date": "2024-06-01",
-        "capture_lat": 60.175, "capture_lon": 24.9375, "camera_make": "Acme", "camera_model": "Phone 9",
+        "capture_date_source": "camera-exif", "capture_lat": 60.175, "capture_lon": 24.9375, "camera_make": "Acme", "camera_model": "Phone 9",
         "pixel_width": 64, "pixel_height": 48,
     }
 
@@ -317,3 +318,63 @@ def test_extraction_of_a_video_records_its_utc_basis(vault, tmp_path, monkeypatc
     assert (fields["capture_time"], fields["capture_date"], fields["capture_date_basis"]) == (
         "2024-06-01T23:30:00Z", "2024-06-01", "utc",
     )
+
+
+def test_a_photo_that_states_no_time_takes_the_time_its_file_name_states(vault, tmp_path, monkeypatch):
+    from exomem.vault import parse_frontmatter
+
+    stripped = _jpeg(tmp_path / "20200314_101112.jpg")
+
+    sidecar = _extract_into_sidecar(vault, monkeypatch, stripped, category="image", media_type="image")
+
+    fields = parse_frontmatter(sidecar)[0]
+    assert (fields["capture_time"], fields["capture_date"], fields["capture_date_source"]) == (
+        "2020-03-14T10:11:12", "2020-03-14", "file-name",
+    )
+
+
+def test_the_time_a_photo_states_wins_over_the_time_its_file_name_states(vault, tmp_path, monkeypatch):
+    from exomem.vault import parse_frontmatter
+
+    photo = _jpeg(tmp_path / "20200314_101112.jpg", original="2024:06:01 14:03:22")
+
+    sidecar = _extract_into_sidecar(vault, monkeypatch, photo, category="image", media_type="image")
+
+    fields = parse_frontmatter(sidecar)[0]
+    assert (fields["capture_date"], fields["capture_date_source"]) == ("2024-06-01", "camera-exif")
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs", "noticed"),
+    [
+        ("chat-copy.jpg", {}, True),
+        ("phone.jpg", {"original": "2024:06:01 14:03:22"}, False),
+        ("20200314_101112.jpg", {}, False),
+    ],
+)
+def test_the_upload_receipt_says_when_an_image_arrives_without_camera_metadata(vault, tmp_path, name, kwargs, noticed):
+    from exomem import preserve
+
+    image = _jpeg(tmp_path / name, **kwargs)
+
+    receipt = preserve.preserve_bytes(
+        vault, scope="Rental", category="image", filename=name, data=image.read_bytes()
+    )
+
+    assert (preserve.NO_CAMERA_METADATA_WARNING in receipt.warnings) is noticed
+
+
+def test_a_screenshot_or_diagram_arrives_with_no_notice_to_send_the_original(vault, tmp_path):
+    """A PNG never carried camera metadata, so telling the user to send the original would be noise."""
+    from PIL import Image
+
+    from exomem import preserve
+
+    diagram = tmp_path / "diagram.png"
+    Image.new("RGB", (64, 48), (200, 30, 30)).save(diagram)
+
+    receipt = preserve.preserve_bytes(
+        vault, scope="Rental", category="image", filename="diagram.png", data=diagram.read_bytes()
+    )
+
+    assert preserve.NO_CAMERA_METADATA_WARNING not in receipt.warnings

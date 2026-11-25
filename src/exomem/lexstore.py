@@ -468,6 +468,10 @@ _ELIGIBILITY_COLUMNS: tuple[str, ...] = (
     "capture_date_json",
     "capture_lat",
     "capture_lon",
+    # How the capture day was found: a `capture-date-sources` key, which a media sidecar without an
+    # evidence date takes from its fallback entry.
+    "capture_date_source",
+    "capture_date_source_json",
 )
 _EMPTY_ELIGIBILITY: tuple[None, ...] = (None,) * len(_ELIGIBILITY_COLUMNS)
 
@@ -487,6 +491,7 @@ _PAGE_AXIS_COLUMNS: dict[str, tuple[str | None, str]] = {
     "page.capture_date": ("capture_day", "capture_date_json"),
     "page.capture_lat": ("capture_lat", None),
     "page.capture_lon": ("capture_lon", None),
+    "page.capture_date_source": ("capture_date_source", "capture_date_source_json"),
 }
 #: The same, over `semantic_units`. The five governed scalar axes are
 #: single-valued by construction (the parser produces one string or None), so
@@ -617,6 +622,9 @@ def _eligibility_columns(page: object) -> tuple[str | float | None, ...]:
     # Already settled to a stated position by `page_view`; a page that states none stores NULL.
     row.append(view.get("capture_lat"))
     row.append(view.get("capture_lon"))
+    source = view.get("capture_date_source")
+    row.append(_canonical_scalar("page.capture_date_source", source))
+    row.append(_canonical_members("page.capture_date_source", source, present="capture_date_source" in view))
     return tuple(row)
 
 
@@ -1011,7 +1019,10 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 18: `pages.capture_day`, `capture_date_json`, `capture_lat` and `capture_lon` hold the capture date and
 #: position a media sidecar records, so a search filters on them from the index. A v17 catalogue is
 #: rebuilt from canonical pages, which also indexes every sidecar that already records them.
-SCHEMA_VERSION = 18
+#: 19: `pages.capture_date_source` and `capture_date_source_json` hold how the capture day was found, and
+#: `capture_day` now holds the source-date fallback of a media sidecar that records no evidence date. A v18
+#: catalogue is rebuilt from canonical pages, which also derives both for every sidecar that exists.
+SCHEMA_VERSION = 19
 
 #: FTS5 tokenizer for the pre-stemmed `fts` and `unit_fts` columns. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -6155,27 +6166,29 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
     return cur.lastrowid
 
 
-#: The columns that schemas 17 and 18 added to `pages`; a store that the released code created before them
+#: The columns that schemas 17, 18 and 19 added to `pages`; a store that the released code created before them
 #: lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
 #: The type of each column that schema 18 added: the capture day and its typed value are text, the position is real.
 _SCHEMA_18_COLUMN_TYPES = {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
-_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + tuple(_SCHEMA_18_COLUMN_TYPES)
+#: The two text columns that schema 19 added: how the capture day was found, and its members array.
+_SCHEMA_19_COLUMN_TYPES = {"capture_date_source": "TEXT", "capture_date_source_json": "TEXT"}  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
+_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + tuple(_SCHEMA_18_COLUMN_TYPES) + tuple(_SCHEMA_19_COLUMN_TYPES)
 
 
 def _add_later_page_columns(conn: sqlite3.Connection) -> None:
-    """Add the schema 17 and 18 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
+    """Add the schema 17, 18 and 19 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
     present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
     for name in _SCHEMA_17_PAGE_COLUMNS:
         if name not in present:
             conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT")
-    for name, kind in _SCHEMA_18_COLUMN_TYPES.items():
+    for name, kind in (*_SCHEMA_18_COLUMN_TYPES.items(), *_SCHEMA_19_COLUMN_TYPES.items()):
         if name not in present:
             conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {kind}")
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
-    """`columns` without the schema 17 and 18 columns that this connection's `pages` table does not have yet.
+    """`columns` without the schema 17, 18 and 19 columns that this connection's `pages` table does not have yet.
 
     A page written to an older store without these values misleads no door, because `catalogue_schema_current`
     reads that store as not current until `create_catalogue_schema` adds the columns (`_add_later_page_columns`).
@@ -7384,6 +7397,8 @@ class LexicalStore:
             " capture_date_json TEXT,"
             " capture_lat REAL,"
             " capture_lon REAL,"
+            " capture_date_source TEXT,"
+            " capture_date_source_json TEXT,"
             " eligibility_view_json TEXT,"
             " content_hash TEXT, structure_json TEXT, ranking_json TEXT,"
             # The duplicate-handling index: derived from the page's bytes, never authority.

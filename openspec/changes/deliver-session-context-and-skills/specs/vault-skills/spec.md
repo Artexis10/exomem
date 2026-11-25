@@ -84,6 +84,20 @@ The listing, `omitted` and `generation` SHALL NOT depend on the turn.
 - **WHEN** every visible item fits within `skills_max_chars`
 - **THEN** the catalogue lists them all in fit order, whatever the turn touches
 
+### Requirement: An overflowing catalogue still names every item it could not list
+
+When not every item fits, `names` SHALL give each unlisted item's name under its kind, in listing order, within `skills_names_max_chars` (default 2400, range 0..8000; 0 turns it off).
+`omitted` SHALL count only the items neither listed nor named. `names` SHALL be part of `generation` and SHALL NOT depend on the turn.
+The block SHALL carry `names_advice`, which says how to open a named collection and find a named skill on the serving surface.
+
+#### Scenario: A collection shares no word or domain with the turn
+- **WHEN** the catalogue overflows and a visible collection declares no topic and shares no word with the turn
+- **THEN** `names` still gives that collection, so the agent can choose it
+
+#### Scenario: A hidden collection under overflow
+- **WHEN** the catalogue overflows and the caller cannot see a collection
+- **THEN** `names` does not give that collection
+
 ### Requirement: An overflowing catalogue names the turn's unlisted items beside it
 
 When not every item fits, `turn_items` SHALL name unlisted items that fit within `skills_turn_max_chars`: first those whose topics resolve through the domain registry to a domain the turn touches or its ancestor, then those the turn's task context reached.
@@ -92,7 +106,7 @@ When not every item fits, `turn_items` SHALL name unlisted items that fit within
 #### Scenario: An overflowing catalogue names the touched domain's unlisted item
 
 - **WHEN** the items do not all fit and an unlisted item belongs to the one registered domain the turn touches
-- **THEN** the listing stays in fit order, `omitted` counts the items that did not fit, and `turn_items` names that item
+- **THEN** the listing stays in fit order, `omitted` counts the items neither listed nor named, and `turn_items` names that item
 
 #### Scenario: A held overflowing catalogue stays unchanged as the turn's domains change
 

@@ -842,6 +842,7 @@ _HIT_FIELDS: frozenset[str] = frozenset(
         "relation_match",
         "media_type",
         "media_file",
+        "capture_date_source",
         "clip_match_at",
         "scene_frame",
         "scene_match_at",

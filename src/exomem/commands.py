@@ -3547,6 +3547,7 @@ def _search_result_from_hit(hit: dict) -> SearchResult:
         outside_kb=hit.get("outside_kb"),
         media_type=hit.get("media_type"),
         media_file=hit.get("media_file"),
+        capture_date_source=hit.get("capture_date_source"),
         ref=hit.get("ref"),
         corrected_by=hit.get("corrected_by"),
     )
@@ -12618,6 +12619,8 @@ def op_maintain_memory(
     dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
     rebuild_graph: bool = False,
+    recover: bool | None = None,
+    originals_root: str | None = None,
     detail: Literal["actionable", "full"] = "actionable",
     legacy_sample_limit: _AuditSampleLimit = audit_module.DEFAULT_LEGACY_SAMPLE_LIMIT,
     collection: str | None = None,
@@ -12676,6 +12679,8 @@ def op_maintain_memory(
     convert-originals moves an existing archive's ordinary originals into shared original storage; owner only.
     capture-metadata adds capture time, position, camera and size to the sidecars of photos and videos
     filed before they were recorded; it reads only originals that are on the volume; owner only.
+    With recover it also dates a photo that states no time: from its file name, or from the camera-dated
+    original it matches uniquely, labelled in capture_date_source; the preview counts dates per source.
 
     Curation cannot target raw Sources/Evidence, Planning, Records or schema/admin state.
     Mode manuals are in references/vault-care.md.
@@ -12688,6 +12693,9 @@ def op_maintain_memory(
         rebuild_embeddings: fix only.
         rebuild_graph: reconcile only; quarantine unavailable derived graph lineage and
             rebuild it from Markdown.
+        recover: capture-metadata only; match photos without a date to originals that state one.
+        originals_root: capture-metadata only; absolute path of a read-only folder of original photos on a
+            personal server, added to the originals; implies recover. Evermatter Cloud refuses it.
         detail: Audit output detail.
         legacy_sample_limit: Audit legacy-backlog sample count, 0 to 50.
         collection: Planning or Records collection for structured-files.
@@ -13121,7 +13129,10 @@ def op_maintain_memory(
         from . import capture_backfill
 
         _require_job_plan_arguments(mode, dry_run, plan_id, why)
-        return capture_backfill.backfill(vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id)
+        return capture_backfill.backfill(
+            vault_root, dry_run=True if dry_run is None else dry_run, plan_id=plan_id,
+            recover=recover, originals_root=originals_root,
+        )
     if mode == "convert-originals":
         from . import original_conversion
 

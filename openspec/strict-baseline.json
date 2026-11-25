@@ -721,6 +721,8 @@
     "too-long change/reconcile-vocabulary-variants/command-surface :: Vocabulary terms compare through one conservative fold",
     "too-long change/reconcile-vocabulary-variants/mutation-terminal-contract :: A tag variant advisory uses the single advisory slot",
     "too-long change/reconcile-vocabulary-variants/mutation-terminal-contract :: Unavailable vocabulary guidance names a closed reason",
+    "too-long change/recover-media-capture-dates/media-capture-metadata :: An owner operation adds capture metadata to existing sidecars without changing their text",
+    "too-long change/recover-media-capture-dates/media-capture-metadata :: Extraction records capture metadata as the file states it",
     "too-long change/repair-template-write-recovery/live-index-freshness :: Ambiguous graph lineage resets only by explicit derived-state quarantine",
     "too-long change/repair-template-write-recovery/records :: Templates are ordinary independent scaffolds",
     "too-long change/replace-agent-tool-surface/agent-bootstrap-contract :: Bootstrap exposes collection guidance compactly",

@@ -66,7 +66,7 @@ OWNER_GONE_CODE = "OWNER_GONE"
 #: of one of these modes only as a job, and only with the plan_id of its preview and a why.
 JOB_FLAGS: dict[str, tuple[str, ...]] = {  # nosemgrep: ep-word-set -- closed maintain_memory mode and argument literals
     "backfill-ids": (),
-    "capture-metadata": (),
+    "capture-metadata": ("recover", "originals_root"),
     "convert-originals": (),
     "fix": ("rebuild_embeddings",),
     "reconcile": ("rebuild_graph",),
