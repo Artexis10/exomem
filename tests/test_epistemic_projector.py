@@ -282,7 +282,7 @@ def test_feedback1_kind_mapping_evidence_covers_every_mapping_with_documented_su
     from epistemic.snapshot import parse_evidence_citation
 
     expected = {
-        **{page_type: f"type: {page_type}" for page_type in TYPE_TO_KIND},
+        **{page_type: f"## {page_type}" for page_type in TYPE_TO_KIND},
         "entity:decision": "entity_type: decision",
         "sources_fallback": "Location:",
     }

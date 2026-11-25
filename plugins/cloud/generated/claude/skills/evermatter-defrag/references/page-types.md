@@ -570,7 +570,7 @@ of creating a speculative entity.
 ### Concepts, libraries and decisions
 
 A concept anchors conclusions across sources. A library or package carries durable project context.
-A decision is a lightweight record of one choice, with `decided` (date), `project` and
+A decision (`entity_type: decision`) is a lightweight record of one choice, with `decided` (date), `project` and
 `decision_status` fields, and a body that answers four questions:
 
 ```markdown
