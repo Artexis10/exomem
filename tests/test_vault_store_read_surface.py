@@ -315,7 +315,7 @@ class ReadSurfaceViolation(AssertionError):
 def _sub_selector(command_name, selector_value, adapter):
     """A further registry that the classifier reads for one selector value, as (argument path, values).
 
-    `invocation_is_read_only` reads three: governance operations, curation actions and import modes.
+    `invocation_is_read_only` reads four: governance operations, curation actions, import modes and the filing wake's `wait`.
     The classifier does not expose them as data, so a fourth fails
     `test_the_inventory_knows_each_registry_that_the_classifier_reads` until it is listed here.
     """
@@ -323,6 +323,9 @@ def _sub_selector(command_name, selector_value, adapter):
         return ("curation_action",), sorted(curation.READ_ONLY_ACTIONS)
     if adapter == "import-conditional":
         return ("import_request", "mode"), sorted(import_modes.READ_ONLY_MODES)
+    if command_name == "adoption_studio" and selector_value == "file":
+        # `file` with `wait=False` only registers the stage with the cell's filer (session-private bytes).
+        return ("wait",), [False]
     return None
 
 

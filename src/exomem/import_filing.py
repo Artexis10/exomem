@@ -439,7 +439,7 @@ class Filer:
 
     def _invoke(self, record: dict, call: dict, principal: Any) -> Any:
         from . import schema as schema_module
-        from . import write_intake, writer_lease
+        from . import write_intake
 
         command = write_intake.command_named("adoption_studio")
         import_id = record["import_id"]
@@ -456,14 +456,13 @@ class Filer:
             else (self.vault_root,)
         )
         descriptor = write_intake.restore_surface(record.get("surface"), command.name)
-        with write_intake.background_call(principal, descriptor):
-            return writer_lease.invoke_command(
-                command, *injected,
-                idempotency_key=f"import-file:{import_id}:{call['seq']}",
-                idempotency_principal_scope=principal.audience_id,
-                mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
-                **arguments,
-            )
+        return write_intake.invoke_in_background(
+            principal, descriptor, command, *injected,
+            idempotency_key=f"import-file:{import_id}:{call['seq']}",
+            idempotency_principal_scope=principal.audience_id,
+            mutation_request_id=str(uuid.uuid5(_REQUEST_NAMESPACE, f"{import_id}:{call['seq']}:{call['attempt']}")),
+            **arguments,
+        )
 
     def _after_reply(self, import_id: str, reply: Any, call: dict) -> float | None:
         """Record a `file` reply: `done` leaves the list, `working` goes again at once, and a stop parks the stage.
