@@ -247,6 +247,19 @@ def test_manifest_nested_data_is_deeply_immutable_and_schema_values_are_strict(
             {"occurred_on": "2026-07-01", "status": "invented", "metadata": {}}
         )
     assert excinfo.value.code == "SCHEMA_ENUM"
+    # An agent that sent a value outside the enum learns the values it may send instead.
+    assert str(excinfo.value).endswith('field is outside its enum: status; allowed: "completed", "partial"')
+    # A string and an integer of the same digits read apart, as the validator tells them apart.
+    rating = collections.FieldSpec("enum", enum=(1, 2))
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.validate_field_value("rating", "1", rating)
+    assert str(excinfo.value).endswith("field is outside its enum: rating; allowed: 1, 2")
+    # Inspect drops a reason past 512 bytes, so a long non-ASCII listing is cut by bytes, not characters.
+    labels = collections.FieldSpec("enum", enum=tuple(f"状態ラベル番号{n:02}" for n in range(20)))
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.validate_field_value("status", "other", labels)
+    assert len(str(excinfo.value).encode("utf-8")) <= 512
+    assert str(excinfo.value).endswith(" more")
     with pytest.raises(collections.CollectionError) as excinfo:
         manifest.schema.validate(
             {

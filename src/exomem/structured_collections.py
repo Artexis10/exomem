@@ -159,13 +159,13 @@ class CollectionError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
-#: A listed name set past this many characters is summarised, so the public Planning
-#: message cap (512) never cuts a name in half.
+#: A listed name set past this many UTF-8 bytes is summarised, so neither the public Planning
+#: message cap (512) nor inspect's 512-byte reason cap cuts a name in half or drops the reason.
 LISTED_BUDGET = 300
 
 
 def listed_within(names: Iterable[str]) -> str:
-    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET`.
+    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET` bytes.
 
     When the first name alone passes the budget, nothing is listed and the text is the count:
     a cut name would read as a real one.
@@ -173,13 +173,18 @@ def listed_within(names: Iterable[str]) -> str:
     names = list(names)
     shown: list[str] = []
     for name in names:
-        if len(", ".join([*shown, name])) > LISTED_BUDGET:
+        if len(", ".join([*shown, name]).encode("utf-8")) > LISTED_BUDGET:
             break
         shown.append(name)
     if names and not shown:
         return f"{len(names)} item" if len(names) == 1 else f"{len(names)} items"
     more = f" and {len(names) - len(shown)} more" if len(shown) < len(names) else ""
     return f"{', '.join(shown)}{more}"
+
+
+def enum_listing(options: Iterable[Any]) -> str:
+    """An enum's options in their JSON spelling, so `"1"` and `1` read apart as the validator tells them apart."""
+    return listed_within(json.dumps(option, ensure_ascii=False) for option in options)
 
 
 def sqlite_store_required() -> CollectionError:
@@ -2346,14 +2351,16 @@ def _validate_saved_view_literals(
         candidates = raw if operator in {"in", "nin"} and isinstance(raw, list | tuple) else (raw,)
         if semantic_profile == "planning" and field_name == "horizon":
             valid = all(_registered_horizon(planning_values, item) for item in candidates)
+            allowed = ""
         elif field is not None and field.enum:
             valid = all(item in field.enum for item in candidates)
+            allowed = f"; allowed: {enum_listing(field.enum)}"
         else:
             continue
         if not valid:
             raise CollectionError(
                 "INVALID_SAVED_VIEW",
-                f"saved view {field_name} literal is outside the profile vocabulary",
+                f"saved view {field_name} literal is outside the profile vocabulary{allowed}",
             )
 
 
@@ -3632,7 +3639,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}; allowed: {enum_listing(spec.enum)}")
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:
