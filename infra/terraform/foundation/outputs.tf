@@ -18,6 +18,11 @@ output "gateway_hostname" {
   value       = var.gateway_hostname
 }
 
+output "gateway_additional_hostnames" {
+  description = "Further Cloud MCP hostnames that resolve to the fleet node."
+  value       = keys(var.gateway_additional_hostnames)
+}
+
 output "control_hostname" {
   description = "Access-protected public control hostname used by the platform release."
   value       = var.control_hostname

@@ -58,6 +58,24 @@ variable "gateway_hostname" {
   }
 }
 
+variable "gateway_additional_hostnames" {
+  description = "Further Cloud MCP hostnames, each mapped to the Cloudflare zone ID that holds it. Each resolves to the fleet node like gateway_hostname. List the same names in the platform values' cloudGateway.additionalHostnames."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = length(var.gateway_additional_hostnames) == 0 || (
+      var.gateway_hostname != "" && alltrue([
+        for hostname, zone_id in var.gateway_additional_hostnames :
+        can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", hostname)) &&
+        !contains([var.gateway_hostname, var.control_hostname, var.transfer_hostname], hostname) &&
+        zone_id != ""
+      ])
+    )
+    error_message = "gateway_additional_hostnames needs gateway_hostname set, and maps distinct lowercase ASCII DNS names to non-empty zone IDs."
+  }
+}
+
 variable "admin_ssh_cidrs" {
   description = "Temporary break-glass CIDRs allowed to reach public SSH; empty (administration over NetBird) closes it."
   type        = set(string)
