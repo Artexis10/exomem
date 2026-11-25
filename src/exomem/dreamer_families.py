@@ -681,10 +681,17 @@ def _stamp(updated: Any, origin: Any) -> str:
     return str(value) if value else ""
 
 
-def _after(value: str, since: str) -> bool:
-    """Whether `value` is known to be later than `since`; two values that share a day order only when both have a time."""
+def _not_before(value: str, since: str) -> bool:
+    """Whether `value` may be later than `since`: later, or on its day when either lacks a time.
+
+    An unknown order counts as newer: a miss would hide a new preference for good, while a wrong item is visible
+    and its dismissal holds until the evidence changes.
+    """
     later, bound = temporal.parse(value), temporal.parse(since)
-    return later is not None and bound is not None and temporal.compare(later, bound) is temporal.Order.AFTER
+    return (
+        later is not None and bound is not None
+        and temporal.compare(later, bound) in (temporal.Order.AFTER, temporal.Order.INDETERMINATE)
+    )
 
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
@@ -2168,7 +2175,7 @@ _CURATION_PROFILES_SQL = (
 _CURATION_UNIT_PAGES_SQL = (
     "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
     "WHERE f.node_key IN ({keys}) AND f.kind = 'file' "
-    # From the day before the profile's: `_after` then decides each page to the second before any read.
+    # From the day before the profile's: `_not_before` then decides each page before any read.
     "AND substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) >= ? "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
@@ -2344,11 +2351,14 @@ def _curation_candidates(
 
     evidence = _curation_scope(ctx, subject, scope, taxonomy)
     pages = evidence.linked | (evidence.members or frozenset())
-    candidates = sorted(path for path in pages if path != subject and _visible(keep, path))
+    # A profile page is never evidence, the subject included: its lines are already curated, and a narrower
+    # profile serves beside its ancestors rather than feeding them.
+    profiles = frozenset(_profile_paths(ctx))
+    candidates = sorted(path for path in pages if path != subject and path not in profiles and _visible(keep, path))
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
-    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_after`.
+    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_not_before`.
     bound = temporal.parse(since)
     floor = (bound.day - timedelta(days=1)).isoformat() if bound is not None else since[:10]
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
@@ -2360,14 +2370,14 @@ def _curation_candidates(
         yield from sorted(
             (str(path), _stamp(updated, origin))
             for path, updated, origin, status in rows
-            if ctx.live_status(status, str(path)) and _after(_stamp(updated, origin), since)
+            if ctx.live_status(status, str(path)) and _not_before(_stamp(updated, origin), since)
         )
 
 
 def _new_units(
     ctx: Context, subject: str, scope: Any, taxonomy: Any, since: str, today: date, keep
 ) -> tuple[dict[str, list[str]], bool]:
-    """Live units of the curation categories dated after `since`, by page, and whether the count is partial.
+    """Live units of the curation categories not known to precede `since`, by page, and whether the count is partial.
 
     A unit with no date of its own takes its page's. Visibility and eligibility decide each page before the
     page limit counts it, so pages the caller may not see or that are not live never use up the limit. The
@@ -2415,8 +2425,8 @@ def _new_units(
 
 
 def _unit_newer(as_of: str, page_date: str, since: str) -> bool:
-    """A unit's own date decides by day; a unit with no date of its own takes its page's time."""
-    return as_of[:10] > since[:10] if as_of else _after(page_date, since)
+    """A unit's own date decides; a unit with no date of its own takes its page's."""
+    return _not_before(as_of or page_date, since)
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
@@ -2480,7 +2490,7 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     """The curation proposal on one profile page, as a caller whose predicate is `keep` sees it.
 
     Two kinds of evidence, both structural. A live unit of a `preferences` or `constraints` role category,
-    dated after the profile's own update, on a page the profile links or (for a domain profile) a page of its
+    not known to precede the profile's own update, on a page the profile links or (for a domain profile) a page of its
     domain. And a line of the profile that a typed relation supersedes or opposes, whose `until` has passed or
     whose `check_by` has passed. A global profile reads the pages it links alone, so a new unit elsewhere is
     no evidence about it. A count that stopped at a limit, or a domain whose pages are unknown, is partial.
