@@ -17,7 +17,7 @@
 - [x] 3.2 Emit the server key (for a new registration) and the serverInfo name `evermatter`. Rename the skills to `evermatter-*` in the workflow-skill index and the core skill. Regenerate the plugin trees.
 - [ ] 3.3 Rename the plugins to `evermatter` and `evermatter-cloud` with a `renames` entry for each in `marketplace.json`. Run `claude plugin validate .`. This waits for the D6 ruling, because the rename signs each user out. Until then the local plugin keeps `exomem` and `marketplace.json` has no `renames`. The marketplace schema has no display-name field, so its description says "formerly Exomem".
 - [ ] 3.4 Move the Cloud plugin's address to `mcp.evermatter.ai/mcp` once the Cloud's accepted resource list serves it.
-- [x] 3.5 Add `evermatter setup --migrate` (D5) for stdio registrations, and skip each URL registration. Make doctor list user-written rules and hooks that still name the old prefix.
+- [x] 3.5 Add `evermatter setup --migrate` (D5) for stdio registrations, and skip each URL registration. Make doctor list user-written rules and hooks that name the old prefix in a client with no `exomem` server.
 - [x] 3.6 Write the new managed-block markers and the readiness service name `evermatter`.
 - [ ] 3.7 Document `EVERMATTER_*` as the settings prefix once 2.1 ships. Update the README, docs and skill descriptions, keeping "formerly Exomem" as a trigger. Write the release notes and the service notice for Cloud users.
 - [ ] 3.8 Prove the switch end to end:

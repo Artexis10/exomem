@@ -39,5 +39,5 @@ None.
 ## Impact
 
 - `src/exomem/client_config.py`, `install_hook.py`, `_hooks/*`, `doctor.py`, `setup` and `upgrade` commands, `env_compat.py`, `cloud_plugins.py`, `server.py`, the plugin trees under `plugins/`, `.claude-plugin/marketplace.json`, the skill generators, and the docs.
-- Users whose own permission rules or hooks name `mcp__exomem__*` keep working until they migrate. Doctor lists what still names the old prefix.
+- Users whose own permission rules or hooks name `mcp__exomem__*` keep working until they migrate. Doctor lists the rules and hooks that name the old prefix once no `exomem` server answers them.
 - The Cloud plugin's move may need one new sign-in per Claude Code install. The operator's choice on that is recorded in the design.

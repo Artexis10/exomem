@@ -23,7 +23,7 @@ import zipfile
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import install_info, workflow_skills
+from . import client_config, install_info, workflow_skills
 from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
@@ -310,7 +310,8 @@ def _plugin_manifest() -> dict:
             }
         },
         "mcpServers": {
-            PLUGIN_NAME: {
+            # The server key stays `exomem` with the plugin name: Claude Code stores the sign-in under both.
+            client_config.LEGACY_SERVER_NAME: {
                 "type": "http",
                 "url": "${user_config.mcp_url}",
             }

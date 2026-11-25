@@ -125,10 +125,11 @@ directories. A new install registers the `evermatter` key from the start, becaus
 a new registration has no stored sign-in.
 
 Setup never edits a permission rule or hook that you wrote. A rule that names
-`mcp__exomem__*` stops matching for a server that the command renamed. Add a rule
-with the `mcp__evermatter__*` prefix beside it. Both `evermatter setup --migrate` and
-`evermatter doctor` list each such rule and the file that holds it. Settings keep
-their `EXOMEM_*` names.
+`mcp__exomem__*` stops matching for a server that the command renamed. Change it to
+the `mcp__evermatter__*` prefix. A rule still matches while a client holds an
+`exomem` server, such as a URL server that the command kept. `evermatter setup --migrate`
+and `evermatter doctor` list each rule that no `exomem` server answers any more, with
+the file that holds it. Settings keep their `EXOMEM_*` names.
 
 ### claude.ai and ChatGPT
 

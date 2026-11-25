@@ -217,6 +217,32 @@ def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
     report(step, f"[done] bound {', '.join(bindings[len(prior['bindings']) :])}")
 
 
+def dead_references(
+    *, claude_home: Path, codex_home: Path, claude_config_path: Path, project_dir: Path
+) -> tuple[list[client_config.UserReference], list[Path]]:
+    """The user's rules and hooks that name `mcp__exomem__` in a client with no `exomem` server.
+
+    Such a rule matches no tool. A rule with an `exomem` server behind it still works, so it is
+    not listed. Returns the dead rules and every file read. Raises ``ValueError`` when a
+    client's registrations cannot be read, because then no rule can be judged. A Claude Code
+    scope that holds both keys reports only `evermatter`, so a rule there counts as dead.
+    """
+    references, read = client_config.user_references(
+        claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
+    )
+    legacy = client_config.LEGACY_SERVER_NAME
+    holds_legacy = {
+        "claude": any(
+            key == legacy
+            for key, _ in setup_wizard._claude_registrations(
+                config_path=claude_config_path, project_dir=project_dir
+            ).values()
+        ),
+        "codex": client_config.codex_mcp_name(codex_home / "config.toml") == legacy,
+    }
+    return [ref for ref in references if not holds_legacy[ref.client]], read
+
+
 def migrate(
     *,
     claude_home: Path | None = None,
@@ -273,16 +299,23 @@ def migrate(
     _migrate_bindings(client="claude", home=claude_home, print_fn=print_fn, report=report)
     _migrate_bindings(client="codex", home=codex_home, print_fn=print_fn, report=report)
 
-    references, _read = client_config.user_references(
-        claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
-    )
+    try:
+        references, _read = dead_references(
+            claude_home=claude_home,
+            codex_home=codex_home,
+            claude_config_path=claude_config_path,
+            project_dir=project_dir,
+        )
+    except ValueError as exc:
+        references = []
+        print_fn("")
+        print_fn(f"Could not check your permission rules and hooks: {exc}")
     if references:
         print_fn("")
         print_fn(
             "These permission rules and hooks are yours, so setup left them as they are. They name "
-            f"the old `{client_config.LEGACY_TOOL_PREFIX}` prefix. Where this command renamed a "
-            "server, they no longer match its tools. Add a rule with the "
-            f"`{client_config.TOOL_PREFIX}` prefix beside each:"
+            f"`{client_config.LEGACY_TOOL_PREFIX}`, and no `{client_config.LEGACY_SERVER_NAME}` "
+            f"server answers them now. Change each to the `{client_config.TOOL_PREFIX}` prefix:"
         )
         for reference in references:
             print_fn(f"  {reference.path}: {reference.kind} {reference.name}")
@@ -291,7 +324,8 @@ def migrate(
         "To move the skills too, run `evermatter install-skill`; it moves the old `exomem` "
         "skills to a backup folder."
     )
-    print_fn("Restart Claude Code and Codex to load the renamed server.")
+    if any(status.startswith("[done]") for _, status in steps):
+        print_fn("Restart Claude Code and Codex to load the changes.")
     print_fn("")
     print_fn("Summary:")
     for name, status in steps:

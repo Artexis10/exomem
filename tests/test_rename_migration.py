@@ -123,9 +123,10 @@ def test_migrate_renames_the_server_key_in_claude_and_codex_with_backups(tmp_pat
     install = Install(tmp_path)
     claude_before = install.config.read_text(encoding="utf-8")
 
-    code, _out = install.migrate()
+    code, out = install.migrate()
 
     assert code == 0
+    assert "Restart Claude Code and Codex to load the changes." in out
     servers = json.loads(install.config.read_text(encoding="utf-8"))["mcpServers"]
     assert set(servers) == {"evermatter", "other"}
     assert servers["evermatter"]["env"] == {"A": "1"}
@@ -146,9 +147,10 @@ def test_migrate_twice_changes_nothing_the_second_time(tmp_path: Path) -> None:
         (install.codex_home / "config.toml.exomem-bak").read_bytes(),
     )
 
-    code, _out = install.migrate(claude)
+    code, out = install.migrate(claude)
 
     assert code == 0
+    assert "Restart Claude Code" not in out
     assert claude.calls == []
     assert after_first == (
         install.config.read_bytes(),
@@ -304,23 +306,46 @@ def test_setup_migrate_runs_through_the_command_line(
     assert "evermatter setup --migrate" in capsys.readouterr().out
 
 
-def test_doctor_warns_about_a_rule_that_names_the_old_prefix_and_passes_without_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    install = Install(tmp_path)
+def _use_install_for_doctor(install: Install, monkeypatch: pytest.MonkeyPatch, *, server: str) -> Path:
+    """Point doctor at ``install``: Claude Code and Codex each register ``server``, and a
+    project rule names the `mcp__exomem__` prefix. Returns the rule's file."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(install.claude_home))
     monkeypatch.setenv("CODEX_HOME", str(install.codex_home))
     monkeypatch.chdir(install.project)
-
-    assert doctor._check_legacy_tool_references().status == "pass"  # noqa: SLF001
-
-    local = install.project / ".claude" / "settings.local.json"
-    local.parent.mkdir()
-    local.write_text(
+    (install.claude_home / ".claude.json").write_text(
+        json.dumps({"mcpServers": {server: HTTP}}), encoding="utf-8"
+    )
+    (install.codex_home / "config.toml").write_text(
+        f'[mcp_servers.{server}]\nurl = "https://memory.example/mcp"\n', encoding="utf-8"
+    )
+    rule = install.project / ".claude" / "settings.local.json"
+    rule.parent.mkdir()
+    rule.write_text(
         json.dumps({"permissions": {"allow": ["mcp__exomem__save_episode"]}}), encoding="utf-8"
     )
+    return rule
+
+
+def test_doctor_passes_a_rule_that_names_the_old_prefix_while_an_exomem_server_answers_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = Install(tmp_path)
+    _use_install_for_doctor(install, monkeypatch, server="exomem")
+
+    check = doctor._check_legacy_tool_references()  # noqa: SLF001
+
+    assert check.status == "pass"
+    assert "still names it matches" in check.message
+
+
+def test_doctor_warns_about_a_rule_that_names_the_old_prefix_once_only_an_evermatter_server_remains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = Install(tmp_path)
+    rule = _use_install_for_doctor(install, monkeypatch, server="evermatter")
+
     check = doctor._check_legacy_tool_references()  # noqa: SLF001
 
     assert check.status == "warn"
-    assert "mcp__exomem__save_episode" in check.message and str(local) in check.message
-    assert "evermatter setup --migrate" in (check.remediation or "")
+    assert "mcp__exomem__save_episode" in check.message and str(rule) in check.message
+    assert "`mcp__evermatter__`" in (check.remediation or "")

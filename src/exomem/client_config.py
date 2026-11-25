@@ -527,6 +527,7 @@ def remove_learning_instruction(path: Path) -> dict:
 class UserReference:
     """A rule or hook the user wrote that still names the old `mcp__exomem__` prefix."""
 
+    client: Literal["claude", "codex"]
     path: Path
     kind: Literal["permission rule", "hook", "setting"]
     name: str
@@ -555,16 +556,16 @@ def user_references(
     references and the files it read, so a caller can say what it checked.
     """
     files = (
-        claude_home / "settings.json",
-        claude_home / "settings.local.json",
-        project_dir / ".claude" / "settings.json",
-        project_dir / ".claude" / "settings.local.json",
-        codex_home / "config.toml",
-        codex_home / "hooks.json",
+        ("claude", claude_home / "settings.json"),
+        ("claude", claude_home / "settings.local.json"),
+        ("claude", project_dir / ".claude" / "settings.json"),
+        ("claude", project_dir / ".claude" / "settings.local.json"),
+        ("codex", codex_home / "config.toml"),
+        ("codex", codex_home / "hooks.json"),
     )
     found: list[UserReference] = []
     read: list[Path] = []
-    for path in files:
+    for client, path in files:
         try:
             raw = path.read_text(encoding="utf-8")
             document = tomllib.loads(raw) if path.suffix == ".toml" else json.loads(raw)
@@ -581,5 +582,5 @@ def user_references(
             kind = (
                 "permission rule" if root == "permissions" else "hook" if root == "hooks" else "setting"
             )
-            found.append(UserReference(path=path, kind=kind, name=text.strip()[:200]))
+            found.append(UserReference(client=client, path=path, kind=kind, name=text.strip()[:200]))
     return found, read

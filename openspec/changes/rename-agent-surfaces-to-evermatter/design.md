@@ -59,7 +59,7 @@ Claude Code documents a top-level `renames` map in `marketplace.json`. It rewrit
 
 ### D5. Existing client configurations move only when the user asks
 
-`evermatter setup --migrate` renames the stdio server key that setup wrote, and the managed instruction block, with a backup of each file (once per run, before the first change). It adds the new prefix beside the old one in explicit checkpoint bindings. It never edits rules or hooks that the user wrote. It lists them instead, and doctor lists them on every run.
+`evermatter setup --migrate` renames the stdio server key that setup wrote, and the managed instruction block, with a backup of each file (once per run, before the first change). It adds the new prefix beside the old one in explicit checkpoint bindings. It never edits rules or hooks that the user wrote. It lists the ones that no `exomem` server answers any more instead, and doctor lists the same ones on every run.
 
 It skips every registration that has a URL, in Claude Code and in Codex. Both clients store the sign-in under the server name, so a rename signs the user out. The command prints each skipped URL and the reason. A new registration has no stored sign-in, so a fresh install writes `evermatter`.
 
@@ -75,7 +75,7 @@ Until the operator rules, Release B renames nothing that holds a sign-in. The lo
 
 ## Risks / Trade-offs
 
-- A user's own permission rules that name `mcp__exomem__*` stop matching for a server that the migration renamed. Doctor lists them, and the migration never runs unasked.
+- A user's own permission rules that name `mcp__exomem__*` stop matching for a server that the migration renamed. Doctor lists them, and the migration never runs unasked. A rule that still has an `exomem` server behind it, such as a kept URL server, matches and is not listed.
 - Codex's OAuth keying is undocumented, so Codex Cloud users may need one `codex mcp login` after migrating. The release notes say so.
 - Once the plugins rename, `renames` stays append-only, so the old plugin names remain in `marketplace.json` permanently.
 

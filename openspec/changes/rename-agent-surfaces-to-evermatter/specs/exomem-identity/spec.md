@@ -8,7 +8,13 @@ The MCP server key of a new registration, the serverInfo name, the skill names a
 
 - **WHEN** a client holds the server key `exomem`, and its hooks or permission rules name `mcp__exomem__*` or `mcp__plugin_exomem_exomem__*`
 - **THEN** the tools answer, our hooks fire on those tool names, and doctor reports the install as healthy
-- **AND** doctor names the old identifiers that the user can migrate
+- **AND** doctor passes while an `exomem` server answers each rule or hook that names `mcp__exomem__*`
+
+#### Scenario: A rule that names the old prefix has no server left
+
+- **WHEN** a user-written permission rule or hook names `mcp__exomem__*` in a client that holds no `exomem` server
+- **THEN** doctor warns and names the file and the rule, and says to change it to `mcp__evermatter__*`
+- **AND** setup never edits that rule
 
 #### Scenario: A new install uses the new names
 
