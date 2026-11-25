@@ -351,7 +351,8 @@ The names are stable and are the vocabulary a latency diagnosis uses:
 | `embeddings.disk_score.hydrate` | Build results and, for searches that return text, read winning chunks from the scoring snapshot. |
 | `embeddings.disk_score.release` | Roll back the read transaction and close the connection. |
 | `embeddings.matrix_catch_up` | The bounded alternative to that full load. |
-| `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after each unit write; the log line `semantic-unit matrix full load: … rows=…` names the reason. |
+| `embeddings.unit_matrix_load` | A full load of the semantic-unit vectors into the resident unit matrix: the first unit query in a process, and the first after a unit write that the catch-up cannot carry (a rebuild, a write that logged no parent, or more than `CATCHUP_MAX_PATHS` parents); the log line `semantic-unit matrix full load: … rows=…` reports its size. |
+| `embeddings.unit_matrix_catch_up` | The bounded alternative to that full load: the resident unit matrix patched from the rows of the parents that unit writes changed since it was loaded; the log line `semantic-unit matrix catch-up: paths=… rows=…` reports their count. The span can cover a refused attempt before a full load. |
 | `delivery.vocabulary_after_commit` | Vocabulary delivery after the commit. |
 | `derived.advisory_execute`, `derived.component_dispatch`, `derived.component_completion` | The derived drain. |
 | `recall.*` | Retrieval phases, named by `find`'s own timings. |
