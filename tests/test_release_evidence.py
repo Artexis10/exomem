@@ -498,24 +498,28 @@ def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status
 
 
 @pytest.mark.parametrize(
-    "branch,age_hours,status,tested,due",
+    "branch,age_hours,status,tested,cut_open,due",
     [
         # Main moved and its newest Full is older than the window: a cut would find nothing.
-        ("main", 5, "completed", "old", True),
-        ("main", 1, "completed", "old", False),
+        ("main", 5, "completed", "old", False, True),
+        ("main", 1, "completed", "old", False, False),
         # A running Full will supply the evidence; a second one only holds runners.
-        ("main", 5, "in_progress", "old", False),
+        ("main", 5, "in_progress", "old", False, False),
         # Nothing landed since the last Full: rerunning it proves nothing new.
-        ("main", 5, "completed", "tip", False),
+        ("main", 5, "completed", "tip", False, False),
         # A cut's own Full run on main's tip is evidence too; a copy would compete with it.
-        ("release-cuts/tip", 5, "in_progress", "tip", False),
-        ("release-cuts/tip", 1, "completed", "tip", False),
+        ("release-cuts/tip", 5, "in_progress", "tip", False, False),
+        ("release-cuts/tip", 1, "completed", "tip", False, False),
+        # A cut's Full on an older commit predates its reconciliation; it holds off nothing.
+        ("release-cuts/old", 1, "completed", "old", False, True),
+        # While a cut is open, a Full on main lacks its reconciliation and cannot serve.
+        ("main", 5, "completed", "old", True, False),
         # No Full run on main has ever finished.
-        (None, 0, "completed", "old", True),
+        (None, 0, "completed", "old", False, True),
     ],
 )
 def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
-    monkeypatch, branch, age_hours, status, tested, due
+    monkeypatch, branch, age_hours, status, tested, cut_open, due
 ):
     created = evidence.datetime.now(evidence.UTC) - evidence.timedelta(hours=age_hours)
     run = {
@@ -525,12 +529,15 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         "status": status,
         "created_at": created.isoformat().replace("+00:00", "Z"),
     }
+    cut = {"status": "in_progress" if cut_open else "completed"}
 
     def api(path):
         if path == "actions/workflows/ci.yml":
             return {"id": 7}
         if path == "commits/main":
             return {"sha": "tip"}
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"workflow_runs": [cut]}
         listed = branch and "event=workflow_dispatch" in path
         return {"workflow_runs": [run] if listed else []}
 

@@ -308,9 +308,10 @@ When no such commit exists, it picks main's tip and prints `"evidence_run": null
 and the cut runs its own Full fallback. Later main commits wait for the next
 release. To release main's tip regardless, set `source_commit` to main's head.
 The merge queue workflow keeps that evidence recent: after each landing on main
-it dispatches Full on main when main has moved, no Full run on main or on a cut
-is running, and the newest is older than `FULL_EVIDENCE_HOURS` (a repository
-variable, default 4; `0` turns it off).
+it dispatches Full on main when no Full run on main or on a cut is running or
+has tested main's tip, no cut is open, and main's newest Full is older than
+`FULL_EVIDENCE_HOURS` (a repository variable, default 4; `0` turns it off).
+The landing of a cut's reconciliation therefore usually starts the next Full.
 
 2. Start or resume the cut; expect one controller run on main for that source.
 

@@ -119,9 +119,10 @@ def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
 def main_full_due(repository: str, hours: float) -> bool:
     """A release cut reuses Full evidence on main (release_cuts.py pick-source); keep it recent.
 
-    Full on main is due when none is queued or running, the newest one started more than
-    `hours` ago, and main has moved since that run's commit. A cut's own Full run tests a
-    main commit too (release_cuts.py pick-source reuses it), so it counts here as well.
+    Full on main is due when no Full run on main or on a cut is queued or running, none has
+    tested main's current commit, no cut is open, and main's newest Full started more than
+    `hours` ago. An open cut's reconciliation is not on main yet, and pick-source accepts only
+    sources that contain it, so a Full run during the cut could not serve the next release.
     """
     workflow_id = api("actions/workflows/ci.yml")["id"]
     latest = [
@@ -138,14 +139,18 @@ def main_full_due(repository: str, hours: float) -> bool:
     ]
     if any(run["status"] != "completed" for run in latest):
         return False
-    newest = max(latest, key=lambda run: run["created_at"], default=None)
+    if any(run["head_sha"] == api("commits/main")["sha"] for run in latest):
+        return False
+    # The cut controller runs until the cut's reconciliation is on main.
+    cuts = api(f"actions/workflows/{Path(AUTOMATION).name}/runs?per_page=20")["workflow_runs"]
+    if any(run["status"] != "completed" for run in cuts):
+        return False
+    on_main = [run for run in latest if run.get("head_branch") == "main"]
+    newest = max(on_main, key=lambda run: run["created_at"], default=None)
     if newest is None:
         return True
     started = datetime.fromisoformat(newest["created_at"].replace("Z", "+00:00"))
-    return (
-        datetime.now(UTC) - started > timedelta(hours=hours)
-        and newest["head_sha"] != api("commits/main")["sha"]
-    )
+    return datetime.now(UTC) - started > timedelta(hours=hours)
 
 
 def legacy_workflow(commit: str) -> bool:
