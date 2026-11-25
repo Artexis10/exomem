@@ -24,7 +24,7 @@
 - [x] 3.3 Update the hosted service's source offer and terms wording in the control-plane repository.
 - [x] 3.4 Regenerate `docs/licensing/image-shared-libraries.md` from the first FSL release's published images on every platform (lean, ml, cuda, cloud, cellctl), with Unmapped and Strong copyleft at 0 in every row; record it before the release statement.
 - [x] 3.5 Publish one plain statement: what changed, from which release, that self-hosting stays free, and the two-year Apache-2.0 conversion.
-- [ ] 3.6 Give the `cellctl` image the licence label and `/LICENSE` that every published artifact carries, or take it private with the platform move (section 4), before this change is archived.
+- [x] 3.6 Give the `cellctl` image a licence label (`FSL-1.1-ALv2`), as every published artifact declares one licence expression, or take it private with the platform move (section 4), before this change is archived.
 
 ## 4. Platform boundary (after `contain-cloud-controller-compromise` and `make-cloud-cells-operator-resistant` ship)
 
