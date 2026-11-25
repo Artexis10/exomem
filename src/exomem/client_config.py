@@ -31,13 +31,13 @@ LEGACY_SERVER_NAME = "exomem"
 # Every server key a reader accepts: a client stores the key it was given, so an old
 # install keeps `exomem` while a new one holds `evermatter`. Writers emit SERVER_NAME only.
 SERVER_NAMES = (SERVER_NAME, LEGACY_SERVER_NAME)
-#: The tool-name prefix of each old server key, with the prefix its new key gives. A client
-#: builds a user-scope server's tools as `mcp__<server>__<tool>` and a plugin's as
-#: `mcp__plugin_<plugin>_<server>__<tool>`, and users' rules and hooks match those names.
-LEGACY_TOOL_PREFIXES = {
-    "mcp__exomem__": "mcp__evermatter__",
-    "mcp__plugin_exomem_exomem__": "mcp__plugin_evermatter_evermatter__",
-}
+#: The tool-name prefix that each server key gives. A client builds a user-scope server's tools as
+#: `mcp__<server>__<tool>`, and users' rules and hooks match those names. A plugin's tools keep
+#: their own prefix (`mcp__plugin_exomem_exomem__`) because the plugin keeps its name for now.
+LEGACY_TOOL_PREFIX = f"mcp__{LEGACY_SERVER_NAME}__"
+TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
+#: The suffix that `_write_user_file` and `evermatter setup --migrate` give a file's backup copy.
+BACKUP_SUFFIX = ".exomem-bak"
 
 
 def normalize_mcp_url(raw: str) -> str:
@@ -287,8 +287,10 @@ def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
     Only the section headers change, so the server's settings and the tool approvals
     under its sub-tables move with it. Returns {"action", "path", "diff", "backup"} where
     ``action`` is "renamed", "current" (no legacy key, nothing written), "conflict" (both keys
-    hold a section, nothing written) or "manual" (the legacy key is not a plain section the
-    rename can move, such as an inline table, nothing written).
+    hold a section, nothing written), "http" (the legacy server is a URL: Codex stores its sign-in
+    under the server key, so a rename would sign the user out; nothing written, ``url`` holds
+    it) or "manual" (the legacy key is not a plain section the rename can move, such as an
+    inline table, nothing written).
 
     Raises:
         ValueError: the config is not valid TOML, or the rename would make it invalid
@@ -307,11 +309,16 @@ def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
         return {"action": "current", **outcome}
     if SERVER_NAME in servers:
         return {"action": "conflict", **outcome}
+    registered = servers[LEGACY_SERVER_NAME]
+    if isinstance(registered, dict) and "url" in registered:
+        return {"action": "http", "url": str(registered["url"]), **outcome}
     legacy = _section_bounds(original, f"[mcp_servers.{LEGACY_SERVER_NAME}]")
     if legacy is None:
         return {"action": "manual", **outcome}
     start, end = legacy
     old, new = f"mcp_servers.{LEGACY_SERVER_NAME}", f"mcp_servers.{SERVER_NAME}"
+    # Line-based, because Python has no format-preserving TOML writer and a parse-and-dump would
+    # drop the user's comments and ordering. tomllib re-validates the result before it is written.
     lines = original.splitlines(keepends=True)
     for index in range(start, end):
         stripped = lines[index].strip()
@@ -342,7 +349,7 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
     backup = None
     path.parent.mkdir(parents=True, exist_ok=True)
     if original:
-        backup_path = path.with_suffix(path.suffix + ".exomem-bak")
+        backup_path = path.with_suffix(path.suffix + BACKUP_SUFFIX)
         shutil.copy2(path, backup_path)
         backup = str(backup_path)
     path.write_text(updated, encoding="utf-8", newline="")
@@ -518,7 +525,7 @@ def remove_learning_instruction(path: Path) -> dict:
 
 @dataclass(frozen=True)
 class UserReference:
-    """A rule or hook the user wrote that still names an old tool-name prefix."""
+    """A rule or hook the user wrote that still names the old `mcp__exomem__` prefix."""
 
     path: Path
     kind: Literal["permission rule", "hook", "setting"]
@@ -539,12 +546,13 @@ def _strings(node: object, trail: tuple[str, ...] = ()):
 
 def user_references(
     *, claude_home: Path, codex_home: Path, project_dir: Path
-) -> list[UserReference]:
-    """List the user's permission rules and hooks that still name an old tool prefix.
+) -> tuple[list[UserReference], list[Path]]:
+    """List the user's permission rules and hooks that still name the old `mcp__exomem__` prefix.
 
     Setup writes no rule or hook that names a tool, so every hit is the user's own. It
     reads the settings files each client documents, and a file it cannot read or parse
-    is skipped: the client reports that file itself. Nothing is written.
+    is skipped: the client reports that file itself. Nothing is written. Returns the
+    references and the files it read, so a caller can say what it checked.
     """
     files = (
         claude_home / "settings.json",
@@ -555,23 +563,23 @@ def user_references(
         codex_home / "hooks.json",
     )
     found: list[UserReference] = []
+    read: list[Path] = []
     for path in files:
         try:
             raw = path.read_text(encoding="utf-8")
             document = tomllib.loads(raw) if path.suffix == ".toml" else json.loads(raw)
         except (OSError, UnicodeError, ValueError):  # tomllib and json errors are ValueErrors
             continue
+        read.append(path)
         for trail, text in _strings(document):
-            # The tokens are the client-defined tool-name prefixes, a closed set (a
-            # protocol token, not a reading of what the rule meant).
-            if not any(
-                prefix in text or text.strip() == prefix.removesuffix("__")
-                for prefix in LEGACY_TOOL_PREFIXES
-            ):
+            # The token is the client-defined tool-name prefix, a closed set (a protocol token,
+            # not a reading of what the rule meant).
+            bare = LEGACY_TOOL_PREFIX.removesuffix("__")
+            if LEGACY_TOOL_PREFIX not in text and text.strip() != bare:
                 continue
             root = trail[0] if trail else ""
             kind = (
                 "permission rule" if root == "permissions" else "hook" if root == "hooks" else "setting"
             )
             found.append(UserReference(path=path, kind=kind, name=text.strip()[:200]))
-    return found
+    return found, read

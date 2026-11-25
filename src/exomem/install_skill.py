@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+
+import yaml
 
 from . import package_skills, workflow_skills
 
@@ -105,15 +108,19 @@ def install_skills(
     client: str | None = "auto",
     force: bool = False,
     link: bool = False,
+    on_moved: Callable[[dict], None] | None = None,
 ) -> dict:
     """Install the skill set into one or more clients.
+
+    ``on_moved`` hears each old skill folder at the moment it moves, so a later client that
+    raises still leaves the caller with every move already reported.
 
     Returns {"clients": {name: <install_skill result>}, "installed": [names]}.
     """
     results: dict[str, dict] = {}
     for name in resolve_clients(client):
         results[name] = install_skill(
-            client_skill_target(name), force=force, link=link
+            client_skill_target(name), force=force, link=link, on_moved=on_moved
         )
     return {"clients": results, "installed": sorted(results)}
 
@@ -122,11 +129,10 @@ def install_skills(
 # only when it is unmistakably ours (see that function).
 _LEGACY_MARKER = "name: knowledge-base"
 _LEGACY_FINGERPRINT = "Exomem"
-# Our own old skills (`exomem`, `exomem-<workflow>`) carry the product name in one of these
-# two spellings. A fingerprint of provenance, not a reading of meaning: it keeps a user's own
-# folder that merely shares the name from being retired.
-_RENAMED_FINGERPRINTS = ("Exomem", "Evermatter")
-_RENAMED_READ_LIMIT = 1_000_000
+# Where `retire_renamed_skill` moves an old skill folder. It sits beside `skills/`, not inside it,
+# so the client does not load the backup as a second copy of the skill.
+RETIRED_SKILLS_DIR = "exomem-retired-skills"
+_FRONTMATTER_READ_LIMIT = 65536
 
 
 def install_skill(
@@ -134,6 +140,7 @@ def install_skill(
     *,
     force: bool = False,
     link: bool = False,
+    on_moved: Callable[[dict], None] | None = None,
 ) -> dict:
     """Install the bundled Evermatter skill into a Claude Code skills folder.
 
@@ -142,8 +149,8 @@ def install_skill(
     ``target`` (default ``~/.claude/skills/evermatter``). The named workflow skills
     are also installed as sibling Claude Code skills beside the core `evermatter`
     skill so clients can discover them directly. A copy of one of our skills that the
-    rename left under its old `exomem` name is retired once the new ones are in place
-    (see ``retire_renamed_skill``).
+    rename left under its old `exomem` name is moved to a backup folder once the new ones are
+    in place (see ``retire_renamed_skill``); nothing is deleted.
 
     Args:
         target: Destination skill folder. Defaults to DEFAULT_TARGET.
@@ -152,10 +159,11 @@ def install_skill(
         link: Best-effort symlink instead of copy (keeps the install in sync as
             the skill evolves). Falls back to a copy if the OS refuses the
             symlink — e.g. Windows without Developer Mode.
+        on_moved: Called with each move record as it happens.
 
     Returns:
         {"target": str, "mode": "copy"|"symlink"|"mixed", "files": int,
-        "workflow_skills": [...], "retired": [str, ...]}.
+        "workflow_skills": [...], "retired": [{"skill", "from", "backup"}, ...]}.
 
     Raises:
         FileNotFoundError: the bundled skill is missing (broken install).
@@ -203,11 +211,13 @@ def install_skill(
             }
         )
 
-    retired = [
-        str(path)
-        for item in targets
-        if (path := retire_renamed_skill(item["target"].parent, item["name"])) is not None
-    ]
+    retired = []
+    for item in targets:
+        moved = retire_renamed_skill(item["target"].parent, item["name"])
+        if moved is not None:
+            retired.append(moved)
+            if on_moved is not None:
+                on_moved(moved)
     modes = {r["mode"] for r in records}
     return {
         "target": str(target),
@@ -279,31 +289,6 @@ def _count_files(root: Path) -> int:
     return sum(1 for p in root.rglob("*") if p.is_file())
 
 
-def _retire_skill_dir(
-    path: Path, *, marker: str, fingerprints: tuple[str, ...], limit: int
-) -> Path | None:
-    """Remove the skill folder ``path`` when its SKILL.md names ``marker`` and a fingerprint.
-
-    Only the first ``limit`` characters are read. A symlink is unlinked, never followed.
-    Returns the removed path, or ``None`` when there was nothing of ours to remove.
-    """
-    skill_md = path / "SKILL.md"
-    if not skill_md.is_file():
-        return None
-    try:
-        with skill_md.open(encoding="utf-8", errors="replace") as handle:
-            head = handle.read(limit)
-    except OSError:
-        return None
-    if marker not in head or not any(fingerprint in head for fingerprint in fingerprints):
-        return None
-    if path.is_symlink() or path.is_file():
-        path.unlink()
-    else:
-        shutil.rmtree(path)
-    return path
-
-
 def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     """Retire a pre-rename ``knowledge-base`` skill install, if present and ours.
 
@@ -320,27 +305,71 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     legacy = (
         Path(legacy) if legacy is not None else _default_path("_LEGACY_TARGET")
     ).expanduser()
-    return _retire_skill_dir(
-        legacy, marker=_LEGACY_MARKER, fingerprints=(_LEGACY_FINGERPRINT,), limit=4096
-    )
+    skill_md = legacy / "SKILL.md"
+    if not skill_md.is_file():
+        return None
+    try:
+        head = skill_md.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return None
+    if _LEGACY_MARKER not in head or _LEGACY_FINGERPRINT not in head:
+        return None
+    if legacy.is_symlink() or legacy.is_file():
+        legacy.unlink()
+    else:
+        shutil.rmtree(legacy)
+    return legacy
 
 
-def retire_renamed_skill(skills_dir: Path, name: str) -> Path | None:
-    """Retire the copy of our skill ``name`` that the rename left under its old name.
+def skill_name(skill_md: Path) -> str | None:
+    """The ``name`` in the frontmatter of ``skill_md``, or ``None`` when it has none.
+
+    Parses the frontmatter as YAML, so a CRLF file reads like an LF one and a ``name`` that only
+    appears in the body does not count.
+    """
+    try:
+        with Path(skill_md).open(encoding="utf-8-sig", errors="replace", newline=None) as handle:
+            lines = handle.read(_FRONTMATTER_READ_LIMIT).splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next((i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if end is None:
+        return None
+    try:
+        data = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def retire_renamed_skill(skills_dir: Path, name: str) -> dict | None:
+    """Move the copy of our skill ``name`` that the rename left under its old name to a backup.
 
     The core skill and the workflow skills moved from ``exomem`` and ``exomem-<x>`` to
     ``evermatter`` and ``evermatter-<x>``; left in ``skills_dir`` after an upgrade the old copy
-    loads as a stale duplicate. It goes only when its SKILL.md carries the old
-    ``name:`` line *and* our product name, so a user's own folder that shares the name stays.
-    A ``--link`` symlink resolves to the renamed scaffold, so it no longer names the old skill and is
-    left for the user to clear.
+    loads as a stale duplicate. It moves only when the ``name`` in its SKILL.md frontmatter is
+    that old name, so a user's own folder that merely shares the folder name stays. The move goes
+    to ``RETIRED_SKILLS_DIR`` beside ``skills_dir``, never into a deletion, so a user's edits to
+    the old copy are kept. A ``--link`` symlink to the renamed scaffold names the new skill, so
+    it is left for the user to clear.
 
-    Returns the removed path, or ``None`` if there was nothing of ours to remove.
+    Returns ``{"skill", "from", "backup"}`` for the move, or ``None`` if there was nothing of
+    ours to move.
     """
+    skills_dir = Path(skills_dir)
     old = workflow_skills.legacy_skill_name(name)
-    return _retire_skill_dir(
-        Path(skills_dir) / old,
-        marker=f"\nname: {old}\n",
-        fingerprints=_RENAMED_FINGERPRINTS,
-        limit=_RENAMED_READ_LIMIT,
-    )
+    path = skills_dir / old
+    if skill_name(path / "SKILL.md") != old:
+        return None
+    backups = skills_dir.parent / RETIRED_SKILLS_DIR
+    backups.mkdir(parents=True, exist_ok=True)
+    backup = backups / old
+    count = 1
+    while backup.exists() or backup.is_symlink():
+        count += 1
+        backup = backups / f"{old}-{count}"
+    shutil.move(str(path), str(backup))
+    return {"skill": old, "from": str(path), "backup": str(backup)}

@@ -23,7 +23,7 @@ import zipfile
 from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import client_config, install_info, workflow_skills
+from . import install_info, workflow_skills
 from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
@@ -229,10 +229,11 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 # The skills/ and hooks/ trees are GENERATED from the same package sources and
 # guarded by a sync test rather than hand-maintained.
 
-#: The plugin's name, which is also the entry name in `.claude-plugin/marketplace.json`. A client
-#: builds its tools as `mcp__plugin_<plugin>_<server>__<tool>`. The marketplace's `renames` map
-#: sends an install of the old name `exomem` here.
-PLUGIN_NAME = "evermatter"
+#: The plugin's name and its server key stay `exomem` for now. Claude Code stores an HTTP server's
+#: sign-in under its name (a plugin server's under the plugin and server names), so a rename signs
+#: each user out. A later release renames both with a sign-in notice. The plugin's skills are
+#: renamed already: a skill rename signs nobody out.
+PLUGIN_NAME = "exomem"
 
 _PLUGIN_HOOK_EVENTS: tuple[tuple[str, str | None], ...] = (
     ("Stop", None),
@@ -309,7 +310,7 @@ def _plugin_manifest() -> dict:
             }
         },
         "mcpServers": {
-            client_config.SERVER_NAME: {
+            PLUGIN_NAME: {
                 "type": "http",
                 "url": "${user_config.mcp_url}",
             }

@@ -3574,14 +3574,24 @@ def _install_skill_main(argv: list[str]) -> int:
     from . import install_skill as install_module
 
     target = Path(args.target) if args.target else None
+
+    def moved(record: dict) -> None:
+        # Printed as each move happens, so a later failure still leaves it on the record.
+        print(
+            f"Moved the previous `{record['skill']}` skill from {record['from']} "
+            f"to {record['backup']}. Your edits are in that backup."
+        )
+
     try:
         if target is not None:
             reports = {
-                "claude": install_module.install_skill(target, force=args.force, link=args.link)
+                "claude": install_module.install_skill(
+                    target, force=args.force, link=args.link, on_moved=moved
+                )
             }
         else:
             reports = install_module.install_skills(
-                client=args.client, force=args.force, link=args.link
+                client=args.client, force=args.force, link=args.link, on_moved=moved
             )["clients"]
     except (FileExistsError, FileNotFoundError, ValueError) as e:
         print(f"exomem install-skill: {e}", file=sys.stderr)
@@ -3595,8 +3605,6 @@ def _install_skill_main(argv: list[str]) -> int:
         if report.get("workflow_skills"):
             names = ", ".join(s["name"] for s in report["workflow_skills"])
             print(f"  Workflow skills: {names}")
-        for retired in report.get("retired", []):
-            print(f"  Removed the previous copy at {retired}.")
     # Installing to the default location supersedes any pre-rename `knowledge-base`
     # skill; retire it so Claude Code doesn't load both.
     if target is None:

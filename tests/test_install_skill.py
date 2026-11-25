@@ -212,40 +212,51 @@ def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
     )
 
 
-# ---- the rename: our old `exomem` skill folders are retired, a user's own are not ----
+# ---- the rename: our old `exomem` skill folders move to a backup, a user's own stay ----
 
 
 def _old_skill(skills: Path, name: str, text: str) -> Path:
     folder = skills / name
     folder.mkdir(parents=True)
-    (folder / "SKILL.md").write_text(text, encoding="utf-8")
+    (folder / "SKILL.md").write_bytes(text.encode("utf-8"))
     return folder
 
 
-def test_install_retires_the_old_exomem_skills_it_wrote(tmp_path: Path) -> None:
+def test_install_moves_an_edited_old_skill_to_a_backup_with_its_content_intact(
+    tmp_path: Path,
+) -> None:
     skills = tmp_path / "skills"
     old_core = _old_skill(
-        skills, "exomem", "---\nname: exomem\ndescription: Use Exomem for recall.\n---\n"
+        skills, "exomem", "---\nname: exomem\ndescription: My edited recall rule.\n---\n"
     )
-    old_capture = _old_skill(
-        skills, "exomem-capture", "---\nname: exomem-capture\n---\n\n# exomem-capture\nExomem.\n"
-    )
+    (old_core / "notes.md").write_text("my own notes\n", encoding="utf-8")
+    crlf_text = "---\r\nname: exomem-capture\r\n---\r\n\r\nMy capture habits.\r\n"
+    old_capture = _old_skill(skills, "exomem-capture", crlf_text)
+    heard: list[dict] = []
 
-    report = install_module.install_skill(skills / "evermatter")
+    report = install_module.install_skill(skills / "evermatter", on_moved=heard.append)
 
     assert (skills / "evermatter" / "SKILL.md").is_file()
-    assert (skills / "evermatter-capture" / "SKILL.md").is_file()
-    assert not old_core.exists()
-    assert not old_capture.exists()
-    assert sorted(report["retired"]) == sorted([str(old_core), str(old_capture)])
+    assert not old_core.exists() and not old_capture.exists()
+    backups = tmp_path / install_module.RETIRED_SKILLS_DIR
+    assert (backups / "exomem" / "notes.md").read_text(encoding="utf-8") == "my own notes\n"
+    assert "My edited recall rule." in (backups / "exomem" / "SKILL.md").read_text(encoding="utf-8")
+    assert (backups / "exomem-capture" / "SKILL.md").read_bytes() == crlf_text.encode("utf-8")
+    assert not (skills / install_module.RETIRED_SKILLS_DIR).exists()
+    assert report["retired"] == heard
+    assert {move["skill"]: move["backup"] for move in heard} == {
+        "exomem": str(backups / "exomem"),
+        "exomem-capture": str(backups / "exomem-capture"),
+    }
 
 
-def test_install_keeps_an_exomem_skill_folder_the_user_wrote(tmp_path: Path) -> None:
+def test_install_keeps_a_folder_whose_frontmatter_name_is_not_ours(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
-    mine = _old_skill(skills, "exomem", "---\nname: exomem\n---\n\nMy own notes helper.\n")
     other = _old_skill(skills, "exomem-capture", "---\nname: my-capture\n---\n\nExomem helper.\n")
+    in_body = _old_skill(skills, "exomem-review", "---\nname: my-review\n---\n\nname: exomem-review\n")
 
     report = install_module.install_skill(skills / "evermatter")
 
-    assert mine.is_dir() and other.is_dir()
+    assert other.is_dir() and in_body.is_dir()
     assert report["retired"] == []
+    assert not (tmp_path / install_module.RETIRED_SKILLS_DIR).exists()

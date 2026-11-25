@@ -27,7 +27,7 @@ metadata to the default branch publishes that Git-repo channel:
 
 ```text
 /plugin marketplace add substrate-systems/evermatter
-/plugin install evermatter@exomem
+/plugin install exomem@exomem
 ```
 
 The plugin does not create a usable server route when `mcp_url` is blank. After

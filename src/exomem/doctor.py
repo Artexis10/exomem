@@ -4052,39 +4052,40 @@ def _check_managed_hook_refresh() -> DoctorCheck:
 def _check_legacy_tool_references() -> DoctorCheck:
     """Warn about permission rules and hooks of the user's that name the old tool prefix.
 
-    They still match while the client holds the old `exomem` server key and stop matching
-    after `evermatter setup --migrate`, which never edits them. A warning, never a
-    failure: the install works either way. Read-only; the output names rules and files only.
+    They match while the client holds the old `exomem` server key and stop matching for a
+    server that `evermatter setup --migrate` renames, which never edits them. A warning, never
+    a failure: the install works either way. Read-only; the output names rules and files only.
     """
     from . import client_config
     from .install_skill import client_home
 
-    references = client_config.user_references(
+    references, read = client_config.user_references(
         claude_home=client_home("claude"),
         codex_home=client_home("codex"),
         project_dir=Path.cwd(),
     )
     if not references:
+        checked = ", ".join(str(path) for path in read) or "no Claude or Codex settings file found"
         return _check(
             "migration.tool_prefix",
             "pass",
-            "no permission rule or hook of yours names the old `mcp__exomem__` tool prefix",
+            f"checked {checked}: no permission rule or hook there names the old "
+            f"`{client_config.LEGACY_TOOL_PREFIX}` tool prefix. Rules kept anywhere else are not read.",
         )
     listed = "; ".join(f"{ref.kind} {ref.name} in {ref.path}" for ref in references)
     return _check(
         "migration.tool_prefix",
         "warn",
-        f"{len(references)} permission rule(s) or hook(s) of yours name the old `exomem` tool "
-        f"prefix: {listed}",
-        "Run `evermatter setup --migrate`, then change each listed rule or hook to the "
-        "`mcp__evermatter__` prefix. Setup never edits what you wrote.",
+        f"{len(references)} permission rule(s) or hook(s) of yours name the old "
+        f"`{client_config.LEGACY_TOOL_PREFIX}` tool prefix: {listed}",
+        f"Add each rule or hook again with the `{client_config.TOOL_PREFIX}` prefix, then run "
+        "`evermatter setup --migrate`. Setup never edits what you wrote.",
         details={
             "references": [
                 {"path": str(ref.path), "kind": ref.kind, "name": ref.name} for ref in references
             ]
         },
     )
-
 
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public

@@ -73,7 +73,7 @@ def test_manifest_matches_apart_from_the_version(regenerated: dict[str, bytes]) 
 def test_plugin_never_auto_starts_a_full_stdio_core() -> None:
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
 
-    server = manifest["mcpServers"]["evermatter"]
+    server = manifest["mcpServers"]["exomem"]
     assert server == {"type": "http", "url": "${user_config.mcp_url}"}
     option = manifest["userConfig"]["mcp_url"]
     assert option["type"] == "string"
@@ -189,22 +189,24 @@ def test_plugin_checkpoint_survives_a_compaction(tmp_path: Path) -> None:
 def test_marketplace_points_at_the_plugin_directory() -> None:
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    entry = next(p for p in marketplace["plugins"] if p["name"] == "evermatter")
+    entry = next(p for p in marketplace["plugins"] if p["name"] == "exomem")
     # `source` is relative to the REPO ROOT, not to .claude-plugin/.
     source = (REPO_ROOT / entry["source"]).resolve()
     assert source == PLUGIN_ROOT.resolve()
 
 
-def test_marketplace_moves_an_install_of_the_old_plugin_name() -> None:
-    """Claude Code rewrites an enabled `exomem` plugin to `evermatter` through `renames`.
+def test_plugin_keeps_its_name_so_no_http_sign_in_is_lost() -> None:
+    """Claude Code stores the plugin server's sign-in under the plugin and server names.
 
-    The marketplace id stays `exomem`, so `exomem@exomem` installs resolve to the new name.
+    A rename signs every user out, so it waits for a release that says so. The skills inside the
+    plugin are renamed already, which signs nobody out.
     """
+    manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    assert marketplace["name"] == "exomem"
-    assert marketplace["renames"] == {"exomem": "evermatter"}
-    assert "evermatter" in {plugin["name"] for plugin in marketplace["plugins"]}
+    assert manifest["name"] == "exomem"
+    assert "renames" not in marketplace
+    assert (PLUGIN_ROOT / "skills" / "evermatter" / "SKILL.md").is_file()
 
 
 def test_manifest_carries_listing_metadata() -> None:

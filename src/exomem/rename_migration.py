@@ -2,8 +2,10 @@
 
 Every reader accepts both names, so an install made before the rename keeps working and
 nothing here runs unasked. The user runs it to adopt the new names. It changes only what
-setup wrote: the server key in Claude Code and Codex, the managed instruction block and the
-explicit checkpoint bindings. A rule or hook the user wrote stays as it is and is listed.
+setup wrote: the stdio server key in Claude Code and Codex, the managed instruction block and
+the explicit checkpoint bindings. A URL (HTTP) server keeps its key, because both clients store
+its sign-in under that key and a rename signs the user out. A rule or hook the user wrote stays
+as it is and is listed.
 """
 
 from __future__ import annotations
@@ -18,55 +20,76 @@ from . import client_config, prominence, setup_wizard
 from . import install_hook as hook_module
 from . import install_skill as install_module
 
-_BACKUP_SUFFIX = ".exomem-bak"  # the suffix client_config._write_user_file gives its backups
-
-
-def _backup(path: Path) -> str | None:
-    """Copy ``path`` beside itself before a client's own CLI rewrites it."""
-    if not path.is_file():
-        return None
-    backup = path.with_suffix(path.suffix + _BACKUP_SUFFIX)
-    shutil.copy2(path, backup)
-    return str(backup)
+#: Said for each URL server that this command leaves under its old key.
+_HTTP_KEPT = (
+    "kept `{old}` for {url}: renaming it would sign you out; "
+    "a later release moves it with a sign-in notice"
+)
 
 
 def _migrate_claude_servers(
-    *, config_path: Path, project_dir: Path, which_fn, run_fn, print_fn, report
+    *, config_path: Path, project_dir: Path, which_fn, run_fn, print_fn, report, backup
 ) -> None:
+    project_file = project_dir / ".mcp.json"
     try:
-        found = setup_wizard._claude_registrations(config_path=config_path, project_dir=project_dir)
+        user_config = setup_wizard._read_json_object(config_path)
+        project_config = setup_wizard._read_json_object(project_file)
     except ValueError as exc:
         report("claude", f"[failed: {exc}]")
         return
-    legacy = {
-        scope: entry
-        for scope, (key, entry) in found.items()
-        if key == client_config.LEGACY_SERVER_NAME
+    scopes = {
+        "local": setup_wizard._project_entry(user_config, project_dir).get("mcpServers"),
+        "project": project_config.get("mcpServers"),
+        "user": user_config.get("mcpServers"),
     }
-    if not legacy:
-        report("claude", f"[skipped: no `{client_config.LEGACY_SERVER_NAME}` server in Claude Code]")
+    old_key, new_key = client_config.LEGACY_SERVER_NAME, client_config.SERVER_NAME
+    to_rename: dict[str, dict] = {}
+    for scope, servers in scopes.items():
+        old = servers.get(old_key) if isinstance(servers, dict) else None
+        if not isinstance(old, dict):
+            continue
+        if isinstance(servers.get(new_key), dict):
+            report(
+                f"claude-{scope}",
+                f"[skipped: holds both `{old_key}` and `{new_key}`; remove the one you do not use]",
+            )
+        elif "url" in old:
+            report(f"claude-{scope}", f"[skipped: {_HTTP_KEPT.format(old=old_key, url=old['url'])}]")
+        else:
+            to_rename[scope] = old
+    others = _other_project_registrations(user_config, project_dir)
+    if others:
+        report(
+            "claude-other-projects",
+            f"[skipped: {len(others)} other project(s) keep a local `{old_key}` registration; "
+            "this command renames the one for the current directory, so run it in each]",
+        )
+        for other in others:
+            print_fn(f"    {other}")
+    if not to_rename:
+        if not any(isinstance(s, dict) and old_key in s for s in scopes.values()) and not others:
+            report("claude", f"[skipped: no `{old_key}` server in Claude Code]")
         return
     claude = which_fn("claude")
     if not claude:
         report(
             "claude",
-            f"[skipped: no claude CLI; rename the `{client_config.LEGACY_SERVER_NAME}` key under "
-            f"mcpServers to `{client_config.SERVER_NAME}` by hand]",
+            f"[skipped: no claude CLI; rename the `{old_key}` key under mcpServers to "
+            f"`{new_key}` by hand]",
         )
         return
     run_kwargs = dict(
         capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(project_dir)
     )
-    project_file = project_dir / ".mcp.json"
-    for scope, entry in legacy.items():
+    for scope, entry in to_rename.items():
         file = project_file if scope == "project" else config_path
         snapshots = setup_wizard._snapshot_files((config_path, project_file))
-        backup = _backup(file)
+        backup(file)
         payload = json.dumps(entry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         failure = ""
         for argv in (
-            [claude, "mcp", "remove", client_config.LEGACY_SERVER_NAME, "--scope", scope],
-            [claude, "mcp", "add-json", "--scope", scope, client_config.SERVER_NAME, payload],
+            [claude, "mcp", "remove", old_key, "--scope", scope],
+            [claude, "mcp", "add-json", "--scope", scope, new_key, payload],
         ):
             try:
                 result = run_fn(argv, **run_kwargs)
@@ -85,11 +108,31 @@ def _migrate_claude_servers(
             else:
                 report(f"claude-{scope}", f"[failed: {failure}; restored the previous registration]")
             continue
-        if backup:
-            print_fn(f"  backup: {backup}")
-        report(f"claude-{scope}", f"[done] renamed to `{client_config.SERVER_NAME}` in {file.name}")
+        report(f"claude-{scope}", f"[done] renamed to `{new_key}` in {file.name}")
         if scope == "project":
             print_fn("  Claude Code asks you to approve the renamed project server again.")
+
+
+def _other_project_registrations(user_config: dict, project_dir: Path) -> list[str]:
+    """The other projects in Claude Code's config that hold a local legacy registration."""
+    projects = user_config.get("projects")
+    if not isinstance(projects, dict):
+        return []
+    here = project_dir.resolve()
+    found = []
+    for raw_path, value in projects.items():
+        servers = value.get("mcpServers") if isinstance(value, dict) else None
+        if not isinstance(servers, dict) or not isinstance(
+            servers.get(client_config.LEGACY_SERVER_NAME), dict
+        ):
+            continue
+        try:
+            if Path(raw_path).expanduser().resolve() == here:
+                continue
+        except OSError:
+            pass
+        found.append(str(raw_path))
+    return found
 
 
 def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> None:
@@ -103,6 +146,7 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         report("codex", f"[failed: {exc}]")
         return
     skipped = {
+        "http": _HTTP_KEPT.format(old=client_config.LEGACY_SERVER_NAME, url=outcome.get("url")),
         "current": f"no `{client_config.LEGACY_SERVER_NAME}` server in {path.name}",
         "conflict": f"{path.name} holds both `{client_config.LEGACY_SERVER_NAME}` and "
         f"`{client_config.SERVER_NAME}`; remove one by hand",
@@ -148,10 +192,10 @@ def _migrate_bindings(*, client: str, home: Path, print_fn, report) -> None:
         report(step, f"[skipped: {reason}]")
         return
     bindings = list(prior["bindings"])
+    old, new = client_config.LEGACY_TOOL_PREFIX, client_config.TOOL_PREFIX
     for binding in prior["bindings"]:
-        for old, new in client_config.LEGACY_TOOL_PREFIXES.items():
-            if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
-                bindings.append(added)
+        if binding.startswith(old) and (added := new + binding[len(old) :]) not in bindings:
+            bindings.append(added)
     if len(bindings) == len(prior["bindings"]):
         report(step, "[skipped: no binding names the old prefix, or the new one is already bound]")
         return
@@ -193,10 +237,23 @@ def migrate(
     )
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     steps: list[tuple[str, str]] = []
+    backed_up: set[Path] = set()
 
     def report(name: str, status: str) -> None:
         steps.append((name, status))
         print_fn(f"  {name}: {status}")
+
+    def backup(path: Path) -> None:
+        """Copy ``path`` beside itself once per run, before the claude CLI first rewrites it.
+
+        Two scopes can share one file, and a second copy would hold the first scope's change.
+        """
+        if path in backed_up or not path.is_file():
+            return
+        backed_up.add(path)
+        copy = path.with_suffix(path.suffix + client_config.BACKUP_SUFFIX)
+        shutil.copy2(path, copy)
+        print_fn(f"  backup: {copy}")
 
     print_fn("evermatter setup --migrate")
     print_fn("")
@@ -207,6 +264,7 @@ def migrate(
         run_fn=run_fn,
         print_fn=print_fn,
         report=report,
+        backup=backup,
     )
     _migrate_codex_server(codex_home=codex_home, which_fn=which_fn, print_fn=print_fn, report=report)
     _migrate_instruction_blocks(
@@ -215,21 +273,24 @@ def migrate(
     _migrate_bindings(client="claude", home=claude_home, print_fn=print_fn, report=report)
     _migrate_bindings(client="codex", home=codex_home, print_fn=print_fn, report=report)
 
-    references = client_config.user_references(
+    references, _read = client_config.user_references(
         claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
     )
     if references:
         print_fn("")
         print_fn(
             "These permission rules and hooks are yours, so setup left them as they are. They name "
-            "the old `exomem` tool prefix, which no longer matches once the server key is "
-            f"`{client_config.SERVER_NAME}`. Change each to the `mcp__{client_config.SERVER_NAME}__` "
-            "prefix:"
+            f"the old `{client_config.LEGACY_TOOL_PREFIX}` prefix. Where this command renamed a "
+            "server, they no longer match its tools. Add a rule with the "
+            f"`{client_config.TOOL_PREFIX}` prefix beside each:"
         )
         for reference in references:
             print_fn(f"  {reference.path}: {reference.kind} {reference.name}")
     print_fn("")
-    print_fn("To move the skills too, run `evermatter setup`; it retires the old `exomem` skills.")
+    print_fn(
+        "To move the skills too, run `evermatter install-skill`; it moves the old `exomem` "
+        "skills to a backup folder."
+    )
     print_fn("Restart Claude Code and Codex to load the renamed server.")
     print_fn("")
     print_fn("Summary:")

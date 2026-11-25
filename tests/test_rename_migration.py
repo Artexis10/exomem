@@ -37,48 +37,73 @@ command = "keep-me"
 
 
 class FakeClaude:
-    """Stands in for `claude mcp remove` and `claude mcp add-json` over a `.claude.json`."""
+    """Stands in for `claude mcp remove` and `claude mcp add-json` over a `.claude.json`.
 
-    def __init__(self, config: Path, *, fail_add: bool = False) -> None:
+    The user scope is the top-level `mcpServers`; the local scope is the one under `projects`
+    for ``project``.
+    """
+
+    def __init__(self, config: Path, project: Path, *, fail_add: bool = False) -> None:
         self.config = config
+        self.project = project
         self.fail_add = fail_add
         self.calls: list[list[str]] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
         data = json.loads(self.config.read_text(encoding="utf-8"))
+        scope = argv[argv.index("--scope") + 1]
+        servers = (
+            data["projects"][str(self.project)]["mcpServers"]
+            if scope == "local"
+            else data["mcpServers"]
+        )
         if argv[2] == "remove":
-            del data["mcpServers"][argv[3]]
+            del servers[argv[3]]
         elif argv[2] == "add-json":
             if self.fail_add:
                 return subprocess.CompletedProcess(argv, 1, "", "add refused")
-            data["mcpServers"][argv[-2]] = json.loads(argv[-1])
+            servers[argv[-2]] = json.loads(argv[-1])
         self.config.write_text(json.dumps(data), encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+STDIO = {"type": "stdio", "command": "exomem", "args": [], "env": {"A": "1"}}
+HTTP = {"type": "http", "url": "https://memory.example/mcp"}
+CODEX_HTTP_CONFIG = '[mcp_servers.exomem]\nurl = "https://memory.example/mcp"\n'
+KEPT = (
+    "kept `exomem` for https://memory.example/mcp: renaming it would sign you out; "
+    "a later release moves it with a sign-in notice"
+)
 
 
 class Install:
     """A client home for each client, holding the configuration an old install left."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        claude: dict | None = None,
+        codex: str = CODEX_CONFIG,
+        local: dict | None = None,
+    ) -> None:
         self.claude_home = root / "claude"
         self.codex_home = root / "codex"
         self.project = root / "project"
         self.config = root / ".claude.json"
         for folder in (self.claude_home, self.codex_home, self.project):
             folder.mkdir()
-        self.config.write_text(
-            json.dumps(
-                {
-                    "mcpServers": {
-                        "exomem": {"type": "stdio", "command": "exomem", "args": [], "env": {"A": "1"}},
-                        "other": {"type": "http", "url": "https://other.example/mcp"},
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        (self.codex_home / "config.toml").write_text(CODEX_CONFIG, encoding="utf-8")
+        config: dict = {
+            "mcpServers": {
+                "exomem": claude if claude is not None else STDIO,
+                "other": {"type": "http", "url": "https://other.example/mcp"},
+            }
+        }
+        if local is not None:
+            config["projects"] = {str(self.project): {"mcpServers": {"exomem": local}}}
+        self.config.write_text(json.dumps(config), encoding="utf-8")
+        (self.codex_home / "config.toml").write_text(codex, encoding="utf-8")
 
     def migrate(self, claude: FakeClaude | None = None) -> tuple[int, str]:
         lines: list[str] = []
@@ -88,7 +113,7 @@ class Install:
             claude_config_path=self.config,
             project_dir=self.project,
             which_fn=lambda name: f"/fake/{name}" if name == "claude" else None,
-            run_fn=claude or FakeClaude(self.config),
+            run_fn=claude or FakeClaude(self.config, self.project),
             print_fn=lines.append,
         )
         return code, "\n".join(lines)
@@ -114,7 +139,7 @@ def test_migrate_renames_the_server_key_in_claude_and_codex_with_backups(tmp_pat
 def test_migrate_twice_changes_nothing_the_second_time(tmp_path: Path) -> None:
     install = Install(tmp_path)
     install.migrate()
-    claude = FakeClaude(install.config)
+    claude = FakeClaude(install.config, install.project)
     after_first = (
         install.config.read_bytes(),
         (install.codex_home / "config.toml").read_bytes(),
@@ -132,11 +157,75 @@ def test_migrate_twice_changes_nothing_the_second_time(tmp_path: Path) -> None:
     )
 
 
+def test_migrate_keeps_a_claude_url_server_under_its_key_and_renames_the_stdio_codex_one(
+    tmp_path: Path,
+) -> None:
+    install = Install(tmp_path, claude=HTTP)
+    claude = FakeClaude(install.config, install.project)
+    claude_before = install.config.read_bytes()
+
+    code, out = install.migrate(claude)
+
+    assert code == 0
+    assert claude.calls == []
+    assert install.config.read_bytes() == claude_before
+    assert KEPT in out
+    codex = tomllib.loads((install.codex_home / "config.toml").read_text(encoding="utf-8"))
+    assert set(codex["mcp_servers"]) == {"evermatter", "keeper"}
+
+
+def test_migrate_keeps_a_codex_url_server_under_its_key_and_renames_the_stdio_claude_one(
+    tmp_path: Path,
+) -> None:
+    install = Install(tmp_path, codex=CODEX_HTTP_CONFIG)
+    codex_before = (install.codex_home / "config.toml").read_bytes()
+
+    code, out = install.migrate()
+
+    assert code == 0
+    assert (install.codex_home / "config.toml").read_bytes() == codex_before
+    assert not (install.codex_home / "config.toml.exomem-bak").exists()
+    assert KEPT in out
+    servers = json.loads(install.config.read_text(encoding="utf-8"))["mcpServers"]
+    assert set(servers) == {"evermatter", "other"}
+
+
+def test_migrating_two_scopes_leaves_the_backup_holding_the_original_file(tmp_path: Path) -> None:
+    install = Install(tmp_path, local=STDIO)
+    original = install.config.read_bytes()
+
+    code, _out = install.migrate()
+
+    assert code == 0
+    assert install.config.with_suffix(".json.exomem-bak").read_bytes() == original
+    config = json.loads(install.config.read_text(encoding="utf-8"))
+    assert set(config["mcpServers"]) == {"evermatter", "other"}
+    assert set(config["projects"][str(install.project)]["mcpServers"]) == {"evermatter"}
+
+
+def test_migrate_reports_a_scope_with_both_keys_and_other_projects_it_did_not_touch(
+    tmp_path: Path,
+) -> None:
+    install = Install(tmp_path)
+    config = json.loads(install.config.read_text(encoding="utf-8"))
+    config["mcpServers"]["evermatter"] = STDIO
+    config["projects"] = {"/elsewhere": {"mcpServers": {"exomem": STDIO}}}
+    install.config.write_text(json.dumps(config), encoding="utf-8")
+    before = install.config.read_bytes()
+
+    code, out = install.migrate()
+
+    assert code == 0
+    assert install.config.read_bytes() == before
+    assert "holds both `exomem` and `evermatter`" in out
+    assert "/elsewhere" in out and "other project(s) keep a local `exomem` registration" in out
+
+
 def test_a_refused_claude_add_restores_the_registration_the_user_had(tmp_path: Path) -> None:
     install = Install(tmp_path)
     before = install.config.read_bytes()
 
-    code, out = install.migrate(FakeClaude(install.config, fail_add=True))
+    code, out = install.migrate(FakeClaude(install.config, install.project, fail_add=True))
 
     assert code == 1
     assert install.config.read_bytes() == before
@@ -164,7 +253,7 @@ def test_migrate_leaves_the_rules_and_hooks_the_user_wrote_and_lists_them(tmp_pa
         json.dumps(
             {
                 "permissions": {"allow": ["mcp__exomem__recall_context", "Bash(ls)"]},
-                "hooks": {"PreToolUse": [{"matcher": "mcp__plugin_exomem_exomem__.*", "hooks": []}]},
+                "hooks": {"PreToolUse": [{"matcher": "mcp__exomem__.*", "hooks": []}]},
             }
         ),
         encoding="utf-8",
@@ -176,7 +265,7 @@ def test_migrate_leaves_the_rules_and_hooks_the_user_wrote_and_lists_them(tmp_pa
     assert code == 0
     assert settings.read_bytes() == before
     assert f"{settings}: permission rule mcp__exomem__recall_context" in out
-    assert f"{settings}: hook mcp__plugin_exomem_exomem__.*" in out
+    assert f"{settings}: hook mcp__exomem__.*" in out
     assert "Bash(ls)" not in out
 
 

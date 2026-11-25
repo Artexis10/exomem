@@ -2,7 +2,7 @@
 
 ### Requirement: Agent-Facing Identifiers Use the Product Name
 
-The MCP server key and serverInfo name, the plugin names, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch release ships. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
+The MCP server key of a new registration, the serverInfo name, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch release ships. The plugin names, and the key of an existing registration that has a URL, follow in a later release, because renaming them signs the user out. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
 
 #### Scenario: An install from before the switch keeps working
 
@@ -13,13 +13,14 @@ The MCP server key and serverInfo name, the plugin names, the skill names and th
 #### Scenario: A new install uses the new names
 
 - **WHEN** a user installs after the switch release
-- **THEN** setup writes the server key `evermatter` and the plugins install as `evermatter` and `evermatter-cloud`
+- **THEN** setup writes the server key `evermatter` and the skills install as `evermatter-*`
 - **AND** the client exposes the tools under the `evermatter` prefix
 
 #### Scenario: Setup migrates an existing configuration
 
 - **WHEN** a user runs `evermatter setup --migrate` on a client configuration that holds the server key `exomem`
-- **THEN** setup renames that key to `evermatter`, rewrites the managed instruction block and the allow rules that setup itself wrote, and keeps a backup of each file it changed
+- **THEN** setup renames that key to `evermatter` when the registration is a stdio server, rewrites the managed instruction block, and keeps a backup of each file it changed
+- **AND** it keeps the key of a registration that has a URL and says why: a rename signs the user out
 - **AND** it leaves rules and hooks that the user wrote unchanged and lists them
 
 #### Scenario: Settings accept the new prefix

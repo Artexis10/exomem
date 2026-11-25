@@ -40,7 +40,7 @@ from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
 
-_SKILL_NAME_MARKER = f"name: {workflow_skills.CORE_SKILL_NAME}"
+
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
     shown = []
     for pack in packs[:limit]:
@@ -1000,33 +1000,36 @@ def run_setup(
 
     # 7. skill — the brain; without it the tools sit unused
     skill_target = (home / "skills" / workflow_skills.CORE_SKILL_NAME) if home else None
+
+    def moved(record: dict) -> None:
+        # Reported as each move happens, so a later failure still leaves it on the record.
+        report(
+            "migrate",
+            f"[done] moved the previous `{record['skill']}` skill from {record['from']} "
+            f"to {record['backup']}",
+        )
+
     try:
         if skill_target is not None:
-            retired = install_module.install_skill(skill_target)["retired"]
+            install_module.install_skill(skill_target, on_moved=moved)
             report("skill", "[done] installed")
         else:
             # No explicit target: install into every client present on this
             # machine, so a Codex user gets the brain too rather than just tools.
-            installed = install_module.install_skills(client="auto")
-            retired = [path for each in installed["clients"].values() for path in each["retired"]]
+            installed = install_module.install_skills(client="auto", on_moved=moved)
             report("skill", f"[done] installed for {', '.join(installed['installed'])}")
-        for path in retired:
-            report("migrate", f"[done] removed the previous copy at {path}")
     except FileExistsError:
         target = skill_target if skill_target is not None else install_module.DEFAULT_TARGET
-        skill_md = target / "SKILL.md"
-        try:
-            head = skill_md.read_text(encoding="utf-8", errors="replace")[:2048]
-        except OSError:
-            head = ""
-        if _SKILL_NAME_MARKER not in head:
+        if install_module.skill_name(target / "SKILL.md") != workflow_skills.CORE_SKILL_NAME:
             report("skill", f"[skipped: {target} exists and is not the bundled skill — not overwriting]")
         elif not yes and _ask_yn(input_fn, "Skill already installed. Refresh it from this repo?", False):
             if skill_target is not None:
-                install_module.install_skill(skill_target, force=True)
+                install_module.install_skill(skill_target, force=True, on_moved=moved)
                 report("skill", "[done] refreshed")
             else:
-                installed = install_module.install_skills(client="auto", force=True)["installed"]
+                installed = install_module.install_skills(
+                    client="auto", force=True, on_moved=moved
+                )["installed"]
                 report("skill", f"[done] refreshed for {', '.join(installed)}")
         else:
             report("skill", "[skipped: already installed]")

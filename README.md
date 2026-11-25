@@ -79,7 +79,7 @@ Claude Code session:
 
 ```
 /plugin marketplace add substrate-systems/evermatter
-/plugin install evermatter@exomem
+/plugin install exomem@exomem
 ```
 
 Then choose the route. If you already run Evermatter as a service for phone or
@@ -92,29 +92,41 @@ exomem setup --vault "/path/to/vault" --mcp-url https://<host>/mcp
 For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
 Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime. When updating from an older plugin,
-run `/plugin update evermatter@exomem`, then `/reload-plugins` or restart Claude
-Code before rerunning setup. The plugin was `exomem` before the rename; Claude Code
-moves an install of the old name to `evermatter` by itself. The marketplace id stays
-`exomem`.
+run `/plugin update exomem@exomem`, then `/reload-plugins` or restart Claude
+Code before rerunning setup. The plugin keeps the name `exomem` for now. Its URL
+server stores a sign-in under that name, so a rename signs every user out. A later
+release renames it and says so first. The skills inside it are `evermatter-*`.
 
 ### Move an existing install to the Evermatter names
 
-An install made before the rename keeps working with no action. Its server key,
-tool names, hooks and permission rules still match. To adopt the new names, run:
+After you update, an install made before the rename keeps working until you run
+`evermatter setup` or `evermatter install-skill`. Its `exomem` server key, tool names,
+hooks, permission rules and managed instruction block still match. Those two commands
+install the `evermatter` skills. They move each old `exomem` skill folder, with your
+edits, to `exomem-retired-skills` beside the client's `skills` folder, where the client
+does not load it.
+
+To rename the server key and the instruction block too, run:
 
 ```bash
 evermatter setup --migrate
 ```
 
-1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex.
-2. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
-3. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
-4. It backs up each file it changes beside the original, as `<file>.exomem-bak`.
-5. Restart Claude Code and Codex. Run `evermatter setup` to replace the old `exomem` skills.
+1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex, for each stdio server.
+2. It keeps the `exomem` key of each server that has a URL, and prints that URL. Claude Code and Codex store a sign-in under the server name, so a rename signs you out. A later release moves those servers and says so first.
+3. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
+4. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
+5. It backs up each file it changes beside the original, once per run, as `<file>.exomem-bak`.
+6. Restart Claude Code and Codex.
+
+Claude Code keeps a project's local registration per directory. The command renames
+the one for the current directory and lists the others. Run it in each of those
+directories. A new install registers the `evermatter` key from the start, because
+a new registration has no stored sign-in.
 
 Setup never edits a permission rule or hook that you wrote. A rule that names
-`mcp__exomem__*` stops matching after the key changes, so change it to
-`mcp__evermatter__*` yourself. Both `evermatter setup --migrate` and
+`mcp__exomem__*` stops matching for a server that the command renamed. Add a rule
+with the `mcp__evermatter__*` prefix beside it. Both `evermatter setup --migrate` and
 `evermatter doctor` list each such rule and the file that holds it. Settings keep
 their `EXOMEM_*` names.
 
