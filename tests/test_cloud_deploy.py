@@ -55,7 +55,7 @@ class Recorded:
     def __init__(self, rollout: list[str], put: str = "substrate_put_ok", deployments: list | None = None,
                  releases: str = "github_releases") -> None:
         self.rollout = [copy.deepcopy(ANSWERS[name]) for name in rollout]
-        self.releases = copy.deepcopy(ANSWERS[releases])
+        self.releases = None if releases == "unavailable" else copy.deepcopy(ANSWERS[releases])
         self.put = ANSWERS[put]
         self.deployments = ANSWERS["github_platform_deployments"] if deployments is None else deployments
         self.calls: list[tuple[str, str, bytes | None]] = []
@@ -66,7 +66,7 @@ class Recorded:
         if path == "/repos/example-owner/example-repo/releases/latest":
             return 200, json.dumps(ANSWERS["github_release_latest"]).encode()
         if path == f"/repos/example-owner/example-repo/releases?per_page={cloud_deploy.RELEASE_SCAN_LIMIT}":
-            return 200, json.dumps(self.releases).encode()
+            return (502, b"{}") if self.releases is None else (200, json.dumps(self.releases).encode())
         if path.startswith("/repos/example-owner/example-repo/deployments?"):
             return 200, json.dumps(self.deployments).encode()
         if path.startswith("/repos/example-owner/example-repo/deployments/") and "/statuses?" in path:
@@ -558,3 +558,36 @@ def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platfo
 
     assert paths == ["infra/helm/platform/templates/café.yaml"]
     assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])
+
+
+def test_a_release_list_that_cannot_be_read_still_lets_the_rollout_go_on(capsys) -> None:
+    # Catches a read that only feeds the lag alert stopping a deploy for a day.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"], releases="unavailable")
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert code == 0
+    assert recorded.puts()
+    assert "cloud-deploy: RELEASE_BEHIND_UNKNOWN" in log
+    assert log.splitlines()[-1] == "cloud-deploy: CANARY_ON_TARGET"
+
+
+def test_the_run_that_sets_the_newest_release_resolves_the_lag_it_reported(capsys) -> None:
+    # Catches an "active" email at the moment the fix lands, with "resolved" a day later.
+    recorded = Recorded(["substrate_rollout_behind", "substrate_rollout_canary_on_target"],
+                        releases="github_releases_fleet_several_behind")
+
+    code, _, _ = _run(recorded, capsys)
+
+    lag = [active for alert, active in recorded.alerts() if alert == cloud_deploy.RELEASE_BEHIND_ALERT]
+    assert code == 0
+    assert lag == [True, False]
+
+
+def test_a_paused_rollout_leaves_the_failing_alert_to_cellctls_pause_alert(capsys) -> None:
+    # Catches a deliberate hold emailing twice a day for one cause: cellctl already raises cloud-rollout-paused.
+    recorded = Recorded(["substrate_rollout_paused"])
+
+    _run(recorded, capsys)
+
+    assert recorded.alerts()[-1] == (cloud_deploy.FAILING_ALERT, False)

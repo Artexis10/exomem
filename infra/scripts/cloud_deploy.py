@@ -65,7 +65,8 @@ FAILING_ALERT = "cloud-deploy-failing"
 # A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
 RELEASE_BEHIND_DEFAULT_HOURS = 48
 # The failing stops that name their cause in an alert of their own, so `cloud-deploy-failing` stays quiet for them.
-OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT)
+# cellctl raises cloud-rollout-paused for a pause, so the pause stop counts as having its own alert.
+OWN_ALERT_STOPS = (PLATFORM_NEEDED_ALERT, BARRIER_ALERT, "ROLLOUT_PAUSED")
 # The off switch: a run without the deploy token does nothing, and sends no alert.
 NOT_CONFIGURED = "CLOUD_DEPLOY_NOT_CONFIGURED"
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
@@ -123,6 +124,10 @@ def release_behind_hours(env: dict[str, str]) -> int:
     hours = int(env.get("CLOUD_DEPLOY_RELEASE_BEHIND_HOURS") or RELEASE_BEHIND_DEFAULT_HOURS)
     if hours < 1:
         raise ValueError("CLOUD_DEPLOY_RELEASE_BEHIND_HOURS must be a positive whole number")
+    try:
+        timedelta(hours=hours)
+    except OverflowError:
+        raise ValueError("CLOUD_DEPLOY_RELEASE_BEHIND_HOURS is too large") from None
     return hours
 
 
@@ -380,13 +385,14 @@ class Tools:
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
-def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag: str, image: str, view: dict) -> None:
+def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag: str, image: str, view: dict) -> bool:
     """Send `cloud-release-behind`: active when the fleet has run an older release for longer than
     `settings.release_behind_after`, counted from the publish time of the oldest release newer than
     the fleet's. The newest release's own age would say nothing: releases come every few hours. A fleet on
     the newest release (by digest or by tag, as D1 step 4 reads it), ahead of it, or on a tag
     that is not a release is not behind. An unknown fleet release, or a publish time that
-    cannot be read, sends nothing and prints its code. The log shows the hours only."""
+    cannot be read, sends nothing and prints its code. The log shows the hours only. Returns whether
+    it reported the fleet as behind."""
 
     now = tools.now()
     fleet = view.get("release")
@@ -394,22 +400,27 @@ def report_release_behind(settings: Settings, tools: Tools, github: GitHub, tag:
     if view.get("cell_image") != image and fleet != tag:
         if fleet is None:
             print("cloud-deploy: RELEASE_BEHIND_UNKNOWN")
-            return
+            return False
         fleet_version = parse_release(fleet) if isinstance(fleet, str) else None
         newest = parse_release(tag)
         if fleet_version is not None and newest is not None and fleet_version < newest:
-            first_missed = github.first_release_after(fleet_version)
+            try:
+                first_missed = github.first_release_after(fleet_version)
+            except (Stop, OSError):
+                # The list read only feeds this alert, so its failure must not stop the rollout.
+                first_missed = None
             if first_missed is None:
                 print("cloud-deploy: RELEASE_BEHIND_UNKNOWN")
-                return
+                return False
             if first_missed.published_at is None:
                 print("cloud-deploy: RELEASE_TIME_UNREADABLE")
-                return
+                return False
             age = now - first_missed.published_at
             behind = age > settings.release_behind_after
             if behind:
                 print(f"cloud-deploy: RELEASE_BEHIND hours={int(age.total_seconds() // 3600)}")
     send_alert(settings, tools.transport, RELEASE_BEHIND_ALERT, behind, now)
+    return behind
 
 
 def report_pinned_cells(settings: Settings, tools: Tools, view: dict) -> None:
@@ -453,7 +464,7 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
 
     # Both lag alerts go out as soon as the view is read, so every stop below reports them.
     view = substrate.rollout()
-    report_release_behind(settings, tools, github, tag, image, view)
+    reported_behind = report_release_behind(settings, tools, github, tag, image, view)
     report_pinned_cells(settings, tools, view)
 
     # D1 step 3: never resume a paused fleet; only a person clears the pause. This comes
@@ -491,6 +502,9 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     if refused is not None:
         raise Stop(f"SUBSTRATE_{refused}", ok=False)
     print("cloud-deploy: CELL_IMAGE_SET")
+    # The fleet now targets the newest release, so the lag this run reported is over.
+    if reported_behind:
+        send_alert(settings, tools.transport, RELEASE_BEHIND_ALERT, False, tools.now())
 
     # D1 step 7: wait until the canary runs the target and is Ready.
     deadline = tools.monotonic() + settings.poll_timeout
