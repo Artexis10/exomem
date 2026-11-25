@@ -1116,6 +1116,8 @@ class OperationAuthorization:
         self.catalogs = {}
         self.file_decisions = {}
         self._presentation_wikilinks = None
+        # A relationship value's resolved target, by value (`views.presentation_identity`).
+        self._presentation_identities: dict[str, str] = {}
         # A verified base proof excludes unpublished file imports in a migration snapshot.
         self._ownership_proof = ownership_proof
         self.points = {}

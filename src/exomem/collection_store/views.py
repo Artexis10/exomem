@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
-from .. import held_fs, record_formats, reserved_paths, vault
+from .. import held_fs, memory_refs, record_formats, reserved_paths, vault
 from . import (
     authority,
     capability,
@@ -1059,6 +1059,20 @@ def presentation_namespace_contains(operation, candidate, listings):
     return False
 
 
+def presentation_identity(operation, raw):
+    """`memory_refs.resolve_identifier_read_only` for ``raw``, answered once per operation.
+
+    A view renders once to prepare its publication and again inside the publication boundary,
+    which holds this store's identity domain. A page id that the store does not hold resolves
+    through pending page custody, which needs the deferred index's domain, and a held domain
+    cannot widen. So the boundary's render reuses the answer of the render that prepared it.
+    """
+    known = operation._presentation_identities
+    if raw not in known:
+        known[raw] = memory_refs.resolve_identifier_read_only(operation.root, raw)
+    return known[raw]
+
+
 @contextmanager
 def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=None, cache=None):
     """Use one canonical snapshot and authorization pass for a batch of item labels."""
@@ -1085,6 +1099,7 @@ def presentation_resolver(conn, root, manifest, *, operation=None, observe_read=
             targeted_namespace_contains=lambda candidate: presentation_namespace_contains(
                 operation, candidate, listings
             ),
+            resolve_identifier=lambda raw: presentation_identity(operation, raw),
         )
     finally:
         if owned:

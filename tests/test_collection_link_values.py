@@ -8,6 +8,12 @@ import json
 
 import pytest
 from test_collection_row_references import collection_text, path, revise, row
+from test_collection_store_conversion import serve, settled
+from test_collection_store_migration import WORK, legacy_vault, migrate
+from test_collection_store_migration import env as env  # noqa: F401 - the fixture, by name
+from test_collection_store_s1_gate import _until
+from test_collection_store_service import call
+from test_collection_store_writer import CID
 from test_collection_store_writer import store as store  # noqa: F401
 from test_governance_egress import _external, write_rule, write_scope
 from test_records_bulk_upsert import EVIDENCE, _evidence
@@ -338,3 +344,29 @@ def test_a_heading_link_is_kept_as_written_with_a_warning_and_an_alias_alone_bec
     _ready(world)
     assert {(field, match) for _, field, match, _ in _entries(world)} == {
         ("pages", f"memory:{ALPHA}"), ("page", "unindexed:1"), ("pages", "unindexed:1")}
+
+
+def test_a_row_that_links_a_page_saved_moments_before_publishes_its_item_view_with_that_link(
+        env, monkeypatch):  # noqa: F811 - the imported fixture, by name
+    """Defect: the item view stays pending without end. The row stores the new page's ref, and
+    the view's second render, inside the publication boundary, can find that page only in
+    pending custody, which the boundary cannot read."""
+    root = legacy_vault(env, relationships=True)
+    assert migrate(root, "apply") == 0
+    service = serve(root, monkeypatch)
+    try:
+        content = "# Thresholds\n\n- [operating constraint] Thresholds bound table bloat.\n"
+        saved = call(root, "remember", title="Thresholds", slug="thresholds", suggestions=False,
+                     content=content)["path"]
+        work = call(root, "record_memory", action="query", collection=WORK)
+        row = next(row for row in work["rows"] if row["title"] == "One")
+        call(root, "record_memory", action="update", collection=WORK, item_key=row["record_id"],
+             changes={"related": saved.removeprefix("Knowledge Base/")}, why="link the page",
+             expected_container_hash=work["snapshot"],
+             expected_item_version=row["item_version"])
+        _until(lambda: settled(root, CID), 30)
+        view = (root / WORK).parent.joinpath("Items/Original.md").read_text()
+        assert f'related: "{call(root, "read_memory", path=saved)["ref"]}"' in view
+        assert f"- **Related:** [[{saved.removesuffix('.md')}|Thresholds]]" in view
+    finally:
+        service.stop()
