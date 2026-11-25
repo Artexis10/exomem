@@ -1,4 +1,6 @@
-# Evermatter hooks
+# Evermatter (self-hosted)
+
+For your own Evermatter server, already connected to Claude as a connector: adds Evermatter's skills and automatic recall and capture to that connection.
 
 Evermatter is a living knowledge base for your AI assistants, not a dump of chat history. It preserves decisions, sources, evidence, relationships, plans, and useful conclusions as organised knowledge you can revisit, correct, and build on.
 
@@ -8,7 +10,7 @@ Pick up projects in another conversation or across supported AI assistants conne
 
 ## Getting started
 
-Connect Evermatter to your assistant first, as a connector or a custom MCP server for your Evermatter Cloud account or your own Evermatter server. This edition adds lifecycle hooks and skills and bundles no MCP server, so it uses the Evermatter connection your account already has. Install the full Evermatter plugin instead if you have not connected Evermatter. Then chat normally. When something is worth keeping, ask Evermatter to remember it; in a new chat, ask about what you saved or where you left off.
+Connect Evermatter to your assistant first, as a connector or a custom MCP server for your Evermatter account or your own Evermatter server. This edition adds lifecycle hooks and skills and bundles no MCP server, so it uses the Evermatter connection your account already has. Install the Evermatter plugin instead if you have not connected Evermatter. Then chat normally. When something is worth keeping, ask Evermatter to remember it; in a new chat, ask about what you saved or where you left off.
 
 For example:
 
@@ -36,4 +38,4 @@ Publisher: Substrate Systems OÜ.
 
 ## Claude lifecycle hooks
 
-To install this plugin in Claude Code, run `/plugin install evermatter-hooks --marketplace substrate-systems/evermatter`. On supported Cowork/Claude Code surfaces, trust the plugin's command hooks through the normal client approval flow. They invoke canonical Python scripts directly and require a real `python3` executable on the execution host; Python dependencies are not installed by this package. Hooks use only the admitted MCP connection. Retrieval requests context activation; capture asks the assistant to preserve governed outcomes. Neither bypasses the live server's write policy. Local hooks inspect the client transcript and workspace metadata for cadence and structural continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not inside the versioned package. Hook logs contain metadata only, not prompt or assistant snippets. Hooks do not execute in Claude Chat. By default the capture check runs after a turn that lands work (a commit, push, merge, pull request or a file handed over). To check after every substantial reply instead, set `EXOMEM_PROMINENCE=maximal` in the session's environment.
+To install this plugin in Claude Code, run `/plugin install evermatter-self-hosted --marketplace substrate-systems/evermatter`. On supported Cowork/Claude Code surfaces, trust the plugin's command hooks through the normal client approval flow. They invoke canonical Python scripts directly and require a real `python3` executable on the execution host; Python dependencies are not installed by this package. Hooks use only the admitted MCP connection. Retrieval requests context activation; capture asks the assistant to preserve governed outcomes. Neither bypasses the live server's write policy. Local hooks inspect the client transcript and workspace metadata for cadence and structural continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not inside the versioned package. Hook logs contain metadata only, not prompt or assistant snippets. Hooks do not execute in Claude Chat. By default the capture check runs after a turn that lands work (a commit, push, merge, pull request or a file handed over). To check after each substantial reply instead, within a short per-session cooldown, set `EXOMEM_PROMINENCE=maximal` in the session's environment.
