@@ -16,7 +16,7 @@ Correct provenance at the write seam, in the tool result the agent reads when it
 
 ## What Changes
 
-- **A compact observation can cite its Source.** When every relation sent with a compact `add_observation` carries the registry's `sources` behaviour, its core relation declares a forward page field, and its target is captured material (a Source or Evidence page), the write commits compact. Each target goes into that page field without duplicates, whatever form the page already cites it in. The outcome names the cited page, and the compact reply's `user_summary` repeats it. Any other relation still refuses whole, and a unit that is already rich keeps its relations on the unit.
+- **A compact observation can cite its Source.** When every relation sent with a compact `add_observation` carries the registry's `sources` behaviour, its core relation binds the page's `sources` field, and its target is captured material (a Source or Evidence page), the write commits compact. Each target goes into that page field without duplicates, whatever form the page already cites it in. The outcome names the cited page, and the compact reply's `user_summary` repeats it. Any other relation still refuses whole, and a unit that is already rich keeps its relations on the unit.
 - **Saving a Source says how to apply it.** A committed `save_source` reply carries a `next_action`: if the person presents the file as the current state (for example an applied or final export), update the note's current statement now and cite this Source; the earlier value stays as dated history.
 
 ## Capabilities

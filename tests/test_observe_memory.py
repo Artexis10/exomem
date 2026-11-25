@@ -624,11 +624,11 @@ def test_a_compact_observation_keeps_existing_page_sources(tmp_path: Path) -> No
     ]
 
 
-@pytest.mark.parametrize("kind", ["supersedes", "cites"])
+@pytest.mark.parametrize("kind", ["supersedes", "cites", "evidenced_by"])
 def test_a_compact_observation_refuses_a_relation_that_is_no_page_source_field(
     tmp_path: Path, kind: str,
 ) -> None:
-    """`supersedes` declares a page field but is no source citation; `cites` is one without a field."""
+    """`supersedes` is no citation; `cites` has no page field; `evidenced_by` binds another field."""
     _write_source_page(tmp_path)
     page = _write_page(tmp_path)
     before = page.read_bytes()

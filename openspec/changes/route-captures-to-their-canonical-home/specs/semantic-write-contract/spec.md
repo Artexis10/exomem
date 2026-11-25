@@ -2,7 +2,7 @@
 
 ### Requirement: Compact observations lift source citations to the page
 
-A compact `add_observation` SHALL commit as a compact unit when every relation it carries has the registry `sources` behaviour, a forward page field on its core relation (a vault extension takes its parent's), and a captured-material target. It SHALL add each target to that page field without duplicates, and read only registry attributes, never a relation key.
+A compact `add_observation` SHALL commit as a compact unit when every relation it carries has the registry `sources` behaviour, a core relation that binds the page's `sources` field forward (a vault extension takes its parent's), and a captured-material target. It SHALL add each target to that field without duplicates, and read only registry attributes, never a relation key.
 
 #### Scenario: An observation cites the Source it came from
 
@@ -27,7 +27,7 @@ A compact `add_observation` that carries any relation outside that rule SHALL re
 
 #### Scenario: A relation that is no source citation still needs a rich kind
 
-- **WHEN** a compact observation carries a relation without the `sources` behaviour, such as a supersession, or one whose core relation declares no forward page field
+- **WHEN** a compact observation carries a relation without the `sources` behaviour, such as a supersession, or one whose core relation does not bind the `sources` field, such as `evidenced_by`
 - **THEN** the call refuses with `COMPACT_RELATIONS_REQUIRE_RICH_KIND`, names the admitted kinds, and writes nothing
 
 #### Scenario: A source link to a note that is no captured material still needs a rich kind

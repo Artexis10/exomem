@@ -9,7 +9,7 @@
 **Source citations lift to the page.** A relation lifts only when all of these hold, each read from the registry or the page and never from a relation key:
 
 1. The relation has the closed `sources` behaviour. `supersedes` and `links_to` declare page fields too, but they are not citations, so they keep the refusal.
-2. Its core relation declares a forward page field. A vault extension takes its core parent's field, because only the shipped pack binds fields; a `sources` relation with no field, such as `cites`, keeps the refusal.
+2. Its core relation binds the page's `sources` field forward, the one field whose closure the commit verifies. A vault extension takes its core parent's binding, because only the shipped pack binds fields. A `sources` relation with no field (such as `cites`) and a relation bound to another field (such as `evidenced_by`, which writes `evidence`) keep the refusal.
 3. Its target resolves to captured material (a Source or Evidence page). Anything else keeps the refusal that names the rich form, because the commit's closure refusal would tell the agent to drop a link the rich form accepts.
 4. The unit stays compact. A rich unit that keeps its kind on an update carries its own relations, so an update that omits `kind` never lifts them.
 

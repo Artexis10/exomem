@@ -1452,31 +1452,30 @@ def _liftable_frontmatter_targets(
 ) -> list[tuple[str, str]] | None:
     """Each relation's (field, target) when every one is a source citation, else None.
 
-    A relation lifts only when the registry gives it the closed `sources` behaviour (the link a
-    page cites its captured material by), its core relation declares a forward page field, and
-    its target names captured material. A vault extension takes the field of its core parent,
-    because only the shipped pack binds fields. Anything else keeps the compact refusal, so a
-    supersession or an association never reaches a page field through this path.
+    A relation lifts only when the registry gives it the closed `sources` behaviour, its core
+    relation binds the page's `sources` field forward, and its target names captured material.
+    A vault extension takes the field of its core parent, because only the shipped pack binds
+    fields. Anything else keeps the compact refusal, so a supersession, an association or an
+    evidence link never reaches a page field through this path.
     """
-    from . import source_closure
+    from . import epistemic_graph, source_closure
 
+    sources_field, _ = epistemic_graph.declared_sources_binding()
     lifted: list[tuple[str, str]] = []
     for kind, target in relations:
         definition = rel_registry.resolve(kind).definition
         if definition is None or not rel_registry.has_label(kind, "sources"):
             return None
         core = definition if definition.core else rel_registry.core.get(definition.parent or "")
-        field = next(
-            (name for name, direction in core.frontmatter_fields if direction == "forward"),
-            None,
-        ) if core is not None else None
-        if field is None:
+        # The lift writes only the field whose closure the commit verifies; a relation bound to
+        # another field keeps the refusal that names the rich form.
+        if core is None or (sources_field, "forward") not in core.frontmatter_fields:
             return None
         # A target that is no captured material cannot be cited here; the refusal that names the
         # rich form is the honest answer, where the commit's closure refusal would say to drop it.
         if source_closure.resolve_reference(vault_root, target, resolver=resolver) is None:
             return None
-        lifted.append((field, target))
+        lifted.append((sources_field, target))
     return lifted
 
 

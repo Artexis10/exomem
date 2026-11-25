@@ -3,7 +3,7 @@
 ## 1. Source citations on compact observations
 
 - [x] 1.1 Red test: a compact `add_observation` with `links: [{relation: derived_from, page: <Source>}]` commits, the page `sources` gains the Source once, and the outcome names it.
-- [x] 1.2 Lift relations that have the `sources` behaviour, a forward field on their core relation and a captured-material target, on a unit that is compact; keep the refusal for any other relation, for a mix and for a rich unit.
+- [x] 1.2 Lift relations that have the `sources` behaviour, a core relation binding the `sources` field and a captured-material target, on a unit that is compact; keep the refusal for any other relation, for a mix and for a rich unit.
 - [x] 1.3 Skip a target the page already cites in another form; state the cited page in `user_summary`, in the future tense on `validate`.
 - [x] 1.4 Update the bootstrap and scaffold text that says compact observations cannot carry typed relations.
 
