@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -191,6 +192,70 @@ def pick_source() -> dict:
         if selected:
             return {"source": candidate, "main": main, "evidence_run": selected["run_id"]}
     return {"source": main, "main": main, "evidence_run": None}
+
+
+# The Conventional Commits header: `type(scope)!: subject`. The spec fixes this shape.
+CONVENTIONAL_HEADER = re.compile(r"(?P<type>[a-z]+)(\([^)]*\))?(?P<breaking>!)?: ")
+RELEASE_PLEASE_CONFIG = Path(__file__).resolve().parents[1] / "release-please-config.json"
+
+
+def released_types() -> set[str]:
+    """The commit types that release-please lists in a changelog: its sections not marked hidden."""
+    config = json.loads(RELEASE_PLEASE_CONFIG.read_text())
+    sections = config.get("packages", {}).get(".", {}).get("changelog-sections") or config.get(
+        "changelog-sections", []
+    )
+    return {section["type"] for section in sections if not section.get("hidden")}
+
+
+def schedule() -> dict:
+    """Whether a scheduled run should start a cut now, and from which source.
+
+    It cuts only from a commit with reusable Full evidence, only when a change since the last
+    release would appear in its changelog, and never while another cut is open or running.
+    """
+    for state in ("in_progress", "queued"):
+        if evidence.api(
+            f"actions/workflows/release-evidence-automation.yml/runs?status={state}&per_page=1"
+        )["total_count"]:
+            return {"cut": False, "reason": f"a release-evidence run is {state.replace('_', ' ')}"}
+    for page in evidence.api("pulls?state=open&per_page=100", pages=True):
+        for pull in page:
+            if pull["base"]["ref"].startswith(evidence.CUT_PREFIX):
+                return {"cut": False, "reason": f"cut pull request #{pull['number']} is open"}
+    picked = pick_source()
+    if picked["evidence_run"] is None:
+        return {
+            "cut": False,
+            "reason": "no commit since the last release has Full evidence yet",
+            **picked,
+        }
+    previous, _ = predecessor(picked["main"], picked["main"])
+    boundary = previous["reconciliation_commit"]
+    if picked["source"] == boundary:
+        return {
+            "cut": False,
+            "reason": "the newest commit with Full evidence is the last release; newer commits await Full",
+            **picked,
+        }
+    types = released_types()
+    changes = []
+    for subject in git("log", "--format=%s", f"{boundary}..{picked['source']}").splitlines():
+        header = CONVENTIONAL_HEADER.match(subject)
+        if header and (header["type"] in types or header["breaking"]):
+            changes.append(subject)
+    if not changes:
+        return {
+            "cut": False,
+            "reason": "no change since the last release would appear in its changelog",
+            **picked,
+        }
+    return {
+        "cut": True,
+        "reason": f"{len(changes)} changelog change(s) since the last release",
+        "changes": changes,
+        **picked,
+    }
 
 
 def prepare(source: str) -> dict:
@@ -903,6 +968,7 @@ def main() -> None:
         "operation",
         choices=(
             "pick-source",
+            "schedule",
             "prepare",
             "check-head",
             "push-generated",
@@ -924,6 +990,8 @@ def main() -> None:
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
     if args.operation == "pick-source":
         print(json.dumps(pick_source()))
+    elif args.operation == "schedule":
+        print(json.dumps(schedule()))
     elif args.operation == "prepare":
         if not args.source:
             parser.error("prepare requires --source")

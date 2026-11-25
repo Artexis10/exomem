@@ -1285,3 +1285,57 @@ def test_pick_source_prefers_the_newest_fully_tested_commit_since_the_last_relea
     else:
         # Evidence from before the last release cannot serve; the tip runs its own Full.
         assert picked == {"source": shas["tip"], "main": shas["tip"], "evidence_run": None}
+
+
+@pytest.mark.parametrize(
+    ("subject", "cuts_now"),
+    [
+        ("fix(store): keep a save that a restart interrupted", True),
+        ("chore!: drop the retired configuration key", True),
+        ("ci: cache the wheel build", False),
+    ],
+)
+def test_a_scheduled_run_cuts_only_when_the_changelog_would_change(
+    tmp_path, monkeypatch, subject, cuts_now
+):
+    """A scheduled cut ships user-facing changes; one with only hidden types would be empty."""
+    repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "release.txt").write_text("release")
+    reconciliation = commit(tmp_path, "chore(main): release 1.2.3")
+    (tmp_path / "change.txt").write_text("change")
+    tested = commit(tmp_path, subject)
+    monkeypatch.setattr(
+        cuts.evidence, "api", lambda path, pages=False: [[]] if pages else {"total_count": 0}
+    )
+    monkeypatch.setattr(
+        cuts, "pick_source", lambda: {"source": tested, "main": tested, "evidence_run": "11"}
+    )
+    monkeypatch.setattr(
+        cuts, "predecessor", lambda source, main: ({"reconciliation_commit": reconciliation}, None)
+    )
+
+    decision = cuts.schedule()
+
+    assert decision["cut"] is cuts_now, decision
+    if cuts_now:
+        assert decision["source"] == tested
+        assert decision["changes"] == [subject]
+
+
+def test_a_scheduled_run_never_starts_a_cut_while_another_is_open(monkeypatch):
+    """Two cuts at once conflict; the schedule waits for the open one instead."""
+
+    def api(path, pages=False):
+        if pages:
+            return [[{"number": 41, "base": {"ref": "release-cuts/" + "a" * 40}}]]
+        return {"total_count": 0}
+
+    monkeypatch.setattr(cuts.evidence, "api", api)
+    monkeypatch.setattr(
+        cuts, "pick_source", lambda: pytest.fail("an open cut must stop the schedule first")
+    )
+
+    decision = cuts.schedule()
+
+    assert decision == {"cut": False, "reason": "cut pull request #41 is open"}

@@ -291,6 +291,16 @@ A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does
 not rerun Full solely because a retry copied the successful gate.
 
+Releases start on a schedule. The `release schedule` workflow runs four times a day
+and runs `python3 scripts/release_cuts.py schedule`. It starts the cut controller from the
+`pick-source` commit only when that commit has reusable Full evidence, a commit since the
+last release has a type that release-please shows in the changelog (or a breaking `!`),
+and no cut is open or running. Its run summary states the decision and the reason. Set
+the repository variable `RELEASE_SCHEDULE` to `off` to stop scheduled cuts. A published
+GitHub release is the event that a release is out: read it with
+`gh release view --json tagName,publishedAt`. The manual steps below still start or
+resume a cut by hand.
+
 Select one merged source commit. The controller creates `release-cuts/<source>`
 at that commit and runs the pinned Release Please action against that branch.
 Later main commits do not change the selected source. Main remains available

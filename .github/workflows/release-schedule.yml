@@ -1,0 +1,56 @@
+name: release schedule
+
+# Starts a release cut on a schedule, so no session waits on a release. It cuts from the
+# newest main commit with reusable Full evidence (pick-source), only when a change since the
+# last release would appear in its changelog, and never while another cut is open or running.
+# The cut controller does the rest: proposal, qualification, merge, tag and publication.
+# The repository variable RELEASE_SCHEDULE set to `off` stops scheduled cuts.
+
+on:
+  schedule:
+    # Four times a day; main's Full evidence is at most FULL_EVIDENCE_HOURS old (merge-queue.yml).
+    - cron: "20 4,10,16,22 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-schedule
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    if: ${{ vars.RELEASE_SCHEDULE != 'off' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide whether to cut, and from which source
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          decision=$(python3 scripts/release_cuts.py schedule)
+          echo "$decision" | jq .
+          {
+            echo "### Release schedule"
+            echo
+            echo "$decision" | jq -r '"- cut: \(.cut)\n- reason: \(.reason)\n- source: \(.source // "none")\n- evidence run: \(.evidence_run // "none")"'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "cut=$(jq -r .cut <<<"$decision")" >> "$GITHUB_OUTPUT"
+          echo "source=$(jq -r '.source // ""' <<<"$decision")" >> "$GITHUB_OUTPUT"
+      - name: Start the cut controller
+        if: steps.decide.outputs.cut == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE: ${{ steps.decide.outputs.source }}
+        run: gh workflow run release-evidence-automation.yml --repo "$GITHUB_REPOSITORY" --ref main -f source="$SOURCE"
