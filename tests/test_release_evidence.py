@@ -498,24 +498,29 @@ def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status
 
 
 @pytest.mark.parametrize(
-    "age_hours,status,tested,due",
+    "branch,age_hours,status,tested,due",
     [
         # Main moved and its newest Full is older than the window: a cut would find nothing.
-        (5, "completed", "old", True),
-        (1, "completed", "old", False),
+        ("main", 5, "completed", "old", True),
+        ("main", 1, "completed", "old", False),
         # A running Full will supply the evidence; a second one only holds runners.
-        (5, "in_progress", "old", False),
+        ("main", 5, "in_progress", "old", False),
         # Nothing landed since the last Full: rerunning it proves nothing new.
-        (5, "completed", "tip", False),
+        ("main", 5, "completed", "tip", False),
+        # A cut's own Full run on main's tip is evidence too; a copy would compete with it.
+        ("release-cuts/tip", 5, "in_progress", "tip", False),
+        ("release-cuts/tip", 1, "completed", "tip", False),
+        # No Full run on main has ever finished.
+        (None, 0, "completed", "old", True),
     ],
 )
 def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
-    monkeypatch, age_hours, status, tested, due
+    monkeypatch, branch, age_hours, status, tested, due
 ):
     created = evidence.datetime.now(evidence.UTC) - evidence.timedelta(hours=age_hours)
     run = {
-        "event": "schedule",
-        "head_branch": "main",
+        "event": "workflow_dispatch",
+        "head_branch": branch,
         "head_sha": tested,
         "status": status,
         "created_at": created.isoformat().replace("+00:00", "Z"),
@@ -526,7 +531,8 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
             return {"id": 7}
         if path == "commits/main":
             return {"sha": "tip"}
-        return {"workflow_runs": [run] if "event=schedule" in path else []}
+        listed = branch and "event=workflow_dispatch" in path
+        return {"workflow_runs": [run] if listed else []}
 
     monkeypatch.setattr(evidence, "api", api)
     monkeypatch.setattr(evidence, "trusted_full", lambda run, repository, workflow: True)

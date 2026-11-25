@@ -36,15 +36,17 @@ jobs:
 
   # Keeps Full evidence on main recent so a release cut can reuse it (release_cuts.py
   # pick-source). The repository variable FULL_EVIDENCE_HOURS sets the window; 0 turns it off.
+  # Each landing on main checks it; GitHub creates this workflow's schedule only hours apart.
   full-evidence:
-    if: ${{ github.event_name == 'schedule' && vars.FULL_EVIDENCE_HOURS != '0' }}
+    if: ${{ (github.event_name == 'push' || github.event_name == 'schedule') && vars.FULL_EVIDENCE_HOURS != '0' }}
     concurrency:
       group: full-evidence
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       actions: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
         with:

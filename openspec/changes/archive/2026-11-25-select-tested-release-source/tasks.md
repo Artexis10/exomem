@@ -3,4 +3,4 @@
 - [x] 1.1 Add `release_cuts.py pick-source`, which returns the newest main commit since the last release with reusable Full evidence, or main's tip.
 - [x] 1.2 Test both outcomes against a real Git history: a newer untested tip and an older green commit before the last release.
 - [x] 1.3 Select the source with `pick-source` in `docs/release.md`.
-- [x] 1.4 Dispatch Full on main from the merge queue workflow when its newest Full run is older than `FULL_EVIDENCE_HOURS` and main has moved.
+- [x] 1.4 After each landing, dispatch Full on main from the merge queue workflow when no Full run on main or a cut is running, the newest is older than `FULL_EVIDENCE_HOURS`, and main has moved.

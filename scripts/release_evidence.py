@@ -120,16 +120,21 @@ def main_full_due(repository: str, hours: float) -> bool:
     """A release cut reuses Full evidence on main (release_cuts.py pick-source); keep it recent.
 
     Full on main is due when none is queued or running, the newest one started more than
-    `hours` ago, and main has moved since that run's commit.
+    `hours` ago, and main has moved since that run's commit. A cut's own Full run tests a
+    main commit too (release_cuts.py pick-source reuses it), so it counts here as well.
     """
     workflow_id = api("actions/workflows/ci.yml")["id"]
     latest = [
         run
         for event in FULL_EVENTS
-        for run in api(f"actions/workflows/ci.yml/runs?branch=main&event={event}&per_page=20")[
+        for run in api(f"actions/workflows/ci.yml/runs?event={event}&per_page=100")[
             "workflow_runs"
         ]
-        if run.get("head_branch") == "main" and trusted_full(run, repository, workflow_id)
+        if (
+            run.get("head_branch") == "main"
+            or (run.get("head_branch") or "").startswith(CUT_PREFIX)
+        )
+        and trusted_full(run, repository, workflow_id)
     ]
     if any(run["status"] != "completed" for run in latest):
         return False
@@ -537,6 +542,11 @@ def main() -> int:
             print("Full evidence on main is recent, running or switched off; nothing dispatched")
             return 0
         command("gh", "workflow", "run", "ci.yml", "--ref", "main")
+        # The next check must see this run as in flight, or it would dispatch a second one.
+        for _ in range(12):
+            time.sleep(5)
+            if not main_full_due(repository, hours):
+                break
         print(f"dispatched Full on main: no Full run on main in the last {hours:g} h")
     elif args.command == "select":
         if not args.source:
