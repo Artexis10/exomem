@@ -2,7 +2,7 @@
 
 ### Requirement: Agent-Facing Identifiers Use the Product Name
 
-The MCP server key of a new registration, the serverInfo name, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch release ships. The plugin names, and the key of an existing registration that has a URL, follow in a later release, because renaming them signs the user out. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
+The MCP server key, the serverInfo name, the plugin names, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch releases ship. A connection that signs in moves in the release that renames it, and that release tells the user to sign in once. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
 
 #### Scenario: An install from before the switch keeps working
 
@@ -25,21 +25,70 @@ The MCP server key of a new registration, the serverInfo name, the skill names a
 #### Scenario: Setup migrates an existing configuration
 
 - **WHEN** a user runs `evermatter setup --migrate` on a client configuration that holds the server key `exomem`
-- **THEN** setup renames that key to `evermatter` when the registration is a stdio server, rewrites the managed instruction block, and keeps a backup of each file it changed
-- **AND** it keeps the key of a registration that has a URL and says why: a rename signs the user out
+- **THEN** setup renames that key to `evermatter`, rewrites the managed instruction block, and keeps a backup of each file it changed
+- **AND** for each renamed registration that has a URL, it prints the client's sign-in step
 - **AND** it leaves rules and hooks that the user wrote unchanged and lists them
 
-#### Scenario: Settings accept the new prefix
+#### Scenario: Settings use the new prefix and keep the old one as an alias
 
-- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH` and no `EXOMEM_VAULT_PATH`
+- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH`, or only the older `EXOMEM_VAULT_PATH`
 - **THEN** the service and the hooks use that value
-- **AND** an explicitly set `EXOMEM_VAULT_PATH`, whether exported, forced by the service or read from `.env` under its own precedence, is never overridden by an `EVERMATTER_` value
+- **AND** setup and the installers write `EVERMATTER_VAULT_PATH`
 
-### Requirement: Stored Identifiers Keep the Internal Name
+#### Scenario: The two prefixes disagree
 
-The `exomem_id` frontmatter key, state and config paths, the Python import package and the `exomem://` reference scheme SHALL keep the internal name. These names are stored in users' notes and state; renaming them would rewrite that data for no visible gain.
+- **WHEN** one source sets `EVERMATTER_VAULT_PATH` and `EXOMEM_VAULT_PATH` to different values
+- **THEN** the service and every command that reads a placement setting or writes a credential refuse to start and name both variables, without their values
+- **AND** the hooks skip that turn's nudge or checkpoint and log the conflict
 
-#### Scenario: An existing vault needs no rewrite
+#### Scenario: A value written after import wins
 
-- **WHEN** a vault written before the rename is opened after the switch release
-- **THEN** every note keeps its `exomem_id` and every stored `exomem://` ref resolves
+- **WHEN** a shell exports an alias of the state root setting and a test fixture or command then sets its internal name in the same process
+- **THEN** the process uses the value that the fixture or command set
+- **AND** a child process inherits only the internal name
+
+#### Scenario: A cell on an older image keeps its settings
+
+- **WHEN** cellctl renders a manifest for a cell whose target image predates the release that reads `EVERMATTER_*`
+- **THEN** the manifest carries the `EXOMEM_*` names
+
+#### Scenario: A plugin rename moves an enabled install
+
+- **WHEN** a user has the `exomem` plugin enabled and the marketplace update brings the `renames` entry
+- **THEN** Claude Code enables `evermatter` in its place
+- **AND** the plugin tells the user the one sign-in step once, when it has a server address configured
+
+## MODIFIED Requirements
+
+### Requirement: Exomem Is the Canonical Internal Name
+
+The Python import package SHALL be `exomem`, and the CLI SHALL be reachable as `python -m exomem`. Every setting SHALL be documented under the `EVERMATTER_` prefix. The `EXOMEM_` and `KB_MCP_` prefixes SHALL stay working aliases through the compatibility window. Identifiers in code, the skill scaffold, tests and scripts SHALL use the exomem name. Prose that a person reads SHALL use the product name, Evermatter.
+
+#### Scenario: Package imports under the new name
+
+- **WHEN** `import exomem` (or any submodule) is executed in an installed environment
+- **THEN** the package loads and all functionality is available under the `exomem` name
+
+#### Scenario: Configuration documented under the new prefix
+
+- **WHEN** a user consults the README or deployment docs for configuration
+- **THEN** every variable is documented as `EVERMATTER_*`, with a note that `EXOMEM_*` and `KB_MCP_*` names remain honored
+
+### Requirement: Legacy `KB_MCP_*` Environment Variables Keep Working
+
+Code SHALL read each setting under one internal name, and its other names SHALL be aliases. At import, the system SHALL rename a set alias to the internal name when that is unset, and remove the alias. A set internal name, and a later in-process write of it, SHALL win.
+
+#### Scenario: Old .env keeps working unchanged
+
+- **WHEN** a process starts with only `KB_MCP_VAULT_PATH` set
+- **THEN** the vault resolves exactly as before
+
+#### Scenario: New name wins on conflict
+
+- **WHEN** both `EXOMEM_DISABLE_CLIP` and `KB_MCP_DISABLE_CLIP` are set to different values
+- **THEN** the `EXOMEM_DISABLE_CLIP` value is used
+
+#### Scenario: Late-set legacy variables are recoverable
+
+- **WHEN** a legacy variable is set after import and `promote_legacy()` is called again
+- **THEN** the corresponding setting becomes visible
