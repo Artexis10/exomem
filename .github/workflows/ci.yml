@@ -663,7 +663,7 @@ jobs:
           -o faulthandler_timeout=100
           tests/test_cloud_video_frames.py tests/test_image_view.py tests/test_media_previews.py tests/test_camera_raw.py
           tests/test_media_preview_recovery.py tests/test_capture_metadata.py
-          tests/test_capture_backfill.py tests/test_capture_backfill_store.py
+          tests/test_capture_backfill.py tests/test_capture_backfill_store.py tests/test_capture_recovery.py
           -m frame_codecs -o timeout=120
           --junitxml=test-results/e2e-logs/cloud-frame-junit.xml
       # The harness prints the tail inline; this keeps the whole log for the

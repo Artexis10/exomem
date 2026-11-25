@@ -37,6 +37,7 @@ from typing import Any
 from . import (
     asr_runtime,
     backoff,
+    capture_metadata,
     cuda_containment,
     deferred_index,
     embeddings,
@@ -1017,6 +1018,9 @@ class MediaWorker:
             )
             return self._publication_outcome(committed, FAILED, error)
         text = _within_result_limit(result.sidecar_text, job.sidecar_path.name)
+        result.capture = capture_metadata.with_name_date(
+            self._vault_root, result.capture, job.media_type, job.binary_path.name
+        )
         if preserve._has_ambiguous_legacy_preserved_notes(claimed_content):
             return _ProcessOutcome(
                 BLOCKED,

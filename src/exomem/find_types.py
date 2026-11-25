@@ -151,6 +151,16 @@ class ParsedPage:
         return str(ef) if ef else None
 
     @property
+    def capture_date_source(self) -> str | None:
+        """How this media sidecar's capture day was found, as a filter reads it; None for any other page."""
+        if self.media_type is None:
+            return None
+        from . import structured_filters
+
+        source = structured_filters.page_view(self).get("capture_date_source")
+        return source if isinstance(source, str) else None
+
+    @property
     def parent_media(self) -> str | None:
         pm = self.frontmatter.get("parent_media")
         return str(pm) if pm else None
@@ -356,6 +366,9 @@ class Hit:
     outside_kb: bool = False
     media_type: str | None = None
     media_file: str | None = None
+    #: A `capture-date-sources` key: how the page's capture day was found, so a caller can tell a stated
+    #: date from the day the source entered the vault. Unset for a page that is no photo or video sidecar.
+    capture_date_source: str | None = None
     clip_frame_ts: float | None = None
     scene_frame: str | None = field(default=None, metadata={"lent": LENT_FRAME})
     scene_frame_ts: float | None = field(default=None, metadata={"lent": LENT_FRAME})
@@ -456,6 +469,8 @@ class Hit:
             out["media_type"] = self.media_type
         if self.media_file:
             out["media_file"] = self.media_file
+        if self.capture_date_source:
+            out["capture_date_source"] = self.capture_date_source
         if self.clip_frame_ts is not None:
             out["clip_match_at"] = _format_timestamp(self.clip_frame_ts)
         if self.scene_frame:
@@ -530,6 +545,8 @@ class Hit:
             out["media_type"] = self.media_type
         if self.media_file:
             out["media_file"] = self.media_file
+        if self.capture_date_source:
+            out["capture_date_source"] = self.capture_date_source
         if self.clip_frame_ts is not None:
             out["clip_match_at"] = _format_timestamp(self.clip_frame_ts)
         if self.scene_frame:

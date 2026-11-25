@@ -118,6 +118,7 @@ class PageHit(TypedDict):
     graph: NotRequired[dict[str, str | None]]
     media_type: NotRequired[str]
     media_file: NotRequired[str]
+    capture_date_source: NotRequired[str]
     clip_match_at: NotRequired[str]
     scene_frame: NotRequired[str]
     scene_match_at: NotRequired[str]

@@ -175,6 +175,13 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     `upload_files(lane="evidence", scope="...", category="...")`. Otherwise tell the user
     the original was not preserved. Custody is proven only by a returned `stored_path`,
     `size` and `hash`, never by a minted token, a link or a saved transcript.
+- **A photo keeps its camera metadata only when its original file arrives.** A chat app usually sends a
+  display-sized copy that it re-encoded without the EXIF block, so the capture time, position and camera are
+  gone; the upload receipt then warns that a JPEG or HEIC photo has no camera metadata. To keep them, send the original
+  file: `upload_files` from a local agent that reads the disk, the prefilled browser upload form on a personal
+  server, or archive the device's originals into the vault. A photo already filed without them can still get a
+  date: `capture_date_source` says whether it came from the camera, a matching original, or a file name, and
+  `source-date` marks only the day the file arrived. See `vault-care.md` § capture-metadata.
 - **Media processing is automatic and actionable — `inspect_memory` and `manage_memory`.** Supported
   audio and video preserved through Evermatter or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.
