@@ -239,8 +239,8 @@ def changed_rows(root: Path, mark: tuple[str, int] | None) -> tuple[tuple[str, i
     owner and shown to no caller: it names no row or page to anyone. A row whose links were all removed, or that is
     gone, maps to an empty tuple, so a candidate that rested on it is refreshed. With no mark it reports only where
     the store stands, so a first scan never replays history. With no store the mark is `("", 0)`, and a store that
-    then appears, or one that replaces the marked store (a restore counts its transactions again), is read from its
-    first transaction. None means the store could not be read now; the caller keeps its mark and asks again.
+    then appears, or one that replaces the marked store (a restore counts its transactions again, or its identity is kept but its
+    last transaction is behind the mark), is read from its first transaction. None means the store could not be read now; the caller keeps its mark and asks again.
     One call reads at most `MAX_SCAN_TXNS` transactions.
     """
     store = connection.store_path(Path(root))
@@ -253,6 +253,10 @@ def changed_rows(root: Path, mark: tuple[str, int] | None) -> tuple[tuple[str, i
             if mark is None:
                 return (instance, conn.execute("SELECT coalesce(max(txn_id), 0) FROM txns").fetchone()[0]), {}
             after = mark[1] if mark[0] == instance else 0
+            # A mark past the store's last transaction means the file was restored with the same identity:
+            # read it again from its first transaction, as for a replaced store.
+            if after > conn.execute("SELECT coalesce(max(txn_id), 0) FROM txns").fetchone()[0]:
+                after = 0
             through = conn.execute(
                 "SELECT max(txn_id) FROM (SELECT txn_id FROM txns WHERE txn_id > ? ORDER BY txn_id LIMIT ?)",
                 (after, MAX_SCAN_TXNS)).fetchone()[0]

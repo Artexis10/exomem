@@ -5564,7 +5564,7 @@ def _related_pages_not_looked_up(manifest: collections.CollectionManifest, *, cr
         return []
     from .collection_store import related_pages
 
-    return [related_pages.unavailable_warning("a vault without a collection store never runs the lookup")]
+    return [related_pages.unavailable_warning("a Records collection kept as files never runs the lookup")]
 
 
 def _with_warnings(result: dict[str, Any], warnings: list[Any]) -> dict[str, Any]:

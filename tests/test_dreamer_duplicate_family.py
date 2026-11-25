@@ -360,6 +360,26 @@ def test_a_store_that_replaces_the_old_one_is_read_from_its_first_transaction(wo
     assert len(served(vault, owner_principal())) == 1
 
 
+
+def test_a_store_restored_with_its_own_identity_is_read_again_when_the_mark_is_ahead_of_it(world):
+    """A backup restored over the store keeps its instance id but fewer transactions, so a mark kept from before
+    the restore sits past every row written after it."""
+    store, vault = world
+    service_page(vault, "Notes/Widget Service.md", "Widget Service", WIDGET, "The Widget Service runs in the home office.")
+    _ready(store, SERVICES)
+    tick(vault)
+    (instance, _), _ = duplicate_facts.changed_rows(vault, None)
+    conn = dreamer_store.DreamerStore(vault).connect()
+    try:
+        dreamer_store.DreamerStore.set_meta(conn, dreamer_families._DUPLICATE_TXN_META,
+                                            {"instance": instance, "txn": 10_000})
+        conn.commit()
+    finally:
+        conn.close()
+    row(store, SERVICES, 1, "Widget Service", "home office", f"exomem://memory/{WIDGET}")
+    tick(vault)
+    assert len(served(vault, owner_principal())) == 1
+
 def owed(vault):
     conn = dreamer_store.DreamerStore(vault).connect()
     try:
