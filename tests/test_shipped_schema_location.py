@@ -401,3 +401,15 @@ def test_the_incremental_patcher_skips_the_new_location_too(tmp_path: Path) -> N
     assert vault_module.in_excluded_scan_dir(".exomem/schema/SKILL.md") is True
     assert vault_module.in_excluded_scan_dir(".exomem/schema/references/frontmatter.md") is True
     assert vault_module.in_excluded_scan_dir("Knowledge Base/Notes/real-note.md") is False
+
+
+def test_the_compatibility_field_table_matches_the_source_page_type() -> None:
+    """Releases up to 0.204.0 refuse to start without `references/frontmatter.md`, so a rollback onto a vault
+    this release refreshed depends on it; its required fields must stay the ones `page-types.md` declares."""
+    from exomem.schema import REQUIRED_FIELD_ROW_PATTERN, _slice_section
+
+    references = Path(__file__).resolve().parents[1] / "src" / "exomem" / "_scaffold" / "_Schema" / "references"
+    compat = _slice_section((references / "frontmatter.md").read_text(encoding="utf-8"), "### source", "###")
+    source = _slice_section((references / "page-types.md").read_text(encoding="utf-8"), "## source", "##")
+    assert compat and source
+    assert REQUIRED_FIELD_ROW_PATTERN.findall(compat) == REQUIRED_FIELD_ROW_PATTERN.findall(source)
