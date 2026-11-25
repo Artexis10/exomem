@@ -226,7 +226,8 @@ def test_the_whats_new_section_is_served_to_home_through_the_cell(run_cell, imag
     image.version = "1.3.0"
 
     async def scenario(client):
-        return await call(client, "bootstrap", {"profile": "compact", "section": "whats_new"})
+        # Home's call exactly as Home sends it; the cell refuses the command name `bootstrap`.
+        return await call(client, "read_instructions", {"profile": "compact", "section": "whats_new"})
 
     assert run_cell(scenario) == {"whats_new": {"version": "1.3.0", "releases": RELEASES, "notes_available": True}}
 

@@ -267,6 +267,29 @@ def test_cellctl_refuses_to_start_without_an_upgrade_window_value(monkeypatch, n
         main.build_reconcile_config()
 
 
+def _reconcile_env(monkeypatch) -> None:
+    monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")
+    monkeypatch.setenv("CELLCTL_UPGRADE_CONCURRENCY_PER_NODE", "1")
+    monkeypatch.setenv("CELLCTL_UPGRADE_PREPARE_ENABLED", "true")
+
+
+def test_the_export_ttl_reads_its_evermatter_name(monkeypatch) -> None:
+    # A deployment that renamed the setting to the product prefix must not fall back to the 24-hour default.
+    _reconcile_env(monkeypatch)
+    monkeypatch.delenv("EXOMEM_EXPORT_TTL_HOURS", raising=False)
+    monkeypatch.setenv("EVERMATTER_EXPORT_TTL_HOURS", "6")
+
+    assert main.build_reconcile_config().export_ttl == timedelta(hours=6)
+
+
+def test_the_export_ttl_keeps_its_exomem_value_when_both_names_differ(monkeypatch) -> None:
+    _reconcile_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_EXPORT_TTL_HOURS", "12")
+    monkeypatch.setenv("EVERMATTER_EXPORT_TTL_HOURS", "6")
+
+    assert main.build_reconcile_config().export_ttl == timedelta(hours=12)
+
+
 def test_cellctl_refuses_a_default_range_that_overlaps_the_backup_window(monkeypatch) -> None:
     # Catches a configuration that rolls unmeasured cells during the stopped nightly backups.
     monkeypatch.setenv("CELLCTL_UPGRADE_READY_DEADLINE_MINUTES", "30")

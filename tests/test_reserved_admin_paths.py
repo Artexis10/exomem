@@ -257,6 +257,7 @@ _PATTERN_SAMPLES = (
     "..review-state.json.abc123_4.tmp",
     "..due-state-candidates.json.abc123_4.tmp",
     "..ownership-rotation.json.abc123_4.tmp",
+    "..app-update-notices.json.abc123_4.tmp",
     f".lexical.sqlite.rebuild-{_HEX32}.tmp-shm",
     ".lexical-staged-0123456789abcdef.sqlite-wal",
     f".lexical.sqlite-shm.quarantine-{_HEX32}",

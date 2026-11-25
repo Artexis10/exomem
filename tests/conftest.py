@@ -31,6 +31,7 @@ from repository_docs_reads import RepositoryDocsReads
 
 from exomem import activation_manifest as activation_manifest_module
 from exomem import embeddings as embeddings_module
+from exomem import env_compat as env_compat_module
 from exomem import find as find_module
 from exomem import graph_sync as graph_sync_module
 from exomem import schema as schema_module
@@ -481,6 +482,15 @@ def _query_deadline_off_the_runner_clock():
         for name, profile in shipped.items():
             patch.setitem(runtime.PROFILES, name, {**profile, "timeout_ms": 10_000})
         yield shipped
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings_conflict_record(monkeypatch):
+    """`env_compat` keeps the conflicts it saw at promotion for the whole process; a test's must not outlive it."""
+    monkeypatch.setattr(env_compat_module, "_process_conflicts", [])
+    monkeypatch.setattr(env_compat_module, "_reported", set())
+    # No snapshot: a test's own environment is the one the process "inherited".
+    monkeypatch.setattr(env_compat_module, "_inherited", None)
 
 
 @pytest.fixture(autouse=True)

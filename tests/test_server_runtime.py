@@ -342,6 +342,33 @@ def test_initialize_runtime_disables_usage_boost_and_relevance_check_in_cloud_mo
     assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
 
 
+def test_a_cloud_cell_keeps_a_forced_setting_against_an_evermatter_value(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cell forces EXOMEM_DISABLE_RELEVANCE_CHECK; an EVERMATTER_ value in the
+    pod environment must not undo it."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    initialize_vault_state_offline(vault, source="server runtime evermatter prefix fixture")
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.setenv("EVERMATTER_DISABLE_RELEVANCE_CHECK", "")
+    monkeypatch.setattr(server_runtime, "resolve_vault", lambda: vault)
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _vault: SimpleNamespace(source_types=("session",)),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _vault: "")
+    monkeypatch.setattr(server_runtime, "_start_compute_runtime", lambda _vault, **_kwargs: None)
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
+    monkeypatch.setattr(server_runtime, "_start_file_watcher", lambda _vault: None)
+
+    server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] == "1"
+
+
 def test_initialize_runtime_does_not_start_workers_before_transport(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
