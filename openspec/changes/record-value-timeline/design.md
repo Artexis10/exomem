@@ -173,7 +173,7 @@ Storage for one indexed field at the load target is estimated at 70 to 110 MB (u
 - **In scope.** Store-backed Records collections in every payload encoding (`json-v1`, `typed-v1`, `typed-v2`) and both view modes.
 - **Refused `TIMELINE_UNAVAILABLE`.** File-canonical, dataset and derived collections, after the collection resolves under the caller's authority, as retraction does. A vault with a collection store creates only store collections, so file-canonical collections are the pre-cutover path. Their kept corrections hold prior payloads only, with no version spine to order points.
 - **Unchanged.** Import (rows take their write time) and Planning collections, which share the store but take no new argument.
-- **Export.** Export to files names a collection that holds a stated timeline fact as unexportable, because file mode cannot hold the fact. Export already keeps only current rows and a checkpoint of store history.
+- **Export.** Export to files keeps only current rows and a checkpoint of store history, so it drops timeline facts as it drops past versions. Its preview names each collection and how many facts the export drops. Refusing export instead would cost a collection its whole file exit path to protect one kind of history among many.
 
 ### D10. Delivery order
 
@@ -226,7 +226,7 @@ The benchmark cases come first, so the baseline runs on `main` before either del
 - **Mixed precision can surprise.** A date that ties a timed change on the same day becomes current and orders after it. The reply names the placement and echoes the window, and `describe` teaches the rule.
 - **UTC days.** A date names a UTC day, which can differ from a writer's local day near midnight. A vault time zone is a later change.
 - **Valid time does not model retraction.** A retracted row is absent from timeline queries. Re-admission restores its whole timeline, including the retracted period.
-- **Export blocks collections with stated facts.** This keeps file mode from silently dropping them, at the cost of exportability.
+- **Export drops timeline facts.** The preview names the count per collection, so the loss is visible before the export runs.
 - **A verification bug could fail a sound chain.** Tests alter, add and remove facts and the marker, and reopen cold. The migration rehearsal verifies the chain from the first transaction before and after.
 
 ## Migration Plan

@@ -11,6 +11,7 @@ from typing import Any, Literal, Never
 from . import (
     automatic_collection,
     collection_refs,
+    kbdir,
     operation_entries,
     query_data,
     record_governance,
@@ -172,7 +173,7 @@ def record_memory(
             reads under the writer lease, and a stale id is refused with the current one. On history
             it names the row whatever version the id carries.
         natural_key: history only: the values of the collection's natural-key fields, as the row was
-            written, e.g. {"asset_tag": "L-17"}. A retracted row is found by its natural key too.
+            written, e.g. {"asset_tag": "L-17"}. A retracted row is found by the natural key it was created with, or by item_key.
             History takes exactly one of item_key, item_id and natural_key.
         automatic: create only: true when you start the collection yourself under silent
             proactive_capture. Unless the bounds in `automatic_collection` hold, the server refuses
@@ -702,14 +703,20 @@ def _history_contract() -> dict[str, Any]:
                 "field, as the row was written"
             ),
         },
-        "retracted": "item_key and natural_key find a retracted row; item_id names only a current row",
+        "retracted": (
+            "item_key finds a retracted row; natural_key finds it only by the key its identity "
+            "derives from (the key it was created with, unless an item_key was given); item_id "
+            "names only a current row"
+        ),
         "refusal": (
-            "RECORD_NOT_FOUND, alike for a row that does not exist, a row the caller may not read, "
-            "and a natural key with a field the caller may not read"
+            "by item_key or natural_key: RECORD_NOT_FOUND, alike for a row that does not exist, a row "
+            "the caller may not read, and a natural key with a field the caller may not read; by "
+            "item_id: the row binder's refusals (ITEM_NOT_FOUND and its siblings), alike for an "
+            "absent and a hidden row"
         ),
         "example": {
             "action": "history",
-            "collection": "Knowledge Base/Records/Publications/_collection.md",
+            "collection": kbdir.managed_join("Records/Publications/_collection.md"),
             "natural_key": {"published_on": "2026-09-01", "slug": "entry-one"},
         },
     }

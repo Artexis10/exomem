@@ -1,8 +1,9 @@
 ## 1. Benchmark first
 
-- [ ] 1.1 Add timeline cases to the Records benchmark, in `scripts/measure-records-query.py` or a sibling that shares `scripts/_records_measurement_env.py`. The fixture is an invented equipment collection, typed and JSON, at 5,000 and 100,000 rows. Each row has 5 to 20 versions, about 10 on average. A 40-value location field changes in about half the versions; about 1% of rows hold a past point and 0.5% a correction. The cases are:
+- [ ] 1.1 Add timeline cases to the Records benchmark, in `scripts/measure-records-query.py` or a sibling that shares `scripts/_records_measurement_env.py`. The fixture is an invented equipment collection, typed and JSON, at 5,000 and 100,000 rows. Each row has 5 to 20 versions, about 10 on average. A 40-value location field changes in about half the versions. A 4-value status field changes in about a third of them, and one of its values holds about 70% of spans, so the key-order path meets a low-cardinality, skewed value. About 1% of rows hold a past point and 0.5% a correction. The cases are:
   - one row's timeline, selected by a natural-key filter;
   - `at` an instant with `eq`, `at` a date, and a `from`/`to` range with `eq`;
+  - `at` an instant with `eq` on the status field's most common value, the costliest key-order case;
   - `at` an instant with `contains`, which takes the per-row path;
   - `changes` over one month and over one year;
   - a current-value filter combined with a timeline;
@@ -41,8 +42,8 @@
   - Check: tests for a corrected current value with no change shown between the two values, a re-date with no values, a corrected past value, a correction of a correction, and each refusal writing nothing.
 - [ ] 4.5 Report `effective_at`, `effective_basis`, `placements`, `past_values`, `corrects` and `replaced_by` in store history revisions. Keep an unchanged-payload update that records a fact. Show a stated effective time on the generated history page.
   - Check: a test in which a corrected move shows both revisions, each naming the other.
-- [ ] 4.6 Refuse `effective_at`, `corrects` and `timeline` with `TIMELINE_UNAVAILABLE` on file-canonical, dataset and derived collections. Make the export preview name a collection that holds a stated fact as unexportable.
-  - Check: tests for each refused kind writing nothing, and for an export preview with a past point.
+- [ ] 4.6 Refuse `effective_at`, `corrects` and `timeline` with `TIMELINE_UNAVAILABLE` on file-canonical, dataset and derived collections. Make the export preview name each collection with timeline facts and how many the export drops.
+  - Check: tests for each refused kind writing nothing, and for an export preview that names the dropped count of a collection with a past point.
 
 ## 5. Timeline queries
 

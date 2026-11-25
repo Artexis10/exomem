@@ -113,7 +113,7 @@ On a store-backed collection, each revision that `records.history` returns SHALL
 - **THEN** the revision for Shelf B names the correction's transition and write time as its replacement, and the correction's revision names the transition it corrects
 
 ### Requirement: query_records reads one field's timeline
-`query_records` SHALL take an optional `timeline`: `field`, a declared scalar field path; an optional `value` predicate with the filter operators; optionally `at`, an instant or a date, or a window of `from`, `to` or both; and an optional `changes` flag. `filters` SHALL select rows by their current values, as without `timeline`. The reply SHALL list the field's spans, ordered by effective start and then row, newest first when `descending` is true, in pages bound to the collection snapshot.
+`query_records` SHALL take an optional `timeline`: `field`, a declared scalar field path; an optional `value` predicate with the filter operators; optionally `at`, an instant or a date, or a window of `from`, `to` or both; and an optional `changes` flag. `filters` SHALL select rows by their current values, as without `timeline`. The reply SHALL list the field's spans in pages bound to the collection snapshot.
 
 #### Scenario: One row's values over time
 - **WHEN** a caller queries with a filter on `asset_tag` equal to L-17 and `timeline` `{"field": "location"}`
@@ -135,6 +135,14 @@ On a store-backed collection, each revision that `records.history` returns SHALL
 - **WHEN** a timeline query also names `sort_by` or `aggregate`
 - **THEN** the query is refused `TIMELINE_ARGUMENT_INVALID` naming the argument
 
+
+### Requirement: Timeline spans have one total order
+
+Timeline spans SHALL be ordered by effective start, then commit sequence, then row, oldest first, and newest first when `descending` is true. Two spans of one row with the same effective start SHALL keep their commit order, so pages and continuations stay stable.
+
+#### Scenario: Two moves on one date keep their order
+- **WHEN** a row moves from Shelf A to Shelf B and then to Shelf C, both stated on 1 March
+- **THEN** the timeline lists the Shelf B span before the Shelf C span, and a continuation that splits them resumes after the Shelf B span
 ### Requirement: Timeline spans state their window honestly
 A span SHALL carry the row `id`, the value, the previous span's value unless it is the row's first span, `effective_from`, `effective_to` (null while current), the basis and the write time. With `at`, the reply SHALL return the spans that contain the instant, or that overlap the UTC day of a date. With `from` and `to`, it SHALL return the spans that overlap the inclusive window, or with `changes` those that start in it. The reply SHALL echo the window as instants.
 
@@ -192,15 +200,15 @@ Stated effective times, past points and corrections SHALL be append-only, writte
 - **THEN** every row, version and transaction is unchanged, history verifies from the first transaction, and every existing point reads with basis `written`
 
 ### Requirement: Timeline arguments are limited to store-backed collections
-`effective_at`, `corrects` and `timeline` SHALL be refused `TIMELINE_UNAVAILABLE` on a file-canonical, dataset or derived collection, after the collection resolves under the caller's authority. Import SHALL take no effective time in this change, so imported rows take their write time. Export to files SHALL name a collection that holds a stated timeline fact as unexportable, because file mode cannot hold the fact.
+`effective_at`, `corrects` and `timeline` SHALL be refused `TIMELINE_UNAVAILABLE` on a file-canonical, dataset or derived collection, after the collection resolves under the caller's authority. Import SHALL take no effective time in this change, so imported rows take their write time. Export to files SHALL drop timeline facts, as it drops past versions, and its preview SHALL name each collection and how many facts it drops.
 
 #### Scenario: A file-canonical collection
 - **WHEN** an owner edits a row of a file-canonical collection with `effective_at`
 - **THEN** the edit is refused `TIMELINE_UNAVAILABLE` and nothing is written
 
-#### Scenario: Export does not drop a stated fact
+#### Scenario: Export names the timeline facts it drops
 - **WHEN** an export preview covers a collection that holds a past point
-- **THEN** the preview names that collection as unexportable with the reason
+- **THEN** the preview names that collection and the number of timeline facts the export drops
 
 ### Requirement: Timeline work meets the Records load target
 The timeline bounds SHALL hold at up to 100,000 rows with 5 to 20 versions per row, under the shipped query profiles, once the queried field's index is built:
