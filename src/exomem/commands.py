@@ -9292,6 +9292,41 @@ def op_observe_memory(
         raise ValueError(
             "INVALID_PATH: observe_memory requires a governed KB-relative path or reference"
         )
+
+    def page_without_walk() -> str | None:
+        # The page this call names when finding it reads no more than the page: a vault path, a
+        # vault or source ref, or a memory ref that the current identity projection answers. A
+        # title would need the title index. A caller whose pages are filtered gets no page-specific
+        # wording, so the reply cannot tell it whether a page it cannot see exists.
+        if egress_module.caller_restricted(vault_root):
+            return None
+        if not raw_path.lower().startswith("exomem://"):
+            return raw_path
+        if raw_path.lower().startswith(memory_refs_module.REF_PREFIX):
+            return memory_refs_module.owner_without_walk(vault_root, raw_path)
+        decoded = memory_refs_module.resolve_identifier_read_only(vault_root, raw_path)
+        return decoded if is_in_managed_root(decoded) else None
+
+    early = observe_memory_module.refusal_before_page(
+        vault_root,
+        page=page_without_walk,
+        operation=operation,
+        category=category,
+        content=content,
+        kind=kind,
+        unit=unit,
+        unit_ref=unit_ref,
+        verdict=verdict,
+        check_by=check_by,
+        as_of=as_of,
+        until=until,
+        tags=tags,
+        context=context,
+        relations=relations,
+        validate_only=validate_only,
+    )
+    if early is not None:
+        raise early.leaf_error()
     if not raw_path.lower().startswith("exomem://"):
         path = page_names_module.resolve_page(
             vault_root, path, prefer=page_names_module.prefer_editable, field="path"
