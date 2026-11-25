@@ -23,7 +23,7 @@ from kubernetes.client.rest import ApiException
 from kubernetes.dynamic import DynamicClient
 
 from .backup_source import FAILURE_CODES as BACKUP_FAILURE_CODES
-from .backup_source import parse_media_census, parse_media_collection
+from .backup_source import parse_media_census, parse_media_collection, parse_media_storage
 from .capacity import (
     AttachmentReservation,
     CapacityObservation,
@@ -93,6 +93,7 @@ from .state import (
     ClusterObservation,
     MediaCensus,
     MediaCollection,
+    MediaStorage,
     PodPlacement,
     ResticVerificationJob,
 )
@@ -962,7 +963,7 @@ class ClusterClient:
         # hold's result. Outside a hold no decision reads Job state.
         backup_job = restore_job = None
         backup_snapshot_id = backup_used_bytes = backup_total_bytes = backup_failure_code = None
-        backup_media_census = backup_media_collection = None
+        backup_media_census = backup_media_storage = backup_media_collection = None
         snapshot_steps: dict[str, bool] = {}
         if (
             backup_family_request
@@ -980,6 +981,7 @@ class ClusterClient:
                 report = self._job_pod_termination_message(namespace, backup_name)
                 backup_snapshot_id, backup_used_bytes, backup_total_bytes = _backup_report(report)
                 backup_media_census = _media_census(report)
+                backup_media_storage = _media_storage(report)
                 backup_media_collection = _media_collection(report)
             elif backup_job is not None and bool(backup_job.status.failed):
                 message = self._job_pod_termination_message(namespace, backup_name, succeeded=False)
@@ -1064,6 +1066,7 @@ class ClusterClient:
             backup_job_used_bytes=backup_used_bytes,
             backup_job_total_bytes=backup_total_bytes,
             backup_job_media_census=backup_media_census,
+            backup_job_media_storage=backup_media_storage,
             backup_job_media_collection=backup_media_collection,
             backup_job_failure_code=backup_failure_code,
             **_job_observation(restore_job, prefix="restore_job"),
@@ -1612,12 +1615,26 @@ def _media_census(message: str | None) -> MediaCensus | None:
     return MediaCensus(evicted=evicted, evicted_bytes=evicted_bytes, captured_at=captured_at)
 
 
-# collect-released-media D5: the third line is the collector's result, whose format backup_source.parse_media_collection
+# add-cloud-media-store D10: the third line is the cell's storage record, whose format backup_source.parse_media_storage
+# fixes.
+def _media_storage(message: str | None) -> MediaStorage | None:
+    """The storage record a backup Job reported, or None when it reported none that cellctl can read. None leaves both
+    figures unknown on the row, as a record that the Job could not read does."""
+
+    line = _report_line(message, 2)
+    parsed = parse_media_storage(line)
+    if parsed is None and line:
+        # Only its length is logged: a line that does not parse is not known to carry no name.
+        logger.warning("cellctl: a backup Job reported a storage record that does not parse (%d characters)", len(line))
+    return None if parsed is None else MediaStorage(*parsed)
+
+
+# collect-released-media D5: the fourth line is the collector's result, whose format backup_source.parse_media_collection
 # fixes.
 def _media_collection(message: str | None) -> MediaCollection | None:
     """The collection a backup Job reported, or None when it ran none or reported a line that cellctl cannot read."""
 
-    line = _report_line(message, 2)
+    line = _report_line(message, 3)
     parsed = parse_media_collection(line)
     if parsed is None and line:
         # A cell image that writes another format would otherwise leave no trace that a collection ran. The line is
