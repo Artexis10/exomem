@@ -23,7 +23,7 @@ import release_evidence as evidence
 from check_release_pr_files import _extra_files, unreleased_changes, version_updates
 
 # These names are the controller's closed GitHub protocol, not product vocabulary.
-ORIGIN_DIRECTORY = ".github/release-cuts"
+ORIGIN_DIRECTORY = evidence.RELEASE_ORIGINS
 INTENT_START, INTENT_END = "<!-- release-cut-intent\n", "\n-->"
 POLLS, POLL_SECONDS = 360, 20
 

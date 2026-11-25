@@ -25,6 +25,8 @@ RECONCILE_PREFIX = "release-reconcile/"
 # The merge queue's candidate branches and its commit status (scripts/merge_queue.py).
 MERGE_QUEUE_PREFIX = "merge-queue/"
 CUT_PREFIX = "release-cuts/"
+# Each accepted release adds its write-once origin record here in its reconciliation commit.
+RELEASE_ORIGINS = ".github/release-cuts"
 MERGE_QUEUE_CONTEXT = "merge queue"
 # Full's required package-build job checks lock, Cloud output and committed plugin content/version.
 PACKAGE_CHECKS = "release-packages-v1"
@@ -116,20 +118,24 @@ def trusted_full(run: dict, repository: str, workflow_id: int) -> bool:
     )
 
 
-def main_full_due(repository: str, hours: float) -> bool:
+def _timestamp(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def main_full_due(repository: str, hours: float) -> tuple[bool, str]:
     """A release cut reuses Full evidence on main (release_cuts.py pick-source); keep it recent.
 
-    Full on main is due when none is queued or running, the newest one started more than
-    `hours` ago, and main has moved since that run's commit. A cut's own Full run tests a
-    main commit too (release_cuts.py pick-source reuses it), so it counts here as well.
+    Full on main is due when no Full run on main or on a cut is queued or running, none has
+    tested main's current commit, no release-evidence run is in progress, and no Full run on
+    main started within `hours` since the newest release reconciliation. pick-source accepts
+    only evidence created after that reconciliation, so older runs cannot serve the next cut.
+    Returns the decision and its reason.
     """
     workflow_id = api("actions/workflows/ci.yml")["id"]
     latest = [
         run
         for event in FULL_EVENTS
-        for run in api(f"actions/workflows/ci.yml/runs?event={event}&per_page=100")[
-            "workflow_runs"
-        ]
+        for run in api(f"actions/workflows/ci.yml/runs?event={event}&per_page=100")["workflow_runs"]
         if (
             run.get("head_branch") == "main"
             or (run.get("head_branch") or "").startswith(CUT_PREFIX)
@@ -137,15 +143,34 @@ def main_full_due(repository: str, hours: float) -> bool:
         and trusted_full(run, repository, workflow_id)
     ]
     if any(run["status"] != "completed" for run in latest):
-        return False
-    newest = max(latest, key=lambda run: run["created_at"], default=None)
-    if newest is None:
-        return True
-    started = datetime.fromisoformat(newest["created_at"].replace("Z", "+00:00"))
-    return (
-        datetime.now(UTC) - started > timedelta(hours=hours)
-        and newest["head_sha"] != api("commits/main")["sha"]
+        return False, "a Full run on main or on a cut is queued or running"
+    tip = api("commits/main")["sha"]
+    if any(run["head_sha"] == tip for run in latest):
+        return False, f"a Full run already tested main's commit {tip}"
+    # An open cut's controller runs until its reconciliation is on main; a Full run before
+    # then could not serve the next cut (about 90 jobs wasted). When this fires wrongly, on a
+    # short evidence callback or a stalled controller, the dispatch waits for the next landing
+    # or scheduled check, and the next cut may run its own Full instead.
+    running = api(f"actions/workflows/{Path(AUTOMATION).name}/runs?status=in_progress&per_page=1")
+    if running["total_count"]:
+        return False, "a release-evidence run, such as an open cut, is in progress"
+    reconciled = api(f"commits?sha=main&path={RELEASE_ORIGINS}&per_page=1")
+    since = (
+        _timestamp(reconciled[0]["commit"]["committer"]["date"])
+        if reconciled
+        else datetime.min.replace(tzinfo=UTC)
     )
+    usable = [
+        run
+        for run in latest
+        if run.get("head_branch") == "main" and _timestamp(run["created_at"]) >= since
+    ]
+    newest = max(usable, key=lambda run: run["created_at"], default=None)
+    if newest is None:
+        return True, "no Full run on main since the newest release reconciliation"
+    if datetime.now(UTC) - _timestamp(newest["created_at"]) > timedelta(hours=hours):
+        return True, f"main's newest usable Full run started more than {hours:g} h ago"
+    return False, f"main's newest usable Full run started within {hours:g} h"
 
 
 def legacy_workflow(commit: str) -> bool:
@@ -538,16 +563,20 @@ def main() -> int:
         args.output.write_text(json.dumps(receipt, indent=2) + "\n")
     elif args.command == "main-full":
         hours = float(os.environ.get("FULL_EVIDENCE_HOURS") or 4)
-        if hours <= 0 or not main_full_due(repository, hours):
-            print("Full evidence on main is recent, running or switched off; nothing dispatched")
+        if hours <= 0:
+            print("Full-evidence dispatch is switched off (FULL_EVIDENCE_HOURS <= 0)")
+            return 0
+        due, reason = main_full_due(repository, hours)
+        if not due:
+            print(f"nothing dispatched: {reason}")
             return 0
         command("gh", "workflow", "run", "ci.yml", "--ref", "main")
         # The next check must see this run as in flight, or it would dispatch a second one.
         for _ in range(12):
             time.sleep(5)
-            if not main_full_due(repository, hours):
+            if not main_full_due(repository, hours)[0]:
                 break
-        print(f"dispatched Full on main: no Full run on main in the last {hours:g} h")
+        print(f"dispatched Full on main: {reason}")
     elif args.command == "select":
         if not args.source:
             parser.error("select requires --source")
