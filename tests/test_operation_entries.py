@@ -31,6 +31,7 @@ VARIANTS = [
 # Either/or rules that a variant's required fields do not state: the leaf checks them.
 _LEAF_EITHER_OR = {
     ("record_memory", "append"): {"item": {}},
+    ("record_memory", "history"): {"item_key": "x"},
     ("record_memory", "update"): {"changes": {}, "item_id": "x"},
     ("record_memory", "validate"): {"manifest_path": "Records/x/_collection.md"},
     ("plan_memory", "validate"): {"manifest_path": "Plans/x/_collection.md"},
