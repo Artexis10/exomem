@@ -422,7 +422,11 @@ def _working_set_max_chars() -> int:
 
 
 def _normalize_env_aliases() -> None:
-    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+    """Map EVERMATTER_* and any legacy KB_* tunable onto its EXOMEM_* name (EXOMEM_* wins if set)."""
+    # Mirrors the EVERMATTER_ step of exomem.env_compat.canonical_settings; this hook cannot import it.
+    for name in list(os.environ):
+        if name.startswith("EVERMATTER_"):
+            os.environ.setdefault("EXOMEM_" + name[len("EVERMATTER_"):], os.environ[name])
     for new, old in _ENV_ALIASES:
         if new not in os.environ and old in os.environ:
             os.environ[new] = os.environ[old]

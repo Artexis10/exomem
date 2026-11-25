@@ -118,7 +118,9 @@ def preload_local_dotenv_policy() -> None:
         return
     from dotenv import dotenv_values
 
-    values = dotenv_values(dotenv_path)
+    from .env_compat import canonical_settings
+
+    values = canonical_settings(dotenv_values(dotenv_path))
     for name in _RESOURCE_POLICY_ENV:
         value = values.get(name)
         if value is not None:

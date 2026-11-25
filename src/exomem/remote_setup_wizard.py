@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import doctor as doctor_module
+from . import env_compat
 
 # The keys this wizard owns in `.env`. Written/patched in place; every other
 # line (comments, unrelated keys) is preserved verbatim by `patch_env`.
@@ -176,13 +177,16 @@ def patch_env(existing: str, updates: dict[str, str | None]) -> str:
 
     An existing `KEY=` line is replaced IN PLACE (position, and any surrounding
     comments/blank lines, preserved); a new key is appended. A `None` value
-    removes every `KEY=` line instead. `export KEY=` lines count as `KEY` and
+    removes every `KEY=` line instead, including the same setting under another
+    prefix (`EVERMATTER_`, `KB_MCP_`). `export KEY=` lines count as `KEY` and
     keep their prefix when replaced. Comments and keys the wizard doesn't own
     are never touched. Always returns text ending in a single newline (empty
     input with no updates returns "").
     """
     remaining = {key: value for key, value in updates.items() if value is not None}
-    removed = {key for key, value in updates.items() if value is None}
+    removed = {
+        name for key, value in updates.items() if value is None for name in env_compat.names_for(key)
+    }
     out: list[str] = []
     for line in existing.splitlines():
         key, prefix = _env_line_key(line)
@@ -258,9 +262,7 @@ def _prompt_base_url(input_fn, print_fn, default: str) -> str:
 
 def _load_env(env_path: Path) -> None:
     """Reload `.env` into os.environ so doctor's remote checks see fresh values."""
-    from dotenv import load_dotenv
-
-    load_dotenv(env_path, override=True)
+    env_compat.load_dotenv(env_path, override=True)
 
 
 def run_remote_setup(
@@ -322,7 +324,7 @@ def run_remote_setup(
         return 2
 
     existing_text = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
-    existing = parse_env(existing_text)
+    existing = env_compat.canonical_settings(parse_env(existing_text))
 
     def _existing(key: str) -> str:
         return existing.get(key) or os.environ.get(key, "")
@@ -560,7 +562,8 @@ def run_remote_setup(
     # this run removed must not survive in the process environment (inherited
     # from the shell or service), or the gate would judge the old value.
     for removed_key in [key for key, value in updates.items() if value is None]:
-        os.environ.pop(removed_key, None)
+        for name in env_compat.names_for(removed_key):
+            os.environ.pop(name, None)
     load_env_fn(env_path)
     dr = doctor_fn(vault=vault_path, profile="remote", probe=probe)
     if dr.success:

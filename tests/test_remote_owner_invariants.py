@@ -105,6 +105,10 @@ def test_every_env_file_loader_reads_only_the_working_directory_env() -> None:
                 # Reloads the file the operator's setup command just wrote,
                 # at a location `run_remote_setup` already guarded before writing.
                 continue
+            if (name, function.name) == ("env_compat.py", "load_dotenv"):
+                # Maps the names of a path that its caller has already guarded;
+                # each caller is checked here, because `load_dotenv` is a loader name.
+                continue
             source = ast.unparse(function)
             if any(f"{helper}(" in source for helper in _GUARD_HELPERS):
                 continue

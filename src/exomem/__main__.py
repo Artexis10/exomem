@@ -54,7 +54,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from . import semantic_authoring
+from . import env_compat, semantic_authoring
 from .kbdir import managed_join, managed_root_rel
 
 
@@ -237,6 +237,7 @@ class _DotenvConflict(Exception):
 def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
     return (
         f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        f"(under that name or an alias: {', '.join(p + '*' for p in env_compat.ALIAS_PREFIXES)}) "
         "to a different value than this process's environment, so it is unclear which "
         "deployment to act on. Unset those variables, remove them from the .env, or run "
         "from a directory without that .env."
@@ -256,7 +257,9 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     The `.env` still wins over exported values. A command that writes
     credentials or sessions passes `refuse_conflicts`: when the `.env` would
     replace an exported value with a different one, it stops instead of
-    acting on a store the operator did not name. Other commands warn.
+    acting on a store the operator did not name. Other commands warn. The
+    comparison uses the `.env`'s names mapped to `EXOMEM_*`, so an
+    `EVERMATTER_X` line conflicts with an exported `EXOMEM_X`.
     """
     from . import cloud_cell
 
@@ -267,12 +270,12 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import dotenv_values, load_dotenv
+    from dotenv import dotenv_values
 
     # Names only: the values may be secrets.
     replaced = sorted(
         key
-        for key, value in dotenv_values(dotenv_path).items()
+        for key, value in env_compat.canonical_settings(dotenv_values(dotenv_path)).items()
         if value is not None and key in os.environ and os.environ[key] != value
     )
     if replaced and refuse_conflicts:
@@ -282,7 +285,7 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
             f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
             file=sys.stderr,
         )
-    load_dotenv(dotenv_path=dotenv_path, override=True)
+    env_compat.load_dotenv(dotenv_path=dotenv_path, override=True)
 
 
 def _build_auth_session_authority():

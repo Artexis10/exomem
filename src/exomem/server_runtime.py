@@ -67,7 +67,8 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 
     ``load_dotenv_func`` is injected from ``server.py`` so tests that monkeypatch
     ``exomem.server.load_dotenv`` still neutralize dotenv loading exactly as they
-    did before this extraction.
+    did before this extraction. The server passes ``env_compat.load_dotenv``, which
+    maps the file's ``EVERMATTER_*`` and ``KB_MCP_*`` names before the override.
     """
     from . import cloud_cell
 

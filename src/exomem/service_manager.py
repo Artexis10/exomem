@@ -1396,6 +1396,8 @@ class WorkerRuntime:
         """
         if not self.environment_files:
             return None
+        from . import env_compat
+
         self.environment_warnings = []
         values: dict[str, str] = {}
         for path in self.environment_files:
@@ -1407,7 +1409,7 @@ class WorkerRuntime:
                 self.environment_warnings.append(f"unreadable: {path.name}")
                 log.warning("managed service environment file could not be read")
                 continue
-            values.update(self._parse_environment(text))
+            values.update(env_compat.canonical_settings(self._parse_environment(text)))
         if not values:
             return None
         return {**os.environ, **values}

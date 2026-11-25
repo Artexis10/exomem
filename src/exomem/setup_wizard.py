@@ -36,6 +36,7 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .env_compat import canonical_settings
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
@@ -285,11 +286,11 @@ def _configured_mcp_url(
         if env_path is not None and env_path.is_file():
             from .remote_setup_wizard import parse_env
 
-            parsed = parse_env(env_path.read_text(encoding="utf-8"))
+            parsed = canonical_settings(parse_env(env_path.read_text(encoding="utf-8")))
             if "EXOMEM_BASE_URL" in parsed:
                 configured = parsed["EXOMEM_BASE_URL"]
-    if configured is None and "EXOMEM_BASE_URL" in environ:
-        configured = environ["EXOMEM_BASE_URL"]
+    if configured is None:
+        configured = canonical_settings(environ).get("EXOMEM_BASE_URL")
     return client_config.normalize_mcp_url(configured) if configured is not None else None
 
 

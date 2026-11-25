@@ -100,3 +100,103 @@ def test_legacy_env_reaches_a_real_reader(monkeypatch) -> None:
         assert embeddings.scene_frames_enabled()
     finally:
         os.environ.pop("EXOMEM_VIDEO_SCENE_FRAMES", None)
+
+
+def test_evermatter_prefix_alone_fills_the_internal_name(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE3", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE3", "product-value")
+
+    promoted = env_compat.promote_legacy()
+
+    assert "EXOMEM_RENAME_PROBE3" in promoted
+    assert os.environ["EXOMEM_RENAME_PROBE3"] == "product-value"
+
+
+def test_evermatter_prefix_beats_the_legacy_prefix(monkeypatch) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE4", raising=False)
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE4", "product-value")
+    monkeypatch.setenv("KB_MCP_RENAME_PROBE4", "legacy-value")
+
+    env_compat.promote_legacy()
+
+    assert os.environ["EXOMEM_RENAME_PROBE4"] == "product-value"
+
+
+def test_explicit_exomem_value_wins_and_the_warning_names_both_variables_not_values(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(env_compat, "_reported", set())
+    monkeypatch.setenv("EXOMEM_RENAME_PROBE5", "explicit-secret")
+    monkeypatch.setenv("EVERMATTER_RENAME_PROBE5", "alias-secret")
+
+    with caplog.at_level("WARNING", logger=env_compat.log.name):
+        env_compat.promote_legacy()
+        env_compat.promote_legacy()  # a later loader maps the same environment again
+
+    assert os.environ["EXOMEM_RENAME_PROBE5"] == "explicit-secret"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelname == "WARNING" and "RENAME_PROBE5" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "EXOMEM_RENAME_PROBE5" in warnings[0] and "EVERMATTER_RENAME_PROBE5" in warnings[0]
+    assert "explicit-secret" not in warnings[0] and "alias-secret" not in warnings[0]
+
+
+def test_a_dotenv_that_sets_both_prefixes_keeps_its_own_exomem_value(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_RENAME_PROBE6", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "EVERMATTER_RENAME_PROBE6=alias-value\nEXOMEM_RENAME_PROBE6=explicit-value\n",
+        encoding="utf-8",
+    )
+
+    env_compat.load_dotenv(env_file, override=True)
+
+    assert os.environ["EXOMEM_RENAME_PROBE6"] == "explicit-value"
+
+
+def test_a_dotenv_that_sets_only_evermatter_beats_an_exported_value_like_its_own_exomem_line(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_RENAME_PROBE7", "exported-value")
+    env_file = tmp_path / ".env"
+    env_file.write_text("EVERMATTER_RENAME_PROBE7=dotenv-value\n", encoding="utf-8")
+
+    env_compat.load_dotenv(env_file, override=True)
+
+    assert os.environ["EXOMEM_RENAME_PROBE7"] == "dotenv-value"
+
+
+def test_the_standalone_hooks_map_the_prefix_like_env_compat(monkeypatch) -> None:
+    """A hook cannot import env_compat, so it carries a copy of the EVERMATTER_ rule."""
+    from exomem._hooks import exomem_capture_nudge, exomem_retrieve_nudge
+
+    sample = {
+        "EVERMATTER_ONLY": "from-product-prefix",
+        "EVERMATTER_BOTH": "alias-loses",
+        "EXOMEM_BOTH": "explicit-wins",
+        "EXOMEM_UNRELATED": "kept",
+        "EVERMATTER_EMPTY": "",
+        "OTHER_SETTING": "ignored",
+    }
+    expected = {
+        name: value
+        for name, value in env_compat.canonical_settings(sample).items()
+        if name.startswith(env_compat.CANONICAL_PREFIX)
+    }
+    assert expected["EXOMEM_ONLY"] == "from-product-prefix"
+    assert expected["EXOMEM_BOTH"] == "explicit-wins"
+
+    for hook in (exomem_capture_nudge, exomem_retrieve_nudge):
+        monkeypatch.setattr(os, "environ", dict(sample))
+        hook._normalize_env_aliases()
+        produced = {
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith(env_compat.CANONICAL_PREFIX)
+        }
+        assert produced == expected, hook.__name__
