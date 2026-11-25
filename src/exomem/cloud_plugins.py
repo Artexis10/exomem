@@ -17,13 +17,18 @@ from . import package_skills, workflow_skills
 
 _SCHEMA_BASE = "https://agent-plugins.org/schemas/1.0.0/"
 
-# Each generated edition maps to its provider and whether it carries command hooks.
-# The Claude directory admits command hooks only from Verified organizations, so its
-# edition omits them; the hooked edition ships through the repository marketplace.
+# Each generated edition maps to its provider, whether it carries command hooks and
+# whether it bundles the Cloud MCP server. The Claude directory admits command hooks
+# only from Verified organizations, so its edition omits them; the hooked edition ships
+# through the repository marketplace. The connector edition carries the same hooks and
+# skills without a server, for an account that already connects Evermatter itself
+# (a self-hosted server or a separately added connector); a bundled server would add a
+# second, unauthenticated connection to the wrong account there.
 _EDITIONS = {
-    "claude": ("claude", False),
-    "claude-hooks": ("claude", True),
-    "openai": ("openai", False),
+    "claude": ("claude", False, True),
+    "claude-hooks": ("claude", True, True),
+    "claude-connector-hooks": ("claude", True, False),
+    "openai": ("openai", False, True),
 }
 # Claude's directory policy fixes this closed set of admitted file types; a licence,
 # readme and .gitignore are admitted by name. ICO is omitted: the published checklist
@@ -192,7 +197,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
     # The repository's own marketplace lists the hooked Claude edition under this name.
     repository = definition["repository"].removeprefix("https://github.com/")
     full_install = f"/plugin install {definition['name']} --marketplace {repository}"
-    for edition, (provider, hooked) in _EDITIONS.items():
+    for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
+        # An edition listed as its own marketplace plugin names itself in the definition.
+        identity_override = definition.get("edition_identities", {}).get(edition, {})
         target = destination / edition
         if target.exists():
             shutil.rmtree(target)
@@ -210,12 +217,22 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         assets.mkdir()
         shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
         shutil.copyfile(package_skills.APACHE_LICENSE, target / "LICENSE")
+        display_name = identity_override.get("display_name", definition["display_name"])
         readme = (
-            f"# {definition['display_name']}\n\n"
+            f"# {display_name}\n\n"
             f"{definition['description']}\n\n"
             "## Getting started\n\n"
-            "Install the plugin and connect your Evermatter account. Check the account "
-            "shown on the sign-in page before approving access. Then chat normally. "
+            + (
+                "Install the plugin and connect your Evermatter account. Check the account "
+                "shown on the sign-in page before approving access. "
+                if bundles_server
+                else "Connect Evermatter to your assistant first, as a connector or a custom "
+                "MCP server for your Evermatter Cloud account or your own Evermatter server. "
+                "This edition adds lifecycle hooks and skills and bundles no MCP server, so "
+                "it uses the Evermatter connection your account already has. Install the "
+                "full Evermatter plugin instead if you have not connected Evermatter. "
+            )
+            + "Then chat normally. "
             "When something is worth keeping, ask Evermatter to remember it; in a new chat, "
             "ask about what you saved or where you left off.\n\n"
             "For example:\n\n"
@@ -226,9 +243,15 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             "## Data handling\n\n"
             "MCP tool arguments, including user turns sent to `recall_context`, reach "
             "the authenticated Evermatter service. Reads return authorized account "
-            "content; successful writes persist governed memory in that account. OAuth "
-            "selects the account, and this package reaches Evermatter only through that "
-            "admitted MCP connection. It does not import a local vault or share "
+            "content; successful writes persist governed memory in that account. "
+            + (
+                "OAuth selects the account, and this package reaches Evermatter only through "
+                "that admitted MCP connection. "
+                if bundles_server
+                else "The connection you added selects the account, and this package reaches "
+                "Evermatter only through that admitted MCP connection. "
+            )
+            + "It does not import a local vault or share "
             "authorization between accounts. Your AI provider also processes the "
             "conversation and tool results under its policies.\n\n"
             "## Surface support\n\n"
@@ -262,7 +285,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(
                     "\n## Claude lifecycle hooks\n\n"
-                    f"To install this plugin in Claude Code, run `{full_install}`. "
+                    "To install this plugin in Claude Code, run "
+                    f"`/plugin install {identity_override.get('name', definition['name'])} "
+                    f"--marketplace {repository}`. "
                     "On supported Cowork/Claude Code surfaces, trust the plugin's command "
                     "hooks through the normal client approval flow. They invoke canonical "
                     "Python scripts directly and require a real `python3` executable on "
@@ -274,12 +299,16 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                     "transcript and workspace metadata for cadence and structural "
                     "continuation, keeping bounded state in `CLAUDE_PLUGIN_DATA`, not "
                     "inside the versioned package. Hook logs contain metadata only, "
-                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat.\n"
+                    "not prompt or assistant snippets. Hooks do not execute in Claude Chat. "
+                    "By default the capture check runs after a turn that lands work (a commit, "
+                    "push, merge, pull request or a file handed over). To check after every "
+                    "substantial reply instead, set `EXOMEM_PROMINENCE=maximal` in the "
+                    "session's environment.\n"
                 )
         if provider == "claude":
             manifest = {
-                "name": definition["name"],
-                "displayName": definition["display_name"],
+                "name": identity_override.get("name", definition["name"]),
+                "displayName": display_name,
                 "description": definition["description"],
                 "version": identity["version"],
                 "author": definition["author"],
@@ -298,11 +327,12 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path.write_bytes(_json_bytes(manifest))
             # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
             # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).
-            (target / ".mcp.json").write_bytes(
-                _json_bytes(
-                    {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
+            if bundles_server:
+                (target / ".mcp.json").write_bytes(
+                    _json_bytes(
+                        {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
+                    )
                 )
-            )
             if not hooked:
                 _validate_claude_directory(target)
         else:

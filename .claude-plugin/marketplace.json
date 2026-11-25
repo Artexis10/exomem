@@ -27,6 +27,11 @@
       "name": "exomem-cloud",
       "source": "./plugins/cloud/generated/claude-hooks",
       "category": "knowledge"
+    },
+    {
+      "name": "evermatter-hooks",
+      "source": "./plugins/cloud/generated/claude-connector-hooks",
+      "category": "knowledge"
     }
   ]
 }

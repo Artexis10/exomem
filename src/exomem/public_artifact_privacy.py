@@ -245,6 +245,7 @@ DEFAULT_BINARY_PROVENANCE: tuple[BinaryProvenance, ...] = (
             "plugins/cloud/assets",
             "plugins/cloud/generated/claude/assets",
             "plugins/cloud/generated/claude-hooks/assets",
+            "plugins/cloud/generated/claude-connector-hooks/assets",
             "plugins/cloud/generated/openai/assets",
             "assets",
         )
