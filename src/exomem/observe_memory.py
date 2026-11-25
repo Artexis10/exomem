@@ -785,17 +785,6 @@ def observe_memory(
         after_body,
         today=authored_day,
     )
-    if expected_unit is not None and origin_block is None:
-        # The preflight reads the unit back from this same source, after it has built the corpus.
-        # Reading it back from this one page first refuses a unit that cannot round-trip at once.
-        proposed_page = semantic_writes.proposed_page_state(
-            vault_root,
-            path=editable.rel_path,
-            before_source=editable.original_text,
-            after_source=after_source,
-        )
-        if proposed_page is not None:
-            _round_tripped_unit(proposed_page.document, expected_unit)
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
     # commits, so it stays entirely uninstrumented and byte-identical.
@@ -1489,6 +1478,9 @@ def refusal_before_page(
     check_by: str | None,
     as_of: str | None,
     until: str | None,
+    tags: list[str] | None,
+    context: str | None,
+    relations: list[dict[str, Any]] | None,
     validate_only: bool,
 ) -> ObserveMemoryError | None:
     """The compact-metadata refusal that an add's own arguments decide, or None.
@@ -1496,9 +1488,11 @@ def refusal_before_page(
     `observe_memory` reaches this refusal only after it has found and read the page, and finding a
     page by memory ref can walk the whole vault. A new unit's kind and governed fields are all in
     the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
-    update keeps the unit's own kind and form, which only the page knows. A call whose category,
-    dates or date order `observe_memory` would refuse is left to it, so that refusal still wins; one
-    decided by the page (a missing path, an unknown reference, a stale hash) comes after this one.
+    update keeps the unit's own kind and form, which only the page knows. Every refusal that
+    `observe_memory` decides from the arguments before this one (category, tags, context, relations,
+    dates and date order) is left to it, so it still wins. A refusal decided by the page (a missing
+    path, an unknown reference, a stale hash, the page's verdict vocabulary, relations the page
+    cannot lift) comes after this one.
 
     `page` names the page when it can do so without walking the vault, else None. Only the
     remediation reads the page, to list the rich kinds it admits; a page that `page` cannot name,
@@ -1512,10 +1506,6 @@ def refusal_before_page(
         return None
     if category is None or not str(category).strip() or content is None:
         return None
-    try:
-        origin_bindings.extract_origin_metadata(str(content))
-    except provenance.OriginError:
-        return None
     passed = _compact_names_passed({
         "operation": op, "kind": kind,
         **dict(zip(_GOVERNED_ARGUMENT_KEYS, (verdict, check_by, as_of, until), strict=True)),
@@ -1523,8 +1513,15 @@ def refusal_before_page(
     if not passed:
         return None
     try:
-        # Argument checks that `observe_memory` makes before this refusal keep winning.
+        origin_bindings.extract_origin_metadata(str(content))
+    except provenance.OriginError:
+        return None
+    try:
+        # The argument checks that `observe_memory` makes before this refusal, in its order.
         _canonical_category(str(category))
+        _canonical_tags(tags or [])
+        _canonical_context(context)
+        _canonical_relations(relations or [])
         dates = {
             key: _canonical_date(str(value), key)
             for key, value in (("as_of", as_of), ("until", until), ("check_by", check_by))

@@ -1304,6 +1304,9 @@ def test_an_early_compact_refusal_still_lets_a_malformed_date_win(tmp_path: Path
     with pytest.raises(ValueError) as reversed_dates:
         commands.op_observe_memory(tmp_path, as_of="2026-07-02", until="2026-07-01", **arguments)
     assert str(reversed_dates.value).startswith("INVALID_SEMANTIC_DATE_ORDER")
+    with pytest.raises(ValueError) as bad_tag:
+        commands.op_observe_memory(tmp_path, as_of="2026-07-01", tags=["bad tag!"], **arguments)
+    assert str(bad_tag.value).startswith("INVALID_SEMANTIC_TAG")
 
 
 def test_observe_accepts_legacy_vault_reference_inside_governed_kb(

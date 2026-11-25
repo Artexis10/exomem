@@ -1297,7 +1297,12 @@ def owner_without_walk(vault_root: Path, value: str) -> str | None:
         answered, _snapshot = _owners_from_projection(root, (memory_id,))
         if answered is None:
             return None
-        projection = _settled_projection(root, _pending_reference_projection(root))
+        from .find import RetrievalIndexWarming
+
+        try:
+            projection = _settled_projection(root, _pending_reference_projection(root))
+        except RetrievalIndexWarming:
+            return None  # pending custody is not readable yet: the lookup did not answer
         if projection is not None and projection.blocked_paths:
             return None
         rows = list(answered[memory_id])

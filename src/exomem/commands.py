@@ -9320,6 +9320,9 @@ def op_observe_memory(
         check_by=check_by,
         as_of=as_of,
         until=until,
+        tags=tags,
+        context=context,
+        relations=relations,
         validate_only=validate_only,
     )
     if early is not None:
