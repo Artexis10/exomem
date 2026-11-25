@@ -249,13 +249,18 @@ def _plan_collection(root, conn, entry, store_id, plan_id, parents, *, views=Tru
         "AND operation!='legacy_import'", (cid,)).fetchone()
     row = {"collection_id": cid, "path": manifest_path, "layout": layout,
            "rows": conn.execute("SELECT COUNT(*) FROM items WHERE collection_id=?", (cid,)).fetchone()[0]}
-    # Files keep no timeline, as they keep no past versions, so the plan names the facts the export drops.
-    dropped = conn.execute(
+    # Files keep no timeline, as they keep no past versions, so the plan names each kind of fact the export drops.
+    # Every timeline_points row is either a past point or a correction, so the two counts partition that table.
+    stated, past, corrections = conn.execute(
         "SELECT (SELECT COUNT(*) FROM item_rows i JOIN version_effective v ON v.row_id=i.row_id "
-        "WHERE i.collection_id=?1)+(SELECT COUNT(*) FROM item_rows i JOIN timeline_points p ON p.row_id=i.row_id "
-        "WHERE i.collection_id=?1)", (cid,)).fetchone()[0]
-    if dropped:
-        row["timeline_facts_dropped"] = dropped
+        "WHERE i.collection_id=?1), "
+        "(SELECT COUNT(*) FROM item_rows i JOIN timeline_points p ON p.row_id=i.row_id "
+        "WHERE i.collection_id=?1 AND p.corrects_txn IS NULL), "
+        "(SELECT COUNT(*) FROM item_rows i JOIN timeline_points p ON p.row_id=i.row_id "
+        "WHERE i.collection_id=?1 AND p.corrects_txn IS NOT NULL)", (cid,)).fetchone()
+    if stated or past or corrections:
+        row["timeline_facts_dropped"] = {"stated_effective_times": stated, "past_points": past,
+                                         "corrections": corrections}
     rendered, targets, resolved = None, {}, {}
     in_files = manifest.storage.strategy != collections.SQLITE_STORAGE
     try:

@@ -1088,7 +1088,7 @@ def test_an_export_preview_names_the_timeline_facts_it_drops(env, capsys):  # no
     assert run_export(root, "--dry-run", operator=False) == 0
 
     dropped = {row["path"]: row.get("timeline_facts_dropped") for row in printed(capsys)["collections"]}
-    assert dropped.pop(WORK) == 2  # the past point and the effective time its write stated
+    assert dropped.pop(WORK) == {"stated_effective_times": 1, "past_points": 1, "corrections": 0}
     assert set(dropped.values()) == {None}
 
 
