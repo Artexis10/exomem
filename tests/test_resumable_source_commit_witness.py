@@ -151,8 +151,11 @@ _WORKER = dedent(
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         status = upload_sessions.open_session(root, session_id, secret).view()
-        if status["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED) and session.part.exists():
-            # The receipt is durable before the daemon removes its staged bytes. Let it finish.
+        if status["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED) and (
+            session.part.exists() or session_id in upload_sessions._RUNNING
+        ):
+            # The receipt is durable before the daemon removes its staged bytes and releases its
+            # commit credit; exiting earlier kills that daemon. It forgets the session last.
             time.sleep(0.05)
             continue
         if status["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED, upload_sessions.RETRYABLE):
@@ -349,6 +352,6 @@ def test_a_source_resumed_at_the_space_floor_keeps_its_receipt_or_unknown_outcom
         assert upload.part.read_bytes() == data
     credits = vault_state_dir(vault) / "upload-commit-credit.sqlite"
     with closing(sqlite3.connect(credits)) as conn:
-        # The resumed worker's log names any credit cleanup that failed and was deferred to expiry.
+        # A failed credit cleanup is logged and deferred to expiry; the worker's log names it.
         leftover = conn.execute("SELECT peak FROM credits WHERE session = ?", (upload.id,)).fetchone()
         assert leftover is None, resumed.stderr
