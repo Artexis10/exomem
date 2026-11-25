@@ -42,6 +42,7 @@ The filer runs `file` through `writer_lease.invoke_command`, under the principal
 | `MUTATION_BUSY`, acknowledgement pending | Back off with a bounded exponential delay, at most 5 tries per hour, then park until the next start or `file` call. |
 | `KB_NOT_INITIALIZED` | The vault has no Knowledge Base yet, and no one is present to create it. Make one `start` call with `initialize_kb`, under its own identity, then carry on with `file`. |
 | The login that registered the stage ended | Park with code `IMPORT_FILING_LOGIN_ENDED` and a `login` need. A `file` call with `wait: false` from a valid login resumes it. |
+| `CLOUD_CELL_READ_ONLY` | The cell serves read-only for a while, and the refusal comes before any work. Park with a `read_only` need and keep the stored call. Check again every minute; a `file` call or a restart checks sooner. |
 | Any other error | Record the code and reason; park with a `support` need. |
 | A discard of the stage | On the next start the residual exists; record `discarded`; leave the list. |
 
@@ -68,7 +69,7 @@ After each call the filer writes the stage record. A status read with `path` set
 - `left_out` in `progress` is 0 until `done`, then the number of members that adoption left out. `remaining` is `total - filed - skipped_duplicates - failed` before `done`. On `done` it is `total - filed - skipped_duplicates - left_out`, because each failed member is also left out. It is never below 0.
 - The `left_out` object is present only on `done`. When the filer sees `done`, it reads the members that adoption did not file (`adoption_run.unfiled_members`) once and stores them in the record, so the view stays O(1). `by_reason` counts every member. `items` lists up to 100, sorted by path. `truncated` is true when more exist.
 - Codes in `left_out` and in `stop.code` are the cell's closed sets (`adoption_consume.STAYS` and the stop table). Home words each code it knows; an unknown code shows a generic "Not filed" with the code.
-- `needs` is a list of `{need}` objects, empty unless the stage is `parked`. `free_space` carries `bytes`, the next chunk plus the reserve that the volume must hold, and `null` when the stop does not know them. `login` says the registering login ended. `support` is any other stop.
+- `needs` is a list of `{need}` objects, empty unless the stage is `parked`. `free_space` carries `bytes`, the next chunk plus the reserve that the volume must hold, and `null` when the stop does not know them. `login` says the registering login ended. `read_only` says the cell serves read-only, and the filer checks again by itself. `support` is any other stop.
 - `person` is the cell's own text, unchanged, for agents. Home does not show it.
 - `rate` is files filed or skipped per minute over the newest ten samples. The filer takes one sample when it registers a stage that nothing has filed (the start scan and a wake call), and one after each call. A stage that a foreground `file` call registered has no baseline, because the cell cannot know what that call filed. `rate` is absent until two samples exist and the window covers filed work, so a stage never shows 0.0 for work it did. `over_calls` is the number of samples in the window.
 

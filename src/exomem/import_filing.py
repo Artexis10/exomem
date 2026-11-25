@@ -56,9 +56,13 @@ _STALE_CONTINUATION = "INVALID_CONTINUATION"
 #: The cell is not warm yet: a wait, not a try.
 _WARMING = "MUTATION_WARMING"
 
-#: The three things the filing view says the person has to do before the stage can go on.
+#: The cell refuses a write while it serves read-only: a wait that ends when the cell leaves that mode.
+_READ_ONLY = "CLOUD_CELL_READ_ONLY"
+
+#: What the filing view says a parked stage waits for: free space, a login, the cell's read-only mode to end, or support.
 NEED_FREE_SPACE = "free_space"
 NEED_LOGIN = "login"
+NEED_READ_ONLY = "read_only"
 NEED_SUPPORT = "support"
 #: The need that a `file` reply's `person` entry names for a stop on free space (`adoption_run._filing_reply`).
 _PERSON_FREE_SPACE = "free_space"
@@ -70,6 +74,8 @@ FIRST_BACKOFF_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 300.0
 #: A stage that stopped for free space asks again this often; a `file` call or a restart asks sooner.
 SPACE_CHECK_SECONDS = 3600.0
+#: A stage that waits on a read-only cell asks again this often; a `file` call or a restart asks sooner.
+READ_ONLY_CHECK_SECONDS = 60.0
 #: What a fault that no call explains waits before the filer looks at the stage again.
 _FAULT_BACKOFF_SECONDS = 60.0
 _IDLE_WAIT_SECONDS = 3600.0
@@ -527,6 +533,10 @@ class Filer:
                 self.vault_root, import_id,
                 lambda held: held.update(state=DISCARDED, call=None, stop=None, needs=[], person=[]))
             return None
+        if code == _READ_ONLY:
+            # The refusal comes before any work, so the stored call stays and its repeat has the same identity.
+            self._park(import_id, code, reason, person=[], needs=[{"need": NEED_READ_ONLY}])
+            return READ_ONLY_CHECK_SECONDS
         self._park(import_id, code, reason, person=[], needs=[{"need": NEED_SUPPORT}], clear_call=True)
         return None
 

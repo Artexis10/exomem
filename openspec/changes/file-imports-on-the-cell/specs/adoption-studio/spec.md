@@ -73,12 +73,17 @@ A `done` filing view SHALL carry `left_out`: the number of left-out members by r
 
 ### Requirement: A stop states what it needs
 
-The filing view's `needs` SHALL be a list of objects, empty unless the stage is `parked`. A free-space stop SHALL give `{need: "free_space", bytes}` with the bytes that the next chunk and the reserve need when the stop knows them, else null. An ended login SHALL give `{need: "login"}`. Any other stop SHALL give `{need: "support"}`.
+The filing view's `needs` SHALL be a list of objects, empty unless the stage is `parked`. A free-space stop SHALL give `{need: "free_space", bytes}` with the bytes that the next chunk and the reserve need when the stop knows them, else null. An ended login SHALL give `{need: "login"}`. A cell that serves read-only SHALL give `{need: "read_only"}`, and the filer SHALL check it again on a fixed interval. Any other stop SHALL give `{need: "support"}`.
 
 #### Scenario: Filing stops for lack of room
 
 - **WHEN** the next chunk and the reserve do not fit the free space
 - **THEN** `needs` holds `free_space` with the bytes that the volume must hold
+
+#### Scenario: The cell serves read-only
+
+- **WHEN** a filing call is refused with `CLOUD_CELL_READ_ONLY`
+- **THEN** `needs` holds `read_only`, the filer checks again on its own, and the stage is filed once the cell leaves read-only mode
 
 ### Requirement: A rate covers filed work only
 

@@ -230,6 +230,29 @@ def test_a_free_space_stop_parks_the_stage_and_a_later_call_resumes_it(vault: Pa
     assert len(_sources(vault)) == len(FILES)
 
 
+def test_a_read_only_cell_parks_the_stage_for_a_later_check_and_files_it_when_the_mode_ends(vault: Path, monkeypatch) -> None:
+    """A cell that serves read-only for a while must not leave the stage stopped until a person calls or the pod restarts."""
+    import_id = _stage(vault)
+    filer = import_filing.Filer(vault)
+    filer.register(import_id, principal=_owner(), surface=None)
+    monkeypatch.setenv("EXOMEM_CLOUD_READ_ONLY", "1")
+
+    delay = filer.run_once(import_id)
+    parked = import_filing.read_view(vault, import_id)
+
+    assert delay == import_filing.READ_ONLY_CHECK_SECONDS
+    assert parked["state"] == "parked" and parked["stop"]["code"] == "CLOUD_CELL_READ_ONLY"
+    assert parked["needs"] == [{"need": "read_only"}]
+    assert _sources(vault) == []
+
+    monkeypatch.delenv("EXOMEM_CLOUD_READ_ONLY")
+    _drive(filer, import_id)  # the next scheduled check finds the cell writable
+
+    done = import_filing.read_view(vault, import_id)
+    assert done["state"] == "done" and done["stop"] is None and done["needs"] == []
+    assert len(_sources(vault)) == len(FILES)
+
+
 def test_a_vault_with_no_knowledge_base_is_created_by_the_filer_and_the_stage_is_filed_once(vault: Path) -> None:
     """A first Home import on a new cell has no Knowledge Base: `file` refuses it, and no one is there to start."""
     shutil.rmtree(vault / "Knowledge Base")
