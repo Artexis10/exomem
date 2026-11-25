@@ -39,8 +39,8 @@ from packaging.version import Version
 
 # GitHub's image attestation protocol fixes this predicate and these field formats.
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
-# PyPI's JSON API can trail the first upload of a new project by minutes, so qualification
-# observes it with a backoff that stays bounded (300 s in total) inside the job timeout.
+# PyPI's JSON API can trail the first upload of a new project by more than a minute, so
+# qualification observes it with a bounded backoff that fits inside the job timeout.
 PYPI_OBSERVATION_PAUSES = (10, 20, 30, 60, 60, 60, 60)
 
 

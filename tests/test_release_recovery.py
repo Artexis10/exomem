@@ -112,7 +112,7 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
         }
         for name in names
     ]
-    # A new PyPI project can stay invisible for minutes after its first upload (one release
+    # A new PyPI project can stay invisible for over a minute after its first upload (one release
     # on 2026-11-24 failed 55 s in): six empty observations outlast the old 50 s window.
     observations = iter([[], [], [], [], [], [], urls])
     monkeypatch.setattr(recovery, "pypi_files", lambda *args: next(observations))

@@ -401,8 +401,9 @@ The receipt reports the verification attempt separately. Manual qualification
 uses `--attempt` for the original build and `--verification-attempt` for the
 publication retry to inspect. Verification defaults to the original attempt.
 The helper verifies actual bytes from the producer, GitHub Release, and PyPI.
-It retries missing PyPI distributions for at most six observations, ten seconds
-apart. Conflicting immutable bytes fail immediately.
+It retries missing PyPI distributions with a bounded backoff
+(`PYPI_OBSERVATION_PAUSES` in `infra/scripts/release_recovery.py`, five minutes
+in total). Conflicting immutable bytes fail immediately.
 
 Python qualification leaves images unqualified and consumer verification
 unverified. It grants no installation or rollout authority. Report source-ready
