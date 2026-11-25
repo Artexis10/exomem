@@ -12,11 +12,13 @@ cannot read the target collection gets the refusal for a collection that does no
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from contextlib import closing
 from dataclasses import dataclass
 
+from .. import state_paths
 from .. import structured_collections as collections
 from ..collection_store import derived_rows, governance
 from .errors import QueryError
@@ -44,6 +46,150 @@ def unresolved_values(pairs: Counter) -> dict:
     entries.sort(key=lambda item: (-item["rows"], item["reference"], item["value"]))
     return {"values": entries[:MAX_UNRESOLVED_VALUES],
             "truncated": len(entries) > MAX_UNRESOLVED_VALUES, "total": len(entries)}
+
+
+def row_released(session, lookup, item_key: str) -> bool:
+    """Whether the caller may read the row ``item_key`` of an admitted collection, decided as `admit` decides it.
+
+    ``lookup`` is the collection's `LookupAdmission`. A row whose basis cannot be built is not released,
+    and reads like a withheld one.
+    """
+    if lookup.uniform:
+        return True
+    operation = session._authorization
+    session.check()
+    try:
+        with closing(governance.iter_subjects(session.connection, lookup.collection_id,
+                                              operation.logical_vault_id, row_key=item_key,
+                                              include_held=False)) as subjects:
+            subject = next(subjects, None)
+        return subject is not None and operation.decision(subject).level >= 6
+    except (ValueError, TypeError, collections.CollectionError):
+        return False
+
+
+def rows_released(session, lookup, row_ids: Iterable[int]) -> set[int]:
+    """The rows of ``row_ids`` the caller may read in an admitted collection, each decided as `row_released` decides it.
+
+    One read serves every row, so the cost is the rows asked for, never a statement a row. Rows of the
+    store whose decision inputs are equal share one decision (`OperationAuthorization.released_rows`), so a
+    policy that names thousands of rows costs a lookup a row. A row whose basis cannot be built is not
+    released: when one stops the shared read, the rows it left are decided one by one, so that row alone
+    reads like a withheld one.
+    """
+    wanted = sorted(set(row_ids))
+    if lookup.uniform or not wanted:
+        return set(wanted)
+    # Every row of the batch is decided for one reader against one host configuration, so the connector
+    # snapshot that each decision reads is taken once for the batch (`state_paths.resolution_scope`).
+    with state_paths.resolution_scope():
+        return _rows_released(session, lookup, wanted)
+
+
+def row_filter(session, lookup) -> governance.RowFilter | None:
+    """Which rows of an admitted collection the caller may read, as one statement tests each row, or None.
+
+    None leaves each row to `rows_released`: a uniform collection needs no filter, and one whose rows
+    are outside the store, or that `OperationAuthorization.row_filter` cannot describe, is decided by row.
+    The decisions that build a filter are charged as row visits.
+    """
+    if lookup.uniform or lookup.source is not derived_rows.STORE:
+        return None
+    session.check()
+    try:
+        with state_paths.resolution_scope():
+            found = session._authorization.row_filter(lookup.collection_id)
+    except (ValueError, TypeError, collections.CollectionError):
+        return None
+    if found is not None:
+        session.charge_visits(found.decisions)
+    return found
+
+
+def _rows_released(session, lookup, wanted: list[int]) -> set[int]:
+    operation = session._authorization
+    released, decided = set(), set()
+    session.check()
+    if lookup.source is derived_rows.STORE:
+        try:
+            released = operation.released_rows(lookup.collection_id, wanted)
+        except (ValueError, TypeError, collections.CollectionError):
+            pass  # each row is decided by itself below, so a row that cannot be read alone stays withheld
+        else:
+            session.check()
+            return released
+    try:
+        with closing(governance.iter_subjects(session.connection, lookup.collection_id,
+                                              operation.logical_vault_id, row_ids=wanted,
+                                              include_held=False)) as subjects:
+            for subject in subjects:
+                session.check()
+                decided.add(subject.row_id)
+                if operation.decision(subject).level >= 6:
+                    released.add(subject.row_id)
+        return released
+    except (ValueError, TypeError, collections.CollectionError):
+        pass
+    left = [row_id for row_id in wanted if row_id not in decided]
+    keys = dict(session.connection.execute(
+        f"SELECT row_id, item_key FROM {lookup.source.items} WHERE row_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(left),)).fetchall())
+    return released | {row_id for row_id in left if row_id in keys and row_released(session, lookup, keys[row_id])}
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRow:
+    """A row that a canonical row ref names and the caller may read."""
+
+    lookup: object  # the collection's `LookupAdmission`
+    row_id: int
+    item_key: str
+
+
+def resolve_row(session, ref: tuple[str, str, str]) -> ResolvedRow | None:
+    """The row that ``ref`` (profile, collection id, item key, as `parse_row_ref` reads it) names, if the caller may read it.
+
+    A missing row, a withheld row, a withheld collection, a row of another profile and a collection whose
+    item keys the caller may not read all answer None and cost one visit, so the answer shows nothing
+    about rows the caller may not read.
+    """
+    profile, collection_id, item_key = ref
+    session.charge_visits(1)
+    try:
+        lookup = session.admit_lookup(collection_id)
+    except QueryError as error:
+        if error.code == "COLLECTION_NOT_FOUND":
+            return None
+        raise
+    if (lookup.manifest.semantic_profile != profile or lookup.source is not derived_rows.STORE
+            or lookup.plan.item_key_withheld):
+        return None
+    session.check()
+    row = session.connection.execute(
+        f"SELECT row_id FROM {lookup.source.items} WHERE collection_id=? AND item_key=?",
+        (collection_id, item_key)).fetchone()
+    if row is None or not row_released(session, lookup, item_key):
+        return None
+    return ResolvedRow(lookup, row[0], item_key)
+
+
+def row_label(session, row: ResolvedRow) -> str:
+    """What names a resolved row to the caller: its natural-key values they may read, else its item key."""
+    plan = row.lookup.plan
+    # A natural key the caller may not read never labels a row; the item key stands in for it.
+    key_fields = () if plan.natural_key_withheld else tuple(
+        name for name in row.lookup.manifest.schema.natural_key if name in plan.whole_fields)
+    values = session.lookup_values(row.lookup.collection_id, row.row_id, key_fields) if key_fields else {}
+    label = " / ".join(str(values[name]) for name in key_fields if values.get(name) not in (None, ""))
+    return label or row.item_key
+
+
+def row_labeller(session):
+    """The label of the row a canonical row ref names, or None, for a link projector reading as ``session`` reads."""
+    def label(ref: tuple[str, str, str]) -> str | None:
+        found = resolve_row(session, ref)
+        return None if found is None else row_label(session, found)
+    return label
 
 
 def bind(session, source_collection_id: str, dotted_path: str) -> BoundReference:
@@ -134,7 +280,8 @@ class BoundReference:
                 operation = self.session._authorization
                 # The session's own authorization snapshot decides links, as it decides rows.
                 self._links = _LinkProjector.create(self.session._root, self.manifest, policy=operation.policy,
-                                                    authorize_path=operation.allows_file)
+                                                    authorize_path=operation.allows_file,
+                                                    row_label=row_labeller(self.session))
             values = self._links(values)
         return values
 
@@ -174,19 +321,7 @@ class BoundReference:
 
     def _released(self, item_key: str) -> bool:
         """Whether the caller may read this target row, decided as `admit` decides it."""
-        if self._target.uniform:
-            return True
-        operation = self.session._authorization
-        self.session.check()
-        try:
-            with closing(governance.iter_subjects(self.session.connection, self.collection_id,
-                                                  operation.logical_vault_id, row_key=item_key,
-                                                  include_held=False)) as subjects:
-                subject = next(subjects, None)
-            return subject is not None and operation.decision(subject).level >= 6
-        except (ValueError, TypeError, collections.CollectionError):
-            # A row whose basis cannot be built is not released, and reads like a withheld one.
-            return False
+        return row_released(self.session, self._target, item_key)
 
 
 def bind_inverse(session, source_id: str, dotted: str, queried_id: str) -> BoundInverse:
@@ -256,21 +391,7 @@ class BoundInverse:
 
     def released(self, item_key: str) -> bool:
         """Whether the caller may read this source row, decided as `admit` decides it."""
-        if self._source.uniform:
-            return True
-        operation = self.session._authorization
-        self.session.check()
-        from contextlib import closing
-
-        from ..collection_store import governance
-        try:
-            with closing(governance.iter_subjects(self.session.connection, self.collection_id,
-                                                  operation.logical_vault_id, row_key=item_key,
-                                                  include_held=False)) as subjects:
-                subject = next(subjects, None)
-            return subject is not None and operation.decision(subject).level >= 6
-        except (ValueError, TypeError, collections.CollectionError):
-            return False
+        return row_released(self.session, self._source, item_key)
 
     def read(self, row_id: int) -> dict:
         """The source row's released fields, under the source field plan."""
@@ -282,6 +403,7 @@ class BoundInverse:
         if any(name in schema and _LinkProjector.carries_links(schema[name]) for name in values):
             operation = self.session._authorization
             links = _LinkProjector.create(self.session._root, self.manifest, policy=operation.policy,
-                                          authorize_path=operation.allows_file)
+                                          authorize_path=operation.allows_file,
+                                          row_label=row_labeller(self.session))
             values = links(values)
         return values

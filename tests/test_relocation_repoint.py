@@ -198,7 +198,7 @@ def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, mon
         new = f"{folder}/Tuning/{name}"
         work = call(root, "record_memory", action="query", collection=WORK)
         row = next(row for row in work["rows"] if row["title"] == "One")
-        # A plain path under the knowledge-base folder, as a row an agent wrote may hold it.
+        # A plain path under the knowledge-base folder, as an agent may write it.
         link = old.removeprefix("Knowledge Base/")
         call(root, "record_memory", action="update", collection=WORK, item_key=row["record_id"],
              changes={"related": link}, why="link the note",
@@ -215,7 +215,11 @@ def test_a_preview_names_the_outcome_of_rows_the_collection_store_keeps(env, mon
 
         assert preview["store_rows"] == sealed["store_rows"] == move_file.KEPT
         rows = call(root, "record_memory", action="query", collection=WORK)["rows"]
-        assert next(row for row in rows if row["title"] == "One").get("related") == link
+        # The write stored the note's ref for the path it was given, so the link follows the note.
+        related = next(row for row in rows if row["title"] == "One").get("related")
+        moved = call(root, "read_memory", path=new)
+        assert related == moved["ref"]
+        assert call(root, "read_memory", path=related)["path"] == new
         assert call(root, "read_memory", path=link)["path"] == new
     finally:
         service.stop()

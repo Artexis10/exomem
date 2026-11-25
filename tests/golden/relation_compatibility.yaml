@@ -13,18 +13,18 @@ relations:
   blocks: {direction: directed, origins: [semantic_relation]}
   caused_by: {direction: directed, inverse: causes, origins: [semantic_relation]}
   causes: {direction: directed, inverse: caused_by, origins: [semantic_relation]}
-  cites: {direction: directed, origins: [semantic_relation]}
+  cites: {direction: directed, origins: [collection_link, semantic_relation]}
   contains: {direction: directed, inverse: part_of, origins: [semantic_relation]}
   contradicts: {direction: symmetric, origins: [semantic_relation]}
   depends_on: {direction: directed, origins: [semantic_relation]}
-  derived_from: {direction: directed, origins: [frontmatter, semantic_block, semantic_relation, semantic_unit]}
+  derived_from: {direction: directed, origins: [collection_link, frontmatter, semantic_block, semantic_relation, semantic_unit]}
   duplicates: {direction: symmetric, origins: [semantic_relation]}
-  evidenced_by: {direction: directed, origins: [frontmatter, semantic_relation]}
+  evidenced_by: {direction: directed, origins: [collection_link, frontmatter, semantic_relation]}
   extends: {direction: directed, origins: [semantic_relation]}
   follows: {direction: directed, inverse: precedes, origins: [semantic_relation]}
   implements: {direction: directed, origins: [semantic_relation]}
   kin_of: {direction: symmetric, origins: [semantic_relation]}
-  links_to: {direction: directed, origins: [frontmatter, semantic_relation, wikilink]}
+  links_to: {direction: directed, origins: [collection_link, frontmatter, semantic_relation, wikilink]}
   located_at: {direction: directed, origins: [semantic_relation]}
   member_of: {direction: directed, origins: [semantic_relation]}
   mentions: {direction: directed, origins: [semantic_relation]}

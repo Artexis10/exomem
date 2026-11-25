@@ -33,6 +33,7 @@ from . import (
 )
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .collection_store import link_declarations
 from .kbdir import managed_join
 
 log = logging.getLogger(__name__)
@@ -3072,6 +3073,7 @@ def _validate_revision_manifest(
         )
     record_formats.validate_storage_contract(proposed)
     record_governance.require_proposed_manifest_visibility(root, proposed)
+    link_declarations.require_relations(root, proposed, current)
     newly_required = _newly_required(current, proposed)
     for record in snapshot.records:
         _validate_values(proposed, record.values, written=newly_required)
@@ -3462,6 +3464,7 @@ def _preflight_collection_create(
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
     record_formats.validate_storage_contract(manifest)
+    link_declarations.require_relations(root, manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
     if source.exists() or _casefold_alias(source):
@@ -3501,6 +3504,7 @@ def _normalized_manifest_contract(
                 **({"enum": list(spec.enum)} if spec.enum else {}),
                 **({"units": list(spec.units)} if spec.units else {}),
                 **({"link_kind": spec.link_kind} if spec.link_kind is not None else {}),
+                **({"relation": spec.relation} if spec.relation is not None else {}),
                 **({"offset": spec.offset} if spec.offset is not None else {}),
             }
             for name, spec in manifest.schema.fields.items()
