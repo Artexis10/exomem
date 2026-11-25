@@ -11454,29 +11454,29 @@ def _carrying_capture_sweep(vault_root: Path, result: Any) -> Any:
     return {**result, "capture_sweep": block}
 
 
-def _carrying_undeclared_referents(vault_root: Path, result: Any) -> Any:
-    """Attach the names a batch's pages newly linked with no page behind them, each once.
+def _carrying_write_advisory(vault_root: Path, result: Any, key: str, batch_block: str) -> Any:
+    """Attach the write-advisory block a batch's pages held, once, under `key`.
 
-    Inside `due_state.batch_scope` the page seam holds these names rather than delivering
-    them (`capture_sweep.undeclared_referents`), so a name that several pages link is listed
-    once, here. Gated on an actual commit like the carriers beside it.
+    Inside `due_state.batch_scope` the page seam holds these blocks rather than delivering them, so
+    a subject that several pages raise is listed once, here. Gated on an actual commit like the
+    carriers beside it. `batch_block` names the `capture_sweep` function that takes the held entries.
     """
     from .writer_lease import active_mutation_committed
 
-    if not isinstance(result, dict) or "undeclared_referents" in result:
+    if not isinstance(result, dict) or key in result:
         return result
     if not active_mutation_committed():
         return result
     try:
         from . import capture_sweep as capture_sweep_module
 
-        block = capture_sweep_module.batch_referents(vault_root)
+        block = getattr(capture_sweep_module, batch_block)(vault_root)
     except Exception:  # noqa: BLE001 — an advisory never breaks a committed batch
-        log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
+        log.debug("%s batch block failed (non-fatal)", key, exc_info=True)
         return result
     if not block:
         return result
-    return {**result, "undeclared_referents": block}
+    return {**result, key: block}
 
 
 def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
@@ -11487,9 +11487,9 @@ def _carrying_batch_advisories(vault_root: Path, result: Any) -> Any:
     has exited and the deltas have been applied — and a leaf that acquired one
     but not the other would be a silent coverage gap rather than a visible one.
     """
-    return _carrying_undeclared_referents(
-        vault_root, _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
-    )
+    carried = _carrying_capture_sweep(vault_root, _carrying_due_state(vault_root, result))
+    carried = _carrying_write_advisory(vault_root, carried, "undeclared_referents", "batch_referents")
+    return _carrying_write_advisory(vault_root, carried, "unlinked_mentions", "batch_unlinked_mentions")
 
 
 def _set_family_disposition(

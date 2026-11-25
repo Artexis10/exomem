@@ -1636,6 +1636,99 @@ def _undeclared_referents_projection(leaf: Any) -> dict[str, Any] | None:
     return None
 
 
+#: Wire bounds on the advisory `unlinked_mentions` block (`write-time-identity-candidates` spec):
+#: at most five Entities in all, grouped by page, each with the name as written, its link target and
+#: the write-advisory handle that dismisses it, and per page the edits of one `edit_note` call. This
+#: module's own numbers, for the reason the bounds above are.
+_MAX_UNLINKED_MENTIONS = 5
+_MAX_UNLINKED_NAME_CHARS = 120
+_MAX_UNLINKED_LINK_CHARS = 512
+_MAX_UNLINKED_EDIT_CHARS = 1024
+_UNLINKED_WHY = "Link the Entities this note names."
+
+
+def _unlinked_mention(value: Any) -> dict[str, Any] | None:
+    """One validated Entity of the block, or None."""
+    if not isinstance(value, Mapping):
+        return None
+    name, link = value.get("name"), value.get("link")
+    review, fingerprint = value.get("review"), value.get("fingerprint")
+    if not isinstance(name, str) or not 0 < len(name) <= _MAX_UNLINKED_NAME_CHARS:
+        return None
+    if not isinstance(link, str) or not 0 < len(link) <= _MAX_UNLINKED_LINK_CHARS:
+        return None
+    if (
+        not isinstance(review, str)
+        or not review.startswith(_UNDECLARED_REFERENT_REVIEW_PREFIX)
+        or len(review) > _MAX_DUE_STATE_REF_CHARS
+    ):
+        return None
+    if not (
+        isinstance(fingerprint, str)
+        and len(fingerprint) == _REVIEW_FINGERPRINT_CHARS
+        and all(char in "0123456789abcdef" for char in fingerprint)  # a field's format, not a meaning
+    ):
+        return None
+    return {"name": name, "link": link, "review": review, "fingerprint": fingerprint}
+
+
+def _unlinked_page(value: Any) -> dict[str, Any] | None:
+    """One validated page group, with its `edit_note` call spelled for this surface, or None."""
+    if not isinstance(value, Mapping):
+        return None
+    note, mentions, edits = value.get("note"), value.get("mentions"), value.get("edits")
+    if not isinstance(note, str) or not 0 < len(note) <= _MAX_UNDECLARED_REFERENT_ORIGIN_CHARS:
+        return None
+    if not isinstance(mentions, (list, tuple)) or not 0 < len(mentions) <= _MAX_UNLINKED_MENTIONS:
+        return None
+    projected = [_unlinked_mention(item) for item in mentions]
+    if any(item is None for item in projected):
+        return None
+    if not isinstance(edits, (list, tuple)) or len(edits) > len(projected):
+        return None
+    operations = []
+    for edit in edits:
+        old, new = (edit.get("old"), edit.get("new")) if isinstance(edit, Mapping) else (None, None)
+        if not (
+            isinstance(old, str) and isinstance(new, str)
+            and 0 < len(old) <= _MAX_UNLINKED_EDIT_CHARS and 0 < len(new) <= _MAX_UNLINKED_EDIT_CHARS
+        ):
+            return None
+        operations.append({"old_string": old, "new_string": new})
+    page: dict[str, Any] = {"note": note, "mentions": projected}
+    if operations:
+        page["call"] = capabilities.active_call_route(
+            "edit_memory",
+            {"path": note, "why": _UNLINKED_WHY, "operation": {"kind": "batch_replace", "edits": operations}},
+        )
+    return page
+
+
+def _unlinked_mentions_projection(leaf: Any) -> dict[str, Any] | None:
+    """Lift one advisory `unlinked_mentions` block out of a write leaf.
+
+    Same posture as `_undeclared_referents_projection`: kept at compact detail, and a malformed or
+    oversized block is DROPPED rather than allowed to widen the wire contract.
+    """
+    if not isinstance(leaf, Mapping):
+        return None
+    for container_key in ("creation", "semantic", "source", None):
+        container = leaf if container_key is None else leaf.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        value = container.get("unlinked_mentions")
+        pages = value.get("pages") if isinstance(value, Mapping) else None
+        if not isinstance(pages, (list, tuple)) or not 0 < len(pages) <= _MAX_UNLINKED_MENTIONS:
+            continue
+        projected = [_unlinked_page(item) for item in pages]
+        if any(item is None for item in projected):
+            continue
+        if sum(len(item["mentions"]) for item in projected) > _MAX_UNLINKED_MENTIONS:
+            continue
+        return {"pages": projected}
+    return None
+
+
 #: The scope a write-time due-state block names (`due_state` produces it, and no reply carries it).
 _MAX_DUE_STATE_REF_CHARS = 256
 # The advisory protocol fixes this scope; omitted scope means historical global counts.
@@ -2614,6 +2707,7 @@ def project_terminal(
     raw_leaf = result["leaf_result"]
     capture_sweep = _capture_sweep_projection(raw_leaf)
     undeclared_referents = _undeclared_referents_projection(raw_leaf)
+    unlinked_mentions = _unlinked_mentions_projection(raw_leaf)
     relation_advisory = (
         _relation_advisory_projection(raw_leaf)
         if result.get("state") == "committed"
@@ -2621,10 +2715,13 @@ def project_terminal(
     )
     leaf = _without_relation_advisory_context(
         _without_leaf_advisory(
-            _without_advisory_capture_sweep(
-                _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+            _without_leaf_advisory(
+                _without_advisory_capture_sweep(
+                    _without_advisory_due_state(_without_graph_rebuild_handoff(raw_leaf))
+                ),
+                "undeclared_referents",
             ),
-            "undeclared_referents",
+            "unlinked_mentions",
         )
     )
     if detail == "legacy":
@@ -2916,6 +3013,8 @@ def project_terminal(
         compact["entity_candidate"] = entity_candidate
     if undeclared_referents is not None:
         compact["undeclared_referents"] = undeclared_referents
+    if unlinked_mentions is not None:
+        compact["unlinked_mentions"] = unlinked_mentions
     # The capture-sweep block carries no admission step here. Its governor is its own
     # quiet-interval ledger, which already ran at the seam where the write it measures happened
     # (see `capture_sweep`'s module docstring on why it records writes, not deliveries).

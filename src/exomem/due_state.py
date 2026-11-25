@@ -3430,11 +3430,11 @@ _BATCH_PATHS: ContextVar[dict[str, set[str]] | None] = ContextVar(
 )
 
 
-# The names this batch's pages newly link with no page behind them, keyed by vault and then by
-# name identity (`capture_sweep.undeclared_referents`). Fresh per outermost scope like
-# `_BATCH_PATHS`, so a name two pages of one batch link is held once.
-_BATCH_REFERENTS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
-    "exomem_due_state_batch_referents", default=None,
+# What a batch's pages write-advisory blocks hold for the post-batch carrier, keyed by advisory
+# family, vault and then subject (`capture_sweep.undeclared_referents`, `capture_sweep.unlinked_mentions`).
+# Fresh per outermost scope like `_BATCH_PATHS`, so a subject two pages of one batch raise is held once.
+_BATCH_HOLDS: ContextVar[dict[tuple[str, str], dict[str, Any]] | None] = ContextVar(
+    "exomem_due_state_batch_holds", default=None,
 )
 
 
@@ -3444,20 +3444,33 @@ def _track_batch_path(vault_root: Path, path: str) -> None:
         tracked.setdefault(str(vault_root), set()).add(path)
 
 
-def note_batch_referent(vault_root: Path, identity: str, entry: dict[str, Any], *, limit: int) -> None:
-    """Hold the first `limit` distinct names a batch's pages link, for the post-batch carrier."""
-    held = _BATCH_REFERENTS.get()
+def note_batch_hold(
+    vault_root: Path, family: str, subject: str, entry: dict[str, Any] | None,
+    *, limit: int | None = None, replace: bool = False,
+) -> None:
+    """Hold one subject's entry of an advisory family for the post-batch carrier.
+
+    A held subject keeps its first entry unless `replace` is set, which swaps it for this one and
+    drops it when `entry` is None (a page written again whose subject no longer holds). `limit`
+    bounds how many subjects the batch holds.
+    """
+    held = _BATCH_HOLDS.get()
     if held is None:
         return
-    names = held.setdefault(str(vault_root), {})
-    if identity not in names and len(names) < limit:
-        names[identity] = entry
+    subjects = held.setdefault((family, str(vault_root)), {})
+    if replace:
+        if entry:
+            subjects[subject] = entry
+        else:
+            subjects.pop(subject, None)
+    elif entry and subject not in subjects and (limit is None or len(subjects) < limit):
+        subjects[subject] = entry
 
 
-def take_batch_referents(vault_root: Path) -> list[dict[str, Any]]:
-    """The names a finished batch's pages linked, once; the batch holds none afterwards."""
-    held = _BATCH_REFERENTS.get()
-    return list(held.pop(str(vault_root), {}).values()) if held is not None else []
+def take_batch_holds(vault_root: Path, family: str) -> list[dict[str, Any]]:
+    """The entries a finished batch's pages held for this family, once; the batch holds none afterwards."""
+    held = _BATCH_HOLDS.get()
+    return list(held.pop((family, str(vault_root)), {}).values()) if held is not None else []
 
 
 @contextmanager
@@ -3477,7 +3490,7 @@ def batch_scope(vault_root: Path | None) -> Iterator[None]:
     """
     if not _IN_BATCH.get():
         _BATCH_PATHS.set({})
-        _BATCH_REFERENTS.set({})
+        _BATCH_HOLDS.set({})
     depth = _IN_BATCH.set((*_IN_BATCH.get(), str(vault_root or "")))
     try:
         yield
@@ -3606,10 +3619,24 @@ def for_activation(
         except Exception:  # noqa: BLE001 - missing advice never prevents current context
             log.debug("relevant due advice unavailable", exc_info=True)
             return
-    # A started read cannot be interrupted; late advice is truncated, never skipped.
-    if budget is not None and budget.remaining() <= 0:
-        budget.note_truncated("working_set.relevant_due")
-        return
+        # A started read cannot be interrupted; late advice is truncated, never skipped.
+        if budget is not None and budget.remaining() <= 0:
+            budget.note_truncated("working_set.relevant_due")
+            return
+        category = _attach_relevant_due(packet, rows, direct, associated)
+        if category is not None:
+            # The ledger row carries integers only: whether a candidate went out, and under which category.
+            fields["attached"] = 1
+            fields[_attached_category_field(category)] = 1
+
+
+def _attach_relevant_due(
+    packet: dict[str, Any], rows: list[dict[str, Any]], direct: dict[str, str], associated: dict[str, str],
+) -> str | None:
+    """Put the first served finding on current material into the packet, and return its category.
+
+    A finding on released material comes before one on a linked page.
+    """
     for material in (direct, associated):
         for row in rows:
             anchor = material.get(str(row.get("path") or ""))
@@ -3622,7 +3649,19 @@ def for_activation(
                     "id": review_ids.item_id(row),
                     "category": row["category"], "due_since": row["due_since"], "anchor": anchor,
                 }]
-                return
+                return str(row["category"])
+    return None
+
+
+def _attached_category_field(category: str) -> str:
+    """The span field key that counts an attached candidate of this category.
+
+    The category comes from the attention registry, so the key is derived from it rather than listed
+    here. A span key is `[a-z_]{1,32}` (`call_spans.FIELD_KEY_PATTERN`), so every other character
+    becomes `_` and the key is cut to length.
+    """
+    slug = "".join(char if "a" <= char <= "z" else "_" for char in category.casefold())
+    return f"attached_{slug}"[:32]
 
 
 def filter_relevant_refs(packet: dict[str, Any]) -> dict[str, Any]:
@@ -5121,4 +5160,4 @@ def reset_emission_state() -> None:
         _EMISSION.clear()
         _UNPERSISTED.clear()
     _BATCH_PATHS.set(None)
-    _BATCH_REFERENTS.set(None)
+    _BATCH_HOLDS.set(None)
