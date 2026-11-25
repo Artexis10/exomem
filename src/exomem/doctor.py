@@ -4052,10 +4052,10 @@ def _check_managed_hook_refresh() -> DoctorCheck:
 def _check_legacy_tool_references() -> DoctorCheck:
     """Warn about permission rules and hooks of the user's that no server answers any more.
 
-    A rule that names `mcp__exomem__` matches while the client holds an `exomem` server, which
-    includes a URL server that `evermatter setup --migrate` keeps under that key. It is dead
-    only in a client that holds no `exomem` server. A warning, never a failure: the install
-    works either way. Read-only; setup never edits what the user wrote.
+    A rule that names `mcp__exomem__` matches while the client holds an `exomem` server, and one
+    that names the plugin's `mcp__plugin_exomem_exomem__` matches while an `exomem` plugin is
+    enabled. Each is dead once nothing answers it. A warning, never a failure: the install works
+    either way. Read-only; setup never edits what the user wrote.
     """
     from . import client_config
     from .install_skill import client_home
@@ -4072,7 +4072,8 @@ def _check_legacy_tool_references() -> DoctorCheck:
             "migration.tool_prefix",
             "warn",
             f"could not read a client's server registrations, so no rule naming "
-            f"`{client_config.LEGACY_TOOL_PREFIX}` was judged: {exc}",
+            f"`{client_config.LEGACY_TOOL_PREFIX}` or `{client_config.LEGACY_PLUGIN_TOOL_PREFIX}` "
+            f"was judged: {exc}",
         )
     if not dead:
         checked = ", ".join(str(path) for path in read) or "no Claude or Codex settings file found"
@@ -4080,20 +4081,31 @@ def _check_legacy_tool_references() -> DoctorCheck:
             "migration.tool_prefix",
             "pass",
             f"checked {checked}: no permission rule or hook there names "
-            f"`{client_config.LEGACY_TOOL_PREFIX}` in a client without an `exomem` server. "
-            "A rule that still names it matches that server. Rules kept anywhere else are not read.",
+            f"`{client_config.LEGACY_TOOL_PREFIX}` in a client without an `exomem` server, or "
+            f"`{client_config.LEGACY_PLUGIN_TOOL_PREFIX}` in a Claude Code without an `exomem` "
+            "plugin. A rule that still names one matches that server or plugin. "
+            "Rules kept anywhere else are not read.",
         )
     listed = "; ".join(f"{ref.kind} {ref.name} in {ref.path}" for ref in dead)
     return _check(
         "migration.tool_prefix",
         "warn",
-        f"{len(dead)} permission rule(s) or hook(s) of yours name `{client_config.LEGACY_TOOL_PREFIX}` "
-        f"in a client with no `exomem` server, so they match no tool: {listed}",
-        f"Change each listed rule or hook to the `{client_config.TOOL_PREFIX}` prefix. "
+        f"{len(dead)} permission rule(s) or hook(s) of yours name an old tool prefix "
+        f"(`{client_config.LEGACY_TOOL_PREFIX}` or `{client_config.LEGACY_PLUGIN_TOOL_PREFIX}`) "
+        f"that no server or plugin answers now, so they match no tool: {listed}",
+        "Change each listed rule or hook to the prefix named in its details: "
+        f"`{client_config.TOOL_PREFIX}` or `{client_config.PLUGIN_TOOL_PREFIX}`. "
         "Setup never edits what you wrote.",
         details={
             "references": [
-                {"client": ref.client, "path": str(ref.path), "kind": ref.kind, "name": ref.name}
+                {
+                    "client": ref.client,
+                    "path": str(ref.path),
+                    "kind": ref.kind,
+                    "name": ref.name,
+                    "old_prefix": ref.prefix,
+                    "new_prefix": ref.replacement,
+                }
                 for ref in dead
             ]
         },

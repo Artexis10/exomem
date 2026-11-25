@@ -1078,6 +1078,9 @@ class Admission:
     #: The dispatcher's own idempotency identity and its retry window; a save without one is not admitted.
     origin: str
     origin_ttl: float
+    #: The refusal that the arguments alone are certain to get. A save that would queue raises it
+    #: instead, because a queued receipt for it would only fail later, at the replay.
+    refusal: Exception | None = None
 
     def run(self, call: Callable[[], Any]) -> Any:
         """Run the save, or queue it when the boundary stays busy.
@@ -1123,6 +1126,8 @@ class Admission:
             log.warning("write intake could not wait behind its queue", exc_info=True)
             behind = False
         if behind:
+            if self.refusal is not None:
+                raise self.refusal
             try:
                 # Behind earlier queued saves: run after them, never before.
                 return self._accept(reason="queue_not_empty", started=started)
@@ -1135,6 +1140,8 @@ class Admission:
         except OpError as error:
             if error.code not in ACCEPTED_REFUSALS or error.details.get("committed") is not False:
                 raise
+            if self.refusal is not None:
+                raise self.refusal from error
             try:
                 return self._accept(reason=error.code, started=started)
             except Exception:  # noqa: BLE001 - an intake that cannot write leaves today's refusal
@@ -1308,7 +1315,7 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
     if drainer is None:
         return None
     from . import writer_lease
-    from .commands import busy_intake_applies, invocation_is_read_only
+    from .commands import busy_intake_applies, invocation_is_read_only, refusal_before_queueing
     from .governance import principal as principal_module
     from .governance.egress import SelectorCoverageError
 
@@ -1351,6 +1358,7 @@ def admission(command: Any, injected: tuple[Any, ...], kwargs: Mapping[str, Any]
         surface=_surface_record(),
         origin=origin[0],
         origin_ttl=origin[1],
+        refusal=refusal_before_queueing(command, jsonable),
     )
 
 

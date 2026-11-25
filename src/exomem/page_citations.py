@@ -252,7 +252,7 @@ def _answer(session, root: Path, keys: dict[str, str | None], limit: int,
     if not asked:
         return answers
     visible = {}
-    for collection_id, fields in sorted(_cited_fields(session, declared, asked).items()):
+    for collection_id, fields in sorted(reference_index.cited_fields(session.connection, declared, asked).items()):
         found = _readable_fields(session, collection_id, declared[collection_id], fields)
         if found is not None:
             visible[collection_id] = found
@@ -389,36 +389,14 @@ class _Tally:
         return widened
 
 
-def _pairs(declared: dict[str, tuple]) -> str:
-    return json.dumps([[collection_id, d.dotted] for collection_id, fields in declared.items() for d in fields])
-
-
 def _warming(session, declared: dict[str, tuple]) -> bool:
     """Whether the index of a link field the caller may read is still building; a field with no state row is.
 
     Only a collection with a field still building is admitted, so a built index costs one statement.
     """
-    pending: dict[str, set[str]] = {}
-    for collection_id, field in session.connection.execute(
-            "SELECT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w WHERE NOT EXISTS ("
-            "SELECT 1 FROM item_reference_state s WHERE s.collection_id=json_extract(w.value,'$[0]')"
-            " AND s.field_path=json_extract(w.value,'$[1]') AND s.target_id=? AND s.ready=1)",
-            (_pairs(declared), collections.LINK_TARGET)).fetchall():
-        pending.setdefault(collection_id, set()).add(field)
+    pending = reference_index.link_pending(session.connection, declared)
     return any(_readable_fields(session, collection_id, declared[collection_id], fields) is not None
                for collection_id, fields in sorted(pending.items()))
-
-
-def _cited_fields(session, declared: dict[str, tuple], asked: dict[str, str]) -> dict[str, set[str]]:
-    """The link fields whose index holds an asked key, by collection, from one probe of the index's leading columns."""
-    found: dict[str, set[str]] = {}
-    for collection_id, field in session.connection.execute(
-            "SELECT DISTINCT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w"
-            " CROSS JOIN json_each(?) a WHERE EXISTS (SELECT 1 FROM item_references r"
-            " WHERE r.collection_id=json_extract(w.value,'$[0]') AND r.field_path=json_extract(w.value,'$[1]')"
-            " AND r.match=a.value)", (_pairs(declared), json.dumps(sorted(asked)))).fetchall():
-        found.setdefault(collection_id, set()).add(field)
-    return found
 
 
 def _readable_fields(session, collection_id: str, declarations: tuple, fields: set[str]) -> tuple[Any, tuple] | None:

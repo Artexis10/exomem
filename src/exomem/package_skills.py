@@ -239,28 +239,23 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 # The skills/ and hooks/ trees are GENERATED from the same package sources and
 # guarded by a sync test rather than hand-maintained.
 
-#: The plugin's name and its server key stay `exomem` for now. Claude Code stores an HTTP server's
-#: sign-in under its name (a plugin server's under the plugin and server names), so a rename signs
-#: each user out. A later release renames both with a sign-in notice. The plugin's skills are
-#: renamed already: a skill rename signs nobody out.
-PLUGIN_NAME = "exomem"
+#: The plugin's name. Claude Code stores an HTTP server's sign-in under the plugin and server
+#: names, so the rename from `exomem` signs each user of the plugin's URL out once. The
+#: marketplace's `renames` map moves the install, and the notice hook names the sign-in step.
+PLUGIN_NAME = "evermatter"
 
-_PLUGIN_HOOK_EVENTS: tuple[tuple[str, str | None], ...] = (
-    ("Stop", None),
-    ("UserPromptSubmit", None),
-    ("PreCompact", "manual|auto"),
-    ("SessionEnd", None),
-    ("SessionStart", "compact|resume"),
+# Each hook the plugin registers: its event, the event's matcher (None for every firing) and the
+# wrapper that serves it. Mirrors install_hook._HOOK_SPECS and _CONTINUATION_EVENTS so the plugin
+# and the CLI installer stay behaviourally identical. The checkpoint serves `compact|resume`; the
+# notice has its own `startup` entry, so it does not widen the checkpoint's.
+_PLUGIN_HOOKS: tuple[tuple[str, str | None, str], ...] = (
+    ("Stop", None, "exomem-capture-nudge.sh"),
+    ("UserPromptSubmit", None, "exomem-retrieve-nudge.sh"),
+    ("PreCompact", "manual|auto", "exomem-continuation-checkpoint.sh"),
+    ("SessionEnd", None, "exomem-continuation-checkpoint.sh"),
+    ("SessionStart", "compact|resume", "exomem-continuation-checkpoint.sh"),
+    ("SessionStart", "startup", "evermatter-sign-in-notice.sh"),
 )
-# Which wrapper serves which event. Mirrors install_hook._HOOK_SPECS and
-# _CONTINUATION_EVENTS so the plugin and the CLI installer stay behaviourally identical.
-_PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
-    "Stop": "exomem-capture-nudge.sh",
-    "UserPromptSubmit": "exomem-retrieve-nudge.sh",
-    "PreCompact": "exomem-continuation-checkpoint.sh",
-    "SessionEnd": "exomem-continuation-checkpoint.sh",
-    "SessionStart": "exomem-continuation-checkpoint.sh",
-}
 # The checkpoint core requires --client; the nudge cores infer it, so only this wrapper
 # needs it. The value comes from the installer's own continuation command.
 _PLUGIN_HOOK_ARGS: dict[str, str] = {
@@ -320,8 +315,8 @@ def _plugin_manifest() -> dict:
             }
         },
         "mcpServers": {
-            # The server key stays `exomem` with the plugin name: Claude Code stores the sign-in under both.
-            client_config.LEGACY_SERVER_NAME: {
+            # Claude Code stores the sign-in under the plugin and server names: both `evermatter`.
+            client_config.SERVER_NAME: {
                 "type": "http",
                 "url": "${user_config.mcp_url}",
             }
@@ -341,11 +336,10 @@ def _plugin_hooks() -> dict:
     install path, which on Windows and macOS routinely contains spaces.
     """
     events: dict[str, list] = {}
-    for event, matcher in _PLUGIN_HOOK_EVENTS:
+    for event, matcher, script in _PLUGIN_HOOKS:
         entry: dict = {}
         if matcher is not None:
             entry["matcher"] = matcher
-        script = _PLUGIN_HOOK_SCRIPTS[event]
         command = f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}"'
         if script in _PLUGIN_HOOK_ARGS:
             command += f" {_PLUGIN_HOOK_ARGS[script]}"
