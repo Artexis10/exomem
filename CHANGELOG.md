@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.203.0](https://github.com/substrate-systems/evermatter/compare/v0.202.0...v0.203.0) (2026-11-25)
+
+
+### Features
+
+* **compat:** accept both the exomem and evermatter agent names ([#3186](https://github.com/substrate-systems/evermatter/issues/3186)) ([72c0514](https://github.com/substrate-systems/evermatter/commit/72c0514ac27ddc46d386ad4909576e1c8db5245e))
+* **evidence:** keep a shared proof file in one call, with its caption, and never a card number ([#3165](https://github.com/substrate-systems/evermatter/issues/3165)) ([743ae94](https://github.com/substrate-systems/evermatter/commit/743ae94a930548a1cf2aa12498ae207629d62b54))
+* **search:** let an agent restrict a search to pictures ([#3163](https://github.com/substrate-systems/evermatter/issues/3163)) ([4c7d698](https://github.com/substrate-systems/evermatter/commit/4c7d698243dcd967fb42fb09672d533910f5e6a4))
+* **skill:** ask for recall on the user's own subjects in the skill description ([#3167](https://github.com/substrate-systems/evermatter/issues/3167)) ([c0b0620](https://github.com/substrate-systems/evermatter/commit/c0b0620f900bd91c8d145d1e149cc4838be0ab2b))
+* **skills:** name every skill and collection an overflowing catalogue cannot list ([#3188](https://github.com/substrate-systems/evermatter/issues/3188)) ([0db4a4b](https://github.com/substrate-systems/evermatter/commit/0db4a4bb40b4b53971438ac17400222c8b925e13))
+
+
+### Bug Fixes
+
+* **ci:** run the Full-evidence check when its window variable is unset ([#3183](https://github.com/substrate-systems/evermatter/issues/3183)) ([c057834](https://github.com/substrate-systems/evermatter/commit/c05783493777e36a542156da0e6be5cfa2a66510))
+* **records:** list the allowed values when a field is outside its enum ([#3187](https://github.com/substrate-systems/evermatter/issues/3187)) ([41f15a2](https://github.com/substrate-systems/evermatter/commit/41f15a2204a81c15dc06346d45a959159a2addb3))
+* **records:** read a withheld child column, child table or saved view as missing ([#3176](https://github.com/substrate-systems/evermatter/issues/3176)) ([02ae09a](https://github.com/substrate-systems/evermatter/commit/02ae09a9dc6c4fecfd593d5ccd68c000a1391f11))
+* **release:** check the native image licences on the runner's platform ([#3178](https://github.com/substrate-systems/evermatter/issues/3178)) ([28b7739](https://github.com/substrate-systems/evermatter/commit/28b7739360bf783ddd4aac884e40e093947a79f1))
+* **release:** observe PyPI long enough for a new project ([#3179](https://github.com/substrate-systems/evermatter/issues/3179)) ([795bc8d](https://github.com/substrate-systems/evermatter/commit/795bc8df54b06dc96b41e466dd5d103ba633b8ee))
+* **tools:** close the gaps left in refused tool calls ([#3172](https://github.com/substrate-systems/evermatter/issues/3172)) ([8ddc38e](https://github.com/substrate-systems/evermatter/commit/8ddc38ea02de08071f4e55425e1119cbe90f4867))
+* **writes:** let a stop end a queued save's replay promptly ([#3162](https://github.com/substrate-systems/evermatter/issues/3162)) ([13a6f98](https://github.com/substrate-systems/evermatter/commit/13a6f98a63ebfe4642a8babe8e5025fd39469771))
+
+
+### Performance
+
+* **lexstore:** keep the statistics base for a vault-sized corpus ([#3171](https://github.com/substrate-systems/evermatter/issues/3171)) ([222128a](https://github.com/substrate-systems/evermatter/commit/222128a243f1008e9b79deff6ea5555e202bdf08))
+* **lexstore:** make a rebuild after a write cost the change ([#3177](https://github.com/substrate-systems/evermatter/issues/3177)) ([f414bda](https://github.com/substrate-systems/evermatter/commit/f414bda3203919f799c5f253268bdfc12f9d1317))
+* **release:** cut from the newest fully tested commit ([#3180](https://github.com/substrate-systems/evermatter/issues/3180)) ([e63f1ef](https://github.com/substrate-systems/evermatter/commit/e63f1ef33a07748064bedc8c01856a37ca97d549))
+* **store:** admit store-mode writes without the graph handoff after a restart ([#3145](https://github.com/substrate-systems/evermatter/issues/3145)) ([9110f1b](https://github.com/substrate-systems/evermatter/commit/9110f1bf4ec68dc8dd04d94f289ce61aba14dc9b))
+
 ## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
 
 
