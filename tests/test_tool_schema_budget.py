@@ -77,15 +77,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # The door operations `media.attach_speech` and `media.rename_speakers`, an owner's agent attaching a speech result it
 # computed and naming the speakers after the fact, added 41 B to the write door's enum on 2026-11-25
 # (keep-speech-results-in-cloud).
-TOTAL_BUDGET = 31_750
+# The optional `sensitivity` list on `create_note`, `save_source`, `save_evidence`, `save_episode` and `add_record`, through which the
+# agent that reads the material names its classes, added 739 B on 2026-11-25 (classify-sensitive-material-at-capture).
+TOTAL_BUDGET = 32_489
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
     "add_observation": 1850,
     "add_plan_item": 500,
-    "add_record": 940,
+    "add_record": 1150,
     "cancel_uploads": 600,
-    "create_note": 1850,
+    "create_note": 2000,
     "decide_review_item": 1000,
     "download_files": 550,
     # Claim-level supersede/assess/link actions joined edit_note on 2026-11-24
@@ -104,9 +106,9 @@ TOOL_CEILINGS: dict[str, int] = {
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,
-    "save_episode": 1100,
-    "save_evidence": 1320,
-    "save_source": 1550,
+    "save_episode": 1200,
+    "save_evidence": 1450,
+    "save_source": 1650,
     "search_memory": 1250,
     # A pointer to edit_note's supersede_observation joined 2026-11-24
     # (add-unit-level-supersession).

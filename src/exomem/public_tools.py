@@ -210,7 +210,7 @@ _DETAIL = Field(default=None)
 _REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
 _SENSITIVITY = Field(
     default=None,
-    description="Sensitivity classes you judge this to carry, such as identity, health or financial. Keep it in full and classify it.",
+    description="Sensitivity classes you judge this holds, such as identity or health.",
 )
 _DRAFT_FIELDS = ("draft_id", "draft_hash", "draft_token")
 
@@ -911,7 +911,7 @@ class AddRecord(Wire):
     held: str | None = None
     sensitivity: list[str] | None = Field(
         default=None,
-        description="Classes this row carries on top of its collection's own; needs a `sensitivity` array field in the item schema.",
+        description="Classes this row adds to its collection's; the item schema needs a `sensitivity` array field.",
     )
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: delivery, item_key.")
     detail: Detail | None = _DETAIL

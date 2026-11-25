@@ -12,10 +12,10 @@
 
 ## 3. Capture and classify
 
-- [ ] 3.1 Accept `sensitivity` on `save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record`. Apply the kind default to Source and Evidence captures. Refuse unknown classes with `SENSITIVITY_CLASS_UNKNOWN`.
+- [x] 3.1 Accept `sensitivity` on `save_source`, `save_evidence`, `create_note`, `save_episode` and `add_record`. Apply the kind default to Source and Evidence captures. Refuse unknown classes with `SENSITIVITY_CLASS_UNKNOWN`.
 - [ ] 3.2 Report `sensitivity {classes, basis, disclosure}` in every capture and classify result. `disclosure` comes from live governance state.
 - [ ] 3.3 Add `manage_memory(operation="files.classify")`, with preview, required reason and revert through the governed pointer write. The file never moves.
-- [ ] 3.4 Collection-level `sensitivity` sets a floor that a row may extend and never shrink. Store it in the row governance metadata.
+- [x] 3.4 Collection-level `sensitivity` sets a floor that a row may extend and never shrink. Store it in the row governance metadata.
 
 ## 4. Proof and delivery
 
