@@ -1772,7 +1772,8 @@ def _selected_link_fields(manifest: collections.CollectionManifest, query: Mappi
         date_to=query.get("date_to"), aggregate=query.get("aggregate"),
     )
     if roots is None:
-        return links
+        # A profile reads every column; any other None is a shape that validation refuses, so let it answer.
+        return links if record_formats.is_profile_aggregate(query.get("aggregate")) else ()
     in_child = bool(roots - set(manifest.schema.fields))
     children = {table.field for table in manifest.child_tables}
     return tuple(name for name in links if name in roots or (in_child and name in children))

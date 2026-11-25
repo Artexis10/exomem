@@ -2512,6 +2512,11 @@ def _field_is_link(spec: collections.FieldSpec) -> bool:
     return spec.type == "array" and spec.items is not None and spec.items.type == "link"
 
 
+def is_profile_aggregate(aggregate: object) -> bool:
+    """Whether `aggregate` asks for a profile, which reads every column."""
+    return isinstance(aggregate, str) and aggregate.strip() == "profile"
+
+
 def selection_columns(
     manifest: collections.CollectionManifest,
     *,
@@ -2529,7 +2534,7 @@ def selection_columns(
     table's column. None when the selection reads every column (a profile) or names a column in a
     shape that validation refuses.
     """
-    if aggregate is not None and (not isinstance(aggregate, str) or aggregate.strip() == "profile"):
+    if aggregate is not None and (not isinstance(aggregate, str) or is_profile_aggregate(aggregate)):
         return None  # a profile reads every column
     aggregated = aggregate.split(":", 1)[1] if isinstance(aggregate, str) and ":" in aggregate else None
     columns: list[object] = [sort_by, date_column, aggregated]

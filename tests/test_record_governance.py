@@ -1952,6 +1952,21 @@ def test_a_saved_view_that_filters_on_a_link_while_the_link_index_is_coming_is_r
     assert [row["asset"] for row in answered["rows"]] == ["[[Vehicle]]"]
 
 
+def test_a_malformed_query_while_the_link_index_is_coming_gets_its_validation_error_not_a_wait(
+    tmp_path: Path, corpus_cache_on: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry cannot fix a malformed query, so the wait for the link index must not hide its error."""
+    manifest = _empty_columns_fixture(tmp_path)
+    freshness.rebaseline(tmp_path)  # the vault's change events are live; no corpus is published yet
+
+    with held_link_index_warm(monkeypatch), pytest.raises(OpError) as raised:
+        record_memory.record_memory(
+            tmp_path, "query", collection=manifest.path, filters=[{"op": "eq", "value": "[[Vehicle]]"}]
+        )
+
+    assert raised.value.code != "LINK_INDEX_WARMING"
+
+
 @pytest.mark.parametrize("live_events", [False, True], ids=["no-live-events", "warms-off"])
 def test_a_query_with_no_corpus_coming_walks_for_its_links(
     tmp_path: Path, corpus_cache_on: None, live_events: bool
