@@ -278,13 +278,12 @@ def _serve_until_the_call_deadline() -> None:
     """Let the final guard serve leads past the activation's own deadline, and one stage reserve past the call's.
 
     The guard rechecks only leads already found, so a nearer activation deadline must not drop them. The stages
-    before it may run to the call's deadline, so it gets one stage reserve beyond it, inside the delivery
-    reserve. On a starved host it once kept rechecking leads 12-32 s past the deadline, and the packet missed
-    a 60 s client timeout. Stopping withholds the task context, as any failed recheck does, and the response
-    names the stage.
+    before it may run to the call's deadline, so it gets one stage reserve beyond it, within the time between
+    the request budget and the client's own timeout. On a starved host it once kept rechecking leads 12-32 s
+    past the deadline, and the packet missed a 60 s client timeout. `guarded` withholds the task context when
+    this stops it, as any failed recheck does, and names the stage.
     """
     if request_budget.request_overrun() > request_budget.ACTIVATION_STAGE_RESERVE_SECONDS:
-        working_set.note_stopped(GUARD_STAGE)
         raise TaskDeadline("the call's deadline arrived while the served task sources were rechecked")
 
 
@@ -1042,6 +1041,8 @@ def guarded(root: Path, caller: Any, block: Mapping[str, Any], *, limit: int) ->
                         or (method and not _holds_method(source, item["ref"]))):
                     return empty("partial", reset=True)
             except TaskDeadline:
+                # Named here, where the context is withheld: a stop that a helper swallowed withheld nothing.
+                working_set.note_stopped(GUARD_STAGE)
                 stopped = empty("partial", reset=True)
                 _add_missing(stopped, "budget")
                 return stopped
