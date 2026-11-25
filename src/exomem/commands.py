@@ -13100,7 +13100,7 @@ def op_maintain_memory(
 
         if (
             categories is not None
-            or dry_run is not None
+            or apply is not None
             or rebuild_embeddings
             or rebuild_graph
             or detail != "actionable"
@@ -13108,17 +13108,19 @@ def op_maintain_memory(
             or collection is not None
             or source_snapshot is not None
         ):
-            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only apply, plan_id and why")
+            raise ValueError("INVALID_ARGUMENTS: path-variants accepts only dry_run, plan_id and why")
         # Merging moves files across the whole vault, protected captures included: it is the owner's.
         refusal = egress_module.owner_only_aggregate(vault_root)
         if refusal is not None:
             return refusal
-        if apply is None:
+        if dry_run is not False:
             if plan_id is not None or why is not None:
-                raise ValueError("INVALID_ARGUMENTS: path-variants preview does not accept apply guards")
+                raise ValueError("INVALID_ARGUMENTS: a path-variants preview takes no plan_id or why")
             return path_variants_module.preview(vault_root)
-        if apply is not True or plan_id is None or why is None:
-            raise ValueError("INVALID_ARGUMENTS: path-variants apply requires true, plan_id, and why")
+        if plan_id is None or why is None:
+            raise ValueError(
+                "INVALID_ARGUMENTS: a path-variants merge needs dry_run=false with the preview's plan_id and a why"
+            )
         return path_variants_module.apply(vault_root, plan_id=plan_id, why=why)
     if mode == "maintenance-job" or mode == "maintenance-job-cancel":
         from . import maintenance_jobs as maintenance_jobs_module

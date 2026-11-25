@@ -55,7 +55,7 @@ A write into a folder that already has a variant sibling SHALL follow the requir
 
 ### Requirement: A read-only audit lists path variants
 
-`maintain_memory(mode="audit")` SHALL run the category `path_variants` by default. It SHALL report sibling groups equal after NFC and casefold as defects, and groups equal only after NFKC folding and dropping separators as candidates. A defect finding for a folder group SHALL name the `path-variants` preview as its fix. The audit SHALL NOT change the vault.
+`maintain_memory(mode="audit")` SHALL run the category `path_variants` by default, over the names an export keeps. It SHALL report sibling groups equal after NFC and casefold as defects, and groups equal only after NFKC folding and dropping separators as candidates. A defect finding for a folder group SHALL name the `path-variants` preview as its fix. The audit SHALL NOT change the vault.
 
 #### Scenario: The audit finds a case group and an NFC group
 
@@ -72,7 +72,7 @@ A write into a folder that already has a variant sibling SHALL follow the requir
 
 ### Requirement: A write into a split folder lands under its canonical spelling
 
-When a destination passes through a folder that has a variant sibling (a split), the write SHALL land under the split's canonical spelling, whichever spelling the caller named. A destination whose path already exists at the requested spelling SHALL keep it. The write SHALL still warn about the split and name the `path_variants` audit.
+When a destination passes through, or ends at, a folder that has a variant sibling (a split), the write SHALL land under the split's canonical spelling, whichever spelling the caller named. A destination whose path already exists as a file at the requested spelling SHALL keep it. The write SHALL still warn about the split and name the `path_variants` audit.
 
 #### Scenario: A capture names the smaller side of a split
 
@@ -80,40 +80,65 @@ When a destination passes through a folder that has a variant sibling (a split),
 - **THEN** the artifact lands in `Evidence/Garden/`
 - **AND** the result warns about the split
 
+#### Scenario: A capture names the smaller side of a split category folder
+
+- **WHEN** `Evidence/Garden/Shared/` holds three files, `Evidence/Garden/shared/` holds one, and a capture names the category `shared`
+- **THEN** the artifact lands in `Evidence/Garden/Shared/`
+
 #### Scenario: An existing path keeps its spelling
 
-- **WHEN** a split exists and the destination path already exists under the non-canonical spelling
+- **WHEN** a split exists and the destination file already exists under the non-canonical spelling
 - **THEN** the destination keeps the requested spelling
 
 ### Requirement: A split's canonical spelling comes from data
 
-The canonical spelling of a split SHALL be the spelling that the project registry names as a project folder; otherwise the spelling whose folder holds the most direct entries; otherwise the first spelling in code-point order. Writers and the merge SHALL use this one rule.
+The canonical spelling of a split SHALL be, in order: the spelling in NFC form; a spelling the vault's layout declares (the managed root, the scaffold's folders, a folder a registry gives a type or placement) or the project registry names; the folder with the most direct entries; the first in code-point order. Writers and the merge SHALL use this one rule.
 
 #### Scenario: The registry names the canonical spelling
 
 - **WHEN** the project registry names the folder `Garden`, `Evidence/garden/` holds more files than `Evidence/Garden/`, and a write names `Evidence/garden/new.png`
 - **THEN** the file lands at `Evidence/Garden/new.png`
 
+#### Scenario: A stray folder does not take a declared folder's writes
+
+- **WHEN** a stray `notes/` holds more entries than the layout's `Notes/`, and a write names `notes/Research/idea.md`
+- **THEN** the page lands at `Notes/Research/idea.md`
+
+#### Scenario: The NFC spelling wins a Unicode split
+
+- **WHEN** a folder's decomposed spelling holds more entries than its precomposed spelling
+- **THEN** a write into either spelling lands under the precomposed one
+
 ### Requirement: A preview lists every folder split
 
-`maintain_memory(mode="path-variants")` SHALL list, without changing the vault, every folder split with its canonical spelling, the files still under each other spelling, the variant folders that hold no entry, and a `plan_id`. A split of two files SHALL be listed as not mergeable.
+`maintain_memory(mode="path-variants")`, a dry run by default, SHALL list without changing the vault every split among the names an export keeps, with its canonical spelling, every move into it, each file it cannot move and why, the other spellings it removes once empty, and a `plan_id` that binds the moves and those folders. A group of names that includes a file SHALL be listed as not mergeable. A remote owner's preview SHALL run as a maintenance job whose receipt lists every move.
 
 #### Scenario: A split is previewed
 
 - **WHEN** `Evidence/Garden/` holds three files and `Evidence/garden/` holds one
-- **THEN** the preview names `Evidence/Garden` as canonical and one file to move
+- **THEN** the preview names `Evidence/Garden` as canonical and one move
 - **AND** the vault is unchanged
 
-### Requirement: The preview's apply moves a batch into the canonical spelling
+### Requirement: The preview's apply merges every split into its canonical spelling
 
-`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL move the batch that the preview with that `plan_id` listed, from the other spellings into the canonical spelling within their own tree, through the ordinary file move with link rewrites. A file whose move or link rewrite would be refused SHALL be listed as blocked, not moved.
+`maintain_memory(mode="path-variants", dry_run=false, plan_id, why)` SHALL move every file the preview with that `plan_id` listed into the canonical spelling within its own tree, through the ordinary file move with link rewrites. A plan that changed since the preview SHALL be refused before anything moves. A move the file move refuses SHALL be skipped and listed. A remote merge SHALL run as a maintenance job that reports its progress and stops between moves when cancelled.
 
 #### Scenario: A split is merged
 
 - **WHEN** `Evidence/Garden/` and `Evidence/garden/` each hold files, a page links to a file under `Evidence/garden/`, and the owner applies the preview's `plan_id`
 - **THEN** every file is under `Evidence/Garden/`
 - **AND** the link names the moved file
-- **AND** the next preview lists `Evidence/garden/` as an empty variant folder
+
+#### Scenario: A remote owner merges as a job
+
+- **WHEN** the owner previews and applies over a remote surface
+- **THEN** each call returns a maintenance job
+- **AND** the apply job's receipt lists each moved file
+
+#### Scenario: A file arrives after the preview
+
+- **WHEN** a file is written under a listed spelling before the apply
+- **THEN** the apply refuses the stale plan and changes nothing
 
 ### Requirement: A split merge is one-way
 
@@ -121,21 +146,21 @@ Each move of a split merge SHALL keep the file's bytes, rewrite the links to it,
 
 #### Scenario: A merged file keeps its bytes and names its old path
 
-- **WHEN** the owner applies a batch that moves `Evidence/garden/seed.txt` into `Evidence/Garden/`
+- **WHEN** the owner applies a plan that moves `Evidence/garden/seed.txt` into `Evidence/Garden/`
 - **THEN** `Evidence/Garden/seed.txt` holds the same bytes
 - **AND** its page's lineage names the page's old path under `Evidence/garden/`
 
-### Requirement: The preview's apply removes empty variant folders
+### Requirement: The preview's apply removes emptied variant folders
 
-`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL remove exactly the empty variant folders that the preview with that `plan_id` listed, also inside an append-only tree, and record each removal in the vault log. When a listed folder gained an entry or lost its variant sibling, the apply SHALL refuse as stale and remove nothing.
+After its moves, the apply SHALL remove each other spelling that the plan listed, holds no file, is writable and is still a split, also inside an append-only tree, and record the removal in the vault log. A spelling that still holds a file SHALL be kept and listed.
 
-#### Scenario: Empty variant folders are removed
+#### Scenario: Emptied variant folders are removed
 
-- **WHEN** the preview lists `Evidence/garden/` as empty and the owner applies its `plan_id`
+- **WHEN** the owner applies a plan whose moves empty `Evidence/garden/`
 - **THEN** `Evidence/garden/` no longer exists
 - **AND** an export of the vault passes the case collision check
 
-#### Scenario: A folder gained a file after the preview
+#### Scenario: A file that cannot move keeps its folder
 
-- **WHEN** a file is written into a listed empty variant folder before the apply
-- **THEN** the apply refuses as stale and removes nothing
+- **WHEN** one file under `Evidence/garden/` cannot move
+- **THEN** `Evidence/garden/` is kept and listed with its reason

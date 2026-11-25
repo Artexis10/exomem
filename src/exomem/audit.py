@@ -1151,16 +1151,12 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
     only after NFKC folding and dropping separators are candidates for a human
     to judge. Read-only: nothing is merged.
     """
+    from . import path_variants
+
     findings: list[AuditFinding] = []
-    for directory, subdirs, files in os.walk(vault_root):
-        request_budget.checkpoint()
-        subdirs[:] = sorted(
-            name for name in subdirs
-            if not name.startswith(".") and name not in VAULT_WALK_SKIP_DIRS
-        )
-        names = sorted([*subdirs, *(name for name in files if not name.startswith("."))])
-        parent = Path(directory).relative_to(vault_root).as_posix()
-        prefix = "" if parent == "." else f"{parent}/"
+    # The names an export carries, so a defect here is a collision that blocks an export.
+    for parent, subdirs, names in path_variants.sibling_names(vault_root):
+        prefix = f"{parent}/" if parent else ""
         defects: dict[str, list[str]] = {}
         for name in names:
             request_budget.checkpoint()

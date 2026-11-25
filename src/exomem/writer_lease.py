@@ -95,7 +95,7 @@ _REQUEST_BOUND_REMOTE_SURFACES = frozenset({"mcp", "rest"})
 # an exact reviewed plan or preview identity, so remote callers get the same
 # capability as the CLI. Closed set: the maintain_memory mode literal fixes it.
 REMOTE_WRITE_MAINTENANCE_MODES = frozenset({  # nosemgrep: ep-word-set -- closed maintain_memory mode literals
-    "structured-files", "tag-variants", "path-variants", "curation", "maintenance-job-cancel", "collections-store-adopt-local",
+    "structured-files", "tag-variants", "curation", "maintenance-job-cancel", "collections-store-adopt-local",
     "held-resolve",
 })
 
@@ -7218,13 +7218,11 @@ class LeaseManager:
         # `maintain_memory(mode="tag-variants")` plans over the tag catalogue
         # and every candidate page before it writes; its leaf takes the
         # mutation boundary itself around only the batch re-verification and
-        # commit (`tag_variants.apply`). `path-variants` walks the vault and
-        # previews each move first; each move and the folder removal take
-        # the boundary themselves (`path_variants.apply`). Every other maintenance mode still
+        # commit (`tag_variants.apply`). Every other maintenance mode still
         # relies on this outer boundary.
         narrow_tag_variant_commit = (
             command.name == "maintain_memory"
-            and kwargs.get("mode") in {"tag-variants", "path-variants"}  # nosemgrep: ep-word-membership -- closed maintain_memory mode literals
+            and kwargs.get("mode") == "tag-variants"
             and not os.environ.get("EXOMEM_WIDE_MUTATION_BOUNDARY")
         )
         from . import maintenance_jobs

@@ -288,6 +288,7 @@ _DOOR_OPERATIONS = {
     "capture-metadata": "maintenance.capture_metadata",
     "convert-originals": "maintenance.convert_originals",
     "fix": "maintenance.fix",
+    "path-variants": "maintenance.path_variants",
     "reconcile": "maintenance.reconcile",
     "maintenance-job": "maintenance.job",
     "maintenance-job-cancel": "maintenance.cancel_job",
@@ -673,6 +674,39 @@ def test_start_without_plan_and_reason_is_refused_and_leaves_no_job(server, vaul
     assert refused["error"]["message"].endswith("Nothing was saved.")
     assert _jobs(listed) == []
     assert _page_ids(vault) == before
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_remote_merge_of_folder_splits_runs_as_the_owners_previewed_job(server, vault) -> None:
+    """Defect: a request-bound merge moves about one file per call on a large vault, so the owner cannot finish it."""
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for folder, names in (("Garden", ("a", "b", "c")), ("garden", ("d", "e"))):
+        (evidence / folder).mkdir(parents=True)
+        for name in names:
+            (evidence / folder / f"{name}.md").write_text("---\ntype: note\n---\n\nBody.\n", encoding="utf-8")
+
+    async def scenario(client):
+        handle, previewed = await _preview_job(client, {"kind": "path-variants"})
+        planned = await _receipt_entries(client, handle["run_id"])
+        started = await _call(client, "repair_memory", {
+            "kind": "path-variants", "dry_run": False,
+            "plan_id": previewed["receipt"]["result"]["plan_id"], "why": "merge the garden split",
+        })
+        merged = await _until_terminal(client, started["run_id"])
+        return previewed, planned, started, merged, await _receipt_entries(client, started["run_id"])
+
+    previewed, planned, started, merged, entries = _session(server, scenario)
+
+    assert previewed["state"] == "completed"
+    assert {(entry["path"], entry["value"]) for entry in planned if entry["kind"] == "planned"} == {
+        (f"Knowledge Base/Evidence/garden/{name}.md", f"Knowledge Base/Evidence/Garden/{name}.md") for name in ("d", "e")
+    }
+    assert started["state"] == "running"
+    assert merged["state"] == "completed" and merged["receipt"]["notes"]["outcome"] == "committed"
+    assert {entry["path"] for entry in entries if entry["kind"] == "committed"} == {
+        f"Knowledge Base/Evidence/Garden/{name}.md" for name in ("d", "e")
+    }
+    assert not (evidence / "garden").exists()
 
 
 def test_a_remote_conversion_runs_only_as_the_owners_previewed_job(server, vault, monkeypatch) -> None:

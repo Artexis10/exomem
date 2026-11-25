@@ -7785,8 +7785,8 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
     `replacing` is the path that a move vacates. It is not a sibling to land
     on, so a move that changes only the case or Unicode form of a name still
     renames it. Each component costs one `lstat`, and each folder on the way
-    one listing; the destination's own folder is listed only when the leaf is
-    missing. Fails open to `rel` when a component cannot be read.
+    one listing; the destination's own folder is not listed when the leaf is an
+    existing file. Fails open to `rel` when a component cannot be read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
     stored = _respell_in_store(Path(vault_root), parts, replacing)
@@ -7804,7 +7804,8 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
             return rel
         else:
             rest = parts[index + 1 :]
-            if rest:
+            # A leaf that is a file keeps its spelling, so its folder needs no listing.
+            if rest or not _existing_file(current / part):
                 part = _split_spelling(
                     root, _listed(current), part, "/".join(spelled), replacing,
                     exists=lambda name, base=current, rest=rest: _existing_file(base.joinpath(name, *rest)),
@@ -7841,25 +7842,37 @@ def _disk_entries(directory: Path) -> set[str] | None:
 
 
 def canonical_variant(
-    vault_root: Path, spellings: Iterable[str], entries: Callable[[str], set[str] | None]
+    vault_root: Path,
+    parent: str,
+    spellings: Iterable[str],
+    entries: Callable[[str], set[str] | None],
 ) -> str | None:
-    """The spelling of a folder split that writes and merges converge on, or None when none is a folder.
+    """The spelling of a folder split under `parent` that writes and merges converge on.
 
-    `entries` gives a spelling's folder entries, or None for a spelling that is not a folder. The
-    project registry decides first, because a registered folder is the identity that the path
-    projects; then the folder with the most entries, which a merge into it only grows; then
-    code-point order.
+    None when no spelling is a folder. `entries` gives a spelling's folder entries, or None for a
+    spelling that is not a folder. The spelling in NFC wins first, because an export refuses any
+    other form. Next comes a spelling that the layout declares (`layout.declared_folders`) or that
+    the project registry names, because code reads those folders by their exact spelling. Then the
+    folder with the most entries, which a merge into it only grows, and last code-point order.
     """
-    counts = {name: len(found) for name in sorted(spellings) if (found := entries(name)) is not None}
+    counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
     if not counts:
         return None
-    from . import project_keys
+    from . import layout, project_keys
 
+    declared = layout.declared_folders(vault_root)
     registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
-    named = [name for name in counts if name in registered]
-    if named:
-        return named[0]
-    return max(counts, key=counts.__getitem__)
+
+    def rank(name: str) -> tuple[bool, bool, int, str]:
+        path = f"{parent}/{name}" if parent else name
+        return (
+            unicodedata.normalize("NFC", name) != name,
+            path not in declared and name not in registered,
+            -counts[name],
+            name,
+        )
+
+    return min(counts, key=rank)
 
 
 def _split_spelling(
@@ -7890,7 +7903,7 @@ def _split_spelling(
     ]
     if not variants or exists(part):
         return part
-    return canonical_variant(vault_root, [part, *variants], entries) or part
+    return canonical_variant(vault_root, prefix, [part, *variants], entries) or part
 
 
 def _sibling_spelling(
@@ -7932,16 +7945,15 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
             names = names_in(prefix)
             if part in names:
                 rest = parts[index + 1 :]
-                if rest:
-                    part = _split_spelling(
-                        vault_root, names, part, prefix, replacing,
-                        exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
-                            vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
-                        ),
-                        entries=lambda name, prefix=prefix: folder_entries(
-                            vault_root, view, f"{prefix}/{name}" if prefix else name
-                        ),
-                    )
+                part = _split_spelling(
+                    vault_root, names, part, prefix, replacing,
+                    exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
+                        vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
+                    ),
+                    entries=lambda name, prefix=prefix: folder_entries(
+                        vault_root, view, f"{prefix}/{name}" if prefix else name
+                    ),
+                )
                 spelled.append(part)
                 continue
             variant = _sibling_spelling(names, part, prefix, replacing)

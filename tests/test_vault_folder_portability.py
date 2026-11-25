@@ -189,17 +189,12 @@ def test_a_split_is_merged_into_its_canonical_spelling_and_exports(vault: Path) 
 
     preview = op_maintain_memory(vault, mode="path-variants")
     assert [split["canonical"] for split in preview["splits"]] == ["Garden"]
-    assert preview["blocked"] == [] and len(preview["batch"]) >= 1
-    moved = op_maintain_memory(
-        vault, mode="path-variants", apply=True, plan_id=preview["plan_id"], why="merge the garden split"
-    )
-    assert moved["outcome"] == "committed" and moved["files_remaining"] == 0
-
-    leftover = op_maintain_memory(vault, mode="path-variants")
-    assert "Knowledge Base/Evidence/garden" in leftover["empty_folders"]
+    assert preview["blocked"] == [] and preview["move_count"] >= 1
+    assert preview["folders"] == ["Knowledge Base/Evidence/garden"]
     removed = op_maintain_memory(
-        vault, mode="path-variants", apply=True, plan_id=leftover["plan_id"], why="remove emptied spelling"
+        vault, mode="path-variants", dry_run=False, plan_id=preview["plan_id"], why="merge the garden split"
     )
+    assert removed["outcome"] == "committed" and removed["skipped_count"] == 0
 
     assert "Knowledge Base/Evidence/garden" in removed["removed_folders"]
     assert not (kb / "Evidence" / "garden").exists()
@@ -251,60 +246,63 @@ def test_a_merge_receipt_names_where_each_file_landed(vault: Path) -> None:
         assert (vault / move["to"]).is_file(), move
 
 
-def test_a_plan_examines_a_bounded_number_of_files(vault: Path) -> None:
-    """Defect: every preview resolves and checks every file of a large split, so a call outlives its budget."""
-    from exomem import path_variants
+def test_a_stray_folder_does_not_take_the_writes_of_a_declared_one(vault: Path) -> None:
+    """Defect: a stray `notes/` with more direct entries than `Notes/` takes every structured write."""
+    kb = vault / "Knowledge Base"
+    for index in range(len(list((kb / "Notes").iterdir())) + 3):
+        _page(kb / "notes" / f"stray-{index}.md")
 
-    evidence = vault / "Knowledge Base" / "Evidence"
-    count = path_variants.EXAMINE_LIMIT + 10
-    for index in range(count + 1):
-        _page(evidence / "Garden" / f"kept-{index}.md")
-    for index in range(count):
-        _page(evidence / "garden" / f"moved-{index}.md")
-
-    preview = path_variants.preview(vault)
-
-    assert len(preview["batch"]) == path_variants.BATCH_UNITS
-    assert preview["files_examined"] == path_variants.BATCH_UNITS
-    assert preview["files_pending"] == count
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/Research/new-idea.md") == (
+        "Knowledge Base/Notes/Research/new-idea.md"
+    )
+    assert vault_module.respell_new_path(vault, "Knowledge Base/notes/Research/new-idea.md") == (
+        "Knowledge Base/Notes/Research/new-idea.md"
+    )
 
 
-def test_an_apply_short_of_time_stops_and_says_what_is_left(vault: Path) -> None:
-    """Defect: an apply keeps moving past the request budget, and the call is cut off with no answer."""
-    from exomem import path_variants, request_budget
+def test_the_nfc_spelling_of_a_unicode_split_wins(vault: Path) -> None:
+    """Defect: the NFD side wins a split, so writes land where an export refuses every path."""
+    composed, decomposed = unicodedata.normalize("NFC", "Café"), unicodedata.normalize("NFD", "Café")
+    notes = vault / "Knowledge Base" / "Notes" / "Research"
+    _page(notes / composed / "a.md")
+    for name in ("b", "c"):
+        _page(notes / decomposed / f"{name}.md")
 
-    evidence = vault / "Knowledge Base" / "Evidence"
+    assert vault_module.respell_new_path(vault, f"Knowledge Base/Notes/Research/{decomposed}/new.md") == (
+        f"Knowledge Base/Notes/Research/{composed}/new.md"
+    )
+
+
+def test_a_capture_into_a_split_category_folder_lands_in_the_fuller_spelling(vault: Path) -> None:
+    """Defect: a split at the destination's own folder is not steered, so the capture deepens it."""
+    evidence = vault / "Knowledge Base" / "Evidence" / "Garden"
     for name in ("a", "b", "c"):
-        _page(evidence / "Garden" / f"{name}.md")
-    for name in ("d", "e"):
-        _page(evidence / "garden" / f"{name}.md")
-    preview = path_variants.preview(vault)
+        _page(evidence / "Shared" / f"{name}.md")
+    _page(evidence / "shared" / "d.md")
 
-    token = request_budget.set_current(request_budget.RequestBudget(seconds=0.0))
-    try:
-        result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
-    finally:
-        request_budget.reset_current(token)
+    result = preserve_module.preserve(
+        vault, scope="Garden", category="shared", filename="seed.txt", content="tomato"
+    )
 
-    assert result["outcome"] == "partial" and result["moved"] == []
-    assert result["stopped"]["code"] == "BUDGET_SHORT" and result["files_remaining"] == 2
-    assert result["next"] == {"tool": "maintain_memory", "args": {"mode": "path-variants"}}
-    assert sorted(p.name for p in (evidence / "garden").iterdir()) == ["d.md", "e.md"]
+    assert result.path.startswith("Knowledge Base/Evidence/Garden/Shared/")
+    assert sorted(p.name for p in (evidence / "shared").iterdir()) == ["d.md"]
 
 
-def test_a_stale_empty_folder_is_not_removed(vault: Path) -> None:
-    """Defect: a folder that gained a file after the preview is removed with it."""
+def test_a_file_that_arrives_after_the_preview_stops_the_merge(vault: Path) -> None:
+    """Defect: a folder that gained a file after the preview is merged or removed without the owner seeing it."""
     from exomem import path_variants
+    from exomem.cli_ops import OpError
 
     evidence = vault / "Knowledge Base" / "Evidence"
     _page(evidence / "Garden" / "a.md")
     (evidence / "garden").mkdir(parents=True)
     preview = path_variants.preview(vault)
-    assert preview["empty_folders"] == ["Knowledge Base/Evidence/garden"]
+    assert preview["folders"] == ["Knowledge Base/Evidence/garden"] and preview["move_count"] == 0
     (evidence / "garden" / "late.txt").write_text("late")
 
-    with pytest.raises(ValueError, match="STALE_PATH_VARIANT_PLAN"):
+    with pytest.raises(OpError) as refused:
         path_variants.apply(vault, plan_id=preview["plan_id"], why="remove emptied spelling")
+    assert refused.value.code == "STALE_MAINTENANCE_PLAN"
     assert (evidence / "garden" / "late.txt").exists()
 
 

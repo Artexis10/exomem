@@ -713,7 +713,7 @@ def test_a_stored_split_is_merged_into_its_canonical_spelling(served):
     )
 
     preview = path_variants.preview(served)
-    assert [unit["from"] for unit in preview["batch"]] == ["Knowledge Base/stored only/Epsilon.md"]
+    assert [unit["from"] for unit in preview["moves"]] == ["Knowledge Base/stored only/Epsilon.md"]
     result = path_variants.apply(served, plan_id=preview["plan_id"], why="merge the stored split")
 
     assert result["moved"] == [
