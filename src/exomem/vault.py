@@ -7862,11 +7862,11 @@ def canonical_variant(
     counts = {name: len(found) for name in spellings if (found := entries(name)) is not None}
     if not counts:
         return None
-    from . import kbdir, layout, project_keys
+    from . import layout, project_keys
 
     declared = layout.declared_folders(vault_root)
     registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
-    if parent in {"", kbdir.kb_dirname()} and not any(
+    if parent in {"", managed_root_rel()} and not any(
         (f"{parent}/{name}" if parent else name) in declared for name in counts
     ):
         return None
