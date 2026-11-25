@@ -29,7 +29,7 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > ```
 >
 > Claude Code alone? `/plugin marketplace add substrate-systems/evermatter` then
-> `/plugin install exomem@exomem` installs the skills and hooks. Finish the MCP
+> `/plugin install evermatter@exomem` installs the skills and hooks. Finish the MCP
 > route with `exomem setup --stdio`, or point setup at your existing service.
 >
 > The manual walkthrough below exists so you can see what those do, and for when
@@ -370,7 +370,7 @@ installation, setup can create the stdio route for you with `--stdio`. The
 manual equivalent is:
 
 ```bash
-claude mcp add exomem \
+claude mcp add evermatter \
   --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
   --env EXOMEM_DISABLE_EMBEDDINGS=1 \
   -- uv --directory "$PWD" run python -m exomem --transport stdio
@@ -388,7 +388,7 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```json
 {
   "mcpServers": {
-    "exomem": {
+    "evermatter": {
       "command": "uv",
       "args": ["--directory", "/path/to/evermatter", "run", "python", "-m", "exomem", "--transport", "stdio"],
       "env": {
@@ -400,7 +400,8 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 }
 ```
 
-Restart Claude Code; you should see the product `exomem` tools (`bootstrap`,
+Restart Claude Code; you should see the Evermatter tools, named `mcp__evermatter__<tool>` in permission
+rules (`bootstrap`,
 `search_memory`, `read_memory`, `create_note`, `capture_source`, `review_memory`,
 `maintain_memory`, …). Quick test before wiring: `uv run python -m exomem
 --transport stdio` should start and wait on stdin without error.
@@ -419,16 +420,16 @@ path needed — it ships in the package):
 uv run python -m exomem install-skill
 ```
 
-That writes the core skill to `~/.claude/skills/exomem/` and installs the named
-workflow skills beside it, such as `exomem-continue`, `exomem-capture`,
-`exomem-research`, `exomem-review`, and `exomem-media`. The workflow skills are
-short operating loops for common user intents; the core `exomem` skill remains
+That writes the core skill to `~/.claude/skills/evermatter/` and installs the named
+workflow skills beside it, such as `evermatter-continue`, `evermatter-capture`,
+`evermatter-research`, `evermatter-review`, and `evermatter-media`. The workflow skills are
+short operating loops for common user intents; the core `evermatter` skill remains
 the contract that preserves Sources, Evidence, compiled notes, review, and
 supersession. See [docs/workflow-skills.md](docs/workflow-skills.md).
 
 The core skill uses the same name as the Evermatter connector and tools, so it all
 reads as one product. (If you installed before the rename, this also retires the
-old `knowledge-base` skill folder.) **Restart Claude Code** so it loads. Useful flags: `--link`
+old `knowledge-base`, `exomem` and `exomem-*` skill folders that Evermatter wrote.) **Restart Claude Code** so it loads. Useful flags: `--link`
 symlinks instead of copying so it
 tracks repo updates as you `git pull` (falls back to a copy if your OS refuses
 the symlink); `--force` overwrites an existing install; `--target` picks a

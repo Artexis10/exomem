@@ -10,7 +10,7 @@ The fastest way to try exomem with Claude Code: no `uv`, no Python, no clone.
 > lines and compose files to keep upgrading.
 
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Replace `/path/to/vault` with your Obsidian/markdown vault's absolute path.

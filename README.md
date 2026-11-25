@@ -79,7 +79,7 @@ Claude Code session:
 
 ```
 /plugin marketplace add substrate-systems/evermatter
-/plugin install exomem@exomem
+/plugin install evermatter@exomem
 ```
 
 Then choose the route. If you already run Evermatter as a service for phone or
@@ -92,8 +92,31 @@ exomem setup --vault "/path/to/vault" --mcp-url https://<host>/mcp
 For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
 Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime. When updating from an older plugin,
-run `/plugin update exomem@exomem`, then `/reload-plugins` or restart Claude
-Code before rerunning setup.
+run `/plugin update evermatter@exomem`, then `/reload-plugins` or restart Claude
+Code before rerunning setup. The plugin was `exomem` before the rename; Claude Code
+moves an install of the old name to `evermatter` by itself. The marketplace id stays
+`exomem`.
+
+### Move an existing install to the Evermatter names
+
+An install made before the rename keeps working with no action. Its server key,
+tool names, hooks and permission rules still match. To adopt the new names, run:
+
+```bash
+evermatter setup --migrate
+```
+
+1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex.
+2. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
+3. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
+4. It backs up each file it changes beside the original, as `<file>.exomem-bak`.
+5. Restart Claude Code and Codex. Run `evermatter setup` to replace the old `exomem` skills.
+
+Setup never edits a permission rule or hook that you wrote. A rule that names
+`mcp__exomem__*` stops matching after the key changes, so change it to
+`mcp__evermatter__*` yourself. Both `evermatter setup --migrate` and
+`evermatter doctor` list each such rule and the file that holds it. Settings keep
+their `EXOMEM_*` names.
 
 ### claude.ai and ChatGPT
 
@@ -254,7 +277,7 @@ policy, see [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 Or add it directly to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.exomem]
+[mcp_servers.evermatter]
 command = "exomem"
 args = ["--transport", "stdio"]
 env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
@@ -266,7 +289,7 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 <summary>Any MCP client (generic stdio)</summary>
 
 ```json
-{"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
+{"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
 
 After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
@@ -287,7 +310,7 @@ standing instruction.
 > lines and compose files to keep upgrading.
 
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or
