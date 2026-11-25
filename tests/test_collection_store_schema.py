@@ -60,6 +60,10 @@ EXPECTED_TABLES = {
     "rollup_members",
     "item_references",
     "item_reference_state",
+    "version_effective",
+    "timeline_points",
+    "field_span_state",
+    "field_spans",
     "store_mode",
     "store_mode_objects",
     "store_pages",
@@ -79,6 +83,8 @@ APPEND_ONLY = (
     "collection_type_versions",
     "import_members",
     "store_audit",
+    "version_effective",
+    "timeline_points",
 )
 
 
@@ -227,6 +233,14 @@ def _populated(writer: connection.WriterConnection) -> dict[str, int]:
                 "INSERT INTO store_audit(revision, path, operation, origin, sha256, at)"
                 " VALUES (1, 'Knowledge Base/a.md', 'write', 'agent', ?, '2026-11-08T00:00:00Z')",
                 (H,),
+            )
+        if schema.schema_version(conn) >= schema.TIMELINE_SCHEMA_VERSION:  # an older store has no timeline facts
+            conn.execute("INSERT INTO version_effective(row_id, row_version, effective_at) VALUES (?, 1, '2026-03-07')",
+                         (row_id,))
+            conn.execute(
+                "INSERT INTO timeline_points(row_id, field_path, txn_id, row_version, placement, effective_at,"
+                " value_json) VALUES (?, 'title', 1, 1, 'past', '2026-03-01', '\"b\"')",
+                (row_id,),
             )
     return {"row_id": row_id}
 

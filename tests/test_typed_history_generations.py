@@ -87,8 +87,8 @@ def before_retractable_rows(patch):
 def before_source_dependencies(patch):
     """Make the maintained writer seed v1 events, as every release before schema 18 wrote them."""
     before_retractable_rows(patch)  # a store from before schema 18 is also from before schema 19
-    # A store before schema 18 has no event_version column and no version-Source association table.
-    columns = tuple(column.name for column in tables.txns.c if column.name != "event_version")
+    # A store before schema 18 has no event_version column, no version-Source association table and no timeline marker.
+    columns = tuple(column.name for column in tables.txns.c if column.name not in ("event_version", "timeline_version"))
     patch.setattr(tables, "INSERT_TXN", text(
         f"INSERT INTO txns({','.join(columns)}) VALUES({','.join(':' + name for name in columns)})"))
     current_txn = writer.CollectionWriter._txn
@@ -179,8 +179,9 @@ def test_schema10_upgrade_binds_exact_history_and_preserves_source_spine(histori
             if name == "version_identity":
                 assert [row[:6] for row in after] == rows
             elif name == "txns":
-                assert [row[:-1] for row in after] == rows
-                assert all(row[-1] == 1 for row in after)
+                # Migration 18 adds the event version, 1 for every earlier event; no earlier event has a timeline marker.
+                assert [row[:-2] for row in after] == rows
+                assert all(row[-2:] == (1, None) for row in after)
             else:
                 assert after == rows
         assert conn.execute("SELECT encoding,payload_generation FROM version_identity ORDER BY row_version").fetchall() == [

@@ -11,7 +11,8 @@ Contract held here, not in the writers:
   modules' DDL, are not ``STRICT`` and are never created here;
 - ``txns``, ``audit_effects``, ``item_versions``, ``item_sources``,
   ``collection_manifests``, ``collection_type_versions``,
-  ``version_identity`` and ``store_audit`` (schema 15) are append-only: conflicting ``BEFORE INSERT``,
+  ``version_identity``, ``store_audit`` (schema 15), ``version_source_bindings`` (schema 18),
+  ``version_effective`` and ``timeline_points`` (schema 21) are append-only: conflicting ``BEFORE INSERT``,
   ``BEFORE UPDATE`` and ``BEFORE DELETE`` triggers abort the statement;
 - ``version_identity`` is the version spine (schema 5): every JSON or typed
   item version has exactly one identity, and ``item_sources`` references it.
@@ -48,7 +49,10 @@ if TYPE_CHECKING:
     from alembic.config import Config
     from sqlalchemy.engine import Connection
 
-SCHEMA_VERSION = 20
+#: The schema that adds timeline facts. Its number lives only here, so a migration that merges first
+#: moves it by one line; the migration module reads it.
+TIMELINE_SCHEMA_VERSION = 21
+SCHEMA_VERSION = TIMELINE_SCHEMA_VERSION
 #: The first schema with the store-mode tables, ``VAULT_STORE_TABLES``.
 VAULT_STORE_SCHEMA_VERSION = 15
 #: The last schema that changed a table that a store-mode page read reads: 16 gave pages their mtime. A store
@@ -131,6 +135,10 @@ TABLES = (
     "rollup_members",
     "item_references",
     "item_reference_state",
+    "version_effective",
+    "timeline_points",
+    "field_span_state",
+    "field_spans",
     *VAULT_STORE_TABLES,
 )
 _V1_APPEND_ONLY_TABLES = (
@@ -142,11 +150,11 @@ _V1_APPEND_ONLY_TABLES = (
     "collection_type_versions",
 )
 APPEND_ONLY_TABLES = (*_V1_APPEND_ONLY_TABLES, "version_identity", "import_members", "typed_field_epochs", "typed_value_formats",
-                      "store_audit", "version_source_bindings")
+                      "store_audit", "version_source_bindings", "version_effective", "timeline_points")
 
-#: The declared-reference inverse index (schema 17). It derives from items, so the replica
-#: leaves it empty and warms a rebuilt state instead of trusting a copied one.
-DERIVED_INDEX_TABLES = ("item_references",)
+#: The declared-reference inverse index (schema 17) and the per-field span index (timeline schema). They
+#: derive from items, so the replica leaves them empty and warms a rebuilt state instead of trusting a copied one.
+DERIVED_INDEX_TABLES = ("item_references", "field_spans", "field_span_state")
 
 _TABLES_V1 = (
     """
@@ -346,6 +354,8 @@ _CONFLICT_KEYS = {
     "typed_field_epochs": (("collection_id", "generation", "field_ordinal"),),
     "typed_value_formats": (("collection_id", "generation", "field_ordinal", "format_id"),
                             ("collection_id", "generation", "field_ordinal", "format_json")),
+    "version_effective": (("row_id", "row_version"),),
+    "timeline_points": (("row_id", "field_path", "txn_id"),),
 }
 
 
@@ -1309,6 +1319,69 @@ def _migrate_to_20(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX store_derivation_queue_by_revision ON store_derivation_queue(revision)")
 
 
+def _add_timeline_facts(conn: sqlite3.Connection) -> None:
+    """Keep the authored timeline facts of Records writes, and the derived per-field span index.
+
+    ``version_effective`` holds the effective time a writer stated for a version; a defaulted time is
+    never stored, so every earlier version reads as taking effect when it was written. ``timeline_points``
+    holds each past point and each correction. ``txns.timeline_version`` marks a transaction whose event
+    material carries these facts, so the hash chain covers them; ``ADD COLUMN`` keeps ``txns`` in place,
+    as migration 18 did. ``field_span_state`` and ``field_spans`` derive from the versions and the facts,
+    so a snapshot copies them empty and a store rebuilds them on demand.
+    """
+    conn.execute("""CREATE TABLE version_effective(
+      row_id INTEGER NOT NULL,
+      row_version INTEGER NOT NULL,
+      effective_at TEXT NOT NULL,
+      PRIMARY KEY(row_id,row_version),
+      FOREIGN KEY(row_id,row_version) REFERENCES version_identity(row_id,row_version)
+    ) STRICT, WITHOUT ROWID""")
+    # Placement is a closed set this schema fixes. A past point holds its value (NULL when the field was absent);
+    # a current correction's value is its version's.
+    conn.execute("""CREATE TABLE timeline_points(
+      row_id INTEGER NOT NULL,
+      field_path TEXT NOT NULL,
+      txn_id INTEGER NOT NULL REFERENCES txns(txn_id) DEFERRABLE INITIALLY DEFERRED,
+      row_version INTEGER NOT NULL,
+      placement TEXT NOT NULL CHECK(placement IN ('current','past')),
+      effective_at TEXT NOT NULL,
+      value_json TEXT CHECK(value_json IS NULL OR (placement='past' AND json_valid(value_json))),
+      corrects_txn INTEGER REFERENCES txns(txn_id),
+      CHECK(placement='past' OR corrects_txn IS NOT NULL),
+      PRIMARY KEY(row_id,field_path,txn_id),
+      FOREIGN KEY(row_id,row_version) REFERENCES version_identity(row_id,row_version)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX timeline_points_by_txn ON timeline_points(txn_id)")
+    conn.execute("ALTER TABLE txns ADD COLUMN timeline_version INTEGER CHECK(timeline_version IN (1))")
+    conn.execute("""CREATE TABLE field_span_state(
+      field_key INTEGER PRIMARY KEY,
+      collection_id TEXT NOT NULL,
+      field_path TEXT NOT NULL,
+      encoding_hash TEXT NOT NULL,
+      built_through INTEGER NOT NULL,
+      ready INTEGER NOT NULL CHECK(ready IN (0,1)),
+      UNIQUE(collection_id,field_path)
+    ) STRICT""")
+    # Times are UTC microseconds since the Unix epoch; end_at is NULL while a span is current.
+    conn.execute("""CREATE TABLE field_spans(
+      field_key INTEGER NOT NULL,
+      value_tag INTEGER NOT NULL,
+      value_key TEXT NOT NULL,
+      start_at INTEGER NOT NULL,
+      start_seq INTEGER NOT NULL,
+      end_at INTEGER,
+      row_id INTEGER NOT NULL,
+      PRIMARY KEY(field_key,value_tag,value_key,start_at,start_seq,row_id)
+    ) STRICT, WITHOUT ROWID""")
+    conn.execute("CREATE INDEX field_spans_by_start ON field_spans(field_key,start_at,start_seq,row_id)")
+    conn.execute("CREATE INDEX field_spans_by_row ON field_spans(row_id,field_key,start_at,start_seq)")
+    for statement in _TRIGGERS_TIMELINE:
+        conn.execute(statement)
+
+
+_TRIGGERS_TIMELINE = (*_append_only_triggers("version_effective"), *_append_only_triggers("timeline_points"))
+
+
 def compatibility_ids(version: int | None = None) -> tuple[str, ...]:
     """The state compatibility ids that a store at ``version`` requires of a release that opens it.
 
@@ -1399,7 +1472,8 @@ def ensure_schema(conn: Connection) -> int:
                               *(_TRIGGERS_V9 if target >= 9 else ()), *(_TRIGGERS_V10 if target >= 10 else ()),
                               *(_TRIGGERS_V14 if target >= 14 else ()),
                               *(_TRIGGERS_V15 if target >= 15 else ()),
-                              *(_TRIGGERS_V18 if target >= 18 else ())):
+                              *(_TRIGGERS_V18 if target >= 18 else ()),
+                              *(_TRIGGERS_TIMELINE if target >= TIMELINE_SCHEMA_VERSION else ())):
                 raw.execute(statement)
             if target >= 5:
                 from . import typed_storage

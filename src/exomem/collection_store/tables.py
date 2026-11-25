@@ -24,7 +24,14 @@ txns = Table("txns", metadata,
     Column("actor", Text), Column("why", Text), Column("request_id", Text),
     Column("request_hash", Text), Column("receipt_json", Text), Column("committed_at", Text),
     Column("prev_event_hash", Text), Column("event_hash", Text), Column("commit_seq", Integer),
-    Column("store_head_hash", Text), Column("legacy_event_json", Text), Column("event_version", Integer))
+    Column("store_head_hash", Text), Column("legacy_event_json", Text), Column("event_version", Integer),
+    Column("timeline_version", Integer))
+version_effective = Table("version_effective", metadata,
+    Column("row_id", Integer), Column("row_version", Integer), Column("effective_at", Text))
+timeline_points = Table("timeline_points", metadata,
+    Column("row_id", Integer), Column("field_path", Text), Column("txn_id", Integer), Column("row_version", Integer),
+    Column("placement", Text), Column("effective_at", Text), Column("value_json", Text),
+    Column("corrects_txn", Integer))
 item_versions = Table("item_versions", metadata,
     Column("row_id", Integer), Column("row_version", Integer), Column("values_json", Text),
     Column("body", Text), Column("payload_hash", Text), Column("txn_id", Integer))
@@ -72,6 +79,8 @@ INSERT_SOURCE = item_sources.insert()
 INSERT_SOURCE_BINDING = version_source_bindings.insert()
 INSERT_EFFECT = audit_effects.insert()
 INSERT_TXN = txns.insert()
+INSERT_VERSION_EFFECTIVE = version_effective.insert()
+INSERT_TIMELINE_POINT = timeline_points.insert()
 ADVANCE = collections.update().where(collections.c.collection_id == bindparam("target_collection_id")).values(
     generation=bindparam("generation"), audit_head=bindparam("audit_head"), updated_txn=bindparam("updated_txn"))
 _PENDING = insert(projection_state)

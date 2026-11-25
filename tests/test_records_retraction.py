@@ -545,8 +545,14 @@ HISTORY_TABLES = ("txns", "audit_effects", "item_versions", "item_sources", "ver
                   "version_source_bindings", "held_candidates")
 
 
-def tables_of(raw, names):
-    return {name: raw.execute(f"SELECT * FROM {name} ORDER BY 1, 2").fetchall() for name in names}  # noqa: S608
+def columns_of(raw, names):
+    return {name: [row[1] for row in raw.execute(f"PRAGMA table_info({name})")] for name in names}  # noqa: S608
+
+
+def tables_of(raw, columns):
+    """Each table's rows in the listed columns: a later schema may add a column, as the timeline marker did."""
+    return {name: raw.execute(f"SELECT {', '.join(listed)} FROM {name} ORDER BY 1, 2").fetchall()  # noqa: S608
+            for name, listed in columns.items()}
 
 
 @pytest.fixture
@@ -592,7 +598,8 @@ def test_a_store_with_history_upgrades_without_losing_a_row_or_a_proof(schema_18
         assert raw.execute("SELECT type FROM sqlite_master WHERE name='items'").fetchone() == ("table",)
         before_items = raw.execute("SELECT * FROM items ORDER BY row_id").fetchall()
         before_counts = raw.execute("SELECT collection_id, COUNT(*) FROM items GROUP BY 1 ORDER BY 1").fetchall()
-        before = tables_of(raw, HISTORY_TABLES)
+        columns = columns_of(raw, HISTORY_TABLES)
+        before = tables_of(raw, columns)
     assert len(before_counts) == 3 and before["version_source_bindings"] and before["held_candidates"]
 
     with connection.open_writer(path, lease_check=lambda: True) as handle, library_scope():
@@ -600,7 +607,7 @@ def test_a_store_with_history_upgrades_without_losing_a_row_or_a_proof(schema_18
         assert schema.schema_version(conn) == schema.SCHEMA_VERSION
         assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert tables_of(conn, HISTORY_TABLES) == before
+        assert tables_of(conn, columns) == before
         assert [row[:-1] for row in conn.execute("SELECT * FROM item_rows ORDER BY row_id")] == before_items
         assert conn.execute("SELECT COUNT(*) FROM item_rows WHERE retracted_txn IS NOT NULL").fetchone() == (0,)
         assert conn.execute("SELECT * FROM items ORDER BY row_id").fetchall() == before_items
