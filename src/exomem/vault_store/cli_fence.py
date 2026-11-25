@@ -140,6 +140,8 @@ ACCESS: dict[str, Declaration] = {
     "media-replicas": _NONE,
     # Reads the cell's media drain record, which the file-mode drain wrote.
     "cell-media-census": _pages(),
+    # Reads the cell's media storage record, which the file-mode worker wrote.
+    "cell-media-storage": _pages(),
     # Reads the vault's companions for the media references that they hold.
     "cell-media-manifest": _pages(),
     # Takes a snapshot and a manifest path, never a vault: it reads manifests and asks the media edge.

@@ -296,7 +296,7 @@ exomem setup --vault "/path/to/vault" \
   --replace-client-registration
 ```
 
-Then use `/mcp` in Claude Code and `codex mcp login exomem` for native OAuth.
+Then use `/mcp` in Claude Code and `codex mcp login evermatter` for native OAuth.
 After updating an older Evermatter Claude plugin, run `/reload-plugins` or restart
 Claude Code so its former stdio process does not survive in the live session.
 

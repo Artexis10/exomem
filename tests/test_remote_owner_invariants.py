@@ -21,7 +21,7 @@ from exomem import server_runtime
 SRC = Path(__file__).resolve().parents[1] / "src" / "exomem"
 _WRITE_CALLS = {"write_text", "write_bytes", "open", "replace", "rename", "write", "touch"}
 _ENV_MARKERS = (".env", "env_path", "service_env", "environment_file", "dotenv")
-_LOADERS = {"load_dotenv", "load_dotenv_func", "dotenv_values"}
+_LOADERS = {"load_dotenv", "load_dotenv_func", "dotenv_values", "dotenv_settings"}
 
 
 def _modules() -> list[tuple[str, ast.Module]]:
@@ -107,6 +107,10 @@ def test_every_env_file_loader_reads_only_the_working_directory_env() -> None:
             if (name, function.name) == ("remote_setup_wizard.py", "_load_env"):
                 # Reloads the file the operator's setup command just wrote,
                 # at a location `run_remote_setup` already guarded before writing.
+                continue
+            if name == "env_compat.py" and function.name in {"load_dotenv", "dotenv_settings"}:
+                # Map the names of a path that their caller has already guarded;
+                # each caller is checked here, because both are loader names.
                 continue
             source = ast.unparse(function)
             if any(f"{helper}(" in source for helper in _GUARD_HELPERS):

@@ -134,18 +134,7 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out
 
 function Get-DotenvValue {
     param([string]$Name)
-    $envPath = Join-Path $repoRoot ".env"
-    if (-not (Test-Path $envPath)) { return $null }
-    foreach ($line in Get-Content $envPath) {
-        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
-            $value = $Matches[1].Trim()
-            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
-                $value = $value.Substring(1, $value.Length - 2)
-            }
-            return $value
-        }
-    }
-    return $null
+    return Get-ExomemDotenvValue -RepoRoot $repoRoot -Name $Name
 }
 
 function Read-DotenvMap {
@@ -162,13 +151,6 @@ function Read-DotenvMap {
         }
     }
     return $map
-}
-
-function Set-ProcessEnvFromMap {
-    param([System.Collections.IDictionary]$Map)
-    foreach ($entry in $Map.GetEnumerator()) {
-        [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
-    }
 }
 
 function Set-NssmEnvironment {
@@ -327,7 +309,7 @@ $receiptStateRoot = if ($transitionReceipt) { [string]$transitionReceipt.state_r
 $pinnedStateRoot = Ensure-ExomemDotenvStateRootBinding `
     -AppDirectory $repoRoot `
     -ExpectedStateRoot $receiptStateRoot
-[Environment]::SetEnvironmentVariable("EXOMEM_STATE_ROOT", $pinnedStateRoot, "Process")
+Set-ExomemProcessSetting -Name "EXOMEM_STATE_ROOT" -Value $pinnedStateRoot
 if ($existingTransition) {
     Set-ExomemTransitionReceiptPhase @transitionIdentity -Phase "bound"
 }
@@ -379,11 +361,12 @@ if ($existingTransition) {
 # re-ran this script. Respects an operator's own explicit `.env` override --
 # only pins when unset there.
 $serviceEnv = Read-DotenvMap
-if (-not $serviceEnv.Contains("EXOMEM_LOG_DIR")) {
+# The .env may name the log directory under any of its names; pin only when it names none.
+if ($null -eq (Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Source ".env")) {
     $serviceEnv["EXOMEM_LOG_DIR"] = $pinnedLogDir
 }
-$appLogDir = $serviceEnv["EXOMEM_LOG_DIR"]
-Set-ProcessEnvFromMap -Map $serviceEnv
+$appLogDir = Get-ExomemMapSetting -Map $serviceEnv -Name "EXOMEM_LOG_DIR" -Source ".env"
+Set-ExomemProcessEnvFromMap -Map $serviceEnv -Source ".env"
 
 $script:StateRootTransitionBegan = $true
 Write-Host "Migrating machine-local state under the proven offline window..."

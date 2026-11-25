@@ -392,6 +392,7 @@ def _entry_arguments(name, vault, scratch):
         "cell-init": ["cell-init", "--vault", where],
         "media-replicas": ["media-replicas", "list", "--vault", where],
         "cell-media-census": ["cell-media-census", "--vault", where],
+        "cell-media-storage": ["cell-media-storage", "--vault", where],
         "cell-media-manifest": ["cell-media-manifest", "--vault", where],
     }[name]
 

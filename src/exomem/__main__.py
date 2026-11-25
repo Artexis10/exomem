@@ -24,6 +24,8 @@ Subcommands:
   cell, uploaded to controller-presigned parts; reports sizes and digests only
 - `cell-media-census` — Evermatter Cloud backup Job: the cell's last census of its
   evicted originals from its drain record, or `unknown unknown` when it cannot say
+- `cell-media-storage` — Evermatter Cloud backup Job: the cell's last reading of its
+  vault and media storage figures from its storage record, or nothing when it cannot say
 - `cell-media-manifest` — Evermatter Cloud backup Job: the media manifest that each
   snapshot carries, or an unknown manifest when the census cannot say
 - `cell-media-collect` — Evermatter Cloud backup Job: condemn the released media
@@ -54,7 +56,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from . import semantic_authoring
+from . import env_compat, semantic_authoring
 from .kbdir import managed_join, managed_root_rel
 
 
@@ -109,13 +111,22 @@ def _is_cli_only_invocation(raw: list[str]) -> bool:
 # runtime: each bounds itself in seconds on one CPU.
 # nosemgrep: ep-word-set -- This CLI's own parser registers these subcommand names.
 _LEAN_COMMANDS: frozenset[str] = frozenset(
-    {"cell-media-census", "cell-media-manifest", "cell-media-collect"}
+    {"cell-media-census", "cell-media-storage", "cell-media-manifest", "cell-media-collect"}
 )
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except env_compat.SettingsConflict as conflict:
+        print(f"exomem: not run. {conflict}", file=sys.stderr)
+        return 2
+
+
+def _main(argv: list[str] | None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw[:1] and raw[0] in _LEAN_COMMANDS:
+        env_compat.refuse_process_conflicts()
         return _run_command(raw[0], raw[1:])
     from .runtime_resources import bootstrap, preload_local_dotenv_policy
 
@@ -123,9 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     bootstrap()
     # Named commands and identification/help keep their completion wait. A
     # serving route skips it only when its managed lifecycle already joined.
-    serving = (not raw or raw[0].startswith("-")) and not any(
-        item in {"--version", "--help", "-h"} for item in raw
-    )
+    serving = (not raw or raw[0].startswith("-")) and not env_compat.asks_only_to_identify(raw)
     try:
         return _run_cli(argv)
     finally:
@@ -153,6 +162,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
         from .install_info import print_version
 
         return print_version(as_json="--json" in raw)
+    if not env_compat.asks_only_to_identify(raw):  # help acts on no setting
+        env_compat.refuse_process_conflicts()
     if raw and raw[0] == "find":
         # `find` was the original friendly retrieval command.  Keep existing
         # scripts useful while the current product language calls it `ask`.
@@ -237,6 +248,7 @@ class _DotenvConflict(Exception):
 def _dotenv_conflict_message(command: str, conflict: _DotenvConflict) -> str:
     return (
         f"{command}: not run. The working-directory .env sets {', '.join(conflict.keys)} "
+        f"(under that name or an alias: {', '.join(p + '*' for p in env_compat.ALIAS_PREFIXES)}) "
         "to a different value than this process's environment, so it is unclear which "
         "deployment to act on. Unset those variables, remove them from the .env, or run "
         "from a directory without that .env."
@@ -255,11 +267,17 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
 
     The `.env` still wins over exported values. A command that writes
     credentials or sessions passes `refuse_conflicts`: when the `.env` would
-    replace an exported value with a different one, it stops instead of
-    acting on a store the operator did not name. Other commands warn.
+    replace an exported value with a different one, or either source sets an
+    `EVERMATTER_X` and `EXOMEM_X` to different values, it stops instead of
+    acting on a store the operator did not name. Other commands warn, except
+    that a placement setting in conflict always stops the command. The
+    comparison uses the `.env`'s names renamed to `EXOMEM_*`, so an
+    `EVERMATTER_X` line conflicts with an exported `EXOMEM_X`.
     """
     from . import cloud_cell
 
+    if refuse_conflicts:
+        env_compat.refuse_process_conflicts(every_setting=True)
     if cloud_cell.cloud_mode_enabled():
         return
     from .dotenv_guard import working_directory_dotenv
@@ -267,13 +285,13 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
     dotenv_path = working_directory_dotenv()
     if dotenv_path is None:
         return
-    from dotenv import dotenv_values, load_dotenv
-
+    settings, conflicts = env_compat.dotenv_settings(dotenv_path)
+    env_compat.settle_conflicts(
+        conflicts, source="the working-directory .env", refuse_all=refuse_conflicts
+    )
     # Names only: the values may be secrets.
     replaced = sorted(
-        key
-        for key, value in dotenv_values(dotenv_path).items()
-        if value is not None and key in os.environ and os.environ[key] != value
+        key for key, value in settings.items() if key in os.environ and os.environ[key] != value
     )
     if replaced and refuse_conflicts:
         raise _DotenvConflict(replaced)
@@ -282,7 +300,7 @@ def _load_cwd_dotenv(*, refuse_conflicts: bool = False) -> None:
             f"warning: the working-directory .env replaces exported {', '.join(replaced)}",
             file=sys.stderr,
         )
-    load_dotenv(dotenv_path=dotenv_path, override=True)
+    env_compat.apply_settings(settings, override=True)
 
 
 def _build_auth_session_authority():
@@ -5453,6 +5471,13 @@ def _cell_media_census_main(argv: list[str]) -> int:
     return census_main(argv)
 
 
+def _cell_media_storage_main(argv: list[str]) -> int:
+    # It reads one file, so it loads no CLI, server framework or native runtime.
+    from .cell_media_storage import main as storage_main
+
+    return storage_main(argv)
+
+
 def _cell_media_manifest_main(argv: list[str]) -> int:
     # It runs on a read-only clone: it reads the vault and the media ledger, nothing more.
     from .media_manifest import main as manifest_main
@@ -5510,6 +5535,7 @@ _COMMANDS: dict[str, Callable[[list[str]], int]] = {
     "cell-init": _cell_init_main,
     "media-replicas": _media_replicas_main,
     "cell-media-census": _cell_media_census_main,
+    "cell-media-storage": _cell_media_storage_main,
     "cell-media-manifest": _cell_media_manifest_main,
     "cell-media-collect": _cell_media_collect_main,
     # A thin alias over the registry command, so there is exactly one leaf; the long form
@@ -5527,6 +5553,7 @@ _WITHOUT_CLI_LOG: frozenset[str] = frozenset(
         "cell-export",
         "cell-init",
         "cell-media-census",
+        "cell-media-storage",
         "cell-media-manifest",
         "cell-media-collect",
         "activate",

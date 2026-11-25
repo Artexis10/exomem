@@ -143,10 +143,13 @@ if exomem_service_is_managed "$UNIT_FILE"; then
     # The diarizer sidecar venv is keyed by the active release's sidecar lock; building it is a
     # no-op when the lock is unchanged. The switch already succeeded, so a failure here is reported.
     # The build runs with the unit's EXOMEM_STATE_ROOT, so it lands where the service looks.
+    # The subshell forces both names through exomem_export_setting, so the build never inherits an alias beside them.
     { ACTIVE_PYTHON="$(printf '%s' "$RESULT" | "$VENV_PYTHON" -c 'import json,sys; print(json.load(sys.stdin)["active"]["python"])')" \
-        && EXOMEM_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
-            EXOMEM_STATE_ROOT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_STATE_ROOT "$VENV_PYTHON")" \
-            "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled; } \
+        && (UNIT_DIARIZE="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_DIARIZE "$VENV_PYTHON")" \
+            && UNIT_STATE_ROOT="$(exomem_unit_env_value "$UNIT_FILE" EXOMEM_STATE_ROOT "$VENV_PYTHON")" \
+            && exomem_export_setting EXOMEM_DIARIZE "$UNIT_DIARIZE" \
+            && exomem_export_setting EXOMEM_STATE_ROOT "$UNIT_STATE_ROOT" \
+            && exec "$ACTIVE_PYTHON" -m exomem.diarizer_sidecar --if-enabled); } \
         || echo "Diarizer sidecar: build failed for $SERVED; transcripts carry no speakers until it is rebuilt" >&2
     echo "Managed serving version: $SERVED"
     exit 0
@@ -178,11 +181,12 @@ if [[ -z "$VAULT" ]]; then
         || die "no vault in $UNIT_FILE or its EnvironmentFile; pass --vault for a service that is not the default unit"
     VAULT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_VAULT_PATH)"
 fi
-[[ -z "$VAULT" ]] && VAULT="${EXOMEM_VAULT_PATH:-}"
+[[ -z "$VAULT" ]] && VAULT="$(exomem_process_setting EXOMEM_VAULT_PATH)"
 [[ -n "$VAULT" ]] || die "no vault resolved; pass --vault or set EXOMEM_VAULT_PATH"
 
 DOTENV_STATE_ROOT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_STATE_ROOT)"
-PREFERRED_STATE_ROOT="${EXOMEM_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
+PROCESS_STATE_ROOT="$(exomem_process_setting EXOMEM_STATE_ROOT)"
+PREFERRED_STATE_ROOT="${PROCESS_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
 MANAGED_STATE_ROOT="$(exomem_select_service_state_root \
     "$UNIT_FILE" "$VENV_PYTHON" "$PREFERRED_STATE_ROOT")" \
     || die "could not select the existing service state-root binding"
@@ -264,7 +268,7 @@ exomem_update_transition_receipt \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" stopped
 MANAGED_STATE_ROOT="$(exomem_bind_service_state_root \
     "$UNIT_FILE" "$VENV_PYTHON" "$MANAGED_STATE_ROOT")"
-export EXOMEM_STATE_ROOT="$MANAGED_STATE_ROOT"
+exomem_export_setting EXOMEM_STATE_ROOT "$MANAGED_STATE_ROOT"
 exomem_update_transition_receipt \
     "$VENV_PYTHON" "$TRANSITION_RECEIPT" "$SERVICE_ID" "$BINDING_PATH" \
     "$MANAGED_STATE_ROOT" "$VAULT" "$PORT" bound

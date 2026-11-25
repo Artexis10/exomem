@@ -26,7 +26,7 @@ SERVICE_PY="$(exomem_service_python || true)"
 if [[ -n "$SERVICE_PY" && -x "$SERVICE_PY" ]]; then
     DOCTOR_ARGS=(-m exomem doctor --profile "$PROFILE")
     VAULT="$(exomem_dotenv_value "$REPO_ROOT" EXOMEM_VAULT_PATH)"
-    [[ -z "$VAULT" ]] && VAULT="${EXOMEM_VAULT_PATH:-}"
+    [[ -z "$VAULT" ]] && VAULT="$(exomem_process_setting EXOMEM_VAULT_PATH)"
     [[ -n "$VAULT" ]] && DOCTOR_ARGS+=(--vault "$VAULT")
     echo "Preflight: exomem doctor --profile $PROFILE..."
     if ! "$SERVICE_PY" "${DOCTOR_ARGS[@]}"; then
