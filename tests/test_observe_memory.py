@@ -628,7 +628,10 @@ def test_a_compact_observation_keeps_existing_page_sources(tmp_path: Path) -> No
 def test_a_compact_observation_refuses_a_relation_that_is_no_page_source_field(
     tmp_path: Path, kind: str,
 ) -> None:
-    """`supersedes` is no citation; `cites` has no page field; `evidenced_by` binds another field."""
+    """`supersedes` is no citation; `cites` has no page field.
+
+    `evidenced_by` binds another field.
+    """
     _write_source_page(tmp_path)
     page = _write_page(tmp_path)
     before = page.read_bytes()
@@ -757,7 +760,10 @@ def test_a_compact_observation_does_not_cite_a_source_the_page_already_cites_in_
 
 
 def test_the_hosted_add_summary_says_which_source_the_page_now_cites(tmp_path: Path) -> None:
-    """Catches the cited-Source sentence living in the raw result while the agent's reply omits it."""
+    """Catches the cited-Source sentence living in the raw result.
+
+    The agent's reply must carry it too.
+    """
     from exomem import writer_lease
 
     _write_source_page(tmp_path)
