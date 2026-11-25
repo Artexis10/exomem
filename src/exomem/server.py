@@ -1448,6 +1448,10 @@ def run(
     # this process serves requests. The service manager hides the devices of the workers it starts; this
     # covers a foreground or stdio serve too. The media child gets the deployment's list back.
     cuda_containment.hide_in_process()
+    from . import thread_dump
+
+    # Before the threads start, so per-thread CPU in /proc names each one.
+    thread_dump.name_os_threads()
     from .collection_store import connection
 
     # Serving threads import store modules lazily; load their libraries before any thread starts.

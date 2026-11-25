@@ -143,6 +143,24 @@ try:
     total, used = fs.f_blocks * fs.f_frsize, (fs.f_blocks - fs.f_bfree) * fs.f_frsize
 except OSError:
     pass
+# Each thread of every other process in the container: its name and its user plus system CPU so far.
+threads = {}
+try:
+    tick = os.sysconf('SC_CLK_TCK')
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        try:
+            tids = os.listdir('/proc/' + pid + '/task')
+        except OSError:
+            continue
+        for tid in tids:
+            stat = read('/proc/' + pid + '/task/' + tid + '/stat')
+            if stat and ')' in stat:
+                fields = stat.rsplit(')', 1)[1].split()
+                threads[tid] = [stat[stat.index('(') + 1:stat.rindex(')')], (int(fields[11]) + int(fields[12])) * 1000000 // tick]
+except Exception:  # an unread /proc leaves the tick without threads, never without memory
+    threads = None
 ready = None
 try:
     import urllib.error, urllib.request
@@ -160,7 +178,7 @@ except Exception:  # a stopped or starting server leaves the sample without read
     pass
 print(json.dumps({'memory_current': current, 'memory_anon': anon, 'memory_peak': peak, 'memory_limit': limit,
                   'cpu_usage_usec': cpu, 'mono': time.monotonic(),
-                  'volume_total': total, 'volume_used': used, 'ready': ready}))
+                  'volume_total': total, 'volume_used': used, 'ready': ready, 'threads': threads}))
 """
 # The last bytes of each file in the cell's log folder (EXOMEM_LOG_DIR, set by the cell's manifest), compressed
 # and encoded so that any byte survives the text channel of `kubectl exec`.
@@ -326,6 +344,30 @@ def peaks(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
+def thread_cpu(rows: Sequence[Mapping[str, Any]], label: str) -> dict[str, float] | None:
+    """CPU seconds per thread name in the ticks labelled `label`, busiest first; None when none read threads.
+
+    A tick's share is what each thread used since the tick before it that read threads, whatever its label;
+    the first such tick counts from each thread's start. A thread that ended between two ticks loses what it
+    used after the last tick that saw it.
+    """
+    last: dict[str, int] = {}
+    used: Counter[str] = Counter()
+    read = False
+    for row in rows:
+        threads = row.get("threads")
+        if threads is None:
+            continue
+        if row["label"] == label:
+            read = True
+            for tid, (name, usec) in threads.items():
+                before = last.get(tid, 0)
+                # A smaller count is a new thread that reuses the id.
+                used[name] += usec - before if usec >= before else usec
+        last = {tid: usec for tid, (_name, usec) in threads.items()}
+    return {name: round(usec / 1e6, 1) for name, usec in used.most_common()} if read else None
+
+
 def decide_verdict(folders: Mapping[str, Mapping[str, Sequence[str]] | None], volume_problems: Sequence[str],
                    findings: Sequence[Any], *, smoke: bool, proves_one_copy_only: bool) -> str:
     """`pass` needs both folders judged with no problem, on a volume that cannot hold two copies.
@@ -477,7 +519,8 @@ class Sampler:
     def summary(self) -> dict[str, Any]:
         labels = sorted({row["label"] for row in self.rows})
         return {"interval_seconds": SAMPLE_SECONDS, "all": peaks(self.rows),
-                "by_phase": {label: peaks([row for row in self.rows if row["label"] == label]) for label in labels}}
+                "by_phase": {label: peaks([row for row in self.rows if row["label"] == label]) for label in labels},
+                "cpu_seconds_by_thread": {label: thread_cpu(self.rows, label) for label in labels}}
 
 
 # --- the folders ---------------------------------------------------------------------------
@@ -635,6 +678,8 @@ async def file_pages(agent: Agent, plan: LargeImportPlan, folder: Folder) -> dic
     fields: dict[str, Any] = {"path": stage_path, "collection": collection}
     filed_before: int | None = 0
     while True:
+        # Kept current before the deadline check, so a run that the deadline stops still reports each call.
+        folder.report["pages"] = list(pages.values())
         plan.require_time(f"the {folder.name} folder was filed")
         reply, took = await agent.import_op("file", **fields)
         page = pages.setdefault(reply["run_id"], {"page": len(pages) + 1, "run_id": reply["run_id"], "file_seconds": 0.0,
