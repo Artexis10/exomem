@@ -523,6 +523,35 @@ def test_explicit_replacement_removes_every_shadowing_claude_scope(tmp_path: Pat
     assert [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
 
 
+def test_explicit_replacement_keeps_a_claude_registration_under_the_evermatter_key(
+    tmp_path: Path,
+) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"evermatter": {"command": "exomem", "args": []}}}),
+        encoding="utf-8",
+    )
+    recorder = Recorder()
+
+    code, _out = _setup(
+        vault,
+        home,
+        recorder,
+        claude_config_path=config_path,
+        mcp_url="https://kb.example.com/mcp",
+        replace_client_registration=True,
+    )
+
+    assert code == 0
+    claude_removals = [c for c in recorder.calls if c[1:3] == ["mcp", "remove"] and "claude" in c[0]]
+    assert [c[3:] for c in claude_removals] == [["evermatter", "--scope", "user"]]
+    # The replacement keeps the user's key, so their tool prefix does not change.
+    claude_adds = [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+    assert len(claude_adds) == 1
+    assert claude_adds[0][claude_adds[0].index("--scope") + 2] == "evermatter"
+
+
 def test_failed_claude_replacement_restores_every_snapshotted_file(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     project_dir = tmp_path / "workspace"

@@ -20,6 +20,6 @@
 
 ## 4. Proof and delivery
 
-- [ ] 4.1 Run base against changed on real models and record the per-case result against the ship bar.
-- [ ] 4.2 If the bar is missed, build the Stop-hook custody check and run again.
+- [x] 4.1 Run base against changed on real models and record the per-case result against the ship bar. PR #2938 records it: on 2026-11-20 one blind held-out run with 3 repeats kept the handed files without a nudge in 3 of 3 changed units and 0 of 3 base units, and the final code kept none of the files in the four negative cases.
+- [x] 4.2 If the bar is missed, build the Stop-hook custody check and run again. Not needed: the run in 4.1 met the bar.
 - [x] 4.3 Regenerate derived artifacts, including the plugin and cloud plugin, and run the public-artifact privacy gate.

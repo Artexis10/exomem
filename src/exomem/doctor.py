@@ -3220,12 +3220,12 @@ def _ha_replica_urls(explicit: list[str] | tuple[str, ...] | None) -> list[str]:
 def _evaluate_ha_readiness(
     body: object, *, supported_contracts: set[int]
 ) -> tuple[list[str], dict[str, object]]:
-    from .runtime_readiness import HTTP_TRANSPORT
+    from .runtime_readiness import HTTP_TRANSPORT, SERVICE_NAMES
 
     if not isinstance(body, dict):
         return ["invalid readiness payload"], {}
     reasons: list[str] = []
-    if body.get("status") != "ready" or body.get("service") != "exomem":
+    if body.get("status") != "ready" or body.get("service") not in SERVICE_NAMES:
         reasons.append("runtime is not ready")
     contract = body.get("runtime_contract")
     if isinstance(contract, bool) or not isinstance(contract, int) or contract not in supported_contracts:

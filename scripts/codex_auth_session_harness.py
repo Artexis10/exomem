@@ -18,12 +18,19 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from exomem.client_config import SERVER_NAME, SERVER_NAMES  # noqa: E402
+
 
 class HarnessFailure(RuntimeError):
     """The live client gate observed registration, login, or reuse failure."""
 
 
 SENTINEL_QUERY = "__exomem_codex_session_smoke_absent__"
+# The gate reads a call under either accepted server key; it registers SERVER_NAME only.
+_TOOL_PREFIXES = tuple(f"mcp__{name}__" for name in SERVER_NAMES)
+_ASK_MEMORY_NAMES = {"ask_memory", *(f"{prefix}ask_memory" for prefix in _TOOL_PREFIXES)}
 _SUCCESS_STATUSES = {"completed", "success", "succeeded"}
 _ERROR_STATUSES = {"cancelled", "error", "failed", "failure"}
 _ERROR_LIKE_STDERR = re.compile(
@@ -127,11 +134,11 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
         server = str(item.get("server") or item.get("server_name") or "")
         tool = str(item.get("tool") or item.get("name") or "")
         if not (
-            server.casefold() == "exomem"
-            or tool.casefold().startswith("mcp__exomem__")
+            server.casefold() in SERVER_NAMES
+            or tool.casefold().startswith(_TOOL_PREFIXES)
         ):
             raise HarnessFailure("fresh Codex process called an unexpected MCP tool")
-        if tool.casefold() not in {"ask_memory", "mcp__exomem__ask_memory"}:
+        if tool.casefold() not in _ASK_MEMORY_NAMES:
             raise HarnessFailure("fresh Codex process called an unexpected Evermatter tool")
         if _arguments(item.get("arguments")) != {"query": SENTINEL_QUERY}:
             raise HarnessFailure("Evermatter ask_memory call used unexpected arguments")
@@ -255,14 +262,14 @@ def run_harness(
     )
     _run_checked(
         runner,
-        ["codex", "mcp", "add", "exomem", "--url", url.strip()],
+        ["codex", "mcp", "add", SERVER_NAME, "--url", url.strip()],
         env=env,
         action="register the Evermatter MCP server",
         timeout=30.0,
     )
     _run_checked(
         runner,
-        ["codex", "mcp", "login", "exomem"],
+        ["codex", "mcp", "login", SERVER_NAME],
         env=env,
         action="complete the one interactive Evermatter login",
         timeout=300.0,
@@ -270,7 +277,7 @@ def run_harness(
     )
 
     prompt = (
-        "Use the exomem MCP server now. Make exactly one harmless read-only "
+        f"Use the {SERVER_NAME} MCP server now. Make exactly one harmless read-only "
         f"ask_memory call with query '{SENTINEL_QUERY}'. Do not call any other "
         "Evermatter tool. Do not use shell commands."
     )

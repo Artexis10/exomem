@@ -17,6 +17,10 @@ from .install_info import installed_version
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
+SERVICE_NAME = "exomem"
+# Every service name a reader of the readiness payload accepts: a doctor must read replicas on
+# either side of the name switch. Writers emit SERVICE_NAME only.
+SERVICE_NAMES = ("exomem", "evermatter")
 #: The `retrieval.state` of a proven process whose catalogue trails a live
 #: projection that recall still serves. It exists only in this payload, never in
 #: `readiness.retrieval_admission`, whose states `find` routes on.
@@ -543,7 +547,7 @@ def build_runtime_readiness(
         coordination_payload["graph_sync"] = graph_sync
     payload = {
         "status": "ready" if takeover_eligible and retrieval_serving else "not_ready",
-        "service": "exomem",
+        "service": SERVICE_NAME,
         "release": release,
         "mcp_tool_surface_sha256": mcp_tool_surface_sha256,
         "runtime_contract": RUNTIME_CONTRACT,

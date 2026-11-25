@@ -2613,6 +2613,40 @@ def _skill_lines(items: object) -> list[str]:
     return lines
 
 
+#: The service bounds the names to the vault's `budgets.skills_names_max_chars`; this is the most a vault may set
+#: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together), so
+#: the hook never drops a well-formed names line and still caps a malformed one. The advice sits outside the cap.
+_SKILLS_NAMES_MAX_CHARS = 8000
+#: How the names line labels each kind, once per group, written exactly as the service's `vault_skills.names_text`.
+_SKILLS_NAMES_GROUPS = (("skill", "skills"), ("collection", "collections"))
+
+
+def _skill_names_text(names: object) -> str:
+    """The named items grouped by kind, exactly as the service's `vault_skills.names_text` writes and counts them."""
+    if not isinstance(names, dict):
+        return ""
+    groups = []
+    for kind, label in _SKILLS_NAMES_GROUPS:
+        listed = names.get(kind)
+        members = [" ".join(str(name).split()) for name in listed if str(name).strip()] if isinstance(listed, list) else []
+        if members:
+            groups.append(f"{label}: " + "; ".join(members) + ".")
+    return " ".join(groups)
+
+
+def _skill_names_line(block: dict) -> str:
+    """The items the service names without a line, after its own advice; empty when there are none or they are malformed.
+
+    A held catalogue is recorded only in the continuity token, so names cut here would never be offered again: the
+    cap applies to the names alone and must never bite a block within the service's bound.
+    """
+    text = _skill_names_text(block.get("names"))
+    if not text or len(text) > _SKILLS_NAMES_MAX_CHARS:
+        return ""
+    advice = " ".join(str(block.get("names_advice") or "").split()) or "More of the owner's skills and collections, by name only."
+    return f"- {advice} {text}"
+
+
 def _format_skills_block(block: object) -> str:
     """The skills and collections the service lists, whole lines under one framing line, then the turn's unlisted items.
 
@@ -2622,12 +2656,14 @@ def _format_skills_block(block: object) -> str:
     if not isinstance(block, dict):
         return ""
     parts: list[str] = []
-    lines = _skill_lines(block.get("items")) if block.get("state") == "ready" else []
-    if lines:
+    ready = block.get("state") == "ready"
+    lines = _skill_lines(block.get("items")) if ready else []
+    names = _skill_names_line(block) if ready else ""
+    if lines or names:
         advice = " ".join(str(block.get("advice") or "").split()) or _SKILLS_FALLBACK_ADVICE
         omitted = block.get("omitted")
         tail = [f"- skills and collections: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
-        parts.extend([_SKILLS_FRAME + advice, *lines, *tail])
+        parts.extend([_SKILLS_FRAME + advice, *lines, *([names] if names else []), *tail])
     turn = _skill_lines(block.get("turn_items"))
     if turn:
         parts.extend([_SKILLS_TURN_HEADER, *turn])

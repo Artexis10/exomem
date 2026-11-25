@@ -197,6 +197,42 @@ def test_replace_swaps_only_our_section_and_backs_the_file_up(tmp_path: Path) ->
     assert "hand-tuned" in Path(outcome["backup"]).read_text(encoding="utf-8")
 
 
+def test_a_registration_under_the_evermatter_key_counts_as_ours(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[mcp_servers.evermatter]\ncommand = "hand-tuned"\n', encoding="utf-8")
+
+    assert client_config.codex_mcp_name(path) == "evermatter"
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
+
+    assert outcome["action"] == "exists"
+    assert "hand-tuned" in path.read_text(encoding="utf-8")
+
+
+def test_replace_swaps_an_evermatter_section_and_its_sub_tables_instead_of_adding_a_second(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[mcp_servers.evermatter]\n"
+        'command = "hand-tuned"\n'
+        "\n"
+        "[mcp_servers.evermatter.env]\n"
+        'EXOMEM_VAULT_PATH = "/old/vault"\n'
+        "\n"
+        "[mcp_servers.keeper]\n"
+        'command = "keep-me"\n',
+        encoding="utf-8",
+    )
+
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path, replace=True)
+
+    assert outcome["action"] == "replaced"
+    servers = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
+    assert set(servers) == {"exomem", "keeper"}
+    assert servers["exomem"]["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
+    assert servers["keeper"]["command"] == "keep-me"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows mode bits do not model POSIX 0600")
 def test_codex_backup_preserves_restrictive_config_permissions(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
@@ -238,3 +274,39 @@ def test_codex_home_follows_the_env_override(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "elsewhere"))
 
     assert client_config.codex_config_path() == tmp_path / "elsewhere" / "config.toml"
+
+
+def _evermatter_block(text: str) -> str:
+    return (
+        f"{client_config.EVERMATTER_LEARNING_BEGIN}\n{text}\n"
+        f"{client_config.EVERMATTER_LEARNING_END}\n"
+    )
+
+
+def test_a_file_holding_the_evermatter_markers_is_updated_in_place_not_duplicated(
+    tmp_path: Path,
+) -> None:
+    claude_md = tmp_path / "CLAUDE.md"
+    above, below = "# My rules\n\n", "\n## Later notes\nKeep this.\n"
+    claude_md.write_text(f"{above}{_evermatter_block('older text')}{below}", encoding="utf-8")
+
+    outcome = client_config.place_learning_instruction(claude_md, "newer text")
+
+    assert outcome["action"] == "updated"
+    updated = claude_md.read_text(encoding="utf-8")
+    assert updated.startswith(above) and updated.endswith(below)
+    assert "older text" not in updated
+    assert updated.count("newer text") == 1
+    assert updated.count("learning instruction (managed by") == 1
+
+
+def test_uninstall_removes_a_block_written_with_the_evermatter_markers(tmp_path: Path) -> None:
+    claude_md = tmp_path / "CLAUDE.md"
+    claude_md.write_text(
+        f"# My rules\n\n{_evermatter_block('managed text')}\n## Later notes\n", encoding="utf-8"
+    )
+
+    outcome = client_config.remove_learning_instruction(claude_md)
+
+    assert outcome["action"] == "removed"
+    assert claude_md.read_text(encoding="utf-8") == "# My rules\n\n\n## Later notes\n"

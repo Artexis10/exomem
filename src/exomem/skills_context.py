@@ -48,6 +48,39 @@ def _advice() -> str:
     )
 
 
+def _names_advice() -> str:
+    """How to open an item that the catalogue names without a line, as the serving surface spells each call."""
+    query = capabilities.active_call_text("record_memory", {"action": "query", "collection": "<name>"})
+    find = capabilities.active_call_text("search_memory", {"query": "<name>"})
+    return (
+        "More of the owner's skills and collections, by name only; when one fits this turn, "
+        f"open a collection with {query} and find a skill with {find}."
+    )
+
+
+def _fit_names(candidates: list[_Candidate], max_chars: int | None) -> tuple[dict[str, list[str]], list[_Candidate]]:
+    """The names of `candidates` that fit `max_chars` as `vault_skills.names_text` writes them, by kind, in order.
+
+    The length is kept running, so fitting is linear in the candidates: each kind's label, colon, space and closing
+    full stop are paid once when its group opens, a space joins the groups, and each name pays its length plus the
+    `; ` that joins it to the one before. A name that does not fit is skipped, and a shorter later one may still fit.
+    """
+    labels = dict(vault_skills.NAMES_GROUPS)
+    names: dict[str, list[str]] = {}
+    named: list[_Candidate] = []
+    used = 0
+    for candidate in candidates if max_chars else ():
+        kind, name = candidate.item["kind"], " ".join(str(candidate.item["name"]).split())
+        group = names.get(kind)
+        cost = len(name) + (2 if group else len(labels[kind]) + 3 + (1 if names else 0))
+        if used + cost > max_chars:
+            continue
+        names.setdefault(kind, []).append(name)
+        named.append(candidate)
+        used += cost
+    return {kind: names[kind] for kind, _ in vault_skills.NAMES_GROUPS if kind in names}, named
+
+
 def _unit(item: Mapping[str, Any], path: str) -> dict[str, Any]:
     """The unit shape admission decides for one catalogue line, with its page path.
 
@@ -128,6 +161,7 @@ def compile_block(
     max_chars = conventions.budget("skills_max_chars")
     summary_chars = conventions.budget("skill_summary_max_chars")
     turn_chars = conventions.budget("skills_turn_max_chars")
+    names_chars = conventions.budget("skills_names_max_chars")
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
     try:
@@ -167,14 +201,25 @@ def compile_block(
         block["items"].append(candidate.item)
         served.append(_unit(candidate.item, candidate.path))
         used += cost
-    block["state"] = "ready" if block["items"] else "empty"
-    block["generation"] = _digest({"items": block["items"], "omitted": block["omitted"]})
+    # Each item left without a line is still named while its name fits, so the agent sees every collection and
+    # skill it may choose from and decides itself; `omitted` then counts only the items not even named.
+    names, named = _fit_names(unlisted, names_chars)
+    block["omitted"] -= len(named)
+    if named:
+        block["names"] = names
+    block["state"] = "ready" if block["items"] or named else "empty"
+    block["generation"] = _digest({"items": block["items"], "names": names, "omitted": block["omitted"]})
     if block["state"] == "ready" and known_generation == block["generation"]:
         # The caller holds exactly these items: repeat none of them, and keep the count they were chosen with.
         block.update(state="unchanged", items=[])
+        block.pop("names", None)
         served = []
-    elif block["items"]:
+    elif block["state"] == "ready":
         block["advice"] = _advice()
+        if named:
+            block["names_advice"] = _names_advice()
+        # Terminal egress decides the whole unit each name comes from, so a name never outlives its page's release.
+        served.extend(_unit(candidate.item, candidate.path) for candidate in named)
     turn_items, turn_used = [], 0
     for candidate in _of_the_turn(root, unlisted, domains, reached) if unlisted and turn_chars else ():
         cost = len(vault_skills.item_line(candidate.item)) + 1

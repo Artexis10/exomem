@@ -29,6 +29,8 @@ A full module rename would touch every open pull request. It would also force a 
 
 ### D2. The MCP server key and the plugin and skill identifiers stay `exomem`
 
+Superseded on 2026-11-25 by `rename-agent-surfaces-to-evermatter`, which gives agent-facing identifiers the product name. The paragraphs below describe the rename release as it shipped.
+
 Clients store the key the installer wrote. Renaming it for new installs would split the user base into two tool prefixes. Hooks and permission rules match `mcp__exomem__*`, so a split breaks them silently. The server's displayed title and instructions say Evermatter instead.
 
 Plugin and skill identifiers are what clients use to update an installed plugin. Renaming them would leave existing installs on a dead identifier. Their display names and descriptions say Evermatter.
