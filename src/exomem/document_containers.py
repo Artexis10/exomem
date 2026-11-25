@@ -405,10 +405,14 @@ def _parent_binding_for_page(root: Path, path: str, frontmatter: Mapping, *, art
     return parent_binding
 
 
+def parent_paths(binding: originals.BinaryBinding | None) -> tuple[str, str] | None:
+    """Return the binary and companion paths for a validated parent binding."""
+    return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
+
+
 def parent_for_page(root: Path, path: str, frontmatter: Mapping, *, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
     """Return both current parent paths after validating the member binding."""
-    binding = _parent_binding_for_page(root, path, frontmatter, artifact_copy=artifact_copy)
-    return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
+    return parent_paths(_parent_binding_for_page(root, path, frontmatter, artifact_copy=artifact_copy))
 
 
 # Remembers ordinary notes that were read and carry no container claim, so a restricted path
@@ -668,8 +672,7 @@ def _stored_unclaimed(root: Path, path: str, digest: str | None, content: bytes 
 
 def parent_for_path(root: Path, path: str, *, content: bytes | None = None, artifact_copy: reserved_paths.GenericFileCopy | None = None) -> tuple[str, str] | None:
     """Return both current parent paths after resolving one member binding."""
-    binding = parent_binding_for_path(root, path, content=content, artifact_copy=artifact_copy)
-    return None if binding is None else (binding.path, originals.sidecar_path(Path(binding.path)).as_posix())
+    return parent_paths(parent_binding_for_path(root, path, content=content, artifact_copy=artifact_copy))
 
 
 

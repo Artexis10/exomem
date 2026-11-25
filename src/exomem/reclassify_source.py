@@ -763,13 +763,8 @@ def _propose(
             raise preview_warming() from None
         current_inbound = _managed_preview_inbound(vault_root, rel, owner, read_hashes=read_hashes,
                                                    candidate_limit=candidate_limit, visible=visible)
-        # A paged build hands its read set to the job, which judges each change since the build
-        # began against it (`reclassification_preview`): a change elsewhere keeps the report.
-        if current_inbound != inbound or (
-                held_sink is None and _preview_generation(vault_root) != generation):
+        if current_inbound != inbound or _preview_generation(vault_root) != generation:
             raise preview_warming()
-        if held_sink is not None:
-            held_sink.read_paths = frozenset(read_hashes)
     return ReclassifyProposal(
         path=rel,
         current_kind=current_kind,
@@ -1031,8 +1026,6 @@ def _read_inline_text(root: Path, path: Path) -> tuple[str, PathGuard]:
 class _HeldSink(dict):
     """path -> release record, plus the build's identity context, computed once on first use."""
 
-    #: Every page the build read: the Source and each inbound or named page it examined.
-    read_paths: frozenset[str] = frozenset()
     context_ready = False
     context_usable = False
     compiled = None
@@ -1409,7 +1402,10 @@ def _write_correction(
             raise ReclassifyError(refusal["code"], refusal["reason"])
 
     def current_reference_generation() -> tuple:
-        generation = freshness.preview_reference_generation(vault_root)
+        # An approval is refused for a change, not for a moment of lock contention: wait briefly.
+        generation = freshness.preview_reference_generation(
+            vault_root, wait=_APPROVAL_SAMPLE_WAIT_SECONDS,
+        )
         if generation is None or generation[1] is None or generation[3] is not None:
             raise _stale_paged_approval()
         try:
@@ -1497,6 +1493,10 @@ def _write_correction(
         result.new_path, result.wikilinks_updated, result.path_mentions_updated,
         tuple(result.warnings), tuple(result.pointer_repointed),
     )
+
+
+#: How long an approved correction waits for a busy freshness registry before it gives up.
+_APPROVAL_SAMPLE_WAIT_SECONDS = 2.0
 
 
 def _stale_paged_approval() -> ReclassifyError:

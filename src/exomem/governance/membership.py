@@ -693,6 +693,27 @@ CONTAINER_INHERITANCE = "container"
 def held_scope_basis(
     page: ParsedPage, policy: Policy, *, content_hash: str,
 ) -> tuple[frozenset[str], dict[str, Any] | None] | None:
+    """A page's own scopes and where it inherits the rest, checked against `evaluate_snapshot`.
+
+    The split must give the same scopes as the full rule today, so a later change to one rule that
+    misses the other sends the row to full verification instead of a held release.
+    """
+    basis = _split_scope_basis(page, policy, content_hash=content_hash)
+    if basis is None or basis[1] is None or page.vault_root is None:
+        return basis
+    own, inherits = basis
+    try:
+        inherited, _ = live_inherited_scopes(page.vault_root, page.rel_path, inherits, policy)
+    except MembershipUnresolved:
+        return None
+    if own | inherited != evaluate_snapshot(page, policy, content_hash=content_hash):
+        return None
+    return basis
+
+
+def _split_scope_basis(
+    page: ParsedPage, policy: Policy, *, content_hash: str,
+) -> tuple[frozenset[str], dict[str, Any] | None] | None:
     """A page's own scopes and, separately, where it inherits the rest, as `evaluate_snapshot` combines them.
 
     A holder keeps the page's own scopes with its bytes' evidence and rereads only the inherited part,
@@ -745,7 +766,7 @@ def live_inherited_scopes(
             raise MembershipUnresolved("container parent provenance is unavailable") from error
         if binding is None:
             raise MembershipUnresolved("container parent provenance is unavailable")
-        scopes = _current_parent_scopes(root, originals.sidecar_path(Path(binding.path)).as_posix(), policy)
+        scopes = _current_parent_scopes(root, inherited["claim"]["parent_page"], policy)
         return scopes | evaluate_path_only(root, binding.path, policy).require_classified(), binding
     raise MembershipUnresolved("unknown inheritance")
 

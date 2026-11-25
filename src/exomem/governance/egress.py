@@ -2149,10 +2149,11 @@ def content_permits(vault_root: Path, path: str, who: RequestPrincipal, *,
     if snapshot is None and artifact_copy is None and not derived:
         held = _held_fast_evidence(vault_root, path)
         if held is not None:
+            from .. import document_containers
+
             # Held scopes replay against the live ceiling so a connector change still narrows the row,
             # and a container member's current parents meet every content floor first.
-            parents = () if held.parent is None else (
-                held.parent.path, originals.sidecar_path(Path(held.parent.path)).as_posix())
+            parents = document_containers.parent_paths(held.parent) or ()
             return (all(content_permits(vault_root, parent, who, on_unavailable=on_unavailable)
                         for parent in parents)
                     and connector_boundary.permits_scope_sets(vault_root, path, who, tuple(held.scopes))

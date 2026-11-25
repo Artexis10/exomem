@@ -344,28 +344,15 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
             assert {("rewritten", path) for path in paths}.issubset(seen)
             assert ("pointer_repointed", evidence) in seen
 
-            async def after_writing(page, text):
-                page.write_text(text, encoding="utf-8")
-                freshness.on_files_changed(vault, changed=[page])
-                vault_module.on_inbound_files_changed(
-                    vault, changed_rels=[page.relative_to(vault).as_posix()], deleted_rels=[],
-                )
-                lexstore.ensure_fresh(vault)
-                return await preview(preview_run_id=run_id)
-
-            kept = await after_writing(
-                vault / KB / "Notes" / "unrelated.md", "# An unrelated observation\n",
+            unrelated = vault / KB / "Notes" / "unrelated.md"
+            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
+            freshness.on_files_changed(vault, changed=[unrelated])
+            vault_module.on_inbound_files_changed(
+                vault, changed_rels=[unrelated.relative_to(vault).as_posix()], deleted_rels=[],
             )
-            assert kept.get("snapshot_current") and kept["result"]["preview_digest"] == digest, kept
-            citation = vault / KB / "Notes" / "new-citation.md"
-            stale = await after_writing(citation, f"See [[{source}]].\n")
+            stale = await preview(preview_run_id=run_id)
             assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
             assert "result" not in stale
-            citation.unlink()
-            freshness.on_files_changed(vault, deleted=[citation])
-            vault_module.on_inbound_files_changed(
-                vault, changed_rels=[], deleted_rels=[citation.relative_to(vault).as_posix()],
-            )
 
             governance = vault / KB / "_Governance"
             scope = governance / "scopes" / "field-log.yaml"
@@ -524,11 +511,11 @@ def test_served_large_preview_pages_complete_report_and_rejects_stale_approval(
         maintenance_jobs.stop_all(vault)
 
 
-def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer, bare_link=None):
+def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer):
     """A served MCP preview of a Source with three referrers whose background build pauses mid-loop.
 
     ``pause_at_referrer(stop)`` runs on the build thread as it reads its first referrer, with the
-    job's stop event. ``bare_link`` names one more page that cites the Source by its file stem.
+    job's stop event.
     """
     from exomem import (
         file_watcher,
@@ -546,8 +533,6 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer, bar
         (vault / f"{KB}/Notes/measurement-{index}.md").write_text(
             f"See [[{source}]].\n", encoding="utf-8",
         )
-    if bare_link is not None:
-        (vault / bare_link).write_text(f"Also [[{Path(source).stem}]].\n", encoding="utf-8")
     for scope, directory in (("vault", vault), ("kb", vault / KB)):
         freshness.seed(vault, scope, (
             (str(path), freshness.stat_signature(path))
@@ -570,6 +555,16 @@ def _served_preview(vault, source_schema, monkeypatch, *, pause_at_referrer, bar
     return server.build_server(require_auth=False), source
 
 
+async def _start_preview(client, source):
+    """Start a preview, retrying the WARMING answer a busy snapshot sample may give."""
+    async with asyncio.timeout(12):
+        while True:
+            queued = await _preview_call(client, source)
+            if queued.get("error", {}).get("code") != "RECLASSIFICATION_PREVIEW_WARMING":
+                return queued
+            await asyncio.sleep(0.1)
+
+
 def _preview_call(client, source, **extra):
     from _public_call import public_call
     from test_agent_tool_surface import _call
@@ -580,12 +575,13 @@ def _preview_call(client, source, **extra):
     }))
 
 
-def test_a_build_longer_than_a_request_budget_completes_while_a_writer_proceeds(
-    vault, source_schema, monkeypatch,
+@pytest.mark.parametrize("write_page", [False, True], ids=["writer admitted", "snapshot changed"])
+def test_a_long_preview_allows_a_writer_and_checks_the_snapshot(
+    vault, source_schema, monkeypatch, write_page,
 ):
     from fastmcp import Client
 
-    from exomem import request_budget, writer_lease
+    from exomem import freshness, request_budget, writer_lease
 
     monkeypatch.setenv(request_budget.BUDGET_ENV_VAR, "2")
     midway = threading.Event()
@@ -600,12 +596,15 @@ def test_a_build_longer_than_a_request_budget_completes_while_a_writer_proceeds(
 
     async def exercise():
         async with Client(mcp, timeout=15) as client:
-            queued = await _preview_call(client, source)
+            queued = await _start_preview(client, source)
             assert queued["state"] == "running", queued
             assert await asyncio.to_thread(midway.wait, 5)
             manager = writer_lease.get_manager()
             with manager.mutation_guard(vault, request_id="other-writer", operation="edit"):
-                pass
+                if write_page:
+                    page = vault / KB / "Notes" / "unrelated.md"
+                    page.write_text("# An unrelated observation\n", encoding="utf-8")
+                    freshness.on_files_changed(vault, changed=[page])
             async with asyncio.timeout(12):
                 # A poll may itself outlast the short request budget; the transport then asks
                 # for a retry.
@@ -616,7 +615,12 @@ def test_a_build_longer_than_a_request_budget_completes_while_a_writer_proceeds(
                     if status.get("state") != "running" and not warming:
                         break
                     await asyncio.sleep(0.1)
-            assert status.get("state") == "completed" and status["result"]["preview_digest"], status
+            if write_page:
+                assert status.get("state") == "failed", status
+                assert status.get("error_code") == "RECLASSIFICATION_PREVIEW_WARMING", status
+                assert {"result", "preview_digest", "entries"}.isdisjoint(status), status
+            else:
+                assert status.get("state") == "completed" and status["result"]["preview_digest"], status
 
     asyncio.run(exercise())
 
@@ -640,8 +644,8 @@ def test_a_preview_stopped_mid_build_returns_a_typed_error_and_no_report(
 
     async def exercise():
         async with Client(mcp, timeout=15) as client:
-            queued = await _preview_call(client, source)
-            assert queued["state"] == "running", queued
+            queued = await _start_preview(client, source)
+            assert queued.get("state") == "running", queued
             assert await asyncio.to_thread(midway.wait, 5)
             await asyncio.to_thread(maintenance_jobs.stop_all, vault, wait=10)
             stopped = await _preview_call(client, source, preview_run_id=queued["run_id"])
@@ -2497,93 +2501,3 @@ def test_completed_paged_report_stores_held_evidence_only_privately(
         assert record.witness == rc._stat_witness(os.stat(vault / rel))
         assert record.sha256 not in wire
     assert evidence[held_rel].scopes == (frozenset({"01ARZ3NDEKTSV4RRFFQ69G5FAV"}),)
-
-
-def _completed(client, source, run_id):
-    async def poll():
-        async with asyncio.timeout(12):
-            while True:
-                status = await _preview_call(client, source, preview_run_id=run_id)
-                code = status.get("error", {}).get("code")
-                if status.get("state") != "running" and code != "RECLASSIFICATION_PREVIEW_WARMING":
-                    return status
-                await asyncio.sleep(0.1)
-    return poll()
-
-
-def _changed(vault, page, *, deleted=False):
-    from exomem import freshness
-    from exomem import vault as vault_module
-
-    rel = page.relative_to(vault).as_posix()
-    if deleted:
-        freshness.on_files_changed(vault, deleted=[page])
-        vault_module.on_inbound_files_changed(vault, changed_rels=[], deleted_rels=[rel])
-    else:
-        freshness.on_files_changed(vault, changed=[page])
-        vault_module.on_inbound_files_changed(vault, changed_rels=[rel], deleted_rels=[])
-    lexstore.ensure_fresh(vault)
-
-
-def test_an_unrelated_write_during_the_build_keeps_its_report(vault, source_schema, monkeypatch):
-    from fastmcp import Client
-
-    unrelated = vault / KB / "Notes" / "unrelated.md"
-    paused, resume = threading.Event(), threading.Event()
-
-    def hold_the_referrer_loop(_stop):
-        paused.set()
-        assert resume.wait(20)
-
-    mcp, source = _served_preview(
-        vault, source_schema, monkeypatch, pause_at_referrer=hold_the_referrer_loop,
-    )
-
-    async def exercise():
-        async with Client(mcp, timeout=15) as client:
-            queued = await _preview_call(client, source)
-            assert queued.get("state") == "running", queued
-            assert await asyncio.to_thread(paused.wait, 10)
-            # Another writer saves an unrelated page while the build is inside its referrer loop.
-            unrelated.write_text("# An unrelated observation\n", encoding="utf-8")
-            _changed(vault, unrelated)
-            resume.set()
-            status = await _completed(client, source, queued["run_id"])
-            assert status.get("state") == "completed", status
-            assert status["snapshot_current"] and status["result"]["preview_digest"], status
-
-    asyncio.run(exercise())
-
-
-def test_losing_a_counted_reference_refuses_a_kept_report(vault, source_schema, monkeypatch):
-    """A page counted by the report without being one of its rows still binds the report."""
-    from fastmcp import Client
-
-    bare = f"{KB}/Notes/bare-citation.md"
-    mcp, source = _served_preview(
-        vault, source_schema, monkeypatch, pause_at_referrer=lambda _stop: None, bare_link=bare,
-    )
-
-    async def exercise():
-        async with Client(mcp, timeout=15) as client:
-            queued = await _preview_call(client, source)
-            assert "run_id" in queued, queued
-            status = await _completed(client, source, queued["run_id"])
-            assert status.get("state") == "completed", status
-            rows = await _entries(client, source, queued["run_id"], status.get("next_cursor"))
-            assert bare not in {entry["path"] for entry in rows}
-            (vault / bare).unlink()
-            _changed(vault, vault / bare, deleted=True)
-            stale = await _preview_call(client, source, preview_run_id=queued["run_id"])
-            assert stale.get("error", {}).get("code") == "RECLASSIFICATION_PREVIEW_STALE", stale
-
-    asyncio.run(exercise())
-
-
-async def _entries(client, source, run_id, cursor):
-    entries = []
-    while cursor is not None:
-        page = await _preview_call(client, source, preview_run_id=run_id, cursor=cursor)
-        entries.extend(page["entries"])
-        cursor = page.get("next_cursor")
-    return entries

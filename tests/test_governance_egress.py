@@ -5940,7 +5940,9 @@ def _retag(page: Path, tag: str) -> None:
     page.write_text(text.replace("\ntags: [", f"\ntags: [{tag}, ", 1), encoding="utf-8")
 
 
-@pytest.mark.parametrize("change", ["container parent retagged", "container payload replaced", "part source retagged"])
+@pytest.mark.parametrize("change", [
+    "container parent retagged", "container payload replaced", "part source retagged", "frame video retagged",
+])
 def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
     vault: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
@@ -5966,12 +5968,22 @@ def test_a_dependent_held_row_releases_unread_until_a_dependency_changes(
         child = stored.document_container["payloads"][0]
         media_processing.reconcile_media(vault, child)
         rel, parent = child + ".md", vault / stored.sidecar_path
-    else:
+    elif change == "part source retagged":
         stored = preserve.preserve_stream(vault, scope="Examples", category="Documents",
                                           filename="notes.txt", stream=io.BytesIO(b"plain notes"))
         parent = vault / stored.sidecar_path
         preserve.update_sidecar_extraction(vault, parent, text="Clause. " * 9000, engine="upload")
         rel = sorted(extraction_parts.folder_for(parent).glob("*.md"))[-1].relative_to(vault).as_posix()
+    else:
+        from test_scene_frames import _FakeImg, _scene, _video
+
+        from exomem import scene_frames
+
+        video = _video(vault)
+        parent = video.with_suffix(".mp4.md")
+        parent.write_text("---\ntype: source\ntags: [workshop]\n---\n# Workshop\n", encoding="utf-8")
+        (_, frame), = scene_frames.write_scene_frames(vault, video, [(_scene(10.0), _FakeImg())])
+        rel = frame.relative_to(vault).as_posix()
     _tag_scope(vault, "private-parent")
 
     with request_scope(_external()):

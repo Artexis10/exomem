@@ -2,20 +2,13 @@
 
 ### Requirement: A governed reclassification preview completes at the load target
 
-A background reclassification preview on a governed vault SHALL complete for 10,000 governed referrers in one folder. It SHALL resolve each referrer's physical name without listing that folder once per referrer, finish within its own build budget, and discard its report only when a change can alter the report. A concurrent Records read SHALL answer within its own request budget while the build runs. An interrupted or cancelled build SHALL return a typed public error and no report facts.
+A background reclassification preview on a governed vault SHALL complete for 10,000 governed referrers in one folder. It SHALL resolve each referrer's physical name without listing that folder once per referrer and finish within its own build budget. A concurrent Records read SHALL answer within its own request budget while the build runs. An interrupted or cancelled build SHALL return a typed public error and no report facts.
 
 #### Scenario: A large governed preview completes
 
 - **WHEN** an owner previews a Source with 10,000 governed referrers in one folder
 - **THEN** the background build completes and every report page is released within its request budget
 - **AND** a Records read during the build answers within its request budget
-
-#### Scenario: An unrelated generation change keeps the report
-
-- **WHEN** an index or governance generation that cannot change the report moves during the build
-- **THEN** the completed report stays releasable
-- **AND** a change to a referrer, the Source or the requesting owner's current authorization still refuses it
-- **AND** a change to any page the build read, including a counted referrer that needs no rewrite, refuses it
 
 #### Scenario: An interrupted build returns a typed error
 
