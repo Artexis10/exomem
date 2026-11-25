@@ -1098,7 +1098,7 @@ class OperationAuthorization:
         self.points = {}
         self.manifest_subjects = {}
         self.summary_memo = {}
-        self._scope_ref_lists = None
+        self._scope_ref_lists: tuple[frozenset[str], ...] | None = None
         # The release inputs of this snapshot that a kept projection decision is keyed on, read once.
         self._kept_inputs = None
         # How many decisions an unreadable connector input withheld; the release cache keeps none of them.
