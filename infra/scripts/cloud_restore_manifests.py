@@ -51,6 +51,7 @@ from cellctl.manifests import (  # noqa: E402
     JOB_KIND_LABEL,
     JOB_KIND_RESTIC_VERIFY,
     JOB_KIND_RESTORE,
+    OBJECT_STORE_KEY_SECRET,
     RESTIC_VERIFICATION_JOB_NAME_RE,
     SNAPSHOT_ID_RE,
     CellManifestSpec,
@@ -61,7 +62,7 @@ from cellctl.manifests import (  # noqa: E402
     render_cell_manifests,
     render_restore_job,
 )
-from cellctl.storage_config import LEGACY_CLASS  # noqa: E402
+from cellctl.storage_config import parse_storage_config  # noqa: E402
 
 CELL_ID_RE = re.compile(r"[a-z2-7]{16}")  # shape check: a cell ID is 16 base32 characters
 DIGEST_IMAGE_RE = re.compile(r"@sha256:[a-f0-9]{64}$")
@@ -159,18 +160,27 @@ def runtime_of(statefulset: dict) -> tuple[str, dict]:
 def scratch_documents(
     *, cell_id: str, scratch: str, snapshot: str, image: str, storage_gib: int,
     credential: dict[str, str], settings: PlatformSettings, started_at: str,
+    storage_class: str, local_volume: bool = False, object_store_key: dict | None = None,
 ) -> list[dict]:
     """The scratch namespace's documents and the restore Job, in apply order.
 
     The namespace carries `exomem.io/scratch-of` and no `exomem.io/cloud-cell`
-    label, so cellctl never treats it as a cell.
+    label, so cellctl never treats it as a cell. The scratch volume takes the
+    source volume's class and passphrase, so it keeps the source's encryption.
+    An old cell's stored key rides in its Secret; a custodian-provisioned cell
+    has none, so its `object_store_key` Secret is copied into the scratch
+    namespace for the restore Job to read, as the cell's own Jobs do.
     """
 
+    if not credential.get("b2-key-id") and object_store_key is None:
+        raise ValueError("the cell has no stored object-store key and no custodian key Secret")
     spec = CellManifestSpec(
         cell_id=cell_id, image=image, replicas=0, read_only=False,
-        storage_gib=storage_gib, bearer_current=secrets.token_urlsafe(32),
+        storage_gib=storage_gib, storage_class=storage_class, local_volume=local_volume,
+        bearer_current=secrets.token_urlsafe(32),
         backup_password=credential["backup-password"],
-        b2_key_id=credential["b2-key-id"], b2_key_secret=credential["b2-key-secret"],
+        volume_passphrase=credential.get("encryption-passphrase", ""),
+        b2_key_id=credential.get("b2-key-id", ""), b2_key_secret=credential.get("b2-key-secret", ""),
         hold_kind="restore", hold_started_at=started_at,
         job_egress_except=settings.job_egress_except,
     )
@@ -190,6 +200,13 @@ def scratch_documents(
             documents.append(document)
     if len(documents) != len(SCRATCH_DOCUMENTS) + 1 or documents[0]["kind"] != "Namespace":
         raise RuntimeError("cellctl no longer renders the documents a scratch restore needs")
+    if not spec.b2_key_id:
+        documents.append({
+            "apiVersion": "v1", "kind": "Secret", "type": object_store_key.get("type", "Opaque"),
+            "metadata": {"name": OBJECT_STORE_KEY_SECRET, "namespace": scratch,
+                         "labels": {"exomem.io/scratch-of": cell_id}},
+            "data": object_store_key["data"],
+        })
     job = render_restore_job(spec, bucket_name=settings.bucket, endpoint=settings.endpoint, snapshot_id=snapshot)
     job["metadata"]["namespace"] = scratch
     return [*documents, job]
@@ -307,8 +324,12 @@ def apply_scratch(context: str, cell_id: str, snapshot: str, scratch: str, field
         raise ValueError(f"{scratch} already exists")
     source = _check_cell_namespace(context, cell_id)
     pvc = _get(context, "pvc", "cell-data", source)
-    if pvc["spec"]["storageClassName"] != LEGACY_CLASS:
-        raise ValueError(f"the cell's volume is not in the {LEGACY_CLASS} class")
+    deployment = _cellctl(context)
+    # The classes the live cellctl binds cell volumes to; a scratch volume takes the source's.
+    storage = parse_storage_config(_cellctl_env(deployment).get("CELLCTL_CELL_STORAGE"))
+    storage_class = pvc["spec"]["storageClassName"]
+    if storage_class not in storage.classes:
+        raise ValueError(f"the cell's volume class {storage_class} is not a cell class the live cellctl configures")
     size = pvc["spec"]["resources"]["requests"]["storage"]
     if not re.fullmatch(r"[1-9][0-9]*Gi", size):
         raise ValueError("the cell's volume size is not whole GiB")
@@ -316,11 +337,16 @@ def apply_scratch(context: str, cell_id: str, snapshot: str, scratch: str, field
     data = _get(context, "secret", "cell-credentials", source)["data"]
     credential = {
         key: base64.b64decode(data[key], validate=True).decode()
-        for key in ("backup-password", "b2-key-id", "b2-key-secret")
+        for key in ("backup-password", "encryption-passphrase", "b2-key-id", "b2-key-secret") if key in data
     }
+    object_store_key = None
+    if not credential.get("b2-key-id"):
+        object_store_key = _get(context, "secret", OBJECT_STORE_KEY_SECRET, source)
     documents = scratch_documents(
         cell_id=cell_id, scratch=scratch, snapshot=snapshot, image=image, storage_gib=int(size[:-2]),
-        credential=credential, settings=platform_settings(_cellctl(context)), started_at=_now(),
+        credential=credential, settings=platform_settings(deployment), started_at=_now(),
+        storage_class=storage_class, local_volume=storage.is_local(storage_class),
+        object_store_key=object_store_key,
     )
     for document in documents:
         _apply(context, document, field_manager)

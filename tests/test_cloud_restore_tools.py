@@ -277,7 +277,7 @@ def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> 
         cell_id=CELL_ID, scratch=scratch, snapshot=SNAPSHOT, image=IMAGE, storage_gib=10,
         credential={"backup-password": "p", "b2-key-id": "i", "b2-key-secret": "s"},
         settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ("10.0.0.0/8",)),
-        started_at="2026-10-09T10:00:00+00:00",
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-encrypted",
     )
 
     assert sorted(d["kind"] for d in documents) == [
@@ -291,6 +291,59 @@ def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> 
     assert all(d["metadata"]["namespace"] == scratch for d in documents[1:])
     secret = next(d for d in documents if d["kind"] == "Secret")
     assert "cell-token" not in secret["data"]
+
+
+def test_a_scratch_restore_of_a_custodian_cell_reads_the_copied_custodian_key() -> None:
+    # A cell the key custodian provisioned has no key in cell-credentials; its restore Job must
+    # read a copy of the custodian's Secret in the scratch namespace, or restic cannot reach B2.
+    manifests = _manifests()
+    scratch = f"exo-scratch-{CELL_ID}-0123abcd"
+    custodian_key = {"type": "Opaque", "metadata": {"name": "cell-object-store-key", "uid": "u-1"},
+                     "data": {"keyId": "a2V5", "applicationKey": "c2VjcmV0"}}
+
+    documents = manifests.scratch_documents(
+        cell_id=CELL_ID, scratch=scratch, snapshot=SNAPSHOT, image=IMAGE, storage_gib=10,
+        credential={"backup-password": "p"},
+        settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ("10.0.0.0/8",)),
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-encrypted",
+        object_store_key=custodian_key,
+    )
+
+    copied = next(d for d in documents if d["kind"] == "Secret" and d["metadata"]["name"] == "cell-object-store-key")
+    assert copied["metadata"]["namespace"] == scratch
+    assert copied["data"] == custodian_key["data"]
+    assert "uid" not in copied["metadata"]
+    job = documents[-1]
+    assert job["kind"] == "Job"
+    env = {e["name"]: e for c in job["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])}
+    assert env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"] == {"name": "cell-object-store-key", "key": "keyId"}
+    assert env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "cell-object-store-key"
+
+
+def test_a_scratch_volume_keeps_the_source_class_and_its_passphrase() -> None:
+    # A per-cell encrypted class formats a blank volume as plain ext4 without a passphrase,
+    # so the scratch copy of a customer's vault must carry the source's passphrase.
+    manifests = _manifests()
+
+    documents = manifests.scratch_documents(
+        cell_id=CELL_ID, scratch=f"exo-scratch-{CELL_ID}-0123abcd", snapshot=SNAPSHOT, image=IMAGE,
+        storage_gib=10, credential={"backup-password": "p", "encryption-passphrase": "vp",
+                                    "b2-key-id": "i", "b2-key-secret": "s"},
+        settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ("10.0.0.0/8",)),
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-per-cell",
+    )
+
+    claim = next(d for d in documents if d["kind"] == "PersistentVolumeClaim")
+    assert claim["spec"]["storageClassName"] == "exomem-cloud-per-cell"
+    secret = next(d for d in documents if d["kind"] == "Secret")
+    assert secret["data"]["encryption-passphrase"] == "dnA="
+    with pytest.raises(ValueError, match="empty volume passphrase"):
+        manifests.scratch_documents(
+            cell_id=CELL_ID, scratch=f"exo-scratch-{CELL_ID}-0123abcd", snapshot=SNAPSHOT, image=IMAGE,
+            storage_gib=10, credential={"backup-password": "p", "b2-key-id": "i", "b2-key-secret": "s"},
+            settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ("10.0.0.0/8",)),
+            started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-per-cell",
+        )
 
 
 def test_the_in_place_restore_and_its_helper_run_where_the_cell_runs() -> None:

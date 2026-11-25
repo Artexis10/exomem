@@ -257,7 +257,7 @@ The cell keeps serving throughout.
 3. Set `CELL_ID`, `SNAPSHOT`, `ORIGINAL` (the vault-relative path), `KIND` and `EXPECTED` (the SHA-256).
 4. Set `CELLCTL_PYTHON` as the export runbook does, and run every block from the reviewed release's checkout root.
 5. Restore the snapshot into scratch, as the export runbook's "Render and apply only scratch resources" does. Expect the Job to complete.
-   If the command prints `scratch: 'b2-key-id'; stop` or `scratch: the cell's volume is not in the exomem-cloud-encrypted class; stop`, stop. The command does not yet support that cell (issue #2670).
+   The scratch volume takes the cell volume's storage class and passphrase. For a cell that the key custodian provisioned, the command copies the cell's `cell-object-store-key` Secret into the scratch namespace.
    The Job runs `restic restore <snapshot> --target / --delete --include /data/vault --include /data/host` on the scratch volume.
 6. Set `SCRATCH` to that scratch namespace, then run the first block. Expect `hash matches the binding`.
 7. Run the second block. It writes the original outside the vault, checks its hash, then moves it into place. Expect `original restored`.

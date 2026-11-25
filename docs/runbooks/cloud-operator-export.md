@@ -147,9 +147,12 @@ rehearsal step 11 does. It imports them from the same checkout, and the
 [restore drill and in-place restore](cloud-operator-restore.md) use the same
 file. It takes the source `cell-credentials` Secret into process memory and
 never prints it or writes a manifest file. It reads the source StatefulSet's
-digest image and the PVC size, and the live cellctl Deployment's bucket, S3
-endpoint and job-egress exceptions. A unique scratch namespace must not
-already exist.
+digest image, the PVC size and storage class, and the live cellctl Deployment's
+bucket, S3 endpoint, job-egress exceptions and cell storage classes. The scratch
+volume takes the source volume's class and passphrase, so it keeps the source's
+encryption. A cell that the key custodian provisioned has no key in
+`cell-credentials`; the command then copies its `cell-object-store-key` Secret
+into the scratch namespace. A unique scratch namespace must not already exist.
 
 ```bash
 : "${CELLCTL_PYTHON:?reviewed cellctl Python required}"
