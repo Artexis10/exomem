@@ -29,7 +29,7 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > ```
 >
 > Claude Code alone? `/plugin marketplace add substrate-systems/evermatter` then
-> `/plugin install exomem@exomem` installs the skills and hooks. Finish the MCP
+> `/plugin install evermatter@exomem` installs the skills and hooks. Finish the MCP
 > route with `exomem setup --stdio`, or point setup at your existing service.
 >
 > The manual walkthrough below exists so you can see what those do, and for when

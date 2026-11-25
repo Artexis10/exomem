@@ -27,8 +27,13 @@ metadata to the default branch publishes that Git-repo channel:
 
 ```text
 /plugin marketplace add substrate-systems/evermatter
-/plugin install exomem@exomem
+/plugin install evermatter@exomem
 ```
+
+The marketplace id stays `exomem`. Its `renames` map moves an installed `exomem` plugin to
+`evermatter`. Claude Code stores a URL server's sign-in under the plugin and server names, so
+the rename signs each user of the plugin's URL out once. The plugin's session-start notice
+tells them to run `/mcp` and choose `evermatter`.
 
 The plugin does not create a usable server route when `mcp_url` is blank. After
 installing it, configure one of the supported routes:
