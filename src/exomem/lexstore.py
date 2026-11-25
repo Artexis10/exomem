@@ -4003,11 +4003,20 @@ def create_change_journal(conn: sqlite3.Connection) -> None:
         LexicalStore._create_change_triggers(conn, table)
 
 
-def change_journal_complete(conn: sqlite3.Connection) -> bool:
-    """Whether `conn` holds the change journal, its bound and every trigger of each journaled table it has."""
-    objects, tables = _journaled_tables(conn)
+def change_journal_objects(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
+    """The names of the objects that the change journal needs in `conn`, and the ones of them that it holds.
+
+    It needs its table, its bound and every trigger of each journaled table that `conn` has.
+    """
+    held, tables = _journaled_tables(conn)
     required = {CHANGE_JOURNAL, _CHANGE_JOURNAL_BOUND, *(_change_trigger(t, e) for t in tables for e in _CHANGE_EVENTS)}
-    return required <= objects
+    return required, required & held
+
+
+def change_journal_complete(conn: sqlite3.Connection) -> bool:
+    """Whether `conn` holds every object that the change journal needs (`change_journal_objects`)."""
+    required, held = change_journal_objects(conn)
+    return required == held
 
 
 def _journaled_tables(conn: sqlite3.Connection) -> tuple[set[str], list[str]]:
