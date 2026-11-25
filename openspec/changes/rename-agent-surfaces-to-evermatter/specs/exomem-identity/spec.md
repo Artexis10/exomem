@@ -2,7 +2,7 @@
 
 ### Requirement: Agent-Facing Identifiers Use the Product Name
 
-The MCP server key of a new registration, the serverInfo name, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch release ships. The plugin names, and the key of an existing registration that has a URL, follow in a later release, because renaming them signs the user out. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
+The MCP server key, the serverInfo name, the plugin names, the skill names and the settings prefix that a user or an agent sees SHALL be `evermatter` once the switch releases ship. A connection that signs in moves in the release that renames it, and that release tells the user to sign in once. Every component SHALL accept the old `exomem` identifiers through the compatibility window, so that an install made before the switch keeps working without any action.
 
 #### Scenario: An install from before the switch keeps working
 
@@ -25,21 +25,24 @@ The MCP server key of a new registration, the serverInfo name, the skill names a
 #### Scenario: Setup migrates an existing configuration
 
 - **WHEN** a user runs `evermatter setup --migrate` on a client configuration that holds the server key `exomem`
-- **THEN** setup renames that key to `evermatter` when the registration is a stdio server, rewrites the managed instruction block, and keeps a backup of each file it changed
-- **AND** it keeps the key of a registration that has a URL and says why: a rename signs the user out
+- **THEN** setup renames that key to `evermatter`, rewrites the managed instruction block, and keeps a backup of each file it changed
+- **AND** for each renamed registration that has a URL, it prints the client's sign-in step
 - **AND** it leaves rules and hooks that the user wrote unchanged and lists them
 
-#### Scenario: Settings accept the new prefix
+#### Scenario: Settings use the new prefix and keep the old one as an alias
 
-- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH` and no `EXOMEM_VAULT_PATH`
-- **THEN** the service and the hooks use that value
-- **AND** an explicitly set `EXOMEM_VAULT_PATH`, whether exported, forced by the service or read from `.env` under its own precedence, is never overridden by an `EVERMATTER_` value
+- **WHEN** a deployment sets `EXOMEM_VAULT_PATH` and no `EVERMATTER_VAULT_PATH`
+- **THEN** the service and the hooks use that value as `EVERMATTER_VAULT_PATH`
+- **AND** setup and the installers write `EVERMATTER_VAULT_PATH`
 
-### Requirement: Stored Identifiers Keep the Internal Name
+#### Scenario: The two prefixes disagree
 
-The `exomem_id` frontmatter key, state and config paths, the Python import package and the `exomem://` reference scheme SHALL keep the internal name. These names are stored in users' notes and state; renaming them would rewrite that data for no visible gain.
+- **WHEN** one source sets `EVERMATTER_VAULT_PATH` and `EXOMEM_VAULT_PATH` to different values
+- **THEN** the service and every command that writes a credential refuse to start and name both variables, without their values
+- **AND** the hooks log the conflict and use the `EVERMATTER_` value
 
-#### Scenario: An existing vault needs no rewrite
+#### Scenario: A plugin rename moves an enabled install
 
-- **WHEN** a vault written before the rename is opened after the switch release
-- **THEN** every note keeps its `exomem_id` and every stored `exomem://` ref resolves
+- **WHEN** a user has the `exomem` plugin enabled and the marketplace update brings the `renames` entry
+- **THEN** Claude Code enables `evermatter` in its place
+- **AND** the plugin tells the user the one sign-in step if its server holds no sign-in

@@ -9,24 +9,25 @@
 
 ## 2. Settings prefix (D3)
 
-- [ ] 2.1 Accept `EVERMATTER_*` per source: the process environment (fill only when unset, log a conflict), the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload.
+- [ ] 2.1 Resolve `EVERMATTER_X` and its `EXOMEM_X` alias per source: the process environment, the `.env` loads before their conflict check, the standalone hooks' alias normalisers, setup's `.env` route lookup and the early resource preload. Refuse a conflict in the service and in credential-writing commands.
+- [ ] 2.2 Emit only `EVERMATTER_*` from setup, the installers (shell and PowerShell), the service files, the container images, the Helm chart, cellctl manifests and the remote setup wizard. Cover both names in every scrub and denylist.
 
 ## 3. Release B: emit the new names
 
-- [ ] 3.1 Operator choice on D6 (sign-in cost of renaming a plugin or an HTTP registration, Cloud plugin included) recorded in the design.
+- [x] 3.1 Operator choice on D6 (sign-in cost of renaming a plugin or an HTTP registration, Cloud plugin included) recorded in the design.
 - [x] 3.2 Emit the server key (for a new registration) and the serverInfo name `evermatter`. Rename the skills to `evermatter-*` in the workflow-skill index and the core skill. Regenerate the plugin trees.
-- [ ] 3.3 Rename the plugins to `evermatter` and `evermatter-cloud` with a `renames` entry for each in `marketplace.json`. Run `claude plugin validate .`. This waits for the D6 ruling, because the rename signs each user out. Until then the local plugin keeps `exomem` and `marketplace.json` has no `renames`. The marketplace schema has no display-name field, so its description says "formerly Exomem".
-- [ ] 3.4 Move the Cloud plugin's address to `mcp.evermatter.ai/mcp` once the Cloud's accepted resource list serves it.
+- [ ] 3.3 Release C1: rename the local plugin to `evermatter` with a `renames` entry in `marketplace.json`, and run `claude plugin validate .`. Make `setup --migrate` rename URL registrations and print each client's sign-in step. Show the one-time sign-in notice from the plugin's SessionStart hook.
+- [ ] 3.4 Release C2: rename `exomem-cloud` to `evermatter-cloud` with a `renames` entry, and move its address to `https://mcp.evermatter.ai/mcp`, once the Cloud serves that host and the service notice has gone out.
 - [x] 3.5 Add `evermatter setup --migrate` (D5) for stdio registrations, and skip each URL registration. Make doctor list user-written rules and hooks that name the old prefix in a client with no `exomem` server.
 - [x] 3.6 Write the new managed-block markers and the readiness service name `evermatter`.
-- [ ] 3.7 Document `EVERMATTER_*` as the settings prefix once 2.1 ships. Update the README, docs and skill descriptions, keeping "formerly Exomem" as a trigger. Write the release notes and the service notice for Cloud users.
+- [ ] 3.7 Document `EVERMATTER_*` as the settings prefix once 2.2 ships. Update the README, docs and skill descriptions, keeping "formerly Exomem" as a trigger. Write the release notes and the service notice for Cloud users.
 - [ ] 3.8 Prove the switch end to end:
   - a fixture home with the old configuration migrates;
   - a real Claude Code session lists `mcp__evermatter__*`;
   - the capture hook fires;
   - recall answers;
   - an old plugin install moves through `renames`.
-- [ ] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new.
+- [x] 3.9 Run skill activation on real Claude models with "Exomem" and "Evermatter" prompts, old names against new.
 
 ## 4. Listings
 
