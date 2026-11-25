@@ -248,7 +248,12 @@ def test_manifest_nested_data_is_deeply_immutable_and_schema_values_are_strict(
         )
     assert excinfo.value.code == "SCHEMA_ENUM"
     # An agent that sent a value outside the enum learns the values it may send instead.
-    assert str(excinfo.value).endswith("field is outside its enum: status; allowed: completed, partial")
+    assert str(excinfo.value).endswith('field is outside its enum: status; allowed: "completed", "partial"')
+    # A string and an integer of the same digits read apart, as the validator tells them apart.
+    rating = collections.FieldSpec("enum", enum=(1, 2))
+    with pytest.raises(collections.CollectionError) as excinfo:
+        collections.validate_field_value("rating", "1", rating)
+    assert str(excinfo.value).endswith("field is outside its enum: rating; allowed: 1, 2")
     with pytest.raises(collections.CollectionError) as excinfo:
         manifest.schema.validate(
             {

@@ -182,6 +182,11 @@ def listed_within(names: Iterable[str]) -> str:
     return f"{', '.join(shown)}{more}"
 
 
+def enum_listing(options: Iterable[Any]) -> str:
+    """An enum's options in their JSON spelling, so `"1"` and `1` read apart as the validator tells them apart."""
+    return listed_within(json.dumps(option, ensure_ascii=False) for option in options)
+
+
 def sqlite_store_required() -> CollectionError:
     """The refusal for a sqlite manifest that no collection store holds: no file reader stands in for it."""
     return CollectionError(
@@ -2351,9 +2356,10 @@ def _validate_saved_view_literals(
         else:
             continue
         if not valid:
+            allowed = "" if field is None or not field.enum else f"; allowed: {enum_listing(field.enum)}"
             raise CollectionError(
                 "INVALID_SAVED_VIEW",
-                f"saved view {field_name} literal is outside the profile vocabulary",
+                f"saved view {field_name} literal is outside the profile vocabulary{allowed}",
             )
 
 
@@ -3632,8 +3638,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        allowed = listed_within(option if isinstance(option, str) else json.dumps(option) for option in spec.enum)
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}; allowed: {allowed}")
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}; allowed: {enum_listing(spec.enum)}")
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:
