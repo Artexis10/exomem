@@ -13,3 +13,15 @@ The supported release command SHALL select, by default, the newest commit on mai
 - **WHEN** no commit since the preceding reconciliation has reusable Full evidence, including when the only green Full run predates that reconciliation
 - **THEN** the release command selects main's tip and reports no evidence run
 - **AND** the cut dispatches its Full fallback as before
+
+### Requirement: Main keeps recent Full evidence for release cuts
+
+CI SHALL dispatch one Full run on main when no Full run on main is queued or running, the newest one started more than a configurable window ago, and main has moved since that run's commit. A window of 0 SHALL disable the dispatch.
+
+#### Scenario: Old evidence and a moved main
+- **WHEN** the newest Full run on main is older than the window, none is running, and main has moved since its commit
+- **THEN** CI dispatches one Full run on main
+
+#### Scenario: Recent, running or unchanged evidence
+- **WHEN** a Full run on main is running, started within the window, or tested main's current commit
+- **THEN** CI dispatches nothing

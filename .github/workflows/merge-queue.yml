@@ -34,6 +34,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run merge-queue.yml --repo "$GITHUB_REPOSITORY" --ref main
 
+  # Keeps Full evidence on main recent so a release cut can reuse it (release_cuts.py
+  # pick-source). The repository variable FULL_EVIDENCE_HOURS sets the window; 0 turns it off.
+  full-evidence:
+    if: ${{ github.event_name == 'schedule' && vars.FULL_EVIDENCE_HOURS != '0' }}
+    concurrency:
+      group: full-evidence
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          sparse-checkout: scripts
+      - name: Dispatch Full on main when its newest Full run is old
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FULL_EVIDENCE_HOURS: ${{ vars.FULL_EVIDENCE_HOURS || '4' }}
+        run: python3 scripts/release_evidence.py main-full
+
   advance:
     # A pull request's checks finishing matter; main's own push runs are covered by the push event.
     if: ${{ github.event_name != 'pull_request' && (github.event_name != 'workflow_run' || github.event.workflow_run.event == 'pull_request') }}
