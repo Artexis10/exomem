@@ -156,6 +156,11 @@ def state_path(vault_root: Path) -> Path:
     return state_paths.vault_state_dir(vault_root) / STATE_FILENAME
 
 
+def lock_path(vault_root: Path) -> Path:
+    """The lock that one app's read and write of the record share."""
+    return state_path(vault_root).with_name(f".{STATE_FILENAME}.lock")
+
+
 def _record(vault_root: Path, app_id: str, running: Version, running_text: str) -> tuple[bool, str | None]:
     """Record `running_text` as the version `app_id` was told about: `(recorded, version before)`.
 
@@ -170,7 +175,7 @@ def _record(vault_root: Path, app_id: str, running: Version, running_text: str) 
     try:
         state_paths.ensure_vault_state_dir(vault_root)
         path = state_path(vault_root)
-        with FileLock(str(path.parent / f".{STATE_FILENAME}.lock"), timeout=_LOCK_TIMEOUT_SECONDS):
+        with FileLock(str(lock_path(vault_root)), timeout=_LOCK_TIMEOUT_SECONDS):
             told = _read_told(path)
             before = told.get(app_id)
             before_parsed = parse_version(before)
