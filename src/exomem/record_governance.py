@@ -1599,10 +1599,13 @@ def query_collection(
                 root, manifest, policy=policy, allow_cold_index=not late_link_projection,
                 authorize_path=authorize_path, visible_path=visible_path,
             )
+            # Without a store there is no field plan: a collection released to the caller is read whole.
+            plan = None if writer is None else writer._operation.field_plan(manifest)
+            readable = manifest if plan is None else plan.manifest
             view = kwargs.get("view")
             if view is not None:
-                _authorize_saved_view(root, manifest, view, links)
-            readable = manifest if writer is None else writer._operation.field_plan(manifest).manifest
+                _authorize_saved_view(root, manifest, view, links, readable=(
+                    None if plan is None or plan.holds_every_field(manifest) else readable))
             try:
                 result = record_formats.query_collection(
                     root,
@@ -1645,11 +1648,17 @@ def _authorize_saved_view(
     manifest: collections.CollectionManifest,
     name: object,
     links: _LinkProjector,
+    *,
+    readable: collections.CollectionManifest | None = None,
 ) -> collections.SavedView:
-    """Refuse a saved view if link projection would change its query meaning."""
+    """Refuse a saved view if link projection would change its query meaning.
+
+    Every check reads the author's whole `manifest`. `readable` is given only when the caller's
+    field plan withholds a field, and then hides a view as `collections.resolve_saved_view` describes.
+    """
     if type(name) is not str:
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
-    view = collections.resolve_saved_view(manifest, name)
+    view = collections.resolve_saved_view(manifest, name, readable=readable)
     query = view.definition.get("query")
     if not isinstance(query, Mapping):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")

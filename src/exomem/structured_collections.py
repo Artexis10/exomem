@@ -2203,32 +2203,42 @@ def _parse_view_mode(value: object, storage: StorageSpec, links: CollectionLinks
     return value
 
 
-def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
-    """Resolve one manifest view into the exact definition used for query provenance."""
+def resolve_saved_view(
+    manifest: CollectionManifest, name: str, *, readable: CollectionManifest | None = None
+) -> SavedView:
+    """Resolve one manifest view into the exact definition used for query provenance.
+
+    A view's names are its author's, so it resolves against `manifest`. Pass `readable`, the
+    manifest after the caller's field plan, exactly when that plan withholds a field; leave it
+    None for a caller who reads every field whole. For a caller with `readable`, a view that names
+    a part `readable` lacks, or a view that is invalid for its author, refuses exactly as an
+    undeclared view does, so the reply never tells which withheld names exist.
+    """
     if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
     for diagnostic in manifest.view_diagnostics:
         if diagnostic.location == f"views.{name}":
+            # A reason is free text that can name any field of the view, and the view never parsed,
+            # so its names cannot be checked against `readable`: only a caller who reads every field sees it.
+            if readable is not None:
+                raise _saved_view_not_found()
             raise CollectionError(diagnostic.code, diagnostic.reason)
     definition = manifest.normalized_views.get(name)
     if definition is None:
         definition = manifest.views.get(name)
     if definition is None:
-        raise CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
+        raise _saved_view_not_found()
     if not isinstance(definition, Mapping):  # Defensive: manifests normalize this on load.
         raise CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
     plain_definition = _plain_json_value(definition)
     assert isinstance(plain_definition, dict)
-    normalized_definition = _normalize_saved_view(
-        plain_definition,
-        _saved_view_fields(
-            manifest.schema,
-            manifest.storage,
-            manifest.semantic_profile,
-        ),
-        _saved_view_child_shapes(manifest.storage, manifest.child_tables),
-        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
-    )
+    normalized_definition = _normalize_saved_view_against(manifest, plain_definition)
+    if readable is not None:
+        try:
+            _normalize_saved_view_against(readable, plain_definition)
+        except CollectionError:
+            # The view resolved against the whole manifest, so only a withheld name can fail here.
+            raise _saved_view_not_found() from None
     canonical = json.dumps(
         {
             "collection_id": manifest.collection_id,
@@ -2245,6 +2255,26 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
         name=name,
         definition=normalized_definition,
         identity=hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _saved_view_not_found() -> CollectionError:
+    return CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
+
+
+def _normalize_saved_view_against(
+    manifest: CollectionManifest, definition: dict[str, Any]
+) -> dict[str, Any]:
+    """`definition` normalized against the fields, child tables and references `manifest` declares."""
+    return _normalize_saved_view(
+        definition,
+        _saved_view_fields(
+            manifest.schema,
+            manifest.storage,
+            manifest.semantic_profile,
+        ),
+        _saved_view_child_shapes(manifest.storage, manifest.child_tables),
+        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
     )
 
 

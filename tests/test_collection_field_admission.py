@@ -32,8 +32,10 @@ def owner():
         yield
 
 
-def create(store):
+def create(store, views=None):
     front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    if views is not None:
+        front["views"] = views
     front["item_schema"]["fields"].update({
         "count": {"type": "integer", "sortable": True},
         "place": {"type": "object", "classification": "location", "properties": {"label": {"type": "string"}}},
@@ -857,17 +859,24 @@ def test_a_withheld_query_column_refuses_like_a_missing_one_whichever_argument_n
 
 
 def create_with_child_tables(store):
-    """Three child tables: `measurements` is classified location, `steps` and `checks` are not."""
+    """Three child tables: `measurements` is classified location, `steps` and `checks` are not.
+
+    The `steps` table has a second column, `site`, that is classified location.
+    """
     front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
     rows = {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}}}}
+    steps = {"type": "array", "items": {"type": "object", "properties": {
+        "name": {"type": "string"}, "site": {"type": "string", "classification": "location"}}}}
     front["item_schema"]["fields"].update({
-        "measurements": {**rows, "classification": "location"}, "steps": rows, "checks": rows})
+        "measurements": {**rows, "classification": "location"}, "steps": steps, "checks": rows})
+    columns = {"measurements": ["name"], "steps": ["name", "site"], "checks": ["name"]}
     front["record_presentation"] = {"version": 1, "summary": ["title"], "tables": [
-        {"field": name, "label": name.title(), "columns": [{"field": "name", "type": "string"}]}
-        for name in ("measurements", "steps", "checks")]}
+        {"field": name, "label": name.title(), "columns": [{"field": column, "type": "string"} for column in names]}
+        for name, names in columns.items()]}
     text = "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body
     store.create_collection(manifest_path(), text, why="declare child tables", scaffold=False)
-    store.append_record(CID, item={"title": KEY, **{name: [{"name": "invented"}] for name in ("measurements", "steps", "checks")}},
+    store.append_record(CID, item={"title": KEY, "measurements": [{"name": "invented"}],
+                                   "steps": [{"name": "invented", "site": "invented-site"}], "checks": [{"name": "invented"}]},
                         item_key=KEY, why="record invented values")
 
 
@@ -889,3 +898,129 @@ def test_a_withheld_child_table_refuses_like_a_missing_one_and_is_never_named(st
     # The owner reads the table the guest is refused.
     owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, expand_child="measurements")
     assert "measurements" in str(owner)
+
+
+def test_a_withheld_child_column_refuses_like_a_missing_one_and_never_reads_as_null(store):
+    """A caller that names a child column must not learn from the reply which columns the table declares."""
+    create_with_child_tables(store)
+
+    def refused(name):
+        with pytest.raises(Exception, match="INVALID_RECORD_QUERY_FIELD") as raised:
+            tool(store, "record_memory", who=GUEST, action="query", collection=CID, expand_child="steps", columns=[name])
+        return str(raised.value)
+
+    # Only the name the caller sent differs.
+    assert refused("site").replace("'site'", "'absent'") == refused("absent")
+    # The withheld column is absent from the guest's rows, never a null.
+    plain = tool(store, "record_memory", who=GUEST, action="query", collection=CID)["rows"]
+    assert [row["steps"] for row in plain] == [[{"name": "invented"}]]
+    expanded = tool(store, "record_memory", who=GUEST, action="query", collection=CID, expand_child="steps")["rows"]
+    assert [(row["name"], "site" in row) for row in expanded] == [("invented", False)]
+    # The owner reads the column the guest is refused.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, expand_child="steps", columns=["site"])
+    assert [row["site"] for row in owner["rows"]] == ["invented-site"]
+
+
+def test_a_withheld_child_table_leaves_the_rows_and_child_rows_the_guest_may_read(store):
+    """A withheld child table must not cost the caller the rows and the other child rows it may read."""
+    create_with_child_tables(store)
+
+    rows = tool(store, "record_memory", who=GUEST, action="query", collection=CID)["rows"]
+    assert [(row["title"], row["checks"], "measurements" in row) for row in rows] == [(KEY, [{"name": "invented"}], False)]
+    children = tool(store, "record_memory", who=GUEST, action="query", collection=CID, expand_child="checks")["rows"]
+    assert [(row["parent_record_id"], row["name"]) for row in children] == [(KEY, "invented")]
+    # The owner reads the table the guest is not shown.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID)["rows"]
+    assert [row["measurements"] for row in owner] == [[{"name": "invented"}]]
+
+
+def test_a_saved_view_that_names_a_withheld_field_is_not_found_like_a_missing_one(store):
+    """A caller that runs a saved view must not learn from the reply which fields the view names."""
+    create(store, views={"located": {"query": {"columns": ["title", "place"]}}})
+
+    def refused(view):
+        with pytest.raises(Exception, match="SAVED_VIEW") as raised:
+            tool(store, "record_memory", who=GUEST, action="query", collection=CID, view=view)
+        return str(raised.value)
+
+    # Only the name the caller sent differs.
+    assert refused("located").replace("located", "absent") == refused("absent")
+    # The owner runs the view the guest is refused.
+    owner = tool(store, "record_memory", who=OWNER, action="query", collection=CID, view="located")
+    assert [row["place"]["label"] for row in owner["rows"]] == ["invented-place", "invented-place"]
+
+
+def governed(store):
+    """Give the vault the state and governance folder that a release needs; run it before any collection exists."""
+    from exomem.governance.policy import governance_root
+    from exomem.init import _SCAFFOLD
+
+    initialize_vault_state_offline(store.root, source="field release fixture")
+    governance_root(store.root).mkdir(parents=True, exist_ok=True)
+    (governance_root(store.root) / "README.md").write_bytes((_SCAFFOLD / "_Governance/README.md").read_bytes())
+
+
+def release_to_guest(store, paths):
+    """Commit the owner's standing release of `paths` in collection CID to GUEST, through govern_memory."""
+    basis = tool(store, "record_memory", action="inspect", collection=CID)["field_release_basis"]
+    document = yaml.safe_load(release_document(basis))
+    document["field_release"]["paths"] = paths
+    proposal = govern(store, operation="propose", intent="Release invented values",
+                      documents={"grants/invented-values.yaml": yaml.safe_dump(document)},
+                      selector_paths=[basis["path"]], target_ceiling=6, duration="standing")
+    govern(store, operation="commit", proposal_id=proposal["proposal_id"])
+
+
+def test_a_saved_view_its_author_cannot_run_is_not_found_for_a_guest_like_a_missing_one(tmp_path, store):
+    """A broken view's reason can name a field the guest may not read, so the guest gets the missing-view reply.
+
+    A guest released every field may read anything the reason names, so it gets the owner's reply.
+    """
+    from test_collection_query_index_migrations import _import_files
+
+    governed(store)
+    # The store refuses to save a broken view, so this one arrives with a file collection that already had it.
+    front, body, _ = vault.parse_frontmatter(manifest_text(), strict=True)
+    front["item_schema"]["fields"]["zone"] = {"type": "enum", "enum": ["north", "south"], "classification": "location"}
+    front["views"] = {"stale": {"query": {"filters": [{"column": "zone", "op": "eq", "value": "west"}]}}}
+    _import_files(tmp_path, store, {"title": KEY, "zone": "north"},
+                  text="---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body)
+
+    def refused(who, view):
+        with pytest.raises(Exception, match="SAVED_VIEW") as raised:
+            tool(store, "record_memory", who=who, action="query", collection=CID, view=view)
+        return str(raised.value)
+
+    # Only the name the caller sent differs, so the reply names no field of the view.
+    assert refused(GUEST, "stale").replace("stale", "absent") == refused(GUEST, "absent")
+    # The owner still learns why the view cannot run.
+    assert "zone" in refused(OWNER, "stale")
+    # A guest released every field reads what the owner reads, and query and inspect agree.
+    release_to_guest(store, [{"path": "zone", "subtree": False}])
+    inspected = tool(store, "record_memory", who=GUEST, action="inspect", collection=CID)
+    assert refused(GUEST, "stale") == refused(OWNER, "stale")
+    assert refused(GUEST, "stale").split(": ", 1)[1] in [found["reason"] for found in inspected["diagnostics"]]
+
+
+def test_a_child_table_released_as_a_whole_subtree_keeps_its_columns_for_the_guest(store):
+    """A table whose rows are classified, released whole, must reach the guest with every column."""
+    governed(store)
+    front, body, _ = vault.parse_frontmatter(summary_text(manifest_text()), strict=True)
+    front["item_schema"]["fields"]["steps"] = {"type": "array", "items": {
+        "type": "object", "classification": "location",
+        "properties": {"name": {"type": "string"}, "site": {"type": "string"}}}}
+    front["record_presentation"] = {"version": 1, "summary": ["title"], "tables": [{
+        "field": "steps", "label": "Steps",
+        "columns": [{"field": "name", "type": "string"}, {"field": "site", "type": "string"}]}]}
+    store.create_collection(manifest_path(), "---\n" + yaml.safe_dump(front, sort_keys=False) + "---\n" + body,
+                            why="declare a classified child table", scaffold=False)
+    store.append_record(CID, item={"title": KEY, "steps": [{"name": "invented", "site": "invented-site"}]},
+                        item_key=KEY, why="record invented values")
+    release_to_guest(store, [{"path": "steps", "subtree": True}])
+
+    def rows(**arguments):
+        return tool(store, "record_memory", who=GUEST, action="query", collection=CID, **arguments)["rows"]
+
+    assert [row["steps"] for row in rows()] == [[{"name": "invented", "site": "invented-site"}]]
+    assert [(row["name"], row["site"]) for row in rows(expand_child="steps")] == [("invented", "invented-site")]
+    assert [row["site"] for row in rows(expand_child="steps", columns=["site"])] == ["invented-site"]
