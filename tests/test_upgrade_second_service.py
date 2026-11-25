@@ -45,7 +45,11 @@ def _home(tmp_path: Path) -> dict[str, str]:
     """An environment whose default unit and manifest live under tmp_path."""
     config = tmp_path / "config"
     (config / "systemd" / "user").mkdir(parents=True)
-    env = {k: v for k, v in os.environ.items() if not k.startswith("EXOMEM_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("EXOMEM_", "EVERMATTER_", "KB_MCP_"))
+    }
     env["XDG_CONFIG_HOME"] = str(config)
     env["EXOMEM_MANAGED_INSTALL_MANIFEST"] = str(config / "exomem" / "managed-install.json")
     return env
@@ -260,6 +264,41 @@ def test_upgrade_refuses_to_guess_a_second_services_vault(tmp_path: Path) -> Non
     assert result.returncode != 0
     assert "pass --vault for a service that is not the default unit" in result.stderr
     assert "leaving the uv-tool CLI alone" in result.stdout
+
+
+def test_upgrade_reads_a_second_services_vault_named_with_the_product_prefix(tmp_path: Path) -> None:
+    """The failure: a unit that names its vault EVERMATTER_VAULT_PATH was taken for one with no vault."""
+    env = _home(tmp_path)
+    second = _unit(
+        tmp_path,
+        "exomem-second",
+        env_file=str(tmp_path / "second.env"),
+        environment="Environment=EVERMATTER_VAULT_PATH=/vaults/alias",
+    )
+
+    result = _run_upgrade(tmp_path, env, second)
+
+    assert "pass --vault for a service that is not the default unit" not in result.stderr
+    assert "service must be running with a capturable worker" in result.stderr
+
+
+def test_upgrade_refuses_a_second_services_vault_named_two_ways(tmp_path: Path) -> None:
+    env = _home(tmp_path)
+    env_file = tmp_path / "second.env"
+    env_file.write_text("EVERMATTER_VAULT_PATH=/vaults/alias\n", encoding="utf-8")
+    second = _unit(
+        tmp_path,
+        "exomem-second",
+        env_file=str(env_file),
+        environment="Environment=EXOMEM_VAULT_PATH=/vaults/explicit",
+    )
+
+    result = _run_upgrade(tmp_path, env, second)
+
+    assert result.returncode != 0
+    assert "EVERMATTER_VAULT_PATH and EXOMEM_VAULT_PATH" in result.stderr
+    assert "/vaults/alias" not in result.stderr and "/vaults/explicit" not in result.stderr
+    assert "capturable worker" not in result.stderr
 
 
 def test_upgrade_source_resolves_the_vault_from_the_unit_first() -> None:

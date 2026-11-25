@@ -431,10 +431,36 @@ def transition_identifier(
     ).hexdigest()
 
 
+# The product's closed naming history, in precedence order after EXOMEM_. The chart mounts this
+# file alone, so it cannot import the substrate's env_compat and holds the rule for its one name.
+_SETTING_ALIAS_PREFIXES = ("EVERMATTER_", "KB_MCP_")
+
+
+def _setting(name: str) -> str | None:
+    """The value of the EXOMEM_ name `name`, or of its alias name when `name` is unset.
+
+    `name` wins. A differing EVERMATTER_ value prints one warning that names both variables,
+    never the values: this one is a bearer secret.
+    """
+    value = os.environ.get(name)
+    for prefix in _SETTING_ALIAS_PREFIXES:
+        alias = prefix + name[len("EXOMEM_") :]
+        alias_value = os.environ.get(alias)
+        if alias_value is None:
+            continue
+        if value is None:
+            value = alias_value
+        elif prefix == "EVERMATTER_" and alias_value != value:
+            print(f"{alias} and {name} differ; using {name}", file=sys.stderr)
+    return value
+
+
 def request_once() -> int:
     job = os.environ["JOB_NAME"]
     target = os.environ["TARGET_URL"]
-    bearer = os.environ["EXOMEM_HOSTED_SCHEDULER_SECRET"]
+    bearer = _setting("EXOMEM_HOSTED_SCHEDULER_SECRET")
+    if bearer is None:
+        raise KeyError("EXOMEM_HOSTED_SCHEDULER_SECRET")
     cadence = int(os.environ["CADENCE_SECONDS"])
     connect_timeout = int(os.environ.get("CONNECT_TIMEOUT_SECONDS", "5"))
     total_timeout = int(os.environ.get("TOTAL_TIMEOUT_SECONDS", "20"))

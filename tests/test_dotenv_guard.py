@@ -95,6 +95,18 @@ def test_refuses_when_the_dotenv_declares_the_enclosing_vault(vault: Path) -> No
     assert dotenv_guard.dotenv_load_guard(candidate) is None
 
 
+def test_refuses_a_dotenv_that_names_its_own_directory_as_the_vault_under_the_evermatter_prefix(
+    tmp_path: Path,
+) -> None:
+    """A vault selected before initialization is not structurally a vault yet;
+    the `.env` that selects it under either prefix must not be loaded."""
+    selected = tmp_path / "selected-vault"
+    selected.mkdir()
+    candidate = _plant(selected, f"EVERMATTER_VAULT_PATH={selected}\n")
+
+    assert dotenv_guard.dotenv_load_guard(candidate) is None
+
+
 def test_refuses_a_directory_that_is_a_vault_even_when_a_different_vault_is_configured(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

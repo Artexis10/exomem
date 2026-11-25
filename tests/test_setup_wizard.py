@@ -314,6 +314,25 @@ def test_client_route_prefers_explicit_then_dotenv_then_inherited_env(tmp_path: 
     assert inherited.url == "https://inherited.example.com/mcp"
 
 
+def test_client_route_reads_the_evermatter_prefix_from_dotenv(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text(
+        "EVERMATTER_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
+    )
+
+    route = setup_wizard._resolve_client_route(
+        mcp_url=None,
+        force_stdio=False,
+        cwd=tmp_path,
+        environ={},
+        which_fn=lambda name: f"/fake/{name}",
+        vault_path=tmp_path / "vault",
+        profile="hybrid",
+    )
+
+    assert route.transport == "http"
+    assert route.url == "https://dotenv.example.com/mcp"
+
+
 def test_client_route_force_stdio_ignores_configured_service(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text(
         "EXOMEM_BASE_URL=https://dotenv.example.com\n", encoding="utf-8"
