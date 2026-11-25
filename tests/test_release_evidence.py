@@ -498,26 +498,33 @@ def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status
 
 
 @pytest.mark.parametrize(
-    "branch,age_hours,status,tested,due",
+    "branch,age_hours,status,tested,cut_open,reconciled_hours,due",
     [
         # Main moved and its newest Full is older than the window: a cut would find nothing.
-        ("main", 5, "completed", "old", True),
-        ("main", 1, "completed", "old", False),
+        ("main", 5, "completed", "old", False, 20, True),
+        ("main", 1, "completed", "old", False, 20, False),
         # A running Full will supply the evidence; a second one only holds runners.
-        ("main", 5, "in_progress", "old", False),
+        ("main", 5, "in_progress", "old", False, 20, False),
         # Nothing landed since the last Full: rerunning it proves nothing new.
-        ("main", 5, "completed", "tip", False),
+        ("main", 5, "completed", "tip", False, 20, False),
         # A cut's own Full run on main's tip is evidence too; a copy would compete with it.
-        ("release-cuts/tip", 5, "in_progress", "tip", False),
-        ("release-cuts/tip", 1, "completed", "tip", False),
+        ("release-cuts/tip", 5, "in_progress", "tip", False, 20, False),
+        ("release-cuts/tip", 1, "completed", "tip", False, 20, False),
+        # A cut's Full on an older commit predates its reconciliation; it holds off nothing.
+        ("release-cuts/old", 1, "completed", "old", False, 20, True),
+        # While a cut is open, a Full on main lacks its reconciliation and cannot serve.
+        ("main", 5, "completed", "old", True, 20, False),
+        # A recent main Full from before the newest reconciliation cannot serve the next cut.
+        ("main", 1, "completed", "old", False, 0.5, True),
         # No Full run on main has ever finished.
-        (None, 0, "completed", "old", True),
+        (None, 0, "completed", "old", False, 20, True),
     ],
 )
 def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
-    monkeypatch, branch, age_hours, status, tested, due
+    monkeypatch, branch, age_hours, status, tested, cut_open, reconciled_hours, due
 ):
-    created = evidence.datetime.now(evidence.UTC) - evidence.timedelta(hours=age_hours)
+    now = evidence.datetime.now(evidence.UTC)
+    created = now - evidence.timedelta(hours=age_hours)
     run = {
         "event": "workflow_dispatch",
         "head_branch": branch,
@@ -525,16 +532,33 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         "status": status,
         "created_at": created.isoformat().replace("+00:00", "Z"),
     }
+    # An older finished Full on main changes no decision; it makes a per-run lookup visible.
+    older = {
+        **run,
+        "head_branch": "main",
+        "head_sha": "older",
+        "status": "completed",
+        "created_at": (now - evidence.timedelta(hours=30)).isoformat().replace("+00:00", "Z"),
+    }
+    reconciled = (now - evidence.timedelta(hours=reconciled_hours)).isoformat()
 
     def api(path):
         if path == "actions/workflows/ci.yml":
             return {"id": 7}
         if path == "commits/main":
             return {"sha": "tip"}
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"total_count": int(cut_open)}
+        if path.startswith("commits?sha=main&path=.github/release-cuts"):
+            return [{"commit": {"committer": {"date": reconciled.replace("+00:00", "Z")}}}]
         listed = branch and "event=workflow_dispatch" in path
-        return {"workflow_runs": [run] if listed else []}
+        return {"workflow_runs": [run, older] if listed else []}
 
-    monkeypatch.setattr(evidence, "api", api)
     monkeypatch.setattr(evidence, "trusted_full", lambda run, repository, workflow: True)
 
-    assert evidence.main_full_due("example/project", 4) is due
+    calls = []
+    monkeypatch.setattr(evidence, "api", lambda path: calls.append(path) or api(path))
+
+    assert evidence.main_full_due("example/project", 4)[0] is due
+    # One tip lookup per check: the check runs on every landing within the token's rate limit.
+    assert calls.count("commits/main") <= 1

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.204.0](https://github.com/substrate-systems/evermatter/compare/v0.203.0...v0.204.0) (2026-11-25)
+
+
+### Features
+
+* **media:** recover capture dates from file names and matching originals, with a recorded date source ([#3189](https://github.com/substrate-systems/evermatter/issues/3189)) ([3625de6](https://github.com/substrate-systems/evermatter/commit/3625de6d3f8f312c9f2179ce1072f5ef9f5e919d))
+
+
+### Bug Fixes
+
+* **release:** hold the Full-evidence dispatch while a cut is open ([#3194](https://github.com/substrate-systems/evermatter/issues/3194)) ([f00f14f](https://github.com/substrate-systems/evermatter/commit/f00f14f282abc609405d77e67f2510e104e306c9))
+
 ## [0.203.0](https://github.com/substrate-systems/evermatter/compare/v0.202.0...v0.203.0) (2026-11-25)
 
 
