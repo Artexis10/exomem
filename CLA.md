@@ -1,7 +1,8 @@
 # Contributor License Agreement
 
-This agreement covers contributions to the Exomem repository at
-https://github.com/Artexis10/exomem. "Maintainer" means the owner of that repository
+This agreement covers contributions to the Evermatter repository at
+https://github.com/substrate-systems/evermatter, formerly the Exomem repository at
+https://github.com/Artexis10/exomem. "Maintainer" means Substrate Systems OÜ, the owner of that repository,
 and its successors and assigns. "You" means the person who signs, and your employer
 if it holds rights in your contribution. A "Contribution" is any code, documentation
 or other material that you submit to the repository.
@@ -25,9 +26,12 @@ infringes a patent, the patent licences you granted end on the date you start it
 
 ## 3. Open-source promise
 
-The Maintainer will keep every released version that includes your Contribution
-available to the public under an OSI-approved open-source licence. A licence change
-under section 1 never removes that availability.
+This section covers each version that includes your Contribution and that the
+Maintainer makes available to the public. The Maintainer will make each such version
+available under an OSI-approved open-source licence no later than the second
+anniversary of the date it first made that version available, and will keep it
+available under that licence after that date. A licence change under section 1 never
+delays or removes that availability.
 
 ## 4. What you confirm
 

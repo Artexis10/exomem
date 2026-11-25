@@ -1,4 +1,4 @@
-"""Exomem Cloud cell mode (design D1): auth, surface, read-only, logging.
+"""Evermatter Cloud cell mode (design D1): auth, surface, read-only, logging.
 
 `EXOMEM_CLOUD_CELL=1` selects a thin seam over the standalone server: only
 authentication, logging, tool surface and read-only enforcement change.
@@ -135,20 +135,20 @@ def _teardown_activation(mcp) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Store identity: which Exomem a process serves
+# Store identity: which Evermatter a process serves
 # ---------------------------------------------------------------------------
 
 
 def test_store_identity_tells_the_three_deployment_modes_apart() -> None:
     """Two connectors can present one display name; this is what names the store behind each."""
-    assert cloud_cell.store_identity({}) == {"kind": "personal", "name": "personal Exomem"}
+    assert cloud_cell.store_identity({}) == {"kind": "personal", "name": "personal Evermatter"}
     assert cloud_cell.store_identity({"EXOMEM_HOSTED_CELL": "true"}) == {
         "kind": "hosted",
-        "name": "Exomem Hosted",
+        "name": "Evermatter Hosted",
     }
     assert cloud_cell.store_identity({"EXOMEM_CLOUD_CELL": "1"}) == {
         "kind": "cloud",
-        "name": "Exomem Cloud",
+        "name": "Evermatter Cloud",
     }
     # A cloud cell is the more specific deployment when both flags are set.
     both = {"EXOMEM_CLOUD_CELL": "1", "EXOMEM_HOSTED_CELL": "1"}
@@ -745,7 +745,7 @@ def test_cloud_tool_list_allows_staged_adoption(
         assert {"imports.start", "imports.apply"} <= writes
         # Media status remains available; Cloud still omits the video-frame command.
         assert "media.status" in reads
-        assert not {"media.video", "media.image"} & reads
+        assert not {"media.video", "media.image", "media.preview"} & reads
         assert "media.process" in writes
         assert {"settings.set"} <= writes
         assert "recall_context" in names
@@ -1320,10 +1320,10 @@ def test_cloud_capture_reconciles_across_rotation_restart_and_replay_expiry(vaul
 def test_cloud_cell_handshake_names_its_release_and_source_repository(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AGPL section 13: the operator's service names the release it runs and where its source is."""
+    """The source offer: the operator's service names the release it runs and where its source is."""
     from exomem import __version__
 
     cloud, _ = _build_cloud_server(monkeypatch)
     assert cloud.version == __version__
-    assert cloud.website_url == "https://github.com/Artexis10/exomem"
+    assert cloud.website_url == "https://github.com/substrate-systems/evermatter"
     assert cloud.instructions == server.SERVER_INSTRUCTIONS

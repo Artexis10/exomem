@@ -27,7 +27,7 @@ ANSWERS = json.loads((ROOT / "tests/fixtures/cloud-deploy/answers.json").read_te
 DEPLOY_TOKEN = "deploy-token-value-that-must-never-be-printed"  # noqa: S105 - a test value
 ALERT_URL = "https://app.example.test/api/exomem/alerts/alert-capability-that-must-never-be-printed"
 DIGEST = "sha256:" + "2" * 64
-IMAGE = f"ghcr.io/artexis10/exomem@{DIGEST}"
+IMAGE = f"ghcr.io/substrate-systems/evermatter@{DIGEST}"
 ENV = {
     "GITHUB_REPOSITORY": "example-owner/example-repo",
     "GITHUB_API_URL": "https://api.github.test",
@@ -84,8 +84,8 @@ def _run(recorded: Recorded, capsys, *, attested: bool = True, changed: list[str
     clock = iter(range(0, 10_000, 15))
     tools = cloud_deploy.Tools(
         transport=recorded,
-        digest=lambda tag: DIGEST,
-        attest=lambda repository, image, tag: attested,
+        image=lambda tag: IMAGE,
+        attest=lambda image, tag: attested,
         changed_paths=lambda base, head: TESTS_AND_DOCS if changed is None else changed,
         sleep=slept.append,
         monotonic=lambda: next(clock),
@@ -136,6 +136,68 @@ def test_an_unattested_digest_sets_nothing(capsys) -> None:
     assert "ATTESTATION_UNVERIFIED" in log
 
 
+def test_an_image_is_verified_against_the_repository_that_built_it_and_no_other(monkeypatch) -> None:
+    # Catches a rollback to a release cut before the repository moved that no builder
+    # vouches for, a new release checked against the old repository, and an image from
+    # outside the two repositories that ever built these images.
+    commands: list[list[str]] = []
+
+    def run(command, **_):
+        commands.append(command)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(cloud_deploy.subprocess, "run", run)
+
+    assert cloud_deploy.verify_attestation(f"ghcr.io/artexis10/exomem@{DIGEST}", "v0.200.0")
+    assert cloud_deploy.verify_attestation(IMAGE, "v0.201.0")
+    builders = [(command[command.index("--repo") + 1], command[command.index("--signer-workflow") + 1])
+                for command in commands]
+    assert builders == [
+        ("Artexis10/exomem", "Artexis10/exomem/.github/workflows/release-please.yml"),
+        ("substrate-systems/evermatter", "substrate-systems/evermatter/.github/workflows/release-please.yml"),
+    ]
+
+    commands.clear()
+    for foreign in (f"ghcr.io/example-owner/evermatter@{DIGEST}", f"ghcr.io/artexis10/exomem-cellctl@{DIGEST}"):
+        with pytest.raises(cloud_deploy.Stop) as refused:
+            cloud_deploy.verify_attestation(foreign, "v0.201.0")
+        assert refused.value.code == "CELL_IMAGE_REPOSITORY_UNKNOWN"
+    assert commands == []
+
+
+def test_the_deploy_chart_and_release_name_the_same_cell_image_repositories() -> None:
+    # Catches a repository move that updates one copy of the cell image repositories and
+    # not the others: the deploy would resolve an image the chart refuses, or the release
+    # would publish where the deploy never looks.
+    chart = ROOT / "infra/helm/platform"
+    schema = json.loads((chart / "values.schema.json").read_text(encoding="utf-8"))
+    platform_jobs_image = re.compile(schema["properties"]["platformJobs"]["properties"]["image"]["pattern"])
+    for repository in cloud_deploy.CELL_IMAGE_BUILDERS:
+        assert platform_jobs_image.fullmatch(f"{repository}@{DIGEST}"), repository
+    assert not platform_jobs_image.fullmatch(f"ghcr.io/example-owner/evermatter@{DIGEST}")
+
+    validation = yaml.safe_load((chart / "values.validation.yaml").read_text(encoding="utf-8"))
+    pairs = {source["repository"]: source["builder"] for source in validation["cellctl"]["cellImageRepositories"]}
+    assert pairs == cloud_deploy.CELL_IMAGE_BUILDERS
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/release-please.yml").read_text(encoding="utf-8"))
+    steps = [step for job in workflow["jobs"].values() for step in job.get("steps", [])]
+    # A release publishes where its build outputs push and its attestations name the subject.
+    # The build-push `outputs` value is a comma-separated key=value list fixed by the action.
+    published = {
+        field.removeprefix("name=")
+        for step in steps
+        for field in str(step.get("with", {}).get("outputs", "")).split(",")
+        if field.startswith("name=")
+    } | {
+        step["with"]["subject-name"]
+        for step in steps
+        if str(step.get("with", {}).get("subject-name", "")).startswith("ghcr.io/")
+    }
+    newest = next(iter(cloud_deploy.CELL_IMAGE_BUILDERS))
+    assert published == {newest, f"{newest}-cellctl"}
+
+
 @pytest.mark.parametrize("answer", ["substrate_error_image_seen", "substrate_error_release_older"])
 def test_a_release_not_newer_than_the_fleet_ends_as_success_with_nothing_set(capsys, answer: str) -> None:
     # Catches a red run on every merge after a withdrawal.
@@ -150,6 +212,16 @@ def test_a_release_not_newer_than_the_fleet_ends_as_success_with_nothing_set(cap
 def test_a_paused_rollout_sets_nothing_and_fails_with_the_pause_code(capsys) -> None:
     # Catches automation that resumes a paused fleet.
     recorded = Recorded(["substrate_rollout_paused"])
+
+    code, log, _ = _run(recorded, capsys)
+
+    assert (code, recorded.puts()) == (1, [])
+    assert log.splitlines()[-1] == "cloud-deploy: ROLLOUT_PAUSED UPGRADE_READINESS_TIMEOUT"
+
+
+def test_a_rerun_for_the_release_the_rollout_paused_on_fails_with_the_pause_code(capsys) -> None:
+    # Catches a re-run that reports success while the fleet is paused on this very release.
+    recorded = Recorded(["substrate_rollout_paused_on_the_release"])
 
     code, log, _ = _run(recorded, capsys)
 
@@ -302,3 +374,26 @@ def test_every_release_and_rollout_alert_has_a_runbook_step() -> None:
     assert len(rollout_alerts) == 4
     for alert in (cloud_deploy.PLATFORM_NEEDED_ALERT, cloud_deploy.BARRIER_ALERT, *rollout_alerts):
         assert alert in rows, alert
+
+
+def test_a_changed_chart_template_with_a_non_ascii_name_still_reaches_the_platform_gate(tmp_path, monkeypatch) -> None:
+    # Catches git's quoting of a non-ASCII path, which then matched no platform glob and raised no alert.
+    import subprocess
+
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "--allow-empty", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    template = tmp_path / "infra/helm/platform/templates/café.yaml"
+    template.parent.mkdir(parents=True)
+    template.write_text("kind: ConfigMap\n", encoding="utf-8")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "chart")
+    monkeypatch.setattr(cloud_deploy, "ROOT", tmp_path)
+
+    paths = cloud_deploy.git_changed_paths(base, git("rev-parse", "HEAD"))
+
+    assert paths == ["infra/helm/platform/templates/café.yaml"]
+    assert cloud_deploy.platform_inputs(paths, ["infra/helm/platform/**"], [])

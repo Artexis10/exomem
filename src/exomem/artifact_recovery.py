@@ -9,13 +9,15 @@ import os
 import re
 import threading
 import time
-from contextlib import ExitStack, asynccontextmanager, contextmanager
+from collections.abc import Callable
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from contextvars import Context, ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit, urlunsplit
 
 from . import (
+    access,
     download_links,
     held_fs,
     media_store,
@@ -115,7 +117,10 @@ def native_max_bytes() -> int:
 
 
 def _companion(root: Path, path: str) -> tuple[str, dict]:
-    found = originals.bound_companion(root, path)
+    try:
+        found = originals.bound_companion(root, path)
+    except vault.MALFORMED_FRONTMATTER_ERRORS as error:
+        raise RecoveryUnavailable from error
     if found is None:
         raise reserved_paths.ReservedPathLeafError("MISSING")
     companion, frontmatter, _data = found
@@ -190,12 +195,15 @@ def _descriptor(path: str, metadata: dict, copied: reserved_paths.GenericFileCop
     }
 
 
-def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy) -> tuple:
+def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy, *, check_access: bool = False) -> tuple:
     try:
         companion, _ = _companion(root, copied.relative_path)
         snapshot = reserved_paths.read_generic_bytes(root, companion)
         source_version = reserved_paths.require_generic_copy_source_version(copied)
         compiled = policy.load(root)
+        access_policy = access.publication_policy_snapshot(root) if check_access else None
+        if check_access and access_policy is None:
+            raise RecoveryUnavailable
         return (
             compiled.fingerprint,
             compiled.blocked,
@@ -204,6 +212,7 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
             snapshot.identity,
             hashlib.sha256(snapshot.data).hexdigest(),
             source_version,
+            access_policy,
         )
     except (
         reserved_paths.ReservedPathLeafError,
@@ -216,21 +225,36 @@ def _admission_revision(root: Path, who, copied: reserved_paths.GenericFileCopy)
 
 
 def _release(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict,
-             allow_capture: bool) -> tuple:
+             allow_capture: bool, selected: str | None = None,
+             additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
+             revalidate_closed: bool = False, expected_descriptor: dict | None = None) -> tuple:
     def fresh():
-        for proof in byte_proofs.values():
-            reserved_paths.require_generic_copy_source_version(proof)
-        before = _admission_revision(root, who, copied)
-        with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
-            allowed = egress.release_allows_download(
-                root, copied.relative_path, principal=who, artifact_copy=copied
-            )
-        after = _admission_revision(root, who, copied)
-        for proof in byte_proofs.values():
-            reserved_paths.require_generic_copy_source_version(proof)
-        if not allowed or before != after:
-            raise RecoveryUnavailable
-        return after
+        source = reserved_paths.revalidate_held_binary(copied) if revalidate_closed else nullcontext(copied)
+        with source as current:
+            for proof in byte_proofs.values():
+                reserved_paths.require_generic_copy_source_version(proof)
+            check_access = additional_release is not None
+            before = _admission_revision(root, who, current, check_access=check_access)
+            with request_scope(who), companions.byte_proof_scope(byte_proofs, allow_capture=allow_capture):
+                allowed = egress.release_allows_download(
+                    root, current.relative_path, principal=who, artifact_copy=current
+                )
+                if allowed and additional_release is not None:
+                    allowed = additional_release(current)
+                if allowed and selected is not None:
+                    path, metadata = ((selected, _companion(root, selected)[1]) if selected == current.relative_path
+                                      else _resolve(root, selected))
+                    if path != current.relative_path:
+                        raise RecoveryUnavailable
+                    descriptor = _descriptor(path, metadata, current)
+                    if expected_descriptor is not None and descriptor != expected_descriptor:
+                        raise RecoveryUnavailable
+            after = _admission_revision(root, who, current, check_access=check_access)
+            for proof in byte_proofs.values():
+                reserved_paths.require_generic_copy_source_version(proof)
+            if not allowed or before != after:
+                raise RecoveryUnavailable
+            return after
 
     # Nested resolution scopes share a memo. An empty context forces this final pass to read live host authority.
     try:
@@ -250,12 +274,17 @@ def require_revision(
         raise RecoveryUnavailable
 
 
-def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict | None = None) -> tuple:
+def require_current(root: Path, copied: reserved_paths.GenericFileCopy, who, *, byte_proofs: dict | None = None,
+                    selected: str | None = None,
+                    additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None) -> tuple:
     try:
         reserved_paths.require_current_generic_copy(copied)
     except (reserved_paths.ReservedPathLeafError, OSError) as error:
         raise RecoveryUnavailable from error
-    return _release(root, copied, who, byte_proofs={} if byte_proofs is None else byte_proofs, allow_capture=True)
+    return _release(
+        root, copied, who, byte_proofs={} if byte_proofs is None else byte_proofs, allow_capture=True,
+        selected=selected, additional_release=additional_release,
+    )
 
 
 @contextmanager
@@ -268,6 +297,10 @@ def stage(
     expected: dict | None = None,
     byte_proofs: dict | None = None,
     materialize: bool = True,
+    canonical: bool = False,
+    strict_exit: bool = False,
+    preflight: Callable[[], bool] | None = None,
+    additional_release: Callable[[reserved_paths.GenericFileCopy], bool] | None = None,
 ):
     """Hold one original open for a request, with no private copy, and release it on refusal and cancellation."""
     if not who.resolved:
@@ -284,22 +317,28 @@ def stage(
                     if budget is not None
                     else time.monotonic() + seconds
                 )
-                path, metadata = _resolve(root, selected)
-                if materialize:
+                def binding():
+                    return (selected, _companion(root, selected)[1]) if canonical else _resolve(root, selected)
+
+                if preflight is not None and not Context().run(preflight):
+                    raise RecoveryUnavailable
+                path, metadata = binding()
+                if materialize and not canonical:
                     stack.enter_context(media_store.local_originals(root, (path,), read=True))
 
                 def recorded(version):
-                    return media_store.cached_sha256(root, path, version)
+                    return media_store.cached_sha256(root, path, version, strict_custody=strict_exit)
 
                 try:
                     # The hold hashes an ordinary file under the deadline, and `_descriptor` refuses bytes
                     # that differ from the binding. A pin taken here, or by a caller that passes
                     # `materialize=False`, has already fetched an evicted file.
+                    hold = media_store.hold_original if materialize and canonical else reserved_paths.hold_generic_file
                     held = stack.enter_context(
-                        reserved_paths.hold_generic_file(root, path, recorded_sha256=recorded, deadline=deadline)
+                        hold(root, path, recorded_sha256=recorded, deadline=deadline, strict_exit=strict_exit)
                     )
                 except reserved_paths.ReservedPathLeafError as error:
-                    if error.code != "MISSING":
+                    if canonical or error.code != "MISSING":
                         raise
                     # A pooled filing keeps no file at its logical path, so only its shared object holds the bytes.
                     # Only an object the pool already holds is read: an ordinary file that went missing is
@@ -311,7 +350,9 @@ def stage(
                     if not pooled:
                         raise
                     held = stack.enter_context(
-                        media_store.hold_original(root, path, recorded_sha256=recorded, deadline=deadline)
+                        media_store.hold_original(
+                            root, path, recorded_sha256=recorded, deadline=deadline, strict_exit=strict_exit,
+                        )
                     )
                 descriptor = _descriptor(path, metadata, held)
                 if (
@@ -321,10 +362,18 @@ def stage(
                     and descriptor != expected
                 ):
                     raise RecoveryUnavailable
-                require_current(root, held, who, byte_proofs=byte_proofs)
-                if _resolve(root, selected) != (path, metadata):
+                require_current(root, held, who, byte_proofs=byte_proofs, additional_release=additional_release)
+                if binding() != (path, metadata):
                     raise RecoveryUnavailable
                 yield held, descriptor
+                if strict_exit:
+                    # Close the pin before checking the live file and authority in a fresh release scope.
+                    stack.close()
+                    _release(
+                        root, held, who, byte_proofs={} if byte_proofs is None else byte_proofs,
+                        selected=selected, allow_capture=True, additional_release=additional_release,
+                        revalidate_closed=True, expected_descriptor=descriptor,
+                    )
             except (
                 reserved_paths.ReservedPathLeafError,
                 media_store.MediaStoreError,

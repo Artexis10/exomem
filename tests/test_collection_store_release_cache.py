@@ -198,7 +198,7 @@ def test_unreported_sql_cannot_borrow_or_publish_a_warm_release(store, tmp_path,
 
     def interleave(current=None, manifest=None):
         conn = current.connection if current is not None else store.connection
-        conn.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+        conn.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                      ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
         if before_authorization:
             original(current, manifest)
@@ -253,7 +253,7 @@ def test_unexplained_transaction_rollback_does_not_leave_released_subject_metada
         assert KEY not in rendered()
         store.connection.execute("BEGIN")
         try:
-            store.connection.execute("UPDATE items SET governance_json=? WHERE item_key=?",
+            store.connection.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
                                      ('{"classes":[],"projects":[],"tags":[]}', KEY))
             assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
             assert KEY in rendered()
@@ -491,7 +491,7 @@ def test_inspection_overflow_and_unreported_sql_keep_full_public_data(store):
     before["observed_values"]["title"]["values"][0]["value"] = "Caller mutation"
     assert store.inspect_collection(CID)["observed_values"]["title"]["values"][0]["value"] == "Initial"
     # Trusted SQL is deliberately unexplained, even though its version/hash did not move.
-    store.connection.execute("UPDATE items SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
+    store.connection.execute("UPDATE item_rows SET values_json=? WHERE item_key=?", ('{"title":"Changed"}', KEY))
     current = store.inspect_collection(CID)
     assert current["observed_values"]["title"]["values"][0]["value"] == "Changed"
     cache = store.handle.release_cache.inspections
@@ -627,17 +627,54 @@ def test_unknown_sql_rebuilds_portable_filename_occupancy_with_duplicate_keys(st
     store.append_record(CID, item={"title": "STRASSE", "count": 2}, item_key=OTHER, why="capture")
     source = "Knowledge Base/Records/Work/Items"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/ＳＴＲＡＳＳＥ.md", OTHER))
     # Updating one unchanged path must retain the other portable-equivalent occupant.
     guards = store.inspect_collection(CID)["lifecycle_guards"]
     store.update_record(CID, item_key=KEY, changes={"count": 10},
                         expected_container_hash=guards["expected_container_hash"],
                         expected_item_version=first["after_item_hash"], why="correct")
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved.md", KEY))
     remaining = store.append_record(CID, item={"title": "Strasse", "count": 3}, why="capture")
     assert remaining["affected_paths"][0] != f"{source}/Strasse.md"
     with store.handle.transaction() as conn:
-        conn.execute("UPDATE items SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
+        conn.execute("UPDATE item_rows SET view_path=? WHERE item_key=?", (f"{source}/Moved again.md", OTHER))
     freed = store.append_record(CID, item={"title": "Strasse", "count": 4}, why="capture")
     assert freed["affected_paths"] == [f"{source}/Strasse.md"]
+
+
+def test_a_commit_from_another_connection_after_a_rolled_back_write_is_decided_again(store, monkeypatch):
+    """A rolled-back write that changed no rows must not absorb another connection's commit, which a
+    repair tool or migration can land just after the ROLLBACK. The warm released rows would then
+    still release a row that commit withheld."""
+    text = manifest_text().replace("    count:", "    tags: {type: array, items: {type: string}}\n    count:")
+    store.create_collection(manifest_path(), text, why="create")
+    store.append_record(CID, item={"title": "One", "tags": []}, item_key=KEY, why="capture")
+    store.append_record(CID, item={"title": "Two", "tags": []}, item_key=OTHER, why="capture")
+    write_scope(store.root, paths="Unrelated/**")
+    scope = store.root / "Knowledge Base/_Governance/scopes/patterns.yaml"
+    scope.write_text(scope.read_text() + "tags: [secret]\n")
+    write_rule(store.root, ceiling=0)
+    cache = store.handle.release_cache
+    finish, elsewhere = cache.finish, []
+
+    def commit_elsewhere_then_finish(committed):
+        if not committed and not elsewhere:
+            other = sqlite3.connect(store.handle.path, timeout=5, isolation_level=None)
+            try:
+                other.execute("UPDATE item_rows SET governance_json=? WHERE item_key=?",
+                              ('{"classes":[],"projects":[],"tags":["secret"]}', OTHER))
+            finally:
+                other.close()
+            elsewhere.append(OTHER)
+        return finish(committed)
+
+    with request_scope(_external()), preview_store(store.root, store.handle):
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 2
+        assert record_memory(store.root, "query", collection=CID)["total_matched"] == 2
+        monkeypatch.setattr(cache, "finish", commit_elsewhere_then_finish)
+        with pytest.raises(RuntimeError), store.handle.transaction():
+            raise RuntimeError("a write that changes no rows")
+        assert elsewhere
+        assert store.inspect_collection(CID)["coverage"]["committed"] == 1
+        assert record_memory(store.root, "query", collection=CID)["total_matched"] == 1

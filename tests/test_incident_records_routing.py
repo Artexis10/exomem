@@ -587,7 +587,7 @@ def test_balanced_asks_one_domain_question_once_per_signal(
     assert first is not None and first["disposition"] == "ask"
     question = first["question"]
     assert question.endswith("?") and "Widget incidents" in question
-    for jargon in ("Records", "collection", "record_memory", "Exomem", "routing"):
+    for jargon in ("Records", "collection", "record_memory", "Evermatter", "routing"):
         assert jargon not in question
     assert again is not None and again["disposition"] == "hold" and "question" not in again
 
@@ -1990,7 +1990,9 @@ def test_a_resolved_capture_method_leaves_inspection_without_a_finding(
     from exomem import commands
 
     _write_method_page(vault)
-    _incident_vault(vault, monkeypatch, "maximal", claims=_DECLARES_METHOD)
+    declaration = f'capture:\n  method: "[[{METHOD.removesuffix(".md")}]]"\n'
+    claims = _INCIDENT_CLAIMS + _INCIDENT_MATCH + declaration
+    _incident_vault(vault, monkeypatch, "maximal", claims=claims)
 
     inspection = commands.op_record_memory(vault, action="inspect", collection=INCIDENTS)
 

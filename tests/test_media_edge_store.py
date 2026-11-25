@@ -2,24 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import socket
+import threading
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
-from exomem import media_store, originals
+from exomem import media_replicas, media_store, originals
 from exomem.media_edge_protocol import (
+    ABSENT_CODE,
     COLLECTOR_AUDIENCE,
     OBJECTS_PATH,
+    STATUS_ABSENT,
     STATUS_MISMATCH,
     STATUS_TOO_LARGE,
 )
 from exomem.media_edge_store import CREDENTIAL_FILE_ENV, URL_ENV, EdgeStore
-from exomem.media_store import MediaStoreError, ObjectTooLarge
+from exomem.media_store import MediaStoreError, ObjectTooLarge, ReplicaAbsent
 from tests.test_media_edge import CELL_A, Harness
 from tests.test_media_store import _offload, _preserved, selected_store  # noqa: F401
 from tests.test_upload_sessions import _listening
@@ -81,7 +86,104 @@ def test_an_unreachable_edge_is_an_outage(tmp_path: Path):
     assert outage.value.code == "MEDIA_STORE_UNAVAILABLE"
 
 
+@pytest.mark.parametrize(("body", "absent"), [({"code": ABSENT_CODE}, True), ({"code": "NOT_FOUND"}, False)])
+def test_a_download_404_proves_absence_only_when_the_edge_names_it(tmp_path: Path, body, absent):
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        with pytest.raises(MediaStoreError) as refused, _store(host, port, tmp_path).open("1" * 64, "version"):
+            pytest.fail("a 404 cannot return a stream")
+
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert isinstance(refused.value, ReplicaAbsent) == absent
+
+
+@pytest.mark.parametrize(("body", "absent"), [({"code": ABSENT_CODE}, True), ({"code": "NOT_FOUND"}, False)])
+def test_a_head_404_uses_the_edges_absence_evidence(tmp_path: Path, body, absent):
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        store = _store(host, port, tmp_path)
+        if absent:
+            assert store.head("1" * 64, "version") is None
+        else:
+            with pytest.raises(MediaStoreError) as outage:
+                store.head("1" * 64, "version")
+            assert outage.value.code == "MEDIA_STORE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("operation", ["sample", "absence"])
+def test_a_maintenance_deadline_releases_a_trickling_edge_response(tmp_path: Path, operation: str):
+    disconnected = threading.Event()
+
+    async def trickling(scope, receive, send):
+        if scope["query_string"] == b"version=ready":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": DATA})
+            return
+        status = 200 if operation == "sample" else STATUS_ABSENT
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        if scope["method"] == "HEAD":
+            await send({"type": "http.response.body", "body": b""})
+            return
+        for _chunk in range(200):
+            try:
+                message = await asyncio.wait_for(receive(), timeout=0.02)
+            except TimeoutError:
+                await send({"type": "http.response.body", "body": b"x", "more_body": True})
+            else:
+                if message["type"] == "http.disconnect":
+                    disconnected.set()
+                    return
+        await send({"type": "http.response.body", "body": b""})
+
+    with _listening(trickling) as (host, port):
+        store = _store(host, port, tmp_path)
+        replica = originals.StoredObject(1, "edge", "1", "1" * 64, "slow", 1024**2, SHA256)
+        deadline = time.monotonic() + 0.7
+
+        def slow_read():
+            if operation == "absence":
+                return media_store._verified_head(store, replica, deadline=deadline)
+            return b"".join(media_store._stored_chunks(store, replica, deadline=deadline))
+
+        with pytest.raises(MediaStoreError) as expired:
+            media_store.wait_store_read(tmp_path, "edge", slow_read, timeout=0.7)
+        assert expired.value.code == "MEDIA_STORE_UNAVAILABLE"
+        assert disconnected.wait(1), "the prior connection is still consuming the store's read slot"
+
+        retry_deadline = time.monotonic() + 1
+
+        def read_ready():
+            with store.open(replica.object, "ready", deadline=retry_deadline) as stream:
+                return stream.read()
+
+        while True:
+            try:
+                assert media_store.wait_store_read(
+                    tmp_path, "edge", read_ready, timeout=retry_deadline - time.monotonic(),
+                ) == DATA
+                break
+            except media_store.StoreReadPending:
+                assert time.monotonic() < retry_deadline, "the expired transport did not release the slot"
+                time.sleep(0.01)
+
+
+@pytest.mark.parametrize("operation", ["open", "head"])
+def test_an_oversized_edge_absence_envelope_is_unavailable(tmp_path: Path, operation: str):
+    body = {"code": ABSENT_CODE, "excess": "x" * 8192}
+    with _listening(_stub((204, {}), (STATUS_ABSENT, body))) as (host, port):
+        store = _store(host, port, tmp_path)
+        deadline = time.monotonic() + 2
+        with pytest.raises(MediaStoreError) as refused:
+            if operation == "head":
+                store.head("1" * 64, "version", deadline=deadline)
+            else:
+                with store.open("1" * 64, "version", deadline=deadline):
+                    pytest.fail("an oversized absence reply cannot return a stream")
+
+    assert refused.value.code == "MEDIA_STORE_UNAVAILABLE"
+    assert not isinstance(refused.value, ReplicaAbsent)
+
+
 def test_offload_evict_and_hydrate_round_trip_through_the_edge(vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)
     credential = tmp_path / "credential"
@@ -106,6 +208,7 @@ def test_a_condemned_version_is_never_evicted_on_or_reused_and_its_bytes_go_up_a
         vault: Path, selected_store, tmp_path: Path, monkeypatch):  # noqa: F811
     """A restored or exported cell can hold an original whose name a later hold condemned. Evicting on that version,
     or reusing it for a duplicate, would leave the bytes only in a version that the bucket rule deletes."""
+    monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
     values, config = selected_store
     harness = Harness(tmp_path / "edge", max_object_bytes=10_000_000)
     credential = tmp_path / "credential"
@@ -127,9 +230,10 @@ def test_a_condemned_version_is_never_evicted_on_or_reused_and_its_bytes_go_up_a
 
         assert not media_store.evict(vault, path)
         assert path.read_bytes() == source
-        assert originals.original_state(vault, path).reference is None
-        again = _offload(vault, path)
-        assert again.object != condemned.object
+        assert originals.original_state(vault, path).reference == condemned
+        assert media_replicas.drain(vault) == 1
+        again = originals.original_state(vault, path).reference
+        assert again is not None and again.object != condemned.object
 
         assert condemned.version in harness.fake.lifecycle_tick(harness.fake.hiding_days)
         for original in (path, duplicate):

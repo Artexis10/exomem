@@ -1,9 +1,8 @@
 """A writer that bypasses ``batch_atomic_write`` commits to the store in a store-mode vault.
 
 OpenSpec make-vault-store-canonical task 2.2. The vault is the migration suite's generated vault in
-store mode, and the writer is bound as the store thread binds it (``require_servable`` still refuses
-a store-mode service start, so no service holds the store here). The projector is off unless a test
-runs its pass by hand: nothing writes a stored page to disk, so each answer comes from the store.
+store mode. The fixture binds the writer as the store thread does. Each answer comes from the
+store. The projector runs only when a test calls it.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from test_vault_store_importer import StoreThread
 from test_vault_store_migration import ALPHA, BETA, DIAGRAM, vault  # noqa: F401
 from test_vault_store_write_path import (
     bm25_paths,
+    commits_since,
     edge_targets,
     planned,
     revision,
@@ -147,7 +147,7 @@ def test_delete_of_a_page_that_a_competing_commit_changed_refuses_and_leaves_no_
         delete_file.delete_file(served, path=GAMMA, confirm=True)
 
     assert refused.value.code == "STALE_DELETE"
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert stored_bytes(served, GAMMA) == b"# Gamma, raced\n"
     assert tree(served) == before, "the refused commit must roll back the sidecar it published"
 
@@ -312,7 +312,7 @@ def test_delete_of_a_page_that_gains_a_link_after_the_check_refuses_and_commits_
     assert refused.value.code == "STALE_DELETE"
     assert "a page now links to it" in refused.value.reason
     assert DELTA not in refused.value.reason
-    assert revision(served) == start + 1, "only the competing commit may have committed"
+    assert commits_since(served, start) == 1, "only the competing commit may have committed"
     assert stored_bytes(served, GAMMA) == GAMMA_TEXT.encode()
     assert tree(served) == before, "the refused commit must roll back the sidecar it published"
 
@@ -439,7 +439,7 @@ def test_lifecycle_prepared_cleanup_deletes_a_stale_slot_from_the_store(served, 
     batch_result = relation_review.cleanup_stale_lifecycle_prepared_batch(served, inspections)
 
     assert (batch_result.cleaned, batch_result.blocked) == ((reference,), ())
-    assert revision(served) == start + 1
+    assert commits_since(served, start) == 1
     assert not read.page_exists(served, reference)
     report = projector.Projector(served, run=lambda work: work(writer)).run_pass()
     assert (report.held, report.deferred) == (0, {})
@@ -532,7 +532,7 @@ def test_retiring_a_stored_part_page_deletes_it_from_the_store(served):
     kept = extraction_parts.retire(served, (served / part,))
 
     assert kept == ()
-    assert revision(served) == start + 1
+    assert commits_since(served, start) == 1
     assert not read.page_exists(served, part)
     assert tree(served) == before, "the projector, not the retire, removes files"
 

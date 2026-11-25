@@ -40,34 +40,67 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # (keep-handed-files-as-sources).
 # The door operation `maintenance.capture_metadata`, the owner's metadata-only capture backfill, added 62 B to the two
 # door enums on 2026-11-20 (index-capture-metadata).
-TOTAL_BUDGET = 29_450
+# The Records routes that agents act on at the moment they choose a tool added 118 B on 2026-11-22
+# (capture-structured-work-automatically): `create_note` names add_record for compared or tracked named items, and
+# `add_record` says one row per item with the user's words, the agent's proposals and outside claims in separate
+# fields. Real-model acceptance showed agents never loaded the skill that carried these rules.
+# The same day, add_record's row-key rule became 'key rows by item and date when an item recurs' (+16 B): the
+# vaguer 'per item and occasion' still produced item-only keys that overwrite a recurring item's earlier dated row.
+# `edit_record.options`, the knob that carries `new_fields` as `add_record.options` already does (the server's additive
+# field change under proactive_capture), added 68 B (compact JSON) on 2026-11-22. `add_record` grew none: `new_fields` rides
+# its existing `options`, and the refusal that names the call teaches it.
+# The per-file `diarize` speaker-label choice on the `save_source` and `save_evidence` file handles added 212 B on
+# 2026-11-22 (add-media-processing-policy).
+# The door operation `review.queued_write`, reading a save the service queued while it was busy, added 22 B to the
+# `inspect_memory` door enum on 2026-11-23 (accept-busy-writes-durably).
+# The door operation `curation.relocate`, which derives and seals the plan that moves or renames a set of pages,
+# added 20 B to the write door's enum on 2026-11-22 (relocate-pages-in-one-curation-call).
+# The read operation `inspect_name_drift`, which lists pages whose file name no longer follows
+# their title,
+# added 23 B to the read door's enum on 2026-11-23 (align-names-with-titles).
+# `edit_note`'s claim-level family — `supersede_observation`, `assess_observation` and
+# `link_observation` plus their `unit`, `span`, `verdict`, `check_by`, `kind` and `as_of` fields —
+# added 1,067 B on 2026-11-24 (add-unit-level-supersession): one claim inside a note now supersedes,
+# assesses and links at unit level instead of needing a whole new page. `supersede_note` gained a
+# one-line pointer to it (+73 B).
+# Proof files saved in one call added 166 B on 2026-11-24 (keep-proof-attachments-by-default): `upload_files` takes
+# `scope`, `category` and `description` so an evidence send saves on arrival instead of needing a held-handle save,
+# and `save_evidence` says to keep proof in the turn it arrives.
+# `search_memory.file_types`, which lets an agent restrict a search to pictures and tells it to search both ways
+# when unsure, added 203 B on 2026-11-24 (add-images-only-search).
+TOTAL_BUDGET = 31_400
 
 #: Per-tool ceilings for the tools that discovery lists.
 TOOL_CEILINGS: dict[str, int] = {
     "add_observation": 1650,
     "add_plan_item": 500,
-    "add_record": 850,
+    "add_record": 940,
     "cancel_uploads": 600,
     "create_note": 1850,
     "decide_review_item": 1000,
     "download_files": 550,
-    "edit_note": 2700,
+    # Claim-level supersede/assess/link actions joined edit_note on 2026-11-24
+    # (add-unit-level-supersession).
+    "edit_note": 3700,
     "edit_plan_item": 750,
-    "edit_record": 800,
-    "inspect_memory": 2200,
+    "edit_record": 850,
+    # inspect_name_drift joined the read door on 2026-11-23 (align-names-with-titles).
+    "inspect_memory": 2230,
     "list_review_items": 750,
-    "manage_memory": 2550,
+    "manage_memory": 2570,
     "query_plan_items": 1050,
     "query_records": 1100,
     "read_instructions": 750,
     "read_page": 700,
     "recall_context": 2800,
     "save_episode": 1100,
-    "save_evidence": 1200,
-    "save_source": 1412,
-    "search_memory": 1050,
-    "supersede_note": 1300,
-    "upload_files": 800,
+    "save_evidence": 1320,
+    "save_source": 1550,
+    "search_memory": 1250,
+    # A pointer to edit_note's supersede_observation joined 2026-11-24
+    # (add-unit-level-supersession).
+    "supersede_note": 1400,
+    "upload_files": 940,
 }
 
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only

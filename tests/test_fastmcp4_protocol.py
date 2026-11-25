@@ -1,4 +1,4 @@
-"""FastMCP 4 wire compatibility at Exomem's authenticated HTTP boundary."""
+"""FastMCP 4 wire compatibility at Evermatter's authenticated HTTP boundary."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class _NeverExternalVerifier:
 
     async def verify_token(self, token: str) -> None:
         self.calls.append(token)
-        raise AssertionError("durable Exomem access tokens must not call the provider")
+        raise AssertionError("durable Evermatter access tokens must not call the provider")
 
 
 @dataclass

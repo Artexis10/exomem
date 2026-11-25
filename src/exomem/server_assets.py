@@ -72,7 +72,7 @@ def _studio_error(message: str, *, status_code: int = 503) -> JSONResponse:
         {
             "error": "STUDIO_ASSETS_UNAVAILABLE",
             "message": message[:240],
-            "remediation": "Reinstall Exomem and restart the service.",
+            "remediation": "Reinstall Evermatter and restart the service.",
         },
         status_code=status_code,
         headers={"Cache-Control": "no-store", **_STUDIO_SECURITY_HEADERS},
@@ -213,9 +213,9 @@ def register_health_routes(
 ) -> Callable[[Request], Awaitable[JSONResponse]]:
     """Register the unauthenticated `/health` and `/health/ready` routes only.
 
-    Shared by the standalone asset-route bundle below and by Exomem Cloud
+    Shared by the standalone asset-route bundle below and by Evermatter Cloud
     cells (design D1.5), which register nothing else from this module: an
-    Exomem Cloud cell registers only MCP, `/health` and `/health/ready`.
+    Evermatter Cloud cell registers only MCP, `/health` and `/health/ready`.
     Returns the `/health/ready` handler, which a Cloud cell also serves on its
     health-only port (`cloud_health`). A Cloud cell passes its hourly counts
     (`cell_traffic.CellTraffic`), and its `traffic` block then also reports the
@@ -336,7 +336,10 @@ def register_health_routes(
         process (the GIL is handed back per syscall), and a probe that times out
         gets the pod killed mid index build."""
         _record_health_probe()
-        payload: dict[str, object] = {"status": "ok", "service": "exomem"}
+        payload: dict[str, object] = {
+            "status": "ok",
+            "service": runtime_readiness_module.SERVICE_NAME,
+        }
         facts, refresh, wedged = liveness.current()
         payload.update(facts)
         if refresh:
@@ -566,7 +569,7 @@ def register_oauth_metadata_route(mcp_app: FastMCP, *, base_url: str, auth_enabl
     @mcp_app.custom_route("/.well-known/openid-configuration", methods=["GET"])
     async def _openid_configuration(request: Request) -> JSONResponse:  # noqa: ARG001
         # Some MCP clients probe the OIDC alias after a successful OAuth token
-        # exchange. Exomem uses OAuth (not ID tokens), so return the same RFC
+        # exchange. Evermatter uses OAuth (not ID tokens), so return the same RFC
         # 8414 authorization-server metadata shape as the canonical endpoint.
         return JSONResponse(
             {

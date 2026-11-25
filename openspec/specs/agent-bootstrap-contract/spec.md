@@ -1329,3 +1329,88 @@ A vault whose episodes hold several revision files SHALL keep working after upgr
 
 - **WHEN** an owner compensates a fold
 - **THEN** each rewritten page keeps its file permissions, and each history directory that the fold created and that ends empty is removed
+
+### Requirement: The capture predicate saves each claim at its true strength
+
+At a stepping stone, the capture predicate SHALL include four classes besides the durable conclusion, the recurring entity and the executed method. The agent SHALL save each class at its true strength: the agent SHALL NOT write a claim more certain, more general or more settled than its source made it.
+
+- a held view, which is a view someone holds, such as an interpretation or a working hypothesis that the evidence does not settle, saved attributed to its holder with its uncertainty and never as an established fact; a remark made in passing is not a held view;
+- a person's unsure report that later work could use, saved as unsure and attributed to that person, with its doubt, and never as a fact, an event or a baseline;
+- a question the work leaves open, saved as an open question, including whether something happened at all;
+- the concrete values a task settled, such as times, prices, terms, contacts and limits, saved in full and never as a pointer to a working file.
+
+Trivia and one-offs get no note, because nothing later needs them. A remark with no reuse value, and mid-thought exploration or a tangent, SHALL remain unwritten. The reason is reuse value, not uncertainty. A tentative claim SHALL NOT be written as an event that happened.
+
+The activation `capture_policy` block, at every disposition except `off`, SHALL carry these classes and the rule, as `context-activation` states. So SHALL each of these scaffold surfaces: `_Schema/SKILL.md`, `references/engagement.md`, `workflow-skills/exomem-capture/SKILL.md` and `workflow-skills/exomem-reflect/SKILL.md`. The bootstrap core SHALL NOT state that tentative or unresolved material in general stays unwritten. A copyable custom-instruction block SHALL NOT state that tentative or unresolved material in general stays unwritten. A held view, an unsure report, an open question or settled values SHALL count as a stepping stone even when nothing was decided. A write SHALL NOT mention material that a capture rule leaves unwritten, not even to say that it was left out.
+
+#### Scenario: A held view is saved attributed, with its uncertainty
+
+- **WHEN** a task ends with a view that the evidence does not settle, held by the user or by the agent
+- **THEN** the agent saves it at the stepping stone, attributed to its holder
+- **AND** the saved text states its uncertainty and does not present it as an established fact
+
+#### Scenario: A question the work leaves open is saved as an open question
+
+- **WHEN** a task ends with a question that the work raised and did not answer
+- **THEN** the agent saves the question as an open question
+- **AND** it does not drop the question because it is unresolved
+
+#### Scenario: Values set in a working file are saved as the values themselves
+
+- **WHEN** a task settles concrete values, such as a time, a price, a term or a contact, and records them in a working file
+- **THEN** the saved material states each value in full
+- **AND** it does not save only a pointer to the working file
+
+#### Scenario: A casual tentative personal claim stays quiet
+
+- **WHEN** a person says in passing that they might switch gyms, and nothing later needs it
+- **THEN** the agent saves no held view and performs no durable write for that statement
+- **AND** mid-thought exploration also stays unwritten
+
+#### Scenario: A person's unsure report is saved as unsure
+
+- **WHEN** a person says they think something happened but are not sure, and later work could use the report
+- **THEN** the agent saves the report attributed to that person, and states the doubt in the saved text
+- **AND** it does not save the report as a fact, as an event or as a baseline
+
+#### Scenario: A claim is saved no stronger than its source
+
+- **WHEN** a source says that one client asked for a feature, and a person guesses that the total is about forty
+- **THEN** the saved text names one client and does not say that clients ask for the feature
+- **AND** the saved text gives the total as a guess that it attributes to the person, not as a count
+
+#### Scenario: A question the work leaves open about an event is saved
+
+- **WHEN** the work leaves open whether something happened at all
+- **THEN** the agent saves that as an open question
+- **AND** it does not write the event as having happened
+
+#### Scenario: A session that ends on a held view saves it
+
+- **WHEN** a session ends with a view that someone holds and nothing was decided
+- **THEN** the agent saves the view at that point, attributed to its holder, with its uncertainty
+
+#### Scenario: Unwritten material leaves no trace in a write
+
+- **WHEN** a trivial one-off or a mid-thought tangent stays unwritten
+- **THEN** no write mentions it
+- **AND** no write records that it was left out
+
+### Requirement: The contract teaches research-source identity
+
+The served capture guidance and the shipped skill scaffold SHALL tell agents:
+
+- that a Source's custody verifies none of its claims;
+- to take a document's title, authors, year, venue and DOI from the document itself, never from a search result or memory;
+- to state the document form, and to save an abstract or citation record when the full text is unavailable;
+- to decide whether the Source warrants compilation into an existing or new note, and otherwise to report it as kept for custody only;
+- to correct a wrong Source with a metadata-only correction.
+
+The guidance SHALL ship only when a real-model comparison shows that the arm with it outperforms the same code without it on the incident cases.
+The per-turn capture policy SHALL carry only the identity rule; the document-form, compilation and correction details SHALL live in the skill scaffold.
+
+#### Scenario: An agent receives a misleading repository match
+
+- **WHEN** a search result names a PDF as an article and the PDF's opening shows a different work
+- **THEN** the agent saves it under the document's own identity, or does not save it as that article
+- **AND** the user does not have to point out the mismatch

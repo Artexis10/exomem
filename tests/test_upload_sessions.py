@@ -195,6 +195,11 @@ def test_bytes_that_do_not_match_their_hash_fail_and_are_deleted(vault, monkeypa
 
     assert state["state"] == "failed" and state["code"] == "UPLOAD_SHA256_MISMATCH"
     assert "receipt" not in state
+    # The session records its failure first and deletes the bytes right after, so the
+    # delete can trail the visible state by a moment.
+    deadline = time.monotonic() + 5
+    while _parts(vault) and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert _parts(vault) == []
 
 
@@ -227,6 +232,50 @@ def test_a_source_capability_resumes_into_sources_and_reports_unassessed_compila
     assert not (vault / "Knowledge Base/Evidence/Ignored").exists()
 
 
+@pytest.mark.parametrize(("lane", "resumable"), [("evidence", True), ("source", True), ("source", False)])
+def test_speech_intake_keeps_the_diarization_choice(vault, monkeypatch, lane, resumable):
+    from exomem import media_jobs, upload_tokens
+    from exomem.vault import parse_frontmatter
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    client = _client(vault, monkeypatch)
+    data = b"original audio bytes"
+    token = upload_tokens.mint_for_endpoint("sekret", "https://example.invalid", lane=lane)["token"]
+    metadata = {
+        "filename": "recording.m4a", "scope": "Test", "category": "Audio",
+        "title": "Recording", "source_kind": "session", "diarize": "false",
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+    headers = {"Authorization": "Bearer " + token}
+    if resumable:
+        created = client.request("POST", "/upload/sessions", headers={
+            **TUS, **headers, "Upload-Length": str(len(data)),
+            "Upload-Metadata": ",".join(
+                f"{key} {base64.b64encode(value.encode()).decode()}" for key, value in metadata.items()
+            ),
+        })
+        assert created.status_code == 201, created.text
+        location, secret = created.headers["location"], created.headers["exomem-upload-secret"]
+        assert _patch(client, location, secret, 0, data[:5]).status_code == 204
+        assert _patch(client, location, secret, 5, data[5:]).status_code == 204
+        state = _settled(client, location, secret)
+        assert state["state"] == "committed", state
+        receipt = state["receipt"]
+    else:
+        captured = client.request(
+            "POST", "/upload", headers=headers, data=metadata,
+            files={"file": (metadata["filename"], data, "audio/mp4")},
+        )
+        assert captured.status_code == 201, captured.text
+        receipt = captured.json()
+
+    original = vault / receipt.get("artifact_path", receipt["path"])
+    job = media_jobs.MediaJobStore(vault).get_by_binary(original)
+    assert job is not None
+    assert parse_frontmatter(job.sidecar_path.read_text())[0]["diarize_requested"] is False
+    assert original.read_bytes() == data
+
+
 def test_a_source_session_replays_its_capture_after_the_upload_acknowledgement_is_lost(vault, monkeypatch) -> None:
     """A stopped upload commit must reuse its Source rather than allocate another uniquely named pair."""
     from exomem import server_transfer
@@ -246,7 +295,9 @@ def test_a_source_session_replays_its_capture_after_the_upload_acknowledgement_i
     first = server_transfer.commit_session(vault, session.part, session.record)
     with principal_module.request_scope(principal_module.owner_principal(surface="mcp")):
         state = _settled(client, f"/upload/sessions/{session.id}", secret)
-    assert state["receipt"] == first
+    assert {**state["receipt"], "derived_sync": None} == {**first, "derived_sync": None}
+    # The replay ran no derived fan-out of its own, so it cannot report one as completed.
+    assert (first["derived_sync"], state["receipt"]["derived_sync"]) == ("completed", "pending")
     assert [path for path in (vault / target["destination"]).glob("*.bin")] == [vault / first["artifact_path"]]
     assert (vault / first["artifact_path"]).read_bytes() == data
 
@@ -726,6 +777,31 @@ def test_a_commit_resumed_after_its_file_landed_answers_already_stored(vault, mo
     assert (state["receipt"]["state"], state["receipt"]["path"]) == ("already_stored", landed.path)
     folder = vault / "Knowledge Base" / "Evidence" / "Device" / "Uploads"
     assert sorted(path.name for path in folder.iterdir()) == ["samples.json", "samples.json.md"]
+
+
+def test_a_resumed_speech_upload_discloses_that_it_keeps_the_stored_choice(vault, monkeypatch) -> None:
+    from exomem import preserve
+
+    client = _client(vault, monkeypatch)
+    data = b"test speech original"
+    session, secret = upload_sessions.create(
+        vault, binding="bearer:test", length=len(data), sha256=hashlib.sha256(data).hexdigest(),
+        target={"filename": "recording.wav", "scope": "Test", "category": "Audio", "diarize": True},
+        max_bytes=upload_sessions.DEFAULT_MAX_BYTES,
+    )
+    partial = upload_sessions.Patch(session, 0, len(data))
+    partial.write(data)
+    assert partial.close() == (len(data), True)
+    stored = preserve.preserve_stream(
+        vault, scope="Test", category="Audio", filename="recording.wav", stream=io.BytesIO(data),
+        media_pending=True, diarize=False,
+    )
+
+    outcome = _settled(client, f"/upload/sessions/{session.id}", secret)["receipt"]
+
+    assert outcome["state"] == "already_stored"
+    assert any("speaker-label choice" in warning for warning in outcome["warnings"])
+    assert preserve.diarize_pin((vault / stored.sidecar_path).read_text()) is False
 
 
 def test_a_commit_resumed_after_a_pooled_file_landed_answers_already_stored(vault, monkeypatch) -> None:

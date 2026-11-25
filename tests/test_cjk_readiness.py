@@ -197,11 +197,11 @@ def _fresh_session() -> None:
 
 
 def _statuses(packet: dict) -> dict[str, str]:
-    return {item["path"]: item["status"] for item in packet["anchors"]}
+    return {item["path"]: item["status"] for item in packet.get("anchors", ())}
 
 
 def _resolved(packet: dict) -> list[str]:
-    return [item["path"] for item in packet["anchors"] if item["status"] == "resolved"]
+    return [item["path"] for item in packet.get("anchors", ()) if item["status"] == "resolved"]
 
 
 def _activate(vault: Path, turn: str, **kwargs) -> dict:

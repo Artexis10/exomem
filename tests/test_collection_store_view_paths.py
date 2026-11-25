@@ -23,7 +23,7 @@ from test_governance_egress import (
     write_scope,
 )
 
-from exomem import reserved_paths
+from exomem import reserved_paths, semantic_contract
 from exomem import structured_collections as collections
 from exomem.cli_ops import OpError
 from exomem.collection_store import authority, ownership
@@ -151,7 +151,7 @@ def test_the_owner_file_tools_refuse_view_paths_from_canonical_ownership(vault):
 
 
 def test_restoring_a_folder_where_a_collection_lost_its_views_refuses_them(vault):
-    """The views went missing outside Exomem; the restore path holds none, but its children would."""
+    """The views went missing outside Evermatter; the restore path holds none, but its children would."""
     for name in ("Items/Open plan.md", "notes.md"):
         (vault.root / "Knowledge Base/Notes/Old" / name).parent.mkdir(parents=True, exist_ok=True)
         (vault.root / "Knowledge Base/Notes/Old" / name).write_text("Stale copy.\n")
@@ -396,7 +396,7 @@ def test_inventory_rejects_corrupt_row_authority_before_releasing_counts(vault, 
     metadata = json.loads(vault.connection.execute(
         "SELECT governance_json FROM items WHERE collection_id=? AND item_key=?", (CID, KEY)).fetchone()[0])
     metadata["projects"] = ["different"]
-    vault.connection.execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+    vault.connection.execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                              (json.dumps(metadata), CID, KEY))
 
     with (preview_store(vault.root, vault.handle), request_scope(owner_principal()),
@@ -484,7 +484,7 @@ def test_a_casefold_folder_spelling_cannot_bypass_the_aggregate_view_check(vault
 
 
 def _leave_a_view_older_than_its_row(vault, monkeypatch):
-    vault.connection.execute("UPDATE items SET body='Changed in the store.' WHERE item_key=?", (KEY,))
+    vault.connection.execute("UPDATE item_rows SET body='Changed in the store.' WHERE item_key=?", (KEY,))
 
 
 def _tombstone_a_row(vault, monkeypatch):
@@ -555,6 +555,35 @@ def test_the_owner_aggregate_lists_no_entry_of_a_folder_outside_every_layer(vaul
 
     few, many = entries_listed(50), entries_listed(500)
     assert 0 < few == many
+
+
+def test_the_owners_save_stamp_decides_no_view(vault, monkeypatch):
+    """Defect: a store-mode save captured and checked its reuse stamp through the owner aggregate,
+    which decides every projected view, so each save walked every view four times, twice in the lock.
+    The stamp discloses nothing; the corpus build's release filter decides the views once."""
+    decided = []
+    decide = egress._decide_path
+
+    def counting(vault_root, rel_path, **options):
+        decided.append(rel_path)
+        return decide(vault_root, rel_path, **options)
+
+    monkeypatch.setattr(egress, "_decide_path", counting)
+    with preview_store(vault.root, vault.handle), request_scope(owner_principal()):
+        token = semantic_contract.corpus_validity_token(vault.root, corpus_census=(), status_dependencies=())
+        assert token is not None
+        assert semantic_contract.validity_stamp_current(vault.root, (token, 7), commit_generation=7)
+    assert decided == []
+
+
+def test_a_restricted_caller_gets_no_save_stamp(vault):
+    """A restricted caller's verdict is shaped by what it may see, so its commit always decides again."""
+    with preview_store(vault.root, vault.handle), request_scope(owner_principal()):
+        token = semantic_contract.corpus_validity_token(vault.root, corpus_census=(), status_dependencies=())
+    assert token is not None
+    with preview_store(vault.root, vault.handle), request_scope(_external()):
+        assert semantic_contract.corpus_validity_token(vault.root, corpus_census=(), status_dependencies=()) is None
+        assert not semantic_contract.validity_stamp_current(vault.root, (token, 7), commit_generation=7)
 
 
 def _a_folder(path):

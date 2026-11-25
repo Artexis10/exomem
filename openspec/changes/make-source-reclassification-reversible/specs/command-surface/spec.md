@@ -51,6 +51,18 @@ The operation SHALL offer a read-only mode that reports the corrected classifica
 
 The read-only mode SHALL accept a caller-supplied kind and domain and preview that correction, so a caller that has read the source and decided can show the destination and affected references before anything is written. Supplied values SHALL be resolved through the same rules the correction applies, so a value the correction would refuse is refused during the preview rather than after approval.
 
+A served file-mode preview for an unrestricted owner with a live observer ready for background recovery SHALL use complete inbound evidence and check the prose candidates available to the shared rewrite planner. The prose query SHALL prove current published rows and read those rows on one deadline-bound catalogue transaction. The observer settles pending changes or restores evidence in the background. A managed preview that cannot establish completeness or finish within its request deadline SHALL return `RECLASSIFICATION_PREVIEW_WARMING` with a retry delay. A search backend that cannot provide this proof SHALL return `RECLASSIFICATION_PREVIEW_UNAVAILABLE` without a retry delay. Both refusals SHALL omit reference counts and the preview digest. Evidence of zero references counts as complete.
+
+When complete candidate evidence exceeds the interactive work or response bound, the managed preview SHALL start or rejoin a read-only job and return its handle. The completed receipt SHALL expose the full report through bounded pages with report-local cursors. It SHALL mark the snapshot as current, changed, or unknown. The job SHALL release a digest only after checking the complete report. The service SHALL verify the requesting owner's current authorization and connector access before releasing any report data. Partial, failed, or interrupted work SHALL expose no report or digest.
+
+Managed report delivery SHALL work with governed erasures and concurrent disclosure receipt appends. An ordinary append SHALL preserve reusable verification of unchanged receipt evidence. A pending erasure or changed receipt evidence SHALL withhold affected report facts before release, including the summary and digest. Page delivery SHALL check current evidence for the paths it releases within the request deadline, even when the job processed an oversized referrer.
+
+The paged report's approval digest SHALL bind all referrer outcomes and the pointer-write proof. Before applying a correction with that digest, the writer SHALL verify the same report against the current plan. A changed report SHALL refuse the correction before any write.
+
+Restricted callers, and callers before a live observer is ready or without a live observer, retain the synchronous file preview. Its latency and behavior under concurrent file changes are unverified by this change.
+
+A managed preview SHALL return `RECLASSIFICATION_PREVIEW_UNAVAILABLE` without counts, a job handle, or a digest when an owner-level rule or Access exclusion restricts the report. Before calculating counts or effects, the planner SHALL omit referrers withheld by their release decision or a governed erasure. Paged apply SHALL use the same release decision for its candidate scope. A change to the governed erasure set SHALL invalidate retained results.
+
 When no values are supplied, evidence SHALL be limited to what is deterministically observable about the source: its current location, its recorded origin, its title, and its existing metadata. The operation SHALL NOT infer a classification through a model call, and SHALL report that it has no proposal rather than guessing when the observable evidence supports none.
 
 #### Scenario: A preview writes nothing
@@ -65,6 +77,28 @@ When no values are supplied, evidence SHALL be limited to what is deterministica
 - **WHEN** a preview is requested for a source whose destination a page that the caller can see already occupies
 - **THEN** the report states that the move would be refused and why
 - **AND** it names that page
+
+#### Scenario: Cold inbound evidence leaves the preview pending
+
+- **WHEN** a served file-mode preview for an unrestricted owner with a live observer ready for background recovery cannot prove the inbound references
+- **THEN** the response asks the caller to retry the same preview after the reported delay
+- **AND** the response omits the reference count and approval digest
+- **AND** a retry with complete evidence returns the normal preview
+
+#### Scenario: The report fills several pages
+
+- **WHEN** a managed owner previews a Source whose complete reference report exceeds the interactive bound
+- **THEN** the response gives a job handle without an approval digest
+- **AND** a concurrent Records read can finish while the job is running
+- **AND** the completed job reports every outcome through bounded pages under one approval digest
+- **AND** a change to a later referrer makes that digest stale before apply writes anything
+
+#### Scenario: Governed report pages stay available across disclosure appends
+
+- **WHEN** a completed report belongs to a vault with a governed erasure and a long valid receipt history
+- **THEN** ordinary disclosure receipts can append while the owner reads every report page within its request deadline
+- **AND** changing older evidence after disclosure recording withholds the result before the service releases it
+- **AND** a pending erasure withholds the affected report before any referrer moves
 
 #### Scenario: Evidence accompanies a proposed value
 

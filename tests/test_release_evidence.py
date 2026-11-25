@@ -24,24 +24,29 @@ spec.loader.exec_module(evidence)
 
 
 @pytest.mark.parametrize(
-    "event,draft,branch,full,release",
+    "event,draft,base,branch,full,release,reconcile",
     [
-        ("pull_request", True, "source", False, False),
-        ("pull_request", False, "source", False, False),
-        ("pull_request", False, evidence.RELEASE_BRANCH, False, True),
-        ("push", False, "main", False, False),
-        ("schedule", False, "main", True, False),
-        ("workflow_dispatch", False, "source", True, False),
+        ("pull_request", True, "main", "source", False, False, False),
+        ("pull_request", False, "main", "source", False, False, False),
+        ("pull_request", False, "main", evidence.RELEASE_BRANCH, False, True, False),
+        ("pull_request", False, "main", "release-reconcile/" + "a" * 40, False, True, True),
+        # A reconciliation only lands on main; elsewhere the branch name buys no release tier.
+        ("pull_request", False, "feature", "release-reconcile/" + "a" * 40, False, False, False),
+        ("push", False, "main", "main", False, False, False),
+        ("schedule", False, "main", "main", True, False, False),
+        ("workflow_dispatch", False, "main", "source", True, False, False),
     ],
 )
 def test_scope_runs_full_only_on_schedule_and_dispatch_and_targets_release_prs(
-    event, draft, branch, full, release
+    event, draft, base, branch, full, release, reconcile
 ):
     assert evidence.ci_scope(
-        event, {"pull_request": {"draft": draft, "head": {"ref": branch}}}
+        event,
+        {"pull_request": {"draft": draft, "base": {"ref": base}, "head": {"ref": branch}}},
     ) == {
         "full": full,
         "release": release,
+        "reconcile": reconcile,
     }
 
 
@@ -429,3 +434,131 @@ def test_pending_identical_source_pr_full_prevents_duplicate_fallback(monkeypatc
         ),
     )
     assert evidence.full_inflight(source, repository)
+
+
+@pytest.mark.parametrize(
+    ("event", "payload", "refused"),
+    [
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": ""}}, True),
+        ("workflow_dispatch", {"ref": "refs/heads/main", "inputs": {"queue": ""}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/release-cuts/" + "a" * 40, "inputs": {}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/merge-queue/abc-1", "inputs": {"queue": "batch 1@" + "a" * 40}}, False),
+        ("workflow_dispatch", {"ref": "refs/heads/feat/some-change", "inputs": {"queue": "batch 1@" + "a" * 40}}, True),
+        ("schedule", {"ref": "refs/heads/main"}, False),
+    ],
+)
+def test_a_feature_branch_cannot_dispatch_a_full_run(event, payload, refused):
+    """Catches a Full run on a feature branch, which holds the shared runners the queue and release cuts need."""
+    assert (evidence.full_dispatch_refusal(event, payload) is not None) is refused
+
+
+def test_a_merge_queue_dispatch_is_never_full_evidence():
+    """Catches a merge queue run, which runs only what a push to main runs, qualifying a release."""
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": "batch 1@" + "a" * 40}})["full"] is False
+    assert evidence.ci_scope("workflow_dispatch", {"inputs": {"queue": ""}})["full"] is True
+    run = {
+        "event": "workflow_dispatch",
+        "path": evidence.WORKFLOW,
+        "workflow_id": 7,
+        "repository": {"full_name": "example/project"},
+        "head_repository": {"full_name": "example/project"},
+    }
+    assert evidence.trusted_full({**run, "head_branch": "main"}, "example/project", 7)
+    assert not evidence.trusted_full({**run, "head_branch": "merge-queue/abc-1"}, "example/project", 7)
+
+
+def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status(monkeypatch):
+    """Catches a release cut waiting forever on the merge queue status.
+
+    A release PR lands on its cut branch, which the queue never serves. A reconcile
+    PR lands on main, so it needs the queue's status, and main must require that
+    status from any source: a commit status carries no App identity.
+    """
+    policy = [
+        {"context": "Conventional Commit title", "app_id": 15368},
+        {"context": "merge queue", "app_id": -1},
+        {"context": "required CI gate", "app_id": 15368},
+    ]
+    monkeypatch.setattr(evidence, "main_check_policy", lambda: policy)
+    assert [check["context"] for check in evidence.release_pr_check_policy()] == [
+        "Conventional Commit title",
+        "required CI gate",
+    ]
+
+    def api(path, pages=False):
+        if "check-runs" in path:
+            return [{"check_runs": [
+                {"id": 1, "name": "Conventional Commit title", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+                {"id": 2, "name": "required CI gate", "app": {"id": 15368}, "status": "completed", "conclusion": "success"},
+            ]}]
+        return [{"statuses": [{"id": 3, "context": "merge queue", "state": "success"}]}]
+
+    monkeypatch.setattr(evidence, "api", api)
+    assert {check["bucket"] for check in evidence.inherited_checks("a" * 40, policy)} == {"pass"}
+
+
+@pytest.mark.parametrize(
+    "branch,age_hours,status,tested,cut_open,reconciled_hours,due",
+    [
+        # Main moved and its newest Full is older than the window: a cut would find nothing.
+        ("main", 5, "completed", "old", False, 20, True),
+        ("main", 1, "completed", "old", False, 20, False),
+        # A running Full will supply the evidence; a second one only holds runners.
+        ("main", 5, "in_progress", "old", False, 20, False),
+        # Nothing landed since the last Full: rerunning it proves nothing new.
+        ("main", 5, "completed", "tip", False, 20, False),
+        # A cut's own Full run on main's tip is evidence too; a copy would compete with it.
+        ("release-cuts/tip", 5, "in_progress", "tip", False, 20, False),
+        ("release-cuts/tip", 1, "completed", "tip", False, 20, False),
+        # A cut's Full on an older commit predates its reconciliation; it holds off nothing.
+        ("release-cuts/old", 1, "completed", "old", False, 20, True),
+        # While a cut is open, a Full on main lacks its reconciliation and cannot serve.
+        ("main", 5, "completed", "old", True, 20, False),
+        # A recent main Full from before the newest reconciliation cannot serve the next cut.
+        ("main", 1, "completed", "old", False, 0.5, True),
+        # No Full run on main has ever finished.
+        (None, 0, "completed", "old", False, 20, True),
+    ],
+)
+def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
+    monkeypatch, branch, age_hours, status, tested, cut_open, reconciled_hours, due
+):
+    now = evidence.datetime.now(evidence.UTC)
+    created = now - evidence.timedelta(hours=age_hours)
+    run = {
+        "event": "workflow_dispatch",
+        "head_branch": branch,
+        "head_sha": tested,
+        "status": status,
+        "created_at": created.isoformat().replace("+00:00", "Z"),
+    }
+    # An older finished Full on main changes no decision; it makes a per-run lookup visible.
+    older = {
+        **run,
+        "head_branch": "main",
+        "head_sha": "older",
+        "status": "completed",
+        "created_at": (now - evidence.timedelta(hours=30)).isoformat().replace("+00:00", "Z"),
+    }
+    reconciled = (now - evidence.timedelta(hours=reconciled_hours)).isoformat()
+
+    def api(path):
+        if path == "actions/workflows/ci.yml":
+            return {"id": 7}
+        if path == "commits/main":
+            return {"sha": "tip"}
+        if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
+            return {"total_count": int(cut_open)}
+        if path.startswith("commits?sha=main&path=.github/release-cuts"):
+            return [{"commit": {"committer": {"date": reconciled.replace("+00:00", "Z")}}}]
+        listed = branch and "event=workflow_dispatch" in path
+        return {"workflow_runs": [run, older] if listed else []}
+
+    monkeypatch.setattr(evidence, "trusted_full", lambda run, repository, workflow: True)
+
+    calls = []
+    monkeypatch.setattr(evidence, "api", lambda path: calls.append(path) or api(path))
+
+    assert evidence.main_full_due("example/project", 4)[0] is due
+    # One tip lookup per check: the check runs on every landing within the token's rate limit.
+    assert calls.count("commits/main") <= 1

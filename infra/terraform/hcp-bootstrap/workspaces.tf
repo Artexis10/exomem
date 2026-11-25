@@ -1,7 +1,7 @@
 resource "tfe_project" "hosted" {
   organization = var.hcp_organization
-  name         = "Exomem Hosted"
-  description  = "State coordination for the isolated Exomem Hosted infrastructure roots."
+  name         = "Evermatter Hosted"
+  description  = "State coordination for the isolated Evermatter Hosted infrastructure roots."
 }
 
 resource "tfe_workspace" "foundation" {

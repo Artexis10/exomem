@@ -121,11 +121,23 @@ spec:
     name: cell
     parameterNotFoundAction: Deny
   validationActions: [Deny]
-{{- $policies := list (dict "name" "cloud-cell" "kind" "StatefulSet" "resource" "statefulsets" "family" $deploy.cellFamily "repository" .Values.cellctl.cellImageRepository) }}
+{{- /* Each policy admits images from exact image repository and builder pairs: a cell may run
+a release built before the repository moved, from the old pair; a workload runs the image set here. */}}
+{{- $policies := list (dict "name" "cloud-cell" "kind" "StatefulSet" "resource" "statefulsets" "family" $deploy.cellFamily "sources" .Values.cellctl.cellImageRepositories) }}
 {{- range $workload := $deploy.workloads }}
-{{- $policies = append $policies (dict "name" $workload.name "namespace" $workload.namespace "kind" "Deployment" "resource" "deployments" "family" $workload.family "repository" (first (splitList "@" $.Values.cellctl.image))) }}
+{{- $source := dict "repository" (first (splitList "@" $.Values.cellctl.image)) "builder" $deploy.sourceRepository }}
+{{- $policies = append $policies (dict "name" $workload.name "namespace" $workload.namespace "kind" "Deployment" "resource" "deployments" "family" $workload.family "sources" (list $source)) }}
 {{- end }}
 {{- range $policy := $policies }}
+{{- $inRepository := list }}
+{{- $signed := list }}
+{{- $built := list }}
+{{- range $index, $source := $policy.sources }}
+{{- $match := printf "image.startsWith(%s)" (printf "%s@sha256:" $source.repository | toJson) }}
+{{- $inRepository = append $inRepository $match }}
+{{- $signed = append $signed (printf "(%s && verifyAttestationSignatures(image, attestations.family, [attestors.release%d]) > 0)" $match $index) }}
+{{- $built = append $built (printf "(%s && extractPayload(image,attestations.family).predicate.source.repository == %s)" $match ($source.builder | toJson)) }}
+{{- end }}
 ---
 apiVersion: policies.kyverno.io/v1beta1
 kind: ImageValidatingPolicy
@@ -183,30 +195,32 @@ spec:
   credentials:
     secrets: [{{ $deploy.registryReadSecretName | quote }}]
   attestors:
-    - name: release
+    {{- range $index, $source := $policy.sources }}
+    - name: release{{ $index }}
       cosign:
         keyless:
           identities:
             - issuer: https://token.actions.githubusercontent.com
               # The regex describes GitHub's workflow/ref certificate protocol.
-              subjectRegExp: {{ printf "^https://github\\.com/%s/%s@refs/tags/v[^/]+$" ($deploy.sourceRepository | regexQuoteMeta) ($deploy.workflow | regexQuoteMeta) | quote }}
+              subjectRegExp: {{ printf "^https://github\\.com/%s/%s@refs/tags/v[^/]+$" ($source.builder | regexQuoteMeta) ($deploy.workflow | regexQuoteMeta) | quote }}
         ctlog:
           url: https://rekor.sigstore.dev
+    {{- end }}
   attestations:
     - name: family
       intoto:
         type: {{ $profile.familyPredicateType | quote }}
   validations:
     - expression: >-
-        images.workload.all(image, image.startsWith({{ printf "%s@sha256:" $policy.repository | toJson }}))
-      message: The image must use the configured repository and an exact digest.
+        images.workload.all(image, {{ join " || " $inRepository }})
+      message: The image must use a configured repository and an exact digest.
     - expression: >-
-        images.workload.all(image, verifyAttestationSignatures(image, attestations.family, [attestors.release]) > 0)
-      message: The image needs a signed release family assertion.
+        images.workload.all(image, {{ join " || " $signed }})
+      message: The image needs a release family assertion signed by the workflow of the repository that built it.
     - expression: >-
         images.workload.all(image,
           extractPayload(image,attestations.family).predicate.family == {{ $policy.family | toJson }} &&
-          extractPayload(image,attestations.family).predicate.source.repository == {{ $deploy.sourceRepository | toJson }} &&
+          ({{ join " || " $built }}) &&
           extractPayload(image,attestations.family).predicate.source.ref.startsWith('refs/tags/v'))
       message: The signed source and image family must match this workload.
 {{- end }}

@@ -42,20 +42,23 @@ class _Engine:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.languages: list[str | None] = []
         self.multilingual: list[bool] = []
+        self.diarize: list[bool | None] = []
         self.fail_with: Exception | None = None
         self.during_run = lambda: None
         monkeypatch.setattr(extract, "extract_text", self)
 
     def __call__(
-        self, path, *, media_type=None, vault_root=None, timestamps=False, language=None, multilingual=False
+        self, path, *, media_type=None, vault_root=None, timestamps=False, language=None,
+        multilingual=False, diarize=None,
     ):
         self.languages.append(language)
         self.multilingual.append(multilingual)
+        self.diarize.append(diarize)
         self.during_run()
         if self.fail_with is not None:
             raise self.fail_with
         if media_type == "pdf":
-            return extract.ExtractResult(text="[page 1]\nnew words", media_type="pdf", engine="pymupdf")
+            return extract.ExtractResult(text="[page 1]\nnew words", media_type="pdf", engine="pdfium")
         if multilingual:
             facts = AsrFacts(
                 language="et", language_source="requested", language_mode="multilingual",
@@ -208,6 +211,23 @@ def test_a_language_hint_is_pinned_until_a_later_request_replaces_it(
     assert engine.languages == [None, "et", "et", "fi"]
     assert _frontmatter(sidecar)["asr_language_requested"] == "fi"
     assert len(prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))) == 3
+
+
+def test_an_explicit_diarization_choice_persists_for_later_reprocessing(
+    vault, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _Engine(monkeypatch)
+    binary, sidecar, worker = _completed(vault, "rec.mp3")
+    path = binary.relative_to(vault).as_posix()
+
+    for choice in (True, None, False, None):
+        commands.op_process_media(vault, path=path, operation="reprocess", diarize=choice)
+        _run_to_idle(vault, worker)
+
+    assert engine.diarize == [None, True, True, False, False]
+    assert _frontmatter(sidecar)["diarize_requested"] is False
+    prior = prior_extraction.links_of(sidecar.read_text(encoding="utf-8"))
+    assert _frontmatter(vault / f"{prior[2]}.md")["diarize_requested"] is True
 
 
 def test_the_multilingual_mode_is_pinned_until_a_later_language_replaces_it(
@@ -435,11 +455,13 @@ def test_a_job_store_from_before_the_language_mode_opens_and_takes_a_declaration
     store = media_jobs.MediaJobStore(vault)
     with store._connect() as conn:  # the schema of the release that added `language`
         conn.execute("ALTER TABLE jobs DROP COLUMN language_mode")
+        conn.execute("ALTER TABLE jobs DROP COLUMN diarize")
     stub = preserve.preserve_bytes(
         vault, scope="Rental", category="audio", filename="rec.mp3", data=b"FAKEBYTES"
     )
     job = media_jobs.MediaJob(
-        binary_path=vault / stub.path, sidecar_path=vault / stub.sidecar_path, media_type="audio"
+        binary_path=vault / stub.path, sidecar_path=vault / stub.sidecar_path, media_type="audio",
+        diarize=False,
     )
 
     upgraded = media_jobs.MediaJobStore(vault)
@@ -448,6 +470,7 @@ def test_a_job_store_from_before_the_language_mode_opens_and_takes_a_declaration
     claimed = upgraded.claim_next()
     assert claimed is not None
     assert (claimed.reprocess, claimed.language, claimed.language_mode) == (False, None, "multilingual")
+    assert claimed.diarize is False
 
 
 def test_a_prior_page_owes_no_compilation_and_a_deleted_page_number_is_not_reused(

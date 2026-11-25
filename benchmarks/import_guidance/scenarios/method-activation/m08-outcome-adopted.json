@@ -1,0 +1,12 @@
+{
+  "id": "m08-outcome-adopted",
+  "title": "A successful continuous backup trial is adopted for the real database",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "I need to tell you how the Litestream trial went.",
+    "Three weeks on the laptop copy, replicating to the NAS. It never missed a write, and I restored the database from the replica twice and both restores matched the original byte for byte. The extra CPU is too small to measure. I'm switching it on for the real database tonight.",
+    "Thanks, that's all."
+  ]
+}

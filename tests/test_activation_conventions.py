@@ -77,7 +77,7 @@ def test_raw_material_folders_constant_still_names_sources_and_evidence() -> Non
 def test_scaffold_and_plugin_copies_are_byte_identical() -> None:
     repo = Path(__file__).resolve().parents[1]
     scaffold = repo / "src" / "exomem" / "_scaffold" / "_Schema" / ac.REGISTRY_FILENAME
-    plugin = repo / "plugins" / "claude-code" / "skills" / "exomem" / ac.REGISTRY_FILENAME
+    plugin = repo / "plugins" / "claude-code" / "skills" / "evermatter" / ac.REGISTRY_FILENAME
 
     assert scaffold.is_file()
     assert plugin.is_file()

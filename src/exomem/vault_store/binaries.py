@@ -47,7 +47,7 @@ log = logging.getLogger(__name__)
 #: retries only a binary whose bytes it finds unchanged at a free new path
 #: (``projector._project_binary_move``).
 LEFT = (
-    "stayed here: it changed, its new path is taken, or the rename failed. Exomem moves it later "
+    "stayed here: it changed, its new path is taken, or the rename failed. Evermatter moves it later "
     "only if it is an unchanged binary and the new path is free; otherwise move it yourself"
 )
 #: Each placement's temporary: a dot name beside its path, which the store does not own.

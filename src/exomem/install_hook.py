@@ -542,6 +542,11 @@ def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
     return any(marker in haystack for marker in markers)
 
 
+# The checkpoint core requires --client. The plugin generator imports this so both
+# Claude command builders pass the same argument.
+CLAUDE_CONTINUATION_CLIENT_ARG = "--client claude"
+
+
 def _continuation_command(
     hook_dir: Path,
     client: str,
@@ -570,7 +575,7 @@ def _continuation_command(
         windows = _command_windows_for(_CONTINUATION_SCRIPT, hook_dir, client=client)
         return f"{command} --client codex", f"{windows} --client codex"
     command = _command_for(_CONTINUATION_WRAPPER, hook_dir, client=client)
-    return f"{command} --client claude", None
+    return f"{command} {CLAUDE_CONTINUATION_CLIENT_ARG}", None
 
 
 def _continuation_items(
@@ -1249,9 +1254,9 @@ def check_hooks(
                     f"config.{event}",
                     "pass" if configured and not legacy else "fail",
                     (
-                        f"{event} points at current Exomem hook"
+                        f"{event} points at current Evermatter hook"
                         if configured and not legacy
-                        else f"{event} does not point cleanly at current Exomem hook"
+                        else f"{event} does not point cleanly at current Evermatter hook"
                     ),
                     {"entries": entries},
                 )
@@ -1325,7 +1330,7 @@ def check_hooks(
                     (
                         "Codex SessionEnd must remain unsupported for pinned 0.144.3"
                         if configured
-                        else "Codex 0.144.3 has no Exomem SessionEnd registration"
+                        else "Codex 0.144.3 has no Evermatter SessionEnd registration"
                     ),
                 )
 
@@ -2790,7 +2795,7 @@ def render_uninstall_human(report: dict) -> str:
         lines.append(f"  ! left {row['path']}: {row['error']}")
     instruction = report["instruction"]
     if instruction["changed"]:
-        lines.append(f"Removed the Exomem learning instruction from {instruction['path']}.")
+        lines.append(f"Removed the Evermatter learning instruction from {instruction['path']}.")
     elif instruction["error"]:
         lines.append(f"Could not update {instruction['path']}: {instruction['error']}")
     lines.append(f"Restart {label} to stop running the hooks it already loaded.")

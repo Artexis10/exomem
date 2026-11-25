@@ -20,15 +20,16 @@ the agent calls under that leaf's own authority.
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses, note_types
+from . import dreamer_store, episode_capture, find_corpus, lifecycle_statuses, note_types, temporal
 from .vocabulary_fold import fold_term
 
 #: Every served item says this, the vocabulary advisory's exact phrase.
@@ -672,6 +673,18 @@ def _memory_or_path_ref(rel_path: str, exomem_id: str | None) -> str:
 def _date(updated: Any, origin: Any) -> str:
     value = updated or origin
     return str(value)[:10] if value else ""
+
+
+def _stamp(updated: Any, origin: Any) -> str:
+    """A page's date as written, with its time when it has one."""
+    value = updated or origin
+    return str(value) if value else ""
+
+
+def _after(value: str, since: str) -> bool:
+    """Whether `value` is known to be later than `since`; two values that share a day order only when both have a time."""
+    later, bound = temporal.parse(value), temporal.parse(since)
+    return later is not None and bound is not None and temporal.compare(later, bound) is temporal.Order.AFTER
 
 
 def _hydration_entities(ctx: Context, rel_path: str) -> list[str]:
@@ -2150,11 +2163,13 @@ _CURATION_PROFILES_SQL = (
     "SELECT path FROM graph_nodes WHERE kind = 'file' AND page_type IN ({marks}) ORDER BY path"
 )
 
-#: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated after the
-#: profile, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
+#: Of the candidate evidence pages, those that hold a unit with one of the role labels and were updated on or after
+#: the profile's day, with their dates. The labels only propose candidates; the page's own interpretation decides each unit.
 _CURATION_UNIT_PAGES_SQL = (
     "SELECT f.path, f.updated_date, f.origin_date, f.lifecycle_status FROM graph_nodes f "
-    "WHERE f.node_key IN ({keys}) AND f.kind = 'file' AND {newer} "
+    "WHERE f.node_key IN ({keys}) AND f.kind = 'file' "
+    # From the day before the profile's: `_after` then decides each page to the second before any read.
+    "AND substr(COALESCE(NULLIF(f.updated_date, ''), NULLIF(f.origin_date, ''), ''), 1, 10) >= ? "
     "AND EXISTS (SELECT 1 FROM graph_nodes u WHERE u.path = f.path AND u.kind = ? AND {labels})"
 )
 
@@ -2333,16 +2348,19 @@ def _curation_candidates(
     plan = semantic_language_registry.unit_query_plan(ctx.registry(), categories=sorted(categories))
     labels, params = plan.predicate("u.unit_category", "u.unit_kind")
     graph = ctx.graph()
+    # A day early, so a page whose written day is earlier than the profile's only by its UTC offset still reaches `_after`.
+    bound = temporal.parse(since)
+    floor = (bound.day - timedelta(days=1)).isoformat() if bound is not None else since[:10]
     # The chunks follow the sorted candidates, so sorting each chunk's rows keeps the whole walk in path order.
     for start in range(0, len(candidates), context_catalogue.SQL_VARIABLE_CHUNK):
         chunk = candidates[start : start + context_catalogue.SQL_VARIABLE_CHUNK]
-        sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), newer=_NEWER_THAN, labels=labels)
+        sql = _CURATION_UNIT_PAGES_SQL.format(keys=",".join("?" for _ in chunk), labels=labels)
         keys = [f"file:{path}" for path in chunk]
-        rows = graph.execute(sql, (*keys, since, epistemic_graph.CANDIDATE_KIND, *params))
+        rows = graph.execute(sql, (*keys, floor, epistemic_graph.CANDIDATE_KIND, *params))
         yield from sorted(
-            (str(path), _date(updated, origin))
+            (str(path), _stamp(updated, origin))
             for path, updated, origin, status in rows
-            if ctx.live_status(status, str(path))
+            if ctx.live_status(status, str(path)) and _after(_stamp(updated, origin), since)
         )
 
 
@@ -2384,7 +2402,7 @@ def _new_units(
             refs = sorted(
                 ref
                 for ref, category, as_of, until in units
-                if category in categories and (as_of or page_date)[:10] > since and not _past(until, today)
+                if category in categories and _unit_newer(as_of, page_date, since) and not _past(until, today)
             )
             if not refs:
                 continue
@@ -2394,6 +2412,11 @@ def _new_units(
             found[path] = refs
     memo[subject] = (found, partial)
     return memo[subject]
+
+
+def _unit_newer(as_of: str, page_date: str, since: str) -> bool:
+    """A unit's own date decides by day; a unit with no date of its own takes its page's time."""
+    return as_of[:10] > since[:10] if as_of else _after(page_date, since)
 
 
 def _dated_lines(ctx: Context, subject: str, today: date) -> frozenset[tuple[str, str, str]]:
@@ -2475,9 +2498,15 @@ def _curation_view(ctx: Context, subject: str, *, keep) -> dict[str, Any] | None
     if scope.kind not in (vocabulary_resolution.SCOPE_GLOBAL, vocabulary_resolution.SCOPE_DOMAIN):
         return None
     today = date.fromtimestamp(ctx.now)
-    new, units_partial = _new_units(ctx, subject, scope, taxonomy, _date(node[1], node[2]), today, keep)
+    new, units_partial = _new_units(ctx, subject, scope, taxonomy, _stamp(node[1], node[2]), today, keep)
     stale, counterparts, lines_partial = _stale_lines(ctx, subject, today, keep)
     if not new and not stale:
+        if units_partial and keep is None:
+            # Silence here is a partial read, not an empty one; the log is what shows the design's revisit trigger firing.
+            reason = "the catalogue cannot name its domain's pages" if _curation_scope(
+                ctx, subject, scope, taxonomy
+            ).members is None else f"it used its {_CURATION_READS} reads"
+            logging.getLogger(__name__).info("profile curation for %s found nothing: %s", subject, reason)
         return None
     roles = {**dict.fromkeys(new, "unit"), **counterparts}
     subject_entry = _member_entry(ctx, subject, "subject")

@@ -1,9 +1,21 @@
 """Query routing and lifecycle; the release workflow proves real model outputs."""
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
-from exomem import accel, clip_query, embeddings, model_reaper, readiness
+from exomem import (
+    accel,
+    clip_query,
+    embeddings,
+    find_candidates,
+    model_reaper,
+    readiness,
+    runtime_resources,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -90,3 +102,64 @@ def test_query_only_reaping_waits_for_encodes_and_never_loads_torch(monkeypatch)
 
     embeddings.embed_clip_text("a blue bicycle")
     assert len(constructions) == 2
+
+
+def test_a_page_search_image_query_does_not_wait_for_a_bulk_batch_on_the_shared_turn(monkeypatch, tmp_path):
+    """Page search encoded its image query on the shared turn, so it waited out every bulk batch first."""
+    gate = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda _root: SimpleNamespace(has_vectors=lambda: True))
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "__init__", lambda self: None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "encode",
+                        lambda self, texts: np.ones((len(texts), embeddings.CLIP_DIM), dtype=np.float32))
+    # Warm-up preloads the query tower; a cold load still takes the shared turn by design.
+    monkeypatch.setattr(embeddings, "_CLIP_QUERY_MODEL", clip_query.OnnxClipQueryEncoder())
+    holding, release = threading.Event(), threading.Event()
+
+    def bulk_batch():
+        with gate.admission(), gate.execution():
+            holding.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        batch = pool.submit(bulk_batch)
+        assert holding.wait(5)
+        try:
+            prepared = pool.submit(find_candidates._prepare_clip_query, tmp_path, "harbour at dusk").result(timeout=5)
+        finally:
+            release.set()
+        batch.result()
+    assert prepared.error is None and prepared.vector is not None, prepared
+
+
+def test_a_page_search_image_query_is_refused_while_every_process_admission_is_held(monkeypatch):
+    """The query lane orders turns only; an image query still counts against the process bound on model work."""
+    gate = runtime_resources.ModelAdmissionGate(1)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: gate)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "__init__", lambda self: None)
+    monkeypatch.setattr(clip_query.OnnxClipQueryEncoder, "encode",
+                        lambda self, texts: np.ones((len(texts), embeddings.CLIP_DIM), dtype=np.float32))
+    monkeypatch.setattr(embeddings, "_CLIP_QUERY_MODEL", clip_query.OnnxClipQueryEncoder())
+    holding, release = threading.Event(), threading.Event()
+
+    def bulk_encode():
+        with gate.admission():
+            holding.set()
+            assert release.wait(10)
+
+    def image_query():
+        with embeddings.query_turn():
+            return embeddings.embed_clip_text("harbour at dusk")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bulk = pool.submit(bulk_encode)
+        assert holding.wait(5)
+        try:
+            with pytest.raises(runtime_resources.ModelBusyError):
+                pool.submit(image_query).result(timeout=5)
+        finally:
+            release.set()
+        bulk.result()

@@ -143,7 +143,7 @@ def _seed(store, cid, count):
     seeded = [(f"00000000-0000-4000-8000-{number:012x}", {"title": f"Seed {number}"}) for number in range(count)]
     with store.handle.transaction() as tx:
         tx.executemany(
-            "INSERT INTO items(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
+            "INSERT INTO item_rows(collection_id,item_key,natural_key,row_version,schema_version,values_json,"
             "payload_hash,view_path,created_txn,updated_txn,governance_json,encoding) VALUES (?,?,?,1,1,?,?,?,?,?,?,?)",
             ((cid, key, collections.manifest_natural_key(manifest, values),
               None if typed else json.dumps(values), tokens.payload_hash(1, key, values, ""),
@@ -549,6 +549,8 @@ def test_summary_policy_varying_past_the_bound_refuses_with_its_typed_limit(stor
     write_scope(store.root, paths="Notes/**")
     scope = _gov_dir(store.root) / "scopes" / "patterns.yaml"
     scope.write_text(scope.read_text() + f"refs: [exomem://record/{CID}/{key}]\n")
+    # A rule for this reader's own audience makes the named row differ from the others for it.
+    write_rule(store.root, ceiling=3, audience="owner")
     with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):
         store.inspect_collection(CID)
     with pytest.raises(collections.CollectionError, match="COLLECTION_RELEASE_LIMIT"):

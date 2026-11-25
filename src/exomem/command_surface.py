@@ -388,6 +388,11 @@ class Command:
     #: because every page parameter takes those. A command whose subject is a file keeps `path`:
     #: a file tool takes no title or id.
     names_pages: bool = False
+    #: A save the serving process queues durably instead of refusing while the mutation boundary
+    #: stays busy (`write_intake`). Only knowledge saves declare it: a job, an upload, a protocol
+    #: step or a credential must not run later than its caller expects. Within a declaring command,
+    #: `commands.busy_intake_applies` decides per operation (`OperationEntry.queues_when_busy`).
+    busy_intake: bool = False
     #: Resolve read-only handles before writer admission; the leaf revalidates the bound guards.
     prepare_arguments: Callable[..., dict[str, typing.Any]] | None = field(
         default=None, compare=False, hash=False
@@ -471,9 +476,9 @@ def gateway_required_error(name: str):
 
     return OpError(
         "CLOUD_GATEWAY_REQUIRED",
-        f"`{name}` runs on the Exomem Cloud control plane, and this call did not pass "
+        f"`{name}` runs on the Evermatter Cloud control plane, and this call did not pass "
         "through a gateway that serves it. Nothing was read or changed.",
-        "Call it through your Exomem Cloud connector; if the error persists, the "
+        "Call it through your Evermatter Cloud connector; if the error persists, the "
         "operator has not enabled transfer tools, so use Home to import or export.",
     )
 
@@ -608,12 +613,14 @@ def resolve_invocation(
 
 def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, parsed, *, strict, subject=None):
     """Validate business fields after the public discriminator selects its command."""
+    from .cli_ops import argument_misfit_text
+
     rules = command.argument_rules
     if parsed is None:
         rules.refuse(f"{subject or rendering.name} takes an operation object and nothing else")
     kind, fields = parsed
     try:
-        fields = rendering.leaf_fields(fields)
+        fields = rendering.leaf_fields(kind, fields)
     except ValueError as error:
         rules.refuse(str(error))
     label = operation_entries.OPERATION_KIND
@@ -622,7 +629,7 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
         sibling = next(
             (
                 # The tool that serves the other side on this surface; a grouped call names the rendering.
-                (capabilities.active_tools_text(command.name, other.effect)
+                ("/".join(capabilities.active_tools(command.name, other.effect))
                  if capabilities.current_tool_shape() != "grouped" else "") or other.name
                 for other in command.renderings
                 if other is not rendering and other.variant_for(kind, fields) is not None
@@ -639,10 +646,8 @@ def _resolve_rendered(command, rendering, arguments, carried, tool_arguments, pa
     rules.validate(variant.action, fields)
     unexpected = {key for key in set(fields) - variant.fields if fields[key] is not None}
     missing = {key for key in variant.required if fields.get(key) is None}
-    if unexpected:
-        rules.refuse(f"unexpected for {kind}: {', '.join(sorted(unexpected))}")
-    if missing:
-        rules.refuse(f"{kind} requires {', '.join(sorted(missing))}")
+    if unexpected or missing:
+        rules.refuse(argument_misfit_text(kind, unexpected, missing, variant.fields, variant.required))
     wrong = _type_errors(command, {**fields, **tool_arguments}, skip=rendering.selector, strict=strict)
     if wrong:
         # FastMCP's own error for the grouped call would name a tool the host cannot call.
@@ -684,7 +689,7 @@ def rendered_call_writes(
     flat = {}
     if parsed is not None:
         try:
-            flat = rendering.leaf_fields(parsed[1])
+            flat = rendering.leaf_fields(parsed[0], parsed[1])
             variant = next((v for v in rendering.variants if v.kind == parsed[0]), None)
             if rendering.selector:
                 flat[rendering.selector] = variant.action if variant is not None else parsed[0]
@@ -901,11 +906,13 @@ def agent_refusal_result(
     """The MCP error result for a refusal: what happened, and the exact retry.
 
     `default_detail` is the command's own `response_detail` default, which an omitted argument means.
+    Every refusal that reaches the MCP surface passes here, so this is where it gains the
+    request's service notice.
     """
     from . import agent_refusal, cli_ops
 
     detail = arguments.get("response_detail") or default_detail
-    return agent_refusal.reply(
+    return with_service_notice(agent_refusal.reply(
         refusal,
         error if error is not None else ValueError(refusal.get("message")),
         command=command_name,
@@ -914,7 +921,7 @@ def agent_refusal_result(
         write=write,
         full=detail == "full",
         envelope=cli_ops.envelope(False, error=dict(refusal)),
-    )
+    ))
 
 
 def bind_vault(
@@ -1088,6 +1095,8 @@ def bind_vault(
                     result = page_names.name_released_reply(
                         injected[0], result, keep_paths=kwargs.get("detail") == "full"
                     )
+                # Last, after the egress filter: the notice is the gateway's own text, never vault content.
+                result = with_service_notice(result)
                 call_spans.record_span_since("command.postfilter", "command.leaf_done")
                 _log_tool_success(
                     tool=tool_name,
@@ -1359,6 +1368,66 @@ def gateway_client_context() -> str | None:
     return value if value in prominence.CONTEXTS else None
 
 
+_service_notice_ignored_logged = False
+
+
+def _note_ignored_service_notice() -> None:
+    """Say without quoting it that a header was ignored: a warning the first time, debug after.
+
+    A gateway and a cell that disagree on the header's shape would otherwise lose every notice
+    unseen; one warning per process makes that visible at the default level without flooding it.
+    A cataloged event, not free text: a cloud cell's log redacts any other message.
+    """
+    global _service_notice_ignored_logged
+    from .log_events import log_event
+
+    level = logging.DEBUG if _service_notice_ignored_logged else logging.WARNING
+    _service_notice_ignored_logged = True
+    log_event(_log, level, "cloud_service_notice_ignored")
+
+
+def gateway_service_notice() -> dict[str, typing.Any] | None:
+    """The service notice the Cloud gateway forwarded with this request, or None.
+
+    Cloud mode only, for the reason `cloud_cell.GATEWAY_SERVICE_NOTICE_HEADER` gives. A header
+    that is not a valid notice is ignored and never fails the call.
+    """
+    from . import cloud_cell
+
+    if not cloud_cell.cloud_mode_enabled():
+        return None
+    dependencies = _request_dependencies()
+    if dependencies is None:
+        return None
+    try:
+        value = dependencies.get_http_headers().get(cloud_cell.GATEWAY_SERVICE_NOTICE_HEADER)
+    except (LookupError, RuntimeError):
+        return None
+    if value is None:
+        return None
+    notice = cloud_cell.parse_service_notice(value)
+    if notice is None:
+        _note_ignored_service_notice()
+    return notice
+
+
+def with_service_notice(result: typing.Any) -> typing.Any:
+    """`result` with this request's service notice added as its last field, when it is a JSON object.
+
+    The connected assistant reads the whole result and tells the person. The notice goes last so
+    that the `positions` block keeps leading an `activate_context` packet (see `governance.egress`).
+    A result that is not an object has no place for the field and is returned as it is. The result
+    is copied, never changed in place: a replayed write may hand back an object that the dispatcher
+    keeps. The size reports that a leaf computed do not count the notice.
+    """
+    if not isinstance(result, dict):
+        return result
+    notice = gateway_service_notice()
+    if notice is None:
+        return result
+    return {key: item for key, item in result.items() if key != "service_notice"} | {"service_notice": notice}
+
+
 def peek_request_id() -> str | None:
     """Return the active MCP request id if one is bound, without minting.
 
@@ -1405,18 +1474,16 @@ def mcp_request_context(
     Yields the minted per-call token: the failure-signal key that stays unique
     even when concurrent calls share a client-supplied request id.
 
-    The request-scoped deadline is created here, beside the call token, because
-    this is the one place every MCP tool call passes through: a budget minted
-    anywhere further in would be a bound on some paths and not others. `tool`
-    and `arguments` are read only to exempt the reconcile-class commands, whose
-    terminal is the derived state and whose graph join is unbounded by design.
+    Reuse the managed preview deadline from authorization. Other requests bind
+    their deadline here. The reconcile-class commands wait for the derived state
+    and keep their existing graph join.
     """
     with mcp_request_correlation(request_id):
         call_token = uuid.uuid4().hex
         call_reset = _MCP_CALL_TOKEN.set(call_token)
-        budget = (
-            None
-            if request_budget.is_reconcile_class(tool, arguments)
+        check = request_budget.current_checkpoint()
+        budget = check.budget if check is not None else (
+            None if request_budget.is_reconcile_class(tool, arguments)
             else request_budget.RequestBudget(seconds=request_budget.budget_seconds())
         )
         budget_reset = request_budget.set_current(budget)
@@ -1429,6 +1496,21 @@ def mcp_request_context(
             _MCP_ACTIVATION_RESULT.reset(activation_reset)
             request_budget.reset_current(budget_reset)
             _MCP_CALL_TOKEN.reset(call_reset)
+
+
+async def mcp_preview_warming(context, arguments, surface_descriptor=None):
+    """Render the same content-free preview retry at either MCP boundary."""
+    from . import cli_ops
+    from .reclassify_source import preview_warming
+
+    error = preview_warming()
+    name = context.message.name
+    tool = await context.fastmcp_context.fastmcp.get_tool(name)
+    surface = capabilities.active_surface(surface_descriptor) if surface_descriptor is not None else nullcontext()
+    with surface:
+        return tool.convert_result(agent_refusal_result(
+            cli_ops.public_refusal(error), error, name, arguments, arguments, write=False,
+        ))
 
 
 _SCHEMA_MAPPING_KEYS = ("properties", "$defs", "patternProperties")

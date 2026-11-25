@@ -1,8 +1,8 @@
 <!-- authority:non-specification -->
 
-# Exomem Architecture
+# Evermatter Architecture
 
-Exomem is an owned-vault memory layer. Markdown files, binary evidence, governed
+Evermatter is an owned-vault memory layer. Markdown files, binary evidence, governed
 history, and explicitly portable sidecars are the durable source of truth;
 indexes, embeddings, runtime registries, and access logs are operating data.
 
@@ -90,7 +90,7 @@ disposable.
 
 ## Hosted boundary
 
-The open-source runtime remains single-vault. Hosted service turns that existing
+The self-hosted runtime remains single-vault. Hosted service turns that existing
 boundary into the tenant isolation unit: one private process/container, one
 vault mount, one state root, one log root, and unique service credentials per
 opaque cell ID. Cells may share immutable images and model caches, but never
@@ -100,7 +100,7 @@ select another cell's filesystem.
 The shared product and control plane belongs in Substrate. It owns public
 accounts and sessions, the immutable account-to-cell mapping, the public gateway
 and Home UI, internal entitlements and Paddle integration, provisioning and
-release rollout, encrypted backup storage, and destructive deletion. Exomem owns
+release rollout, encrypted backup storage, and destructive deletion. Evermatter owns
 the private registry-derived command/transfer contract, cell readiness and
 mutation safety, provider-neutral feature enforcement, and canonical
 export/restore helpers. Public requests never carry a trusted tenant selector or
@@ -120,7 +120,7 @@ and rolls back by stopping routing, draining the cell, and starting the previous
 protocol-compatible image against the same canonical vault. Rollback never
 rewrites canonical content; derived stores may be discarded and rebuilt.
 
-See the Exomem Cloud runbooks in [runbooks/](runbooks/) for cell operations and
+See the Evermatter Cloud runbooks in [runbooks/](runbooks/) for cell operations and
 [substrate-control-plane-contract.md](substrate-control-plane-contract.md) for
 the companion ownership contract.
 
@@ -130,7 +130,7 @@ per-cell sensing on shared read-only model weights.
 
 ## Non-goals
 
-Do not add a service/repository/database stack just to look layered. Exomem core
+Do not add a service/repository/database stack just to look layered. Evermatter core
 is not the shared account, billing, scheduling, or product control plane; it is
 also not a graph database product or a general CMS.
 
@@ -155,5 +155,5 @@ Preserve these invariants during architecture cleanup:
   redesign.
 
 The comparison with Basic Memory suggests borrowing discipline, not mass. The
-right target is clearer boundaries around Exomem's existing depth-focused
+right target is clearer boundaries around Evermatter's existing depth-focused
 system.

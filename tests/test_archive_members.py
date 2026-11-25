@@ -11,7 +11,9 @@ import contextlib
 import gzip
 import hashlib
 import io
+import json
 import os
+import random
 import shutil
 import stat
 import struct
@@ -20,7 +22,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import archive_members
+from exomem import archive_members, originals
+from exomem.cli_ops import OpError
 
 
 def _zip(entries: list[tuple[zipfile.ZipInfo | str, bytes]]) -> bytes:
@@ -205,6 +208,57 @@ def test_an_expansion_needs_room_only_for_the_blobs_it_writes(vault: Path, monke
     written = {path.name for path in family.rglob("*.gz")}
     assert hashlib.sha256(days[2]).hexdigest() + ".gz" in written
     assert hashlib.sha256(days[3]).hexdigest() + ".gz" not in written
+
+
+def test_archive_floor_counts_gzip_framing_and_rolls_back_only_new_blobs(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_capacity
+
+    family = vault / "Knowledge Base" / "Evidence" / "Device" / "Exports"
+    reused = random.Random(0).randbytes(4096)
+    compressible = b"sample\n" * 5000
+    _preserve(vault, _zip([("export/reused.bin", reused)]))
+    before = {path: path.read_bytes() for path in family.rglob("*") if path.is_file()}
+    new_blob = family / archive_members.member_blob(hashlib.sha256(compressible).hexdigest())
+    archive = _zip([
+        ("export/0-reused.bin", reused),
+        ("export/1-compressible.bin", compressible),
+        ("export/2-empty.bin", b""),
+    ])
+    floor = 4000
+    config = tmp_path / "media-store.json"
+    config.write_text(json.dumps({"vaults": {str(vault): {"store": "test", "upload_floor_bytes": floor}}}))
+    real_usage = shutil.disk_usage
+    unit = media_capacity._allocation_unit(vault)
+
+    def allocated(size: int) -> int:
+        return -(-size // unit) * unit
+
+    # The compressible member fits. The empty member's gzip framing still requires a block.
+    capacity = (floor + sum(allocated(len(value)) for value in before.values())
+                + allocated(len(gzip.compress(compressible, compresslevel=6))) + unit - 1)
+    sampled = []
+
+    def disk_usage(path: Path):
+        used = sum(allocated(item.stat().st_size) for item in family.rglob("*") if item.is_file())
+        free = capacity - used
+        sampled.append((free, new_blob.exists()))
+        return real_usage(path)._replace(free=free)
+
+    with monkeypatch.context() as pressure:
+        pressure.setenv(originals.CONFIG_ENV, str(config))
+        pressure.setattr(shutil, "disk_usage", disk_usage)
+        with pytest.raises(OpError, match="Retry after eviction frees space") as refused:
+            _preserve(vault, archive)
+
+    assert refused.value.code == "MEDIA_SPACE_BUSY"
+    assert (floor + unit - 1, True) in sampled
+    assert all(free >= floor for free, _ in sampled)
+    assert {path: path.read_bytes() for path in family.rglob("*") if path.is_file()} == before
+
+    receipt, stored = _preserve(vault, archive)
+    assert (stored, receipt["archive"]["new_blobs"]) == (True, 2)
 
 
 def test_an_archive_whose_manifest_the_importer_would_refuse_is_never_recorded(

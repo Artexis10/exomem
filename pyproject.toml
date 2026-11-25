@@ -1,11 +1,11 @@
 [project]
-name = "exomem"
-version = "0.193.0" # x-release-please-version
+name = "evermatter"
+version = "0.204.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "AGPL-3.0-or-later AND Apache-2.0"
-# The wheel ships the starter skill (`_scaffold`) under Apache-2.0 beside the AGPL server.
+license = "FSL-1.1-ALv2 AND Apache-2.0"
+# The wheel ships the starter skill (`_scaffold`) under Apache-2.0 beside the FSL server.
 license-files = ["LICENSE", "src/exomem/_licenses/Apache-2.0.txt"]
 authors = [{ name = "Hugo Ander", email = "founder@substratesystems.io" }]
 keywords = [
@@ -41,6 +41,7 @@ dependencies = [
     "fastmcp==4.0.3",
     "aiofile>=3.12.3,<4",      # release session-storage AIO contexts when synchronous validation loops close
     "uvicorn>=0.47",            # reset_contextvars: each HTTP request starts from an empty context
+    "sse-starlette>=3.4,<4",    # AppStatus.disable_automatic_graceful_drain: in-flight calls finish at SIGTERM
     "httpx>=0.27",
     "fsspec[http]==2026.4.0", # bounded Range reads for canonical verification of completed Cloud exports
     "httpx2>=2.12,<3",         # FastMCP provider clients use a distinct exception family
@@ -72,11 +73,11 @@ dependencies = [
 # package and a missed link from pypi.org to the project's own surfaces.
 # Key order is preserved by PyPI, and "Homepage" gets special treatment.
 [project.urls]
-Homepage = "https://substratesystems.io/exomem"
-Documentation = "https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md"
-Source = "https://github.com/Artexis10/exomem"
-Changelog = "https://github.com/Artexis10/exomem/blob/main/CHANGELOG.md"
-Issues = "https://github.com/Artexis10/exomem/issues"
+Homepage = "https://evermatter.ai"
+Documentation = "https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md"
+Source = "https://github.com/substrate-systems/evermatter"
+Changelog = "https://github.com/substrate-systems/evermatter/blob/main/CHANGELOG.md"
+Issues = "https://github.com/substrate-systems/evermatter/issues"
 
 # Hybrid semantic search (local vector embeddings). Optional so a lean install
 # — `uv sync` — works in keyword/BM25 mode (KB_MCP_DISABLE_EMBEDDINGS=1) without
@@ -86,14 +87,15 @@ Issues = "https://github.com/Artexis10/exomem/issues"
 [project.optional-dependencies]
 image-codecs = [
     "pillow>=11.1.0",
-    "pillow-heif==1.8.1",
+    # HEIF decode only: its wheels bundle LGPL libheif and libde265 and no encoder.
+    "pi-heif==1.4.0",
     # Camera raw (DNG) through LibRaw. It publishes no Intel macOS wheel, and building LibRaw
     # from source is not something an install should attempt; those Macs keep raw undecodable.
     "rawpy>=0.28,<0.29; sys_platform != 'darwin' or platform_machine != 'x86_64'",
 ]
 # The frame reader needs codecs, with no speech, model or document dependencies.
 frame-codecs = [
-    "exomem[image-codecs]",
+    "evermatter[image-codecs]",
     # faster-whisper 1.2.1 decodes with av.open(metadata_errors=...), which PyAV 19
     # removed. All media readers share this decoder, so keep the compatible bound
     # until a faster-whisper release carries SYSTRAN/faster-whisper#1495.
@@ -102,7 +104,7 @@ frame-codecs = [
 embeddings = [
     "sentence-transformers>=2.7",
     "torch>=2.12",
-    "exomem[image-codecs]",  # OCR and CLIP share the same pixel decoders
+    "evermatter[image-codecs]",  # OCR and CLIP share the same pixel decoders
     # SQL-native vector KNN (vec0 virtual tables inside the .embeddings/.clip sidecars).
     # Pure C extension, plain PyPI wheel. Search soft-falls back to the in-memory numpy
     # scan when absent or when this Python's sqlite3 can't load extensions.
@@ -146,13 +148,14 @@ nli = [
 # The CPU-only document and OCR engines: what the Exomem Cloud image ships, with no
 # CUDA wheel. System dep NOT pip-installable: the Tesseract binary and its models.
 media-cpu = [
-    "exomem[frame-codecs]",  # shared image/video codecs, without a model
+    "evermatter[frame-codecs]",  # shared image/video codecs, without a model
     "onnx-asr[cpu]==0.12.0",  # pinned Whisper adapter and CPU execution provider
-    "pymupdf>=1.24",
+    "pypdfium2>=5.15,<6",  # PDFium (BSD-3-Clause, Apache-2.0): page text, page rendering for OCR, information dictionary
+    "pypdf>=7.1,<8",       # BSD-3-Clause: the XMP packet only, which PDFium has no call for
     "defusedxml>=0.7.1",  # XMP packets of captured PDFs: parsed with entity expansion refused
     # docx/xlsx/pptx/html/epub → markdown (Microsoft MarkItDown, MIT). The per-format extras
     # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
-    # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
+    # PDFium (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
     "markitdown[docx,xlsx,pptx]>=0.1.1",
     "odfdo>=3.26",       # OpenDocument text, spreadsheet and presentation (Apache-2.0)
     "striprtf>=0.0.33",  # RTF (BSD-3-Clause)
@@ -166,7 +169,7 @@ media-cpu = [
 # The media extra owns CTranslate2's CUDA 12 wheel runtime; PyAV (pulled by
 # faster-whisper) bundles ffmpeg for audio/video decode. See README for sm_120.
 media = [
-    "exomem[media-cpu]",
+    "evermatter[media-cpu]",
     "faster-whisper>=1.1",  # 1.1.0 added BatchedInferencePipeline and the multilingual option
     "ctranslate2>=4.6.3,<5",
     # CUDA-12 runtime owned by CTranslate2 on Linux and Windows. torch's cuBLAS
@@ -225,7 +228,7 @@ tui = [
 # Full-CI latency statistics and the served CPU encoder; lean PR jobs omit these.
 recall-benchmark = [
     "scipy>=1.17,<2",
-    "exomem[embeddings-onnx]",
+    "evermatter[embeddings-onnx]",
 ]
 dev = [
     "pytest>=8.0",
@@ -244,11 +247,13 @@ tui-dev = [
 ]
 
 [project.scripts]
-# exomem is the public CLI; kb is the short daily-driver alias.
+# evermatter is the product CLI; exomem stays as the compatibility spelling and
+# kb is the short daily-driver alias.
 # python -m exomem (and the legacy python -m kb_mcp) remain available for
 # source checkouts. Entry points MUST target exomem.__main__ — routing them
 # through the kb_mcp alias made every official CLI invocation print the
 # shim's DeprecationWarning.
+evermatter = "exomem.__main__:main"
 kb = "exomem.__main__:main"
 exomem = "exomem.__main__:main"
 

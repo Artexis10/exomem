@@ -1,4 +1,4 @@
-"""Write Exomem's entries into agent clients' own files.
+"""Write Evermatter's entries into agent clients' own files.
 
 Two entries live here: the MCP server registration, and the learning instruction
 in each client's user-level instruction file. The setup wizard has always shelled
@@ -25,11 +25,23 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
-SERVER_NAME = "exomem"
+SERVER_NAME = "evermatter"
+#: The server key an install made before the rename holds.
+LEGACY_SERVER_NAME = "exomem"
+# Every server key a reader accepts: a client stores the key it was given, so an old
+# install keeps `exomem` while a new one holds `evermatter`. Writers emit SERVER_NAME only.
+SERVER_NAMES = (SERVER_NAME, LEGACY_SERVER_NAME)
+#: The tool-name prefix that each server key gives. A client builds a user-scope server's tools as
+#: `mcp__<server>__<tool>`, and users' rules and hooks match those names. A plugin's tools keep
+#: their own prefix (`mcp__plugin_exomem_exomem__`) because the plugin keeps its name for now.
+LEGACY_TOOL_PREFIX = f"mcp__{LEGACY_SERVER_NAME}__"
+TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
+#: The suffix that `_write_user_file` and `evermatter setup --migrate` give a file's backup copy.
+BACKUP_SUFFIX = ".exomem-bak"
 
 
 def normalize_mcp_url(raw: str) -> str:
-    """Return one safe, canonical Exomem MCP endpoint.
+    """Return one safe, canonical Evermatter MCP endpoint.
 
     Public clear-text HTTP is rejected because native clients send OAuth tokens
     to this endpoint. Plain HTTP remains useful for literal loopback addresses.
@@ -91,7 +103,9 @@ class McpRoute:
             raise ValueError("stdio MCP route requires a command")
         return cls(transport="stdio", command=tuple(command), env=dict(env))
 
-    def claude_add_argv(self, executable: str, *, scope: str) -> list[str]:
+    def claude_add_argv(
+        self, executable: str, *, scope: str, name: str = SERVER_NAME
+    ) -> list[str]:
         if self.transport == "stdio":
             payload = json.dumps(
                 self.as_claude_config(),
@@ -105,7 +119,7 @@ class McpRoute:
                 "add-json",
                 "--scope",
                 scope,
-                SERVER_NAME,
+                name,
                 payload,
             ]
         argv = [
@@ -117,11 +131,11 @@ class McpRoute:
         ]
         if self.transport == "http":
             assert self.url is not None
-            return [*argv, "--scope", scope, SERVER_NAME, self.url]
+            return [*argv, "--scope", scope, name, self.url]
         raise AssertionError(f"unsupported Claude MCP transport: {self.transport}")
 
-    def codex_add_argv(self, executable: str) -> list[str]:
-        argv = [executable, "mcp", "add", SERVER_NAME]
+    def codex_add_argv(self, executable: str, *, name: str = SERVER_NAME) -> list[str]:
+        argv = [executable, "mcp", "add", name]
         if self.transport == "http":
             assert self.url is not None
             return [*argv, "--url", self.url]
@@ -148,15 +162,106 @@ def codex_config_path() -> Path:
     return codex_home() / "config.toml"
 
 
-def codex_mcp_exists(path: Path) -> bool:
+def codex_mcp_name(path: Path) -> str | None:
+    """The accepted server key that Codex's config registers, or None."""
     if not path.is_file():
-        return False
+        return None
     try:
         document = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
         raise ValueError(f"cannot inspect Codex MCP registration in {path}: {exc}") from exc
     servers = document.get("mcp_servers")
-    return isinstance(servers, dict) and SERVER_NAME in servers
+    if not isinstance(servers, dict):
+        return None
+    return next((name for name in SERVER_NAMES if name in servers), None)
+
+
+def default_claude_config_path(environ: dict[str, str]) -> Path:
+    """Return Claude's user-state path, including configured relocation."""
+    config_dir = environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
+def read_json_object(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: expected an object")
+    return value
+
+
+def project_entry(config: dict, project_dir: Path) -> dict:
+    target = project_dir.resolve()
+    projects = config.get("projects")
+    if not isinstance(projects, dict):
+        return {}
+    for raw_path, value in projects.items():
+        if not isinstance(raw_path, str) or not isinstance(value, dict):
+            continue
+        try:
+            if Path(raw_path).expanduser().resolve() == target:
+                return value
+        except OSError:
+            continue
+    return {}
+
+
+def server_entry(servers: object) -> tuple[str, dict] | None:
+    """The (key, entry) that an `mcpServers` map holds under an accepted server key, or None."""
+    if not isinstance(servers, dict):
+        return None
+    for name in SERVER_NAMES:
+        value = servers.get(name)
+        if isinstance(value, dict):
+            return name, value
+    return None
+
+
+def claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, tuple[str, dict]]:
+    """Inventory registrations as scope -> (key, entry), without `claude mcp list/get` checks."""
+    user_config = read_json_object(config_path)
+    project_config = read_json_object(project_dir / ".mcp.json")
+    found: dict[str, tuple[str, dict]] = {}
+    candidates = (
+        ("local", server_entry(project_entry(user_config, project_dir).get("mcpServers"))),
+        ("project", server_entry(project_config.get("mcpServers"))),
+        ("user", server_entry(user_config.get("mcpServers"))),
+    )
+    for scope, server in candidates:
+        if server is not None:
+            found[scope] = server
+    return found
+
+
+def dead_references(
+    *, claude_home: Path, codex_home: Path, claude_config_path: Path, project_dir: Path
+) -> tuple[list[UserReference], list[Path]]:
+    """The user's rules and hooks that name `mcp__exomem__` in a client with no `exomem` server.
+
+    Such a rule matches no tool. A rule with an `exomem` server behind it still works, so it is
+    not listed. Returns the dead rules and every file read. Raises ``ValueError`` when a
+    client's registrations cannot be read, because then no rule can be judged. A Claude Code
+    scope that holds both keys reports only `evermatter`, so a rule there counts as dead.
+    """
+    references, read = user_references(
+        claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
+    )
+    holds_legacy = {
+        "claude": any(
+            key == LEGACY_SERVER_NAME
+            for key, _ in claude_registrations(
+                config_path=claude_config_path, project_dir=project_dir
+            ).values()
+        ),
+        "codex": codex_mcp_name(codex_home / "config.toml") == LEGACY_SERVER_NAME,
+    }
+    return [ref for ref in references if not holds_legacy[ref.client]], read
 
 
 def _toml_string(value: str) -> str:
@@ -166,9 +271,9 @@ def _toml_string(value: str) -> str:
     return f'"{escaped}"'
 
 
-def render_codex_block(route: McpRoute) -> str:
-    """Render the `[mcp_servers.exomem]` section Codex expects."""
-    lines = [f"[mcp_servers.{SERVER_NAME}]"]
+def render_codex_block(route: McpRoute, *, name: str = SERVER_NAME) -> str:
+    """Render the `[mcp_servers.<name>]` section Codex expects."""
+    lines = [f"[mcp_servers.{name}]"]
     if route.transport == "http":
         assert route.url is not None
         lines.append(f"url = {_toml_string(route.url)}")
@@ -184,7 +289,11 @@ def render_codex_block(route: McpRoute) -> str:
 
 
 def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
-    """Return (start, end) line indices of a TOML section, or None if absent."""
+    """Return (start, end) line indices of a TOML section, or None if absent.
+
+    The section runs through its own sub-tables (`[mcp_servers.x.env]`), so a
+    replacement leaves none behind to clash with the new block.
+    """
     lines = text.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -193,17 +302,25 @@ def _section_bounds(text: str, header: str) -> tuple[int, int] | None:
             break
     if start is None:
         return None
+    subtable_prefixes = (header[:-1] + ".", "[" + header[:-1] + ".")
     end = len(lines)
     for j in range(start + 1, len(lines)):
         stripped = lines[j].strip()
         if stripped.startswith("[") and stripped.endswith("]"):
+            if stripped.startswith(subtable_prefixes):
+                continue
             end = j
             break
     return start, end
 
 
 def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = False) -> dict:
-    """Merge the exomem MCP block into Codex's config.toml.
+    """Merge the Evermatter MCP block into Codex's config.toml.
+
+    An existing registration under either accepted server key counts as the
+    registration: ``replace=True`` swaps its section, sub-tables included, for
+    ``block`` instead of adding a second server. The caller renders ``block`` under
+    the key it means to keep.
 
     Returns {"action": "created"|"added"|"replaced"|"exists", "path": str,
     "diff": str, "backup": str|None}.
@@ -215,10 +332,16 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
         ValueError: the merge would produce invalid TOML (nothing is written).
     """
     path = Path(path) if path is not None else codex_config_path()
-    header = f"[mcp_servers.{SERVER_NAME}]"
 
     original = path.read_text(encoding="utf-8") if path.is_file() else ""
-    bounds = _section_bounds(original, header)
+    bounds = next(
+        (
+            found
+            for name in SERVER_NAMES
+            if (found := _section_bounds(original, f"[mcp_servers.{name}]")) is not None
+        ),
+        None,
+    )
 
     if bounds is not None and not replace:
         return {"action": "exists", "path": str(path), "diff": "", "backup": None}
@@ -246,6 +369,60 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
     return {"action": action, "path": str(path), "diff": diff, "backup": backup}
 
 
+def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
+    """Rename Codex's legacy `exomem` server section, sub-tables included, to ``SERVER_NAME``.
+
+    Only the section headers change, so the server's settings and the tool approvals
+    under its sub-tables move with it. Returns {"action", "path", "diff", "backup"} where
+    ``action`` is "renamed", "current" (no legacy key, nothing written), "conflict" (both keys
+    hold a section, nothing written), "http" (the legacy server is a URL: Codex stores its sign-in
+    under the server key, so a rename would sign the user out; nothing written, ``url`` holds
+    it) or "manual" (the legacy key is not a plain section the rename can move, such as an
+    inline table, nothing written).
+
+    Raises:
+        ValueError: the config is not valid TOML, or the rename would make it invalid
+            (nothing is written).
+    """
+    path = Path(path) if path is not None else codex_config_path()
+    outcome = {"path": str(path), "diff": "", "backup": None}
+    if not path.is_file():
+        return {"action": "current", **outcome}
+    try:
+        original = path.read_text(encoding="utf-8")
+        servers = tomllib.loads(original).get("mcp_servers")
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"cannot inspect Codex MCP registration in {path}: {exc}") from exc
+    if not isinstance(servers, dict) or LEGACY_SERVER_NAME not in servers:
+        return {"action": "current", **outcome}
+    if SERVER_NAME in servers:
+        return {"action": "conflict", **outcome}
+    registered = servers[LEGACY_SERVER_NAME]
+    if isinstance(registered, dict) and "url" in registered:
+        return {"action": "http", "url": str(registered["url"]), **outcome}
+    legacy = _section_bounds(original, f"[mcp_servers.{LEGACY_SERVER_NAME}]")
+    if legacy is None:
+        return {"action": "manual", **outcome}
+    start, end = legacy
+    old, new = f"mcp_servers.{LEGACY_SERVER_NAME}", f"mcp_servers.{SERVER_NAME}"
+    # Line-based, because Python has no format-preserving TOML writer and a parse-and-dump would
+    # drop the user's comments and ordering. tomllib re-validates the result before it is written.
+    lines = original.splitlines(keepends=True)
+    for index in range(start, end):
+        stripped = lines[index].strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            lines[index] = lines[index].replace(old, new, 1)
+    updated = "".join(lines)
+    try:
+        renamed = tomllib.loads(updated)["mcp_servers"]
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"refusing to write invalid TOML to {path}: {e}") from e
+    if SERVER_NAME not in renamed or LEGACY_SERVER_NAME in renamed:
+        return {"action": "manual", **outcome}  # a header the line scan misread
+    diff, backup = _write_user_file(path, original, updated)
+    return {"action": "renamed", "path": str(path), "diff": diff, "backup": backup}
+
+
 def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str | None]:
     """Back up, diff and write one user-owned file. Returns (diff, backup path)."""
     diff = "".join(
@@ -260,7 +437,7 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
     backup = None
     path.parent.mkdir(parents=True, exist_ok=True)
     if original:
-        backup_path = path.with_suffix(path.suffix + ".exomem-bak")
+        backup_path = path.with_suffix(path.suffix + BACKUP_SUFFIX)
         shutil.copy2(path, backup_path)
         backup = str(backup_path)
     path.write_text(updated, encoding="utf-8", newline="")
@@ -268,9 +445,17 @@ def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str 
 
 
 # The learning instruction sits between these two lines, so a re-run replaces only
-# that span and uninstall removes only it. They are protocol tokens Exomem owns.
-LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
-LEARNING_END = "<!-- END exomem learning instruction -->"
+# that span and uninstall removes only it. They are protocol tokens Evermatter owns.
+LEARNING_BEGIN = "<!-- BEGIN evermatter learning instruction (managed by evermatter setup) -->"
+LEARNING_END = "<!-- END evermatter learning instruction -->"
+LEGACY_LEARNING_BEGIN = "<!-- BEGIN exomem learning instruction (managed by exomem setup) -->"
+LEGACY_LEARNING_END = "<!-- END exomem learning instruction -->"
+# Every marker pair a reader accepts, for the same reason as SERVER_NAMES: a file keeps the
+# pair it was written with. Writers emit LEARNING_BEGIN and LEARNING_END only.
+LEARNING_PAIRS = (
+    (LEARNING_BEGIN, LEARNING_END),
+    (LEGACY_LEARNING_BEGIN, LEGACY_LEARNING_END),
+)
 
 
 def instruction_file(client: str, home: Path) -> Path:
@@ -295,16 +480,24 @@ def _read_user_text(path: Path) -> str | None:
 
 def _learning_span(lines: list[str], path: Path) -> tuple[int, int] | None:
     """Line indexes of the BEGIN and END markers, or None when neither is present."""
-    begins = [i for i, line in enumerate(lines) if line.strip() == LEARNING_BEGIN]
-    ends = [i for i, line in enumerate(lines) if line.strip() == LEARNING_END]
+    begin_markers = {begin for begin, _ in LEARNING_PAIRS}
+    end_markers = {end for _, end in LEARNING_PAIRS}
+    begins = [(i, line.strip()) for i, line in enumerate(lines) if line.strip() in begin_markers]
+    ends = [(i, line.strip()) for i, line in enumerate(lines) if line.strip() in end_markers]
     if not begins and not ends:
         return None
-    if len(begins) == 1 and len(ends) == 1 and begins[0] < ends[0]:
-        return begins[0], ends[0]
+    if (
+        len(begins) == 1
+        and len(ends) == 1
+        and begins[0][0] < ends[0][0]
+        and (begins[0][1], ends[0][1]) in LEARNING_PAIRS
+    ):
+        return begins[0][0], ends[0][0]
     # Guessing which marker is stray could delete the user's own lines, so refuse.
     raise ValueError(
-        f"{path} does not hold exactly one Exomem learning-instruction span. "
-        f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line, "
+        f"{path} does not hold exactly one Evermatter learning-instruction span. "
+        f"Keep one {LEARNING_BEGIN!r} line above one {LEARNING_END!r} line "
+        f"(or the {LEGACY_LEARNING_BEGIN!r} and {LEGACY_LEARNING_END!r} pair), "
         "or delete every marker line, then run the command again."
     )
 
@@ -332,6 +525,27 @@ def _plan_learning_instruction(path: Path, text: str) -> tuple[str, str, str]:
         updated = "".join(lines[:start]) + span + "".join(lines[end + 1 :])
         action = "updated"
     return ("current" if updated == original else action), original, updated
+
+
+def migrate_learning_instruction(path: Path, text: str) -> dict:
+    """Move a managed span written under the legacy marker pair to the current pair.
+
+    The span's text is replaced with ``text``, as a re-run of setup does. A file without
+    a span is left alone, and so is a span that already carries the current pair.
+    Returns {"action": "migrated"|"current"|"absent", "path", "diff", "backup"}.
+
+    Raises:
+        ValueError: the file is not UTF-8 or its markers are unmatched (nothing is written).
+    """
+    path = Path(path)
+    original = _read_user_text(path)
+    bounds = _learning_span(original.splitlines(keepends=True), path) if original else None
+    if bounds is None:
+        return {"action": "absent", "path": str(path), "diff": "", "backup": None}
+    if original.splitlines()[bounds[0]].strip() == LEARNING_BEGIN:
+        return {"action": "current", "path": str(path), "diff": "", "backup": None}
+    outcome = place_learning_instruction(path, text)
+    return {**outcome, "action": "migrated"}
 
 
 def learning_instruction_change(path: Path, text: str) -> str:
@@ -376,8 +590,8 @@ def remove_learning_instruction(path: Path) -> dict:
     except (FileNotFoundError, IsADirectoryError):
         return absent
     # Placing refuses a file it cannot decode, so a file without either marker holds
-    # nothing of Exomem's: report it absent rather than fail an unrelated uninstall.
-    if LEARNING_BEGIN.encode() not in raw and LEARNING_END.encode() not in raw:
+    # nothing of Evermatter's: report it absent rather than fail an unrelated uninstall.
+    if not any(marker.encode() in raw for pair in LEARNING_PAIRS for marker in pair):
         return absent
     original = _read_user_text(path)
     lines = original.splitlines(keepends=True)
@@ -395,3 +609,66 @@ def remove_learning_instruction(path: Path) -> dict:
         return {"action": "removed", "path": str(path), "diff": "", "backup": None}
     diff, backup = _write_user_file(path, original, updated)
     return {"action": "removed", "path": str(path), "diff": diff, "backup": backup}
+
+
+@dataclass(frozen=True)
+class UserReference:
+    """A rule or hook the user wrote that still names the old `mcp__exomem__` prefix."""
+
+    client: Literal["claude", "codex"]
+    path: Path
+    kind: Literal["permission rule", "hook", "setting"]
+    name: str
+
+
+def _strings(node: object, trail: tuple[str, ...] = ()):
+    """Every string value in a parsed settings document, with the keys above it."""
+    if isinstance(node, str):
+        yield trail, node
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            yield from _strings(value, (*trail, str(key)))
+    elif isinstance(node, list):
+        for value in node:
+            yield from _strings(value, trail)
+
+
+def user_references(
+    *, claude_home: Path, codex_home: Path, project_dir: Path
+) -> tuple[list[UserReference], list[Path]]:
+    """List the user's permission rules and hooks that still name the old `mcp__exomem__` prefix.
+
+    Setup writes no rule or hook that names a tool, so every hit is the user's own. It
+    reads the settings files each client documents, and a file it cannot read or parse
+    is skipped: the client reports that file itself. Nothing is written. Returns the
+    references and the files it read, so a caller can say what it checked.
+    """
+    files = (
+        ("claude", claude_home / "settings.json"),
+        ("claude", claude_home / "settings.local.json"),
+        ("claude", project_dir / ".claude" / "settings.json"),
+        ("claude", project_dir / ".claude" / "settings.local.json"),
+        ("codex", codex_home / "config.toml"),
+        ("codex", codex_home / "hooks.json"),
+    )
+    found: list[UserReference] = []
+    read: list[Path] = []
+    for client, path in files:
+        try:
+            raw = path.read_text(encoding="utf-8")
+            document = tomllib.loads(raw) if path.suffix == ".toml" else json.loads(raw)
+        except (OSError, UnicodeError, ValueError):  # tomllib and json errors are ValueErrors
+            continue
+        read.append(path)
+        for trail, text in _strings(document):
+            # The token is the client-defined tool-name prefix, a closed set (a protocol token,
+            # not a reading of what the rule meant).
+            bare = LEGACY_TOOL_PREFIX.removesuffix("__")
+            if LEGACY_TOOL_PREFIX not in text and text.strip() != bare:
+                continue
+            root = trail[0] if trail else ""
+            kind = (
+                "permission rule" if root == "permissions" else "hook" if root == "hooks" else "setting"
+            )
+            found.append(UserReference(client=client, path=path, kind=kind, name=text.strip()[:200]))
+    return found, read

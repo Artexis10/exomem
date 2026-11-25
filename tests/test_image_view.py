@@ -23,7 +23,9 @@ pytestmark = pytest.mark.frame_codecs
 pytest.importorskip("PIL")
 
 
-def _photo(width: int, height: int, *, orientation: int | None = None, taken: str | None = None) -> bytes:
+def _photo(
+    width: int, height: int, *, orientation: int | None = None, taken: str | None = None, comment: bytes = b"",
+) -> bytes:
     from PIL import Image
 
     image = Image.new("RGB", (width, height), (200, 30, 30))
@@ -35,7 +37,7 @@ def _photo(width: int, height: int, *, orientation: int | None = None, taken: st
     if taken is not None:
         exif.get_ifd(0x8769)[0x9003] = taken
     out = io.BytesIO()
-    image.save(out, format="JPEG", quality=90, exif=exif)
+    image.save(out, format="JPEG", quality=90, exif=exif, comment=comment)
     return out.getvalue()
 
 

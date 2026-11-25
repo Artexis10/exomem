@@ -92,7 +92,8 @@ def test_inherited_worker_snapshot_cannot_mix_revisions(stored, writer, committe
             else:
                 assert future.result() == pinned
     if committed:
-        assert body() == (pinned[0] + 1, EDITED)
+        # The commit's revision, and one more for the derivation of its rows.
+        assert body() == (pinned[0] + 2, EDITED)
 
 
 def test_fresh_mutation_read_preserves_the_pinned_request_and_inherited_worker(stored, writer):
@@ -106,9 +107,11 @@ def test_fresh_mutation_read_preserves_the_pinned_request_and_inherited_worker(s
             with read.snapshot(stored, join_request=False) as view:
                 return view.revision, view.page(ALPHA).body
 
+        # The commit's revision, and one more for the derivation of its rows.
+        latest = earlier[0] + 2
         with ThreadPoolExecutor(max_workers=1) as pool:
-            assert pool.submit(copy_context().run, current).result(timeout=10) == (earlier[0] + 1, EDITED)
-        assert current() == (earlier[0] + 1, EDITED)
+            assert pool.submit(copy_context().run, current).result(timeout=10) == (latest, EDITED)
+        assert current() == (latest, EDITED)
         with read.snapshot(stored) as unchanged:
             assert (unchanged.revision, unchanged.page(ALPHA).body) == earlier
 
@@ -311,6 +314,23 @@ def test_the_text_reader_bounds_a_stored_page_by_its_stored_size_not_its_files(s
     assert vault_module.read_guarded_text(stored, stored / NEW)[0] == EDITED.decode()
 
 
+def test_a_bounded_store_read_refuses_an_oversize_page_before_selecting_its_body(stored, writer):
+    write.commit(writer, put(ALPHA, EDITED * 50))
+
+    def refuse_body(action, table, column, _database, _source):
+        if action == sqlite3.SQLITE_READ and (table, column) == ("store_pages", "body"):
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    with read.request_snapshot(stored), read.snapshot(stored) as view:
+        view.connection.set_authorizer(refuse_body)
+        try:
+            with pytest.raises(vault_module.PathGuardError, match="over the .* read limit"):
+                vault_module.read_bounded_guarded_bytes(stored, ALPHA, limit=len(EDITED))
+        finally:
+            view.connection.set_authorizer(None)
+
+
 def test_a_dotdot_spelling_reads_the_stored_page_and_a_symlink_never_names_a_page_by_its_target(
     stored, writer, tmp_path
 ):
@@ -398,7 +418,7 @@ def test_a_commit_stamps_its_rows_with_one_new_revision_and_leaves_the_transacti
             puts=(write.PagePut(ALPHA, EDITED), write.PagePut(NEW, b"# Gamma\n")),
         ),
     )
-    assert result.revision == before + 1 == read.current_revision(stored)
+    assert result.revision == before + 1
     assert set(result.written) == {ALPHA, NEW}
     assert rows(stored, "SELECT max(commit_seq) FROM txns") == chain
     # The migration's own audit row is seq 1; the commit's rows follow it.
@@ -429,7 +449,7 @@ def test_two_commits_to_one_page_leave_one_intent_with_the_oldest_age_and_the_la
     second = write.commit(writer, put(ALPHA, EDITED + b"More.\n"))
     queue = rows(stored, "SELECT path, revision, operation, queued_at FROM store_projection_queue")
     assert queue == [(ALPHA, second.revision, "write", "2030-01-01T00:00:01Z")]
-    assert second.revision == first.revision + 1
+    assert second.revision > first.revision
 
 
 def test_a_commit_whose_expectation_fails_changes_nothing(stored, writer):

@@ -150,7 +150,7 @@ The preservation commands SHALL treat `scope` and `category` as single path segm
 
 ### Requirement: The upload handoff advertises resumable sessions
 
-On a server that serves upload sessions, `transfer_artifact(operation="upload")` for the Evidence lane SHALL return a `resumable` object beside `upload_url`. The object SHALL name the session creation URL, the protocol and its version, the header that a client resends on every later request, the most bytes that one request may carry, the most bytes that one session may hold, the `Upload-Metadata` keys that creation requires, and a link to a documented shell recipe. It SHALL NOT carry the recipe itself. The token that the handoff mints SHALL create a session through the same credential check and lane binding that `/upload` applies. Session creation SHALL refuse a request that lacks an advertised key with `INVALID_UPLOAD`, name every missing key, and open no session. A Sources-lane handoff SHALL NOT advertise sessions, because a session preserves Evidence.
+On a server that serves upload sessions, `transfer_artifact(operation="upload")` for the Evidence lane SHALL return a `resumable` object beside `upload_url`. The object SHALL name the session creation URL, the protocol and its version, the header that a client resends on every later request, the most bytes that one request may carry, the most bytes that one session may hold, the `Upload-Metadata` keys that creation requires, and a link to a documented shell recipe. It SHALL NOT carry the recipe itself. The token that the handoff mints SHALL create a session through the same credential check and lane binding that `/upload` applies. Session creation SHALL refuse a request that lacks an advertised key with `INVALID_UPLOAD`, name every missing key, and open no session. A Sources-lane bearer handoff SHALL advertise sessions when the same listener serves Source upload sessions.
 
 #### Scenario: An agent with a shell uploads a file larger than the proxy edge cap
 - **WHEN** an agent calls `transfer_artifact(operation="upload")`, creates a session at the advertised URL with the minted token, sends the file in parts and loses the connection once
@@ -162,8 +162,8 @@ On a server that serves upload sessions, `transfer_artifact(operation="upload")`
 - **THEN** creation is refused with `INVALID_UPLOAD` that names every missing key, and no session opens
 
 #### Scenario: A Sources-lane handoff
-- **WHEN** an agent mints an upload capability for the Sources lane
-- **THEN** the handoff carries `upload_url` and no `resumable` object
+- **WHEN** an agent mints a bearer upload capability for the Sources lane on a listener that serves sessions
+- **THEN** the handoff advertises the Source session metadata and the resulting session preserves a Source
 
 ### Requirement: A standalone server pulls file handles up to the upload session maximum
 
@@ -368,9 +368,173 @@ The compact projection of a per-file outcome whose bytes were committed (`stored
 
 ### Requirement: A digest holds an upload
 
-`upload_files` with the lane `source` or `evidence` and `expected_sha256` SHALL imply a held upload, as the lane `import` does. `transfer_artifact` with operation `upload` and `expected_sha256` and no `artifact` SHALL do the same. A call without `expected_sha256` and without `hold` SHALL keep returning the bearer-token handoff. The reply SHALL be the held handoff that `hold=true` returns, with `committed=false`.
+`upload_files` with the lane `source` or `evidence` and `expected_sha256` SHALL imply a held upload, as the lane `import` does. `transfer_artifact` with operation `upload` and `expected_sha256` and no `artifact` SHALL do the same. A call without `expected_sha256` and without `hold` SHALL keep returning the bearer-token handoff. The reply SHALL be the held handoff that `hold=true` returns, with `committed=false`, except when a Source request selects the resumable handoff.
 
 #### Scenario: A digest without hold
 
-- **WHEN** an agent calls `upload_files` with the lane `source` and an `expected_sha256` and no `hold`
+- **WHEN** an agent calls `upload_files` with the lane `source`, an `expected_sha256` and a request within the one-shot limit, and omits `hold`
 - **THEN** the reply is a held handoff for that lane with `hold=true` and `handoff_status=handoff_prepared`, and not an `INVALID_MODE` refusal
+
+### Requirement: A personal Source handoff can carry a large original
+
+When a Source request to `upload_files` specifies `size_bytes` above the one-shot limit on a verified personal HTTP listener, the tool SHALL offer a tus resumable handoff up to the configured session maximum. The descriptor SHALL name the endpoint, required metadata, limits and next action. The prepared response SHALL report `committed=false`.
+
+#### Scenario: The client requests a Source larger than the one-shot limit
+
+- **WHEN** the owner requests a Source above the one-shot limit and supplies its expected SHA-256
+- **THEN** the tool returns a resumable handoff with the exact declared size and the session limits
+- **AND** the handoff accepts chunks no larger than the listener's request limit
+
+#### Scenario: The requested maximum exceeds the session ceiling
+
+- **WHEN** the owner declares a Source larger than the listener's upload session maximum
+- **THEN** the tool reports that ceiling without opening a session
+
+#### Scenario: The caller requires a hold
+
+- **WHEN** a Source request specifies `hold=true` or an import identity and exceeds the one-shot limit
+- **THEN** the tool reports that limit without issuing an upload that would publish directly
+
+#### Scenario: The listener does not serve resumable Source handoffs
+
+- **WHEN** an owner requests a large Source on an ingress that offers only the multipart handoff
+- **THEN** the tool reports that ingress's size limit without accepting an upload
+
+### Requirement: A resumable Source preserves the upload's issuing authority
+
+A resumable Source handoff SHALL bind the expected digest, byte limit, owner, issuing MCP login and deployment. One ticket SHALL open at most one session. The session SHALL accept only the bound digest and permitted Source metadata.
+
+#### Scenario: A client replays the ticket or sends a different digest
+
+- **WHEN** a client tries to reuse the ticket or sends a declaration or bytes with another digest
+- **THEN** it cannot open a second session or publish a different Source
+
+### Requirement: A resumable Source rechecks its issuing authority until publication
+
+The service SHALL recheck the current owner binding and issuing login before session operations and at canonical publication. Refreshing an access token SHALL preserve authority while its login remains active. An unreadable authority SHALL leave an unspent ticket available for retry.
+
+#### Scenario: A transfer stops before the final byte
+
+- **WHEN** an upload stops partway or the listener restarts while the issuing login remains valid
+- **THEN** the next valid request receives the durable offset and can send the remaining bytes
+
+#### Scenario: The issuing login closes or loses owner access before publication
+
+- **WHEN** the login has closed or the account has lost its owner binding by the final authorization check
+- **THEN** the listener refuses session access and does not publish any pending Source
+
+### Requirement: A verified resumable Source enters custody once
+
+The listener SHALL verify the complete SHA-256 and publish the original through the governed Source commit. Sending every byte SHALL not by itself report that a Source is stored. The terminal receipt SHALL identify the Source, artifact and verified digest.
+
+#### Scenario: Canonical publication completed before the acknowledgement was interrupted
+
+- **WHEN** the canonical Source commit completed before an interruption
+- **THEN** the listener reuses the exact receipt without duplicating the Source
+- **AND** the same command can retrieve its receipt for 24 hours after settlement
+
+#### Scenario: A partial publication cannot prove its outcome
+
+- **WHEN** a stop leaves canonical files without complete evidence of their commit
+- **THEN** the listener retains the uploaded bytes and reports an unknown Source outcome
+
+### Requirement: File evidence carries a caption and a citation
+
+`save_evidence` SHALL accept `description` together with `files`. The one caption SHALL apply to every file in the call and SHALL be written on each newly stored original's page. A file that was already stored SHALL keep its page unchanged and SHALL report `caption` as `not_recorded`. Each kept file's result row SHALL carry `cite`, a wikilink to the file's page.
+
+#### Scenario: A caption lands with the original
+
+- **WHEN** an agent calls `save_evidence` with one file and a `description`
+- **THEN** the original's page holds the description
+- **AND** the result row reports `caption` as `recorded` and carries `cite`
+
+#### Scenario: An observation cites the kept file
+
+- **WHEN** an agent writes an observation whose text includes the row's `cite`
+- **THEN** the original's page lists that note among its inbound links
+
+#### Scenario: A caption has no page to land on
+
+- **WHEN** a `save_evidence` call with `description` also carries an adoption or `archive="members"`
+- **THEN** the call is refused before anything is stored
+
+### Requirement: An evidence upload can save on arrival
+
+`upload_files` SHALL accept `scope`, `category` and an optional `description` on the evidence lane only, and SHALL refuse them on any other lane or without both segments. Such a ticket SHALL record its destination when it is issued, and MAY omit `expected_sha256`. When its send holds the bytes, the server SHALL save them through the same command as `save_evidence`, under the ticket's principal, and SHALL reply with the stored receipt.
+
+#### Scenario: One call and one send keep the file
+
+- **WHEN** an agent calls `upload_files(lane="evidence", scope, category)` and the file is sent with the returned ticket
+- **THEN** the file is stored under `Evidence/<scope>/<category>/`
+- **AND** the send's reply carries `stored_path`, `hash` and `cite`, and no hold remains
+
+#### Scenario: A send cannot redirect the save
+
+- **WHEN** the send carries a `scope` form field
+- **THEN** the send is refused and nothing is stored
+
+### Requirement: A failed save on arrival keeps the hold
+
+When the save on arrival fails, the reply SHALL carry the held handle and the refusal, and the hold SHALL stay redeemable by `save_evidence` until it expires.
+
+#### Scenario: The agent can still keep the file
+
+- **WHEN** the save on arrival is refused
+- **THEN** the send's reply names the refusal and carries the held `file`
+- **AND** `save_evidence` with that `file` keeps it before the hold expires
+
+### Requirement: A person can send one file from a page
+
+On a personal server, the reply to a destination ticket SHALL include a `page` step whose URL opens `/upload/send` with the ticket in the URL fragment. The page SHALL tell the person to cover any card number, security code or password before sending. A Cloud cell SHALL NOT offer the page step.
+
+#### Scenario: A client with no shell keeps the file
+
+- **WHEN** an agent with no shell receives a destination ticket and gives the person the page link
+- **THEN** the person picks the file on the page, and the page shows the stored path and hash
+
+### Requirement: The send page holds no secret
+
+`/upload/send` SHALL return the same static bytes for every ticket and SHALL contain no ticket. It SHALL be served with a content security policy that allows only its own script and same-origin connections, with `Referrer-Policy: no-referrer` and `Cache-Control: no-store`.
+
+#### Scenario: The ticket stays out of the page and its requests
+
+- **WHEN** a person opens the page link
+- **THEN** the served page holds no ticket, and the ticket travels only in the fragment and the send's authorization header
+
+### Requirement: Kept text never holds a card number
+
+These captures SHALL remove each payment card number before the text is hashed or written: Evidence text, captions, transcriptions, Source text and observation text. A card number has 14 to 19 digits, unbroken or in a grouping that card schemes print. Its issuer prefix and length belong to a card scheme, and its Luhn check digit holds. The kept text SHALL show where the number was, keeping its last four digits.
+
+#### Scenario: A card number in a text original is removed
+
+- **WHEN** an agent saves a text original and a caption that each contain a card number
+- **THEN** neither the stored text nor the page holds the number
+- **AND** the result's warnings say a card number was removed
+
+#### Scenario: Punctuation after the number does not hide it
+
+- **WHEN** a kept text ends a sentence with a card number followed by a full stop
+- **THEN** the number is removed
+
+#### Scenario: Identifiers are kept
+
+- **WHEN** a kept text contains an IMEI, an EAN-13 barcode, a grouped order number and a SHA-256 digest
+- **THEN** all are stored unchanged
+
+### Requirement: Digest-bound Source text with a secret is refused
+
+Source text sent with `expected_sha256` promises those exact bytes. When it holds a card number or a credential, the capture SHALL refuse with a code that names the secret, and SHALL NOT store altered bytes.
+
+#### Scenario: A digest-bound Source text holds a card number
+
+- **WHEN** a caller saves Source text holding a card number, with the digest of that text
+- **THEN** the capture is refused, the refusal names the card number or credential, and nothing is stored
+
+### Requirement: Kept text never holds a labelled credential
+
+The same captures SHALL remove each credential shape that the egress scrubber names explicitly, without the scrubber's high-entropy heuristic. The result SHALL carry a warning that names the field and what was removed. A short human password, PIN or security code has no such shape and stays the agent's judgement.
+
+#### Scenario: A labelled key in a caption is removed
+
+- **WHEN** a caption contains a labelled API key
+- **THEN** the page holds a removal marker in its place, and the result's warnings say so

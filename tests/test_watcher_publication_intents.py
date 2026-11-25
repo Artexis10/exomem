@@ -890,7 +890,7 @@ def test_an_access_policy_edit_reaches_the_drain_as_a_policy_change(vault: Path)
 def test_a_running_watcher_admits_none_of_a_remembers_files(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A real remember, a running watcher, then one edit made outside Exomem.
+    """A real remember, a running watcher, then one edit made outside Evermatter.
 
     The remember rewrites the new page and the hub pages around it. None of
     those may reach the external mark. The outside edit is written after the

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -90,7 +91,9 @@ def main() -> int:
 
         def _build() -> Path:
             _run_or_raise("uv build", ["uv", "build", "--out-dir", str(tmp / "dist")], cwd=REPO)
-            wheels = sorted((tmp / "dist").glob("exomem-*.whl"))
+            # `uv build` names the wheel after the checkout's project.
+            project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
+            wheels = sorted((tmp / "dist").glob(f"{project}-*.whl"))
             if not wheels:
                 raise RuntimeError("uv build produced no wheel")
             return wheels[-1]

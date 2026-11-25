@@ -12,7 +12,8 @@ scope. Both targets SHALL set `EXOMEM_HOST=0.0.0.0` and `EXOMEM_LOG_DIR=/data/lo
 SHALL additionally set `HF_HOME=/data/hf`. Both SHALL declare `VOLUME /data`, `EXPOSE
 8765`, `ENTRYPOINT ["exomem"]`, and default `CMD ["--transport","http","--port","8765"]`.
 Both SHALL carry OCI labels (`org.opencontainers.image.source`,
-`org.opencontainers.image.licenses=AGPL-3.0-or-later AND Apache-2.0`,
+`org.opencontainers.image.licenses` set to the licence expression that the product-licensing
+capability names for the release,
 `org.opencontainers.image.description`) and include `/LICENSE`. Published images SHALL be
 multi-arch (`linux/amd64` and `linux/arm64`).
 

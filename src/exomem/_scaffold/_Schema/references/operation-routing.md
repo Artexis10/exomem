@@ -80,14 +80,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   **`save_evidence(scope="...", category="...", files=[...])`** — the same
   handle shape either way. When the client supplies file handles, call whichever
   of those fits directly. Otherwise use the route for your client under
-  "A shared file that is evidence" below. A personal server (never Exomem Cloud) also
+  "A shared file that is evidence" below. A personal server (never Evermatter Cloud) also
   offers a direct upload: **`upload_files(lane="evidence")`** without `hold` returns a
   short-lived `{token, upload_url}`, and a multipart `POST` there with `scope` and `category`
   form fields stores the file straight in Evidence. If the file-owning client cannot reach
   `upload_url`, open the prefilled browser upload form or give its URL to the user for a
   manual upload.
   **Searchable binaries are automatic:** the server transcribes audio/video
-  (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
+  (Whisper), OCRs images (Tesseract), reads PDFs (PDFium), extracts office/web
   documents (docx/xlsx/pptx/html via MarkItDown; txt/eml/ics via native parsers),
   and CLIP-embeds images and per-keyframe video frames for visual search — all
   server-side after upload, filling an embedded sidecar so any upload becomes
@@ -99,6 +99,16 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   original bytes are the record and a transcription is derived from them, so
   preserve the original before (or in the same call as) any transcription, and
   never save only the transcription. Send bytes, never a path: no tool takes one.
+  - **Keep proof in the turn it arrives, without being asked.** When the user shares a
+    file that proves something (a serial label, receipt, invoice, order confirmation or
+    warranty card), keep the original in that same turn, under proactive capture. A
+    caption goes in `description`. Each kept file's result carries `cite`, a wikilink to
+    the stored file; put it in the observation or note you write about the file.
+  - **Never keep a card number, a security code or a password.** If a file shows one,
+    do not save it: ask for a copy with it covered, and say why. Text you save is
+    checked for card numbers and machine credentials such as API keys: one is
+    removed before saving, and the result's `warnings` say so; tell the user. A
+    short password, PIN or security code is not detected, so never write one.
   - **File handles (ChatGPT attachments):** pass them in `files`, and put your
     transcription in
     **`save_evidence(scope="...", category="...", files=[...], options={"transcriptions": [{"file_id": "...", "text": "..."}]})`**.
@@ -111,10 +121,17 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     token. `--lane source` holds it for `save_source`; `--scope S --category C`
     preserves straight to Evidence.
   - **A folder to import (personal server):** the route is in [importing](importing.md).
+  - **Evidence with no file handle, in one call:** call
+    `upload_files(lane="evidence", scope="...", category="...", description="...")`. The
+    send then saves the file as Evidence on arrival and returns its `stored_path`, `hash`
+    and `cite`; no `save_evidence` call follows. From a sandbox, run the reply's `send`
+    step as below, with `expected_sha256` set when you have the digest. With no shell,
+    give the user the reply's `page` link (personal server only): they open it on the
+    device that holds the file, pick the file, and the page shows what was saved.
   - **Sandbox clients (claude.ai, Claude desktop chat, Cowork; no file handle, no
-    local token):** only with the user's opt-in (code execution on, the Exomem host
+    local token):** only with the user's opt-in (code execution on, the Evermatter host
     allowed for network access, a fresh conversation), hold the bytes with the
-    session's own upload handoff. It needs no user token and works on Exomem Cloud and
+    session's own upload handoff. It needs no user token and works on Evermatter Cloud and
     on a personal server; a Cloud cell accepts no other upload.
     1. In the sandbox, compute the file's SHA-256, for example with `sha256sum <file>`.
     2. Call `upload_files(lane="source", hold=true, expected_sha256="<digest>")`.
@@ -123,7 +140,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
        `token` is a secret: never print it or put it in a message. It works once and
        expires within fifteen minutes, so prepare the file and digest first.
     4. Send the bytes in one of two ways.
-       - Install the CLI pinned to this package's release (`pip install exomem==<exomem-release>`) and run
+       - Install the CLI pinned to this package's release (`pip install evermatter==<exomem-release>`) and run
          `exomem attach <file> --handoff-file handoff.json --root <dir>`, where `<dir>`
          holds the file. It prints the reply.
        - When installing is not possible, or the installed release has no
@@ -150,15 +167,23 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
     uploads with these form fields; follow "Delivering the bytes" in
     `operations.md`. Keep classification fields out of the held-upload request.
 
-    The client caps the file the sandbox receives, not Exomem: use the client's own
+    The client caps the file the sandbox receives, not Evermatter: use the client's own
     attachment limit. The handoff's `max_bytes` is the service's own limit. Pasted
     inline images never reach the sandbox. If the sandbox cannot reach `upload_url`, say so; never guess an
     endpoint or read a credential from the user's environment.
-  - **No path for the bytes:** tell the user the original was not preserved and, on a
-    personal server, offer the browser upload form. Custody is proven only by a returned
-    `stored_path`, `size` and `hash`, never by a minted token or a saved transcript.
+  - **No path for the bytes:** on a personal server, give the user the `page` link from
+    `upload_files(lane="evidence", scope="...", category="...")`. Otherwise tell the user
+    the original was not preserved. Custody is proven only by a returned `stored_path`,
+    `size` and `hash`, never by a minted token, a link or a saved transcript.
+- **A photo keeps its camera metadata only when its original file arrives.** A chat app usually sends a
+  display-sized copy that it re-encoded without the EXIF block, so the capture time, position and camera are
+  gone; the upload receipt then warns that a JPEG or HEIC photo has no camera metadata. To keep them, send the original
+  file: `upload_files` from a local agent that reads the disk, the prefilled browser upload form on a personal
+  server, or archive the device's originals into the vault. A photo already filed without them can still get a
+  date: `capture_date_source` says whether it came from the camera, a matching original, or a file name, and
+  `source-date` marks only the day the file arrived. See `vault-care.md` § capture-metadata.
 - **Media processing is automatic and actionable — `inspect_memory` and `manage_memory`.** Supported
-  audio and video preserved through Exomem or copied directly into the governed
+  audio and video preserved through Evermatter or copied directly into the governed
   Knowledge Base are reconciled into durable timestamped transcription work.
   Call `manage_memory(operation="media.process", arguments={'path': ...})` for immediate targeted
   reconciliation, `operation="status"` for bounded per-artifact state and next
@@ -204,7 +229,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   when one can be made;
   images past a call's size or time limit are listed in `not_shown` for another call. A camera
   raw file such as DNG, or an image too large to decode, cannot be shown: recover it
-  with `download_files` instead. Personal servers show images; Exomem
+  with `download_files` instead. Personal servers show images; Evermatter
   Cloud does not yet.
 - **View a video's frames on demand — `inspect_memory`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
@@ -216,7 +241,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   Read-only, with defaults from settings (8 frames, at most 16, long side 768 px).
   `max_side` sets the frame long side, or `"original"`, as for images; for detail,
   narrow the window rather than raise the size. Frames past the call's byte limit
-  are listed in `not_shown`. Exomem Cloud keeps 768 px and reports it in
+  are listed in `not_shown`. Evermatter Cloud keeps 768 px and reports it in
   `max_side_effective`. Soft-fails with a clear code when the server lacks the media extra.
 - **Read-only / excluded subtrees are write-protected.** Mark a subtree `readonly:`
   or `excluded:` in `Knowledge Base/_access.yaml` (see `write-scope.md` §
@@ -264,7 +289,7 @@ reference for the canonical operation leaves that product commands route to.
 - "what should I compile next," "drain the source backlog" → **inspect_memory**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
-- "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
+- "what should Evermatter do with this existing vault," "how can we migrate this safely" → **adopt**
 - "I edited the vault directly / on my phone — sync it up," "heal the drift" → preview **reconcile**, then start it as a maintenance job with the `plan_id` and a `why`
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
@@ -281,7 +306,7 @@ reference for the canonical operation leaves that product commands route to.
 - a decision is made or a problem just got solved -> stepping-stone: capture via **save_source**/**create_note**, then report the path
 - a method was run and the user says how it turned out -> stepping-stone: capture the method, the adjustment and the outcome, then report the path
 - the user states an intent or commits to work -> resolve workflow posture, inspect Planning, then update an existing matching item before creating an inbox item
-- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection; never transition Planning automatically
+- the user reports that something happened, was produced, delivered, approved, published or failed -> resolve workflow posture and append a Record to one compatible collection, else create a minimal one under `proactive_capture`; never transition Planning automatically
 
 When you say something oblique like "interesting, save it," default to
 **save_source** and ask whether to compile only if there is a durable

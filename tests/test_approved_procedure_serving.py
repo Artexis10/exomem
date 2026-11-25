@@ -134,16 +134,16 @@ def test_the_hook_renders_an_approved_method_as_its_own_line_and_never_a_link(va
     hook = _hook()
     plain_text = hook._format_task_context(unapproved["task_context"], 4000)  # noqa: SLF001 - the render under test
     approved_text = hook._format_task_context(approved["task_context"], 4000)  # noqa: SLF001
-    assert '- method: "alignment-method"; read the source for applicability and exclusions.' in plain_text
+    assert '- approach: "alignment-method"; read the source for applicability and exclusions.' in plain_text
     assert "approved procedure" not in plain_text
     assert '- approved procedure: "alignment-method". Read it, then follow it where it fits.' in approved_text
-    assert "- method:" not in approved_text
+    assert "- approach:" not in approved_text
     assert STEP not in approved_text
     # Approval swaps the method line for its own and changes nothing else: no page text, no other line.
     added = set(approved_text.splitlines()) - set(plain_text.splitlines())
     removed = set(plain_text.splitlines()) - set(approved_text.splitlines())
     assert [line.split(":", 1)[0] for line in added] == ["- approved procedure"]
-    assert [line.split(":", 1)[0] for line in removed] == ["- method"]
+    assert [line.split(":", 1)[0] for line in removed] == ["- approach"]
 
 
 def _read(vault: Path, rel: str, caller=None, **kwargs) -> dict:

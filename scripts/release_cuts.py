@@ -23,7 +23,7 @@ import release_evidence as evidence
 from check_release_pr_files import _extra_files, unreleased_changes, version_updates
 
 # These names are the controller's closed GitHub protocol, not product vocabulary.
-ORIGIN_DIRECTORY = ".github/release-cuts"
+ORIGIN_DIRECTORY = evidence.RELEASE_ORIGINS
 INTENT_START, INTENT_END = "<!-- release-cut-intent\n", "\n-->"
 POLLS, POLL_SECONDS = 360, 20
 
@@ -157,6 +157,42 @@ def accepted_origin(pr: dict | None, source: str, main: str) -> dict | None:
     return record
 
 
+def pick_source() -> dict:
+    """Pick the newest main commit since the last release whose Full evidence a cut can reuse.
+
+    A cut from it skips the Full wait. Without one, main's tip is the source and the cut runs
+    its Full fallback. The cut controller re-checks every source, so this choice grants nothing.
+    """
+    main = trusted_main()
+    previous, _ = predecessor(main, main)
+    boundary = previous["reconciliation_commit"]
+    eligible = git("rev-list", "--topo-order", "--first-parent", f"{boundary}^!", main).splitlines()
+    since = git("show", "-s", "--format=%cI", boundary)
+    workflow_id = evidence.api("actions/workflows/ci.yml")["id"]
+    tested = {
+        run["head_sha"]
+        for event in evidence.FULL_EVENTS
+        for page in evidence.api(
+            f"actions/workflows/ci.yml/runs?event={event}&status=success"
+            f"&created=%3E%3D{quote(since, safe='')}&per_page=100",
+            pages=True,
+        )
+        for run in page["workflow_runs"]
+        if evidence.trusted_full(run, os.environ["GH_REPO"], workflow_id)
+    }
+    for candidate in eligible:
+        if candidate not in tested:
+            continue
+        try:
+            predecessor(candidate, main)
+        except (ValueError, subprocess.CalledProcessError):
+            continue
+        selected = evidence.select_evidence(candidate, os.environ["GH_REPO"])
+        if selected:
+            return {"source": candidate, "main": main, "evidence_run": selected["run_id"]}
+    return {"source": main, "main": main, "evidence_run": None}
+
+
 def prepare(source: str) -> dict:
     branch = evidence.cut_branch(source)
     main = trusted_main()
@@ -204,7 +240,7 @@ def prepare(source: str) -> dict:
         "source": source,
         "branch": branch,
         "predecessor": previous,
-        "policy": evidence.main_check_policy(),
+        "policy": evidence.release_pr_check_policy(),
         "propose": pr is None,
         "merged": bool(pr and pr.get("merged")),
     }
@@ -299,6 +335,7 @@ def push_generated(cut: dict, candidate: Path) -> None:
         "chore: regenerate packages for the selected version",
         cwd=candidate,
     )
+    pushed = git("rev-parse", "HEAD", cwd=candidate)
     git(
         "-c",
         "credential.helper=",
@@ -310,6 +347,13 @@ def push_generated(cut: dict, candidate: Path) -> None:
         f"HEAD:refs/heads/{branch}",
         cwd=candidate,
     )
+    # GitHub moves the PR head seconds after the push; the next step must read the new head.
+    for _ in range(24):
+        pr = release_pull(cut["branch"])
+        if pr and pr["head"]["sha"] == pushed:
+            return
+        time.sleep(5)
+    raise ValueError("release proposal head is pending after the generated push; retry this cut")
 
 
 def child_environment(root: Path) -> dict:
@@ -403,7 +447,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
         "head": head,
         "version": version,
         "predecessor": previous,
-        "policy": evidence.main_check_policy(),
+        "policy": evidence.release_pr_check_policy(),
         "fallback_requested": bool(checkpoint and checkpoint.get("fallback_requested")),
     }
     if checkpoint and checkpoint.get("evidence"):
@@ -449,7 +493,7 @@ def qualify(cut: dict, *, evidence_only: bool = False) -> dict:
     for _ in range(evidence.CHECK_POLLS):
         if not pr.get("merged"):
             evidence.release_pr(pr["number"], source, head)
-        intent["policy"] = evidence.main_check_policy()
+        intent["policy"] = evidence.release_pr_check_policy()
         checks = evidence.inherited_checks(head, intent["policy"])
         if checks is not None:
             if any(check["bucket"] != "pass" for check in checks):
@@ -546,7 +590,7 @@ def reconcile_files(root: Path, record: dict, notes: str) -> None:
 @contextmanager
 def reconciliation_tree(base: str, record: dict, notes: str):
     """Project current metadata and maintained generators from one exact main tree."""
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     with tempfile.TemporaryDirectory(prefix="release-reconcile-") as temporary:
         root = Path(temporary)
         evidence.command("git", "clone", "--quiet", "--shared", ".", str(root))
@@ -610,7 +654,7 @@ def reconciliation_tree(base: str, record: dict, notes: str):
 
 
 def push_reconciliation(root: Path, record: dict) -> str:
-    branch = f"release-reconcile/{record['source']}"
+    branch = evidence.reconcile_branch(record["source"])
     git(
         "-c",
         "core.hooksPath=/dev/null",
@@ -658,7 +702,7 @@ def reconcile(record: dict) -> None:
     """Refresh only mismatched projections and repair a raced squash before publication."""
     tag, source = record["tag"], record["source"]
     notes = evidence.api(f"releases/tags/{tag}")["body"]
-    branch = f"release-reconcile/{source}"
+    branch = evidence.reconcile_branch(source)
     verified = False
     projections = {}
 
@@ -684,8 +728,9 @@ def reconcile(record: dict) -> None:
             if accepted is not None and tree == git("rev-parse", f"{main}^{{tree}}"):
                 return
             existing = evidence.api(f"pulls/{prs[0]['number']}") if prs else None
+            pushed = None
             if existing is None or prospective_tree(main, existing["head"]["sha"]) != tree:
-                push_reconciliation(root, record)
+                pushed = push_reconciliation(root, record)
         pr = (
             prs[0]
             if prs
@@ -700,22 +745,32 @@ def reconcile(record: dict) -> None:
                 },
             )
         )
+        refresh = False
         for _ in range(evidence.CHECK_POLLS):
             current = evidence.api(f"pulls/{pr['number']}")
+            # GitHub moves the PR head seconds after a push; never read the old head's checks.
+            if pushed is not None and current["head"]["sha"] != pushed:
+                time.sleep(evidence.CHECK_POLL_SECONDS)
+                continue
             checks = evidence.inherited_checks(current["head"]["sha"], evidence.main_check_policy())
             if checks is None:
                 time.sleep(evidence.CHECK_POLL_SECONDS)
                 continue
             if any(check["bucket"] != "pass" for check in checks):
-                raise ValueError(
-                    "reconciliation required checks failed; repair or refresh this cut"
-                )
+                latest = trusted_main()
+                # Red checks on a head that is no longer this main's projection need a re-push,
+                # not a stop; red checks on the current projection are a real failure.
+                if prospective_tree(latest, current["head"]["sha"]) == projection(latest):
+                    raise ValueError(
+                        "reconciliation required checks failed; repair or refresh this cut"
+                    )
+                refresh = True
             break
         else:
             raise ValueError("reconciliation is pending; retry after its required checks finish")
         latest = trusted_main()
         expected = projection(latest)
-        if prospective_tree(latest, current["head"]["sha"]) != expected:
+        if refresh or prospective_tree(latest, current["head"]["sha"]) != expected:
             # Main can move freely. Only a conflict or changed generated tree needs fresh CI.
             continue
         evidence.command(
@@ -744,6 +799,42 @@ def reconcile(record: dict) -> None:
         # A base race can accept the origin before new generator inputs were repackaged.
         # The next pass repairs current main through a PR, keeping the accepted origin unchanged.
     raise ValueError("reconciliation refresh is pending after bounded retries; resume the same cut")
+
+
+def check_reconciliation(head: str, main: str, source: str) -> str:
+    """A reconciliation PR runs no CI test job, sound only while merging it gives the projection.
+
+    This is reconcile()'s own acceptance test: the head merged onto main must equal what the
+    controller projects onto that main for the accepted origin of `source`. Repairs that add
+    no origin and branches updated from main pass; any other content lands through a normal PR.
+    """
+    evidence.cut_branch(source)
+    merged = prospective_tree(main, head)
+    if merged is None:
+        raise ValueError("reconciliation does not merge cleanly onto main")
+    # The origin naming this source, as reconcile() pushes it, even when main has a newer release.
+    paths = git("ls-tree", "--name-only", f"{merged}:{ORIGIN_DIRECTORY}").splitlines()
+    matches = [
+        (path, record)
+        for path in paths
+        if (record := json.loads(git("show", f"{merged}:{ORIGIN_DIRECTORY}/{path}"))).get("source")
+        == source
+    ]
+    if len(matches) != 1:
+        raise ValueError("reconciliation must carry exactly one origin for its branch's source")
+    path, record = matches[0]
+    tag = record["tag"]
+    if f"{ORIGIN_DIRECTORY}/{path}" != origin_path(tag):
+        raise ValueError("release origin path differs from its tag")
+    # The record comes from the PR; its Git object names reach git commands below.
+    for name in (record["head"], record["release"], record["predecessor"]["reconciliation_commit"]):
+        evidence.cut_branch(name)
+    verify_origin(record, main, require_evidence=False)
+    notes = evidence.api(f"releases/tags/{tag}")["body"]
+    with reconciliation_tree(main, record, notes) as (_, tree):
+        if tree != merged:
+            raise ValueError("reconciliation differs from the projection onto main")
+    return tag
 
 
 def verify_origin(record: dict, main: str, *, require_evidence: bool) -> None:
@@ -811,6 +902,7 @@ def main() -> None:
     parser.add_argument(
         "operation",
         choices=(
+            "pick-source",
             "prepare",
             "check-head",
             "push-generated",
@@ -819,6 +911,7 @@ def main() -> None:
             "publish",
             "reconcile",
             "verify-tag",
+            "check-reconciliation",
         ),
     )
     parser.add_argument("--source")
@@ -826,9 +919,12 @@ def main() -> None:
     parser.add_argument("--tag")
     parser.add_argument("--candidate", type=Path)
     parser.add_argument("--trusted-main")
+    parser.add_argument("--head")
     args = parser.parse_args()
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
-    if args.operation == "prepare":
+    if args.operation == "pick-source":
+        print(json.dumps(pick_source()))
+    elif args.operation == "prepare":
         if not args.source:
             parser.error("prepare requires --source")
         state = prepare(args.source)
@@ -885,6 +981,11 @@ def main() -> None:
                 return
             time.sleep(5)
         raise ValueError("accepted origin is pending on main; retry this cut before publication")
+    elif args.operation == "check-reconciliation":
+        if not args.head or not args.trusted_main or not args.source:
+            parser.error("check-reconciliation requires --head, --trusted-main and --source")
+        tag = check_reconciliation(args.head, args.trusted_main, args.source)
+        print(f"the reconciliation PR is the controller's projection for {tag}")
     else:
         if not args.tag or not args.trusted_main:
             parser.error("verify-tag requires --tag and --trusted-main")

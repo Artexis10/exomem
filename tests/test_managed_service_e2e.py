@@ -9,11 +9,12 @@ import subprocess
 import sys
 import traceback
 from contextlib import asynccontextmanager
-from importlib.metadata import version
 from pathlib import Path
 
 import httpx
 import pytest
+
+from exomem.install_info import installed_version
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Managed service runtime is Linux-only"
@@ -66,7 +67,7 @@ async def control(root: Path, command: str):
     reader, writer = await asyncio.open_unix_connection(str(root / "managed/control.sock"))
     request = {"command": command}
     if command == "upgrade":
-        request["target"] = {"python": sys.executable, "version": version("exomem")}
+        request["target"] = {"python": sys.executable, "version": installed_version()}
     writer.write(json.dumps(request).encode() + b"\n")
     await writer.drain()
     try:
@@ -524,7 +525,7 @@ def test_shipped_private_worker_runs_full_server_with_existing_auth(vault, tmp_p
                     except httpx.HTTPError:
                         pass
                     await asyncio.sleep(0.05)
-            assert health.json()["version"] == version("exomem")
+            assert health.json()["version"] == installed_version()
             denied = await client.post("/mcp", json={})
             assert denied.status_code == 401
             ready, last_error = None, None
@@ -578,7 +579,11 @@ def test_a_standby_warms_beside_the_serving_worker_and_is_promoted(tmp_path):
                 handoff = result["handoff"]
                 assert handoff["standby"] == "ready", handoff
                 assert handoff["migration"] == {"state": "skipped", "reason": "declared_none"}
-                assert handoff["promotion"]["snapshot"] == "current"
+                # This supervisor fixture has no file observer to seal a graph proof.
+                # Real-vault carry is covered by test_standby_handoff_writes.py.
+                assert handoff["promotion"]["snapshot"] == "rebuild-after-promotion"
+                assert handoff["promotion"]["reproof_declined"] == "observer_unavailable"
+                assert handoff["promotion"]["startup_validation"] == "pending"
                 after = await client.call_tool("counted", {"marker": "after"})
                 assert after.data["pid"] != serving
 

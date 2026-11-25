@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from math import isfinite
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +16,7 @@ from urllib.parse import quote, unquote
 
 from . import (
     access,
+    automatic_collection,
     call_spans,
     capabilities,
     collection_claims,
@@ -1115,10 +1117,22 @@ def _authorize(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class LinkResolution:
+    """What a link value names for one reader: `page` (with its path), `row` (with its label),
+    `ambiguous` (with the visible candidate paths) or `none`."""
+
+    kind: str
+    path: str | None = None
+    candidates: tuple[str, ...] = ()
+    label: str | None = None
+
+
 @dataclass(slots=True)
 class _LinkProjector:
     root: Path
-    manifest: collections.CollectionManifest
+    # None for a projector that only resolves pages (`page_with_identity`) and projects no row.
+    manifest: collections.CollectionManifest | None
     resolver: vault.WikilinkResolver
     memory_targets: Mapping[str, tuple[str, ...]]
     admitted: dict[str, bool]
@@ -1141,17 +1155,27 @@ class _LinkProjector:
     # The retired item paths that this projector's links name, made on the first such link. It
     # reads each linked collection once for the whole query, however many of its rows are named.
     retired_links: Any | None = None
+    # What `_decide` learned about each stripped value it let through or turned away, for `resolve`:
+    # the visible page a value named, and the visible pages an ambiguous title matched.
+    named_pages: dict[str, str] = dataclass_field(default_factory=dict)
+    ambiguous_pages: dict[str, tuple[str, ...]] = dataclass_field(default_factory=dict)
+    # The label of the row that a canonical row ref names for this reader, or None when the reader may not read
+    # it. Only a creator that reads rows through a query session supplies it
+    # (`reference_resolution.row_labeller`); without one a row ref is withheld, as it was before rows resolved.
+    row_label: Callable[[tuple[str, str, str]], str | None] | None = None
+    named_rows: dict[str, str] = dataclass_field(default_factory=dict)
 
     @classmethod
     def create(
         cls,
         root: Path,
-        manifest: collections.CollectionManifest,
+        manifest: collections.CollectionManifest | None,
         *,
         policy: Any | None = None,
         allow_cold_index: bool = True,
         authorize_path: Callable[[str], bool] | None = None,
         visible_path: Callable[[str], bool] | None = None,
+        row_label: Callable[[tuple[str, str, str]], str | None] | None = None,
     ) -> _LinkProjector:
         # Keep the common numeric/event query path independent of vault-wide
         # link lookup. Even link-bearing collections defer that lookup until a
@@ -1171,7 +1195,7 @@ class _LinkProjector:
         # authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
         return cls(root, manifest, empty, {}, {}, None, {}, {}, policy, authorize_path,
-                   visible_path, allow_cold_index)
+                   visible_path, allow_cold_index, row_label=row_label)
 
     def _candidate_index_available(self) -> bool:
         if self.candidate_index_complete is not None:
@@ -1197,6 +1221,34 @@ class _LinkProjector:
             measured[route] = 1
         self.candidate_index_complete = complete
         return complete
+
+    def index_available(self) -> bool:
+        """Whether a bare title or a memory identity can resolve for this reader at all, without a cold walk
+        when the projector was made without one."""
+        return self._candidate_index_available()
+
+    def page_with_identity(self, identity: str) -> str | None:
+        """The one page this reader may see holding the memory identity, else None.
+
+        A withheld page, a missing page and two visible pages holding it all answer None. Call
+        `index_available` first: without the index every identity answers None.
+        """
+        return self._memory_target(identity) if self._candidate_index_available() else None
+
+    def resolve(self, value: str) -> LinkResolution:
+        """What one link value names for this reader: one visible page or row, several pages, or none.
+
+        It decides as a read does, through `_decide`, so a write and a later read cannot disagree. A
+        value that names no row or page this reader may see answers `none`, whether it is withheld or missing.
+        """
+        raw = value.strip()
+        if self._allowed(raw):
+            if raw in self.named_rows:
+                return LinkResolution("row", label=self.named_rows[raw])
+            page = self.named_pages.get(raw)
+            return LinkResolution("page", page) if page is not None else LinkResolution("none")
+        candidates = self.ambiguous_pages.get(raw)
+        return LinkResolution("ambiguous", candidates=candidates) if candidates else LinkResolution("none")
 
     def _visible(self, relative: str) -> bool:
         """Whether this reader may see `relative`, decided live and once per page."""
@@ -1314,6 +1366,8 @@ class _LinkProjector:
         return complete
 
     def __call__(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        if self.manifest is None:
+            raise TypeError("a page-only link projector projects no row")
         projected = dict(values)
         for name, spec in self.manifest.schema.fields.items():
             if name not in projected:
@@ -1371,6 +1425,16 @@ class _LinkProjector:
                 target = self._memory_target(identity)
                 if target is None:
                     return self._remember(f"memory:{identity}", False)
+            elif (row := collections.parse_row_ref(raw)) is not None:
+                # A canonical row ref names a row, not a page. It resolves under this reader's own visibility of
+                # that row, and a withheld row, a missing row and an unreadable collection answer alike.
+                if self.row_label is None or raw != collections._profile_item_ref(*row):  # noqa: SLF001
+                    return False
+                label = self.row_label(row)
+                if label is None:
+                    return False
+                self.named_rows[raw] = label
+                return True
             elif raw.lower().startswith(("exomem://vault/", "exomem://source/")):
                 target = memory_refs.resolve_identifier_read_only(self.root, raw)
             elif (match := re.fullmatch(r"\[\[([^\[\]]+)\]\]", raw)) is not None:
@@ -1403,6 +1467,9 @@ class _LinkProjector:
                         targeted_namespace_contains=self._names_file,
                         visible=visible, retired=self._retired_target,
                     )
+                except vault.AmbiguousWikilinkError as error:
+                    self.ambiguous_pages[raw] = error.candidates
+                    return False
                 except vault.WikilinkError:
                     return False
                 target = canonical.split("#", 1)[0] + ".md"
@@ -1440,13 +1507,17 @@ class _LinkProjector:
         except (memory_refs.ReferenceError, vault.PathGuardError):
             return False
         if relative in self.verdicts:
-            return self.verdicts[relative]
-        if relative in self.admitted and not self.admitted[relative]:
-            return self._remember(relative, False)
-        with call_spans.span("records.link_authorize"):
-            allowed = (self.authorize_path(relative) if self.authorize_path is not None
-                       else _authorize(self.root, relative, receipt=True, policy=self.policy))
-        return self._remember(relative, allowed)
+            allowed = self.verdicts[relative]
+        elif relative in self.admitted and not self.admitted[relative]:
+            allowed = self._remember(relative, False)
+        else:
+            with call_spans.span("records.link_authorize"):
+                allowed = self._remember(relative, (
+                    self.authorize_path(relative) if self.authorize_path is not None
+                    else _authorize(self.root, relative, receipt=True, policy=self.policy)))
+        if allowed:
+            self.named_pages[raw] = relative
+        return allowed
 
     def _names_file(self, key: str) -> bool:
         """Whether the explicit link key `key` names a Markdown file, as the target check reads it.
@@ -1598,21 +1669,48 @@ def query_collection(
                 root, manifest, policy=policy, allow_cold_index=not late_link_projection,
                 authorize_path=authorize_path, visible_path=visible_path,
             )
+            # Without a store there is no field plan: a collection released to the caller is read whole.
+            plan = None if writer is None else writer._operation.field_plan(manifest)
+            readable = manifest if plan is None else plan.manifest
             view = kwargs.get("view")
             if view is not None:
-                _authorize_saved_view(root, manifest, view, links)
-            result = record_formats.query_collection(
-                root,
-                manifest,
-                authorize_path=authorize_path,
-                project_values=links,
-                project_child_value=links.project_presentation_value,
-                late_link_projection=late_link_projection,
-                stage_store_projection=writer is not None and not late_link_projection,
-                **kwargs,
-            )
+                _authorize_saved_view(root, manifest, view, links, readable=(
+                    None if plan is None or plan.holds_every_field(manifest) else readable))
+            try:
+                result = record_formats.query_collection(
+                    root,
+                    manifest,
+                    readable=readable,
+                    authorize_path=authorize_path,
+                    project_values=links,
+                    project_child_value=links.project_presentation_value,
+                    late_link_projection=late_link_projection,
+                    stage_store_projection=writer is not None and not late_link_projection,
+                    **kwargs,
+                )
+            except collections.CollectionError as error:
+                if error.code != "INVALID_RECORD_QUERY_FIELD":
+                    raise
+                raise _with_readable_columns(error, readable, kwargs) from error
         egress.emit_boundary_receipt(collector)
         return result
+
+
+def _with_readable_columns(
+    error: collections.CollectionError,
+    readable: collections.CollectionManifest,
+    query: Mapping[str, Any],
+) -> collections.CollectionError:
+    """The refused-field error plus the columns the caller can read, from the caller's own field plan.
+
+    `readable` is the manifest after the caller's field plan, so a withheld field never
+    appears in the list. The refusal's own details stay out: it carries only the reason.
+    A child expansion changes which columns a query may name, so it gets no list.
+    """
+    if query.get("expand_children") or query.get("expand_child") is not None:
+        return collections.CollectionError(error.code, error.reason)
+    names = collections.listed_within(record_formats.query_columns(readable))
+    return collections.CollectionError(error.code, f"{error.reason}; readable columns: {names}")
 
 
 def _authorize_saved_view(
@@ -1620,11 +1718,17 @@ def _authorize_saved_view(
     manifest: collections.CollectionManifest,
     name: object,
     links: _LinkProjector,
+    *,
+    readable: collections.CollectionManifest | None = None,
 ) -> collections.SavedView:
-    """Refuse a saved view if link projection would change its query meaning."""
+    """Refuse a saved view if link projection would change its query meaning.
+
+    Every check reads the author's whole `manifest`. `readable` is given only when the caller's
+    field plan withholds a field, and then hides a view as `collections.resolve_saved_view` describes.
+    """
     if type(name) is not str:
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
-    view = collections.resolve_saved_view(manifest, name)
+    view = collections.resolve_saved_view(manifest, name, readable=readable)
     query = view.definition.get("query")
     if not isinstance(query, Mapping):
         raise collections.CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
@@ -2140,6 +2244,28 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
         )
     inventory, selections = [], []
     accounted: set[str] = set()
+    # One read of the activity log answers for every file collection, and one read of the store's create records
+    # answers for every store collection: the inventory grows with the collections, and these reads do not.
+    file_automatic = (
+        automatic_collection.file_created_ids(root)
+        if semantic_profile == "records" and any(store_writer is None for _, store_writer in released)
+        else (frozenset(), True)
+    )
+    store_automatic: dict[int, frozenset[str]] = {}
+    if semantic_profile == "records":
+        for _, store_writer in released:
+            if store_writer is not None and id(store_writer) not in store_automatic:
+                store_automatic[id(store_writer)] = store_writer.automatic_collection_ids()
+
+    def created_automatically(manifest: Any, store_writer: Any) -> bool | None:
+        """True or False when the create record answers; None when the log could not be read in full."""
+        if store_writer is not None:
+            return manifest.collection_id in store_automatic[id(store_writer)]
+        if file_automatic is None:
+            return None
+        ids, complete = file_automatic
+        return True if manifest.collection_id in ids else (False if complete else None)
+
     for manifest, store_writer in released:
         coverage, selection, items = _inventory_coverage(
             root, manifest, authorize, observations=observations[str(manifest.path)],
@@ -2153,6 +2279,8 @@ def _inventory_collections(root: Path, *, semantic_profile: str) -> dict[str, An
             "lifecycle": manifest.lifecycle,
             "storage_strategy": manifest.storage.strategy,
             "natural_key": list(manifest.schema.natural_key),
+            # Planning has no automatic create. None is unknown, never False.
+            **({"created_automatically": created_automatically(manifest, store_writer)} if semantic_profile == "records" else {}),
             **coverage,
         })
         if selection is not None:
@@ -2832,7 +2960,7 @@ def _valid_agent_history(value: Mapping[str, Any] | None, *, semantic_profile="r
         return False
     # These are the implemented Records/Planning audit wire operations, not collection vocabulary.
     if semantic_profile == "records":
-        operations = ("create", "append", "update", "revise", "rebaseline", "bulk_upsert", "view_move")
+        operations = ("create", "append", "update", "retract", "revise", "rebaseline", "bulk_upsert", "view_move")
     elif semantic_profile == "planning":
         operations = ("plan_create", "plan_add", "plan_update", "plan_triage", "plan_revise", "plan_rebaseline")
     else:

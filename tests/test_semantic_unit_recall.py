@@ -91,7 +91,7 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
     """Managed unit and mixed calls preserve identity and bound canonical parent reads."""
     from test_governance_egress import _reset_caches, write_rule, write_scope
 
-    from exomem import bm25, memory_refs, semantic_units
+    from exomem import memory_refs, semantic_units
     from exomem.governance import egress
     from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 
@@ -115,7 +115,7 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
         for unit in semantic_index.build_parent_index_state(tmp_path, path).document.units
     }
     raw_get = find_module._CACHE.get
-    statistics_of = bm25.CorpusStatistics.of.__func__
+    build_unit_statistics = lexstore._unit_corpus_statistics
     reads: list[str] = []
     unit_builds = 0
 
@@ -123,17 +123,17 @@ def test_managed_cold_and_warm_recall_keeps_unit_identity_and_bounds_parent_read
         reads.append(path.relative_to(root).as_posix())
         return raw_get(path, root)
 
-    def counted_statistics(cls, corpus):
+    def counted_statistics(corpus, base, *changed):
         nonlocal unit_builds
         if corpus and all(ref.startswith(memory_refs.REF_PREFIX) for ref in corpus):
             unit_builds += 1
-        return statistics_of(cls, corpus)
+        return build_unit_statistics(corpus, base, *changed)
 
     def unexpected_parse(*_args, **_kwargs):
         raise AssertionError("unit selection reparsed canonical Markdown")
 
     monkeypatch.setattr(find_module._CACHE, "get", counted_get)
-    monkeypatch.setattr(bm25.CorpusStatistics, "of", classmethod(counted_statistics))
+    monkeypatch.setattr(lexstore, "_unit_corpus_statistics", counted_statistics)
     monkeypatch.setattr(semantic_units, "parse_semantic_units", unexpected_parse)
     for who in (owner_principal(), RequestPrincipal(audience_id="external", surface="mcp")):
         responses = []

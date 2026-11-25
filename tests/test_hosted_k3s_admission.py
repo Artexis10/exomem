@@ -555,8 +555,8 @@ def test_image_admission_runtime_has_no_tenant_keys_and_rotates_its_webhook_ca(k
             "operatorDeploy.sourceRepository=example/runtime",
             "--set",
             "operatorDeploy.registryReadSecretName=registry-read",
-            "--set",
-            "cellctl.cellImageRepository=127.0.0.1:1/runtime",
+            "--set-json",
+            'cellctl.cellImageRepositories=[{"repository":"127.0.0.1:1/runtime","builder":"example/runtime"}]',
         ]
     )
     all_docs = [doc for doc in yaml.safe_load_all(rendered.stdout) if isinstance(doc, dict)]

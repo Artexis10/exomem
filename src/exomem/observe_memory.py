@@ -9,7 +9,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, assert_never, get_args
 
 from . import (
     access,
@@ -20,7 +20,7 @@ from . import (
     origin_bindings,
     page_ids,
     provenance,
-    semantic_authoring,
+    relation_registry,
     semantic_contract,
     semantic_index,
     semantic_kinds,
@@ -29,16 +29,17 @@ from . import (
     semantic_units,
     semantic_writes,
     temporal,
+    unit_edges,
     vault,
+    working_set_currency,
 )
 from .cli_ops import OpError
 from .governance import egress
 from .kbdir import managed_form
 from .mutation_timings import MutationTimings, write_timings_enabled
 
-ObserveOperation = Literal["add", "update", "remove", "validate"]
-
-_OPERATIONS = frozenset({"add", "update", "remove", "validate"})
+ObserveOperation = Literal["add", "update", "remove", "validate", "supersede", "assess"]
+_OPERATIONS: tuple[str, ...] = get_args(ObserveOperation)
 _COMPACT_KIND = "observation"
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
 _FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
@@ -92,32 +93,6 @@ def _legacy_routing_remediation(resolution: dict[str, Any]) -> str:
     )
 
 
-def _entity_observation_remediation(rel_path: str) -> str:
-    """The exact edit that adds one compact unit line to an Entity page.
-
-    observe_memory does not write Entity pages.
-    """
-    section = semantic_authoring.build_semantic_authoring_contract().compact["canonical_section"]
-    call = capabilities.active_call_text(
-        "edit_memory",
-        {
-            "path": rel_path,
-            "why": "<reason>",
-            "operation": {
-                "kind": "edit_section",
-                "heading": section,
-                "new_string": "<one compact unit line>",
-                "create_missing": True,
-                "expected_hash": "<content_hash>",
-            },
-        },
-    )
-    return (
-        "An Entity page stays structural, so add the observation as a compact unit line under "
-        f"`{section}` with {call}. Take `expected_hash` from a whole-page read of the page."
-    )
-
-
 def observe_memory(
     vault_root: Path,
     *,
@@ -136,6 +111,7 @@ def observe_memory(
     id: str | None = None,
     unit_ref: str | None = None,
     unit: str | None = None,
+    span: str | None = None,
     expected_fingerprint: str | None = None,
     expected_hash: str | None = None,
     transition_token: str | None = None,
@@ -145,19 +121,73 @@ def observe_memory(
     reason: str | None = None,
     target_fingerprints: dict[str, str] | None = None,
     today: dt.date | None = None,
+    validate_only: bool = False,
 ) -> dict[str, Any]:
-    """Validate or atomically mutate one semantic unit in a compiled page."""
+    """Validate or atomically mutate one semantic unit in a compiled or entity page.
+
+    `validate_only` previews a supersede or assess, as `validate` previews an add or update:
+    the reply carries the transition token that the same call then commits with.
+    """
     op = str(operation or "").strip().lower()
     if op not in _OPERATIONS:
         raise ObserveMemoryError(
             "INVALID_OBSERVE_OPERATION",
-            "operation must be add, update, remove, or validate",
+            f"operation must be one of: {', '.join(_OPERATIONS)}",
         )
+    # Only these operations have a preview entry; elsewhere the surface would queue
+    # and report a preview as a write.
+    if validate_only and op not in {"supersede", "assess"}:
+        raise ObserveMemoryError(
+            "INVALID_OBSERVE_INPUT",
+            f"validate_only previews a supersede or assess; preview {op} as operation validate",
+        )
+    previewing = op == "validate" or bool(validate_only)
     if unit is not None and unit_ref:
         raise ObserveMemoryError(
             "INVALID_OBSERVE_INPUT",
             "give the unit id in `unit`, or unit_ref with its guards, not both",
         )
+    if op in {"supersede", "assess"}:
+        # The claim these operations correct is named exactly once: a unit id
+        # or anchor, a raw unit_ref, or the exact text of one list item.
+        named = sum(
+            bool(target)
+            for target in (unit, unit_ref, span and str(span).strip())
+        )
+        if named != 1:
+            raise ObserveMemoryError(
+                "INVALID_OBSERVE_INPUT",
+                f"{op} names its target exactly once: `unit`, `unit_ref`, "
+                "or an exact `span`",
+            )
+    if op == "supersede":
+        if content is None or not str(content).strip():
+            raise OpError(
+                "INVALID_OBSERVE_INPUT",
+                "The supersession is missing required fields.",
+                "Provide the missing fields shown in the retry call.",
+                details={"retry_with": {"content": "<text>"}},
+            )
+        if any(value is not None for value in (verdict, check_by, until, id)):
+            raise ObserveMemoryError(
+                "INVALID_OBSERVE_INPUT",
+                "supersede takes no verdict, check_by, until, or id",
+            )
+    if op == "assess":
+        if verdict is None and check_by is None and relations is None:
+            raise ObserveMemoryError(
+                "INVALID_OBSERVE_INPUT",
+                "assess changes verdict, check_by, or relations; name at least one",
+            )
+        if any(
+            value is not None
+            for value in (category, content, tags, context, as_of, until, id)
+        ):
+            raise ObserveMemoryError(
+                "INVALID_OBSERVE_INPUT",
+                "assess changes only a unit's verdict, check_by, and relations; "
+                "its text and other fields stay as they are",
+            )
     # A unit id names the unit and the version the caller saw; the guards are filled from the
     # page the write reads under the lease, once the unit id has matched it.
     if op in {"update", "remove"} and not (unit_ref or unit):
@@ -264,10 +294,16 @@ def observe_memory(
     )
     current_unit = None
     if unit is not None:
-        unit_ref, expected_fingerprint = _bind_unit_id(
-            vault_root, current.document, unit,
-            definitions_unavailable=current.definitions_unavailable,
-        )
+        if op in {"supersede", "assess"}:
+            unit_ref, expected_fingerprint = _bind_claim_id(
+                vault_root, current.document, unit,
+                definitions_unavailable=current.definitions_unavailable,
+            )
+        else:
+            unit_ref, expected_fingerprint = _bind_unit_id(
+                vault_root, current.document, unit,
+                definitions_unavailable=current.definitions_unavailable,
+            )
     if unit_ref:
         resolution = current.document.resolve_unit(
             unit_ref,
@@ -308,16 +344,232 @@ def observe_memory(
             current_unit.span.end_offset,
         )
         removed_unit = current_unit
+    elif op in {"supersede", "assess"}:
+        page_projects = _page_projects(frontmatter)
+        page_type = (
+            str(frontmatter["type"]) if frontmatter.get("type") is not None else None
+        )
+        existing_anchors: set[str | None] = {
+            unit.anchor
+            for unit in current.document.units
+            if unit.anchor
+        }
+        resolved = (
+            _span_claim_target(body, str(span), current.document, existing_anchors)
+            if span is not None
+            else _resolved_claim(body, current_unit, existing_anchors)
+        )
+        if op == "supersede":
+            assert content is not None
+            rel_registry = (
+                current.definitions.snapshots["relations"].typed
+                if current.definitions is not None
+                else relation_registry.core_registry()
+            )
+            superseding = _superseding_unit(
+                current.document, rel_registry, editable.rel_path, resolved.unit
+            )
+            if superseding is not None:
+                raise ObserveMemoryError(
+                    "SUPERSEDE_TARGET_ALREADY_SUPERSEDED",
+                    f"the claim is already superseded by unit "
+                    f"{unit_id(superseding)}",
+                    "Supersede the successor instead, or read the page's units "
+                    "for the current ids.",
+                )
+            if kind is not None:
+                selected_kind = _select_kind(
+                    language,
+                    kind=kind,
+                    current_unit=None,
+                    projects=page_projects,
+                    page_type=page_type,
+                )
+            elif resolved.kind is not None:
+                selected_kind = resolved.kind
+            else:
+                admitted = set(
+                    _admitted_kind_keys(
+                        language, projects=page_projects, page_type=page_type
+                    )
+                )
+                replacements = sorted(language.kinds_with("replacement") & admitted)
+                if len(replacements) != 1:
+                    raise ObserveMemoryError(
+                        "REPLACEMENT_KIND_REQUIRED",
+                        f"{len(replacements)} admitted kinds carry the "
+                        "replacement trait; the successor's kind must be named",
+                        "Pass `kind` with one of the replacement kinds: "
+                        + (", ".join(replacements) if replacements else "none admitted")
+                        + ".",
+                    )
+                selected_kind = replacements[0]
+            if selected_kind in semantic_kinds.compact_kinds():
+                raise ObserveMemoryError(
+                    "UNSUPPORTED_SEMANTIC_KIND",
+                    "supersede writes a rich replacement unit; a compact "
+                    "observation cannot carry a supersedes relation",
+                )
+            normalized_category = (
+                _canonical_category(str(category))
+                if category is not None and str(category).strip()
+                else resolved.category
+            )
+            normalized_content = str(content).strip()
+            if "[[" in normalized_content:
+                normalized_content, link_warnings = vault.normalize_body_wikilinks(
+                    normalized_content,
+                    vault_root,
+                    resolver=find.writer_resolver_snapshot(vault_root),
+                )
+            normalized_tags = _canonical_tags(tags or [])
+            normalized_context = _canonical_context(context)
+            normalized_relations = unit_edges.add_unit_edges(
+                (unit_edges.supersession_edge(rel_registry, resolved.anchor),),
+                _canonical_relations(relations or []),
+            )
+            normalized_verdict = None
+            normalized_check_by = None
+            normalized_as_of = _canonical_date(as_of, "as_of") if as_of else None
+            normalized_until = None
+            preserved_metadata: tuple[tuple[str, str], ...] = ()
+            target_anchor = _generated_anchor(
+                selected_kind,
+                normalized_category,
+                normalized_content,
+                normalized_tags,
+                normalized_context,
+                normalized_relations,
+                existing_anchors,
+            )
+            rendered = _render_unit(
+                kind=selected_kind,
+                category=normalized_category,
+                content=normalized_content,
+                tags=normalized_tags,
+                context=normalized_context,
+                relations=normalized_relations,
+                anchor=target_anchor,
+                as_of=normalized_as_of,
+            )
+            after_body = semantic_units.apply_splices(body, resolved.edits)
+            after_body = _append_rich(after_body, rendered)
+        else:
+            # assess changes verdict, check_by, or relations — never the claim's text.
+            normalized_verdict = _resolve_verdict(verdict, resolved.unit, language)
+            normalized_check_by = _resolve_check_by(check_by, resolved.unit)
+            added_relations = _canonical_relations(relations or [])
+            normalized_category = resolved.category
+            normalized_content = resolved.content
+            if resolved.unit is not None and resolved.unit.form == "rich":
+                selected_kind = str(resolved.kind)
+                if kind is not None and _select_kind(
+                    language,
+                    kind=kind,
+                    current_unit=None,
+                    projects=page_projects,
+                    page_type=page_type,
+                ) != selected_kind:
+                    raise ObserveMemoryError(
+                        "INVALID_OBSERVE_INPUT",
+                        "assess keeps the unit's kind",
+                    )
+                normalized_tags = tuple(resolved.unit.tags)
+                normalized_context = resolved.unit.context
+                normalized_relations = unit_edges.add_unit_edges(
+                    ((relation.kind, relation.target) for relation in resolved.unit.relations),
+                    added_relations,
+                )
+                normalized_as_of = resolved.unit.as_of
+                normalized_until = resolved.unit.until
+                preserved_metadata = _preserved_metadata(resolved.unit)
+                target_anchor = resolved.anchor
+                rendered = _render_unit(
+                    kind=selected_kind,
+                    category=normalized_category,
+                    content=normalized_content,
+                    tags=normalized_tags,
+                    context=normalized_context,
+                    relations=normalized_relations,
+                    anchor=target_anchor,
+                    verdict=normalized_verdict,
+                    check_by=normalized_check_by,
+                    as_of=normalized_as_of,
+                    until=normalized_until,
+                    preserved=preserved_metadata,
+                )
+                after_body = _replace_unit(
+                    body,
+                    resolved.unit.span.start_offset,
+                    resolved.unit.span.end_offset,
+                    rendered,
+                )
+            else:
+                # A compact target has nowhere to put governed metadata, so an
+                # assessment promotes it to a rich block at the body's end with
+                # the same anchor; rewriting it in place under `## Observations`
+                # would drop the compact lines below it into the new block.
+                if kind is None:
+                    raise ObserveMemoryError(
+                        "COMPACT_METADATA_REQUIRES_RICH_KIND",
+                        "governed unit metadata requires an explicit governed "
+                        "non-observation kind",
+                        _rich_kind_remediation(
+                            language,
+                            category=resolved.category,
+                            projects=page_projects,
+                            page_type=page_type,
+                        ),
+                    )
+                selected_kind = _select_kind(
+                    language,
+                    kind=kind,
+                    current_unit=None,
+                    projects=page_projects,
+                    page_type=page_type,
+                )
+                if selected_kind in semantic_kinds.compact_kinds():
+                    raise ObserveMemoryError(
+                        "UNSUPPORTED_SEMANTIC_KIND",
+                        "assessment metadata requires a rich unit",
+                    )
+                normalized_tags = (
+                    () if resolved.unit is None else tuple(resolved.unit.tags)
+                )
+                normalized_context = (
+                    None if resolved.unit is None else resolved.unit.context
+                )
+                normalized_relations = unit_edges.add_unit_edges((), added_relations)
+                normalized_as_of = None
+                normalized_until = None
+                preserved_metadata = ()
+                target_anchor = resolved.anchor
+                rendered = _render_unit(
+                    kind=selected_kind,
+                    category=normalized_category,
+                    content=normalized_content,
+                    tags=normalized_tags,
+                    context=normalized_context,
+                    relations=normalized_relations,
+                    anchor=target_anchor,
+                    verdict=normalized_verdict,
+                    check_by=normalized_check_by,
+                )
+                after_body = _remove_unit(body, *resolved.span)
+                after_body = _append_rich(after_body, rendered)
+                removed_unit = resolved.unit
     else:
         assert content is not None
+        page_projects = _page_projects(frontmatter)
+        page_type = (
+            str(frontmatter["type"]) if frontmatter.get("type") is not None else None
+        )
         selected_kind = _select_kind(
             language,
             kind=kind,
             current_unit=current_unit if proposal_mode == "update" else None,
-            projects=_page_projects(frontmatter),
-            page_type=(
-                str(frontmatter["type"]) if frontmatter.get("type") is not None else None
-            ),
+            projects=page_projects,
+            page_type=page_type,
         )
         normalized_category = _canonical_category(str(category))
         normalized_content = str(content).strip()
@@ -329,7 +581,8 @@ def observe_memory(
             )
         normalized_tags = _canonical_tags(tags or [])
         normalized_context = _canonical_context(context)
-        normalized_relations = _canonical_relations(relations or [])
+        # add and update both render the unit's whole edge set, which the seam owns.
+        normalized_relations = unit_edges.add_unit_edges((), _canonical_relations(relations or []))
         explicit_rich_kind = bool(
             kind is not None
             and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
@@ -338,8 +591,12 @@ def observe_memory(
             raise ObserveMemoryError(
                 "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
                 "typed unit relations require an explicit governed non-observation kind",
-                "Select an explicit governed non-observation kind for rich form, "
-                "or author a canonical note-level relation.",
+                _rich_kind_remediation(
+                    language,
+                    category=normalized_category,
+                    projects=page_projects,
+                    page_type=page_type,
+                ),
             )
         base_unit = current_unit if proposal_mode == "update" else None
         if base_unit is not None and relations is None and base_unit.relations:
@@ -385,9 +642,14 @@ def observe_memory(
                 "COMPACT_METADATA_REQUIRES_RICH_KIND",
                 "governed unit metadata requires an explicit governed "
                 "non-observation kind",
-                "Compact observations carry no metadata rows. Select an "
-                "explicit governed non-observation kind to keep the rich form; "
-                "or, to convert this unit to compact form, clear each governed field "
+                "Compact observations carry no metadata rows. "
+                + _rich_kind_remediation(
+                    language,
+                    category=normalized_category,
+                    projects=page_projects,
+                    page_type=page_type,
+                )
+                + " Or, to convert this unit to compact form, clear each governed field "
                 "by passing an empty string and remove any remaining "
                 "metadata rows by editing the page, since no argument clears a "
                 "row this tool does not own.",
@@ -427,12 +689,25 @@ def observe_memory(
         )
         if proposal_mode == "update":
             assert current_unit is not None
-            after_body = _replace_unit(
-                body,
-                current_unit.span.start_offset,
-                current_unit.span.end_offset,
-                rendered,
-            )
+            if current_unit.form == "compact" and selected_kind != _COMPACT_KIND:
+                # A promoted compact line cannot become a rich block in place:
+                # the compact lines after it would fall inside the new block.
+                # The line leaves and the block lands at the body end instead.
+                after_body = _append_rich(
+                    _remove_unit(
+                        body,
+                        current_unit.span.start_offset,
+                        current_unit.span.end_offset,
+                    ),
+                    rendered,
+                )
+            else:
+                after_body = _replace_unit(
+                    body,
+                    current_unit.span.start_offset,
+                    current_unit.span.end_offset,
+                    rendered,
+                )
         else:
             after_body = (
                 _add_compact(body, rendered)
@@ -454,7 +729,7 @@ def observe_memory(
     # One collector spans preflight+commit, so the response accounts for the
     # whole governed write rather than two unrelated halves. `validate` never
     # commits, so it stays entirely uninstrumented and byte-identical.
-    timings = MutationTimings() if op != "validate" else None
+    timings = MutationTimings() if not previewing else None
     try:
         with semantic_contract.call_context("write"):
             preflight = semantic_writes.preflight_existing(
@@ -474,7 +749,7 @@ def observe_memory(
                 relation_disposition=relation_disposition,
                 relation_review_hash=relation_review_hash,
                 relation_review_reason=relation_review_reason,
-                validate_only=operation == "validate",
+                validate_only=previewing,
                 stamp=temporal.stamp(authored_day),
                 timings=timings,
             )
@@ -497,17 +772,13 @@ def observe_memory(
         )
     # The authored type is looked up as written; a withheld definition refuses.
     note_type = note_types.Basis(vault_root).resolve(preflight.before.page_type).require()
-    if note_type is None or not note_types.compiled(note_type):
+    if note_type is None or not note_types.accepts_unit_writes(note_type):
         resolution = _legacy_edit_resolution(editable.rel_path)
         raise ObserveMemoryError(
             "OBSERVE_TARGET_NOT_WRITABLE_COMPILED_PAGE",
             f"{capabilities.active_tools_text('observe_memory')} only mutates "
-            "writable compiled pages",
-            # `role` is a closed attribute the note-type registry schema declares,
-            # not an entry key.
-            _entity_observation_remediation(editable.rel_path)
-            if note_type is not None and note_type.role == "entity"
-            else _legacy_routing_remediation(resolution),
+            "writable compiled and entity pages",
+            _legacy_routing_remediation(resolution),
             resolution=resolution,
         )
 
@@ -574,7 +845,7 @@ def observe_memory(
             )
         preflight = replace(preflight, read_dependency_guards=tuple(guards))
 
-    if op == "validate":
+    if previewing:
         return _result(
             operation=op,
             path=editable.rel_path,
@@ -681,9 +952,32 @@ def page_units(vault_root: Path, page: dict[str, Any]) -> Any:
                 "the selected vocabulary definitions required to list all units are unavailable"
             ),
         }
+    units = [unit for unit in selected.document.units if unit.unit_ref]
+    rel_registry = (
+        selected.definitions.snapshots["relations"].typed
+        if selected.definitions is not None
+        else relation_registry.core_registry()
+    )
+    # `superseded_by` is derived at read: the successor's `supersedes` edge is
+    # the only record; nothing writes a back-pointer into the target.
+    supersedes: dict[str, list[str]] = {}
+    superseded_by: dict[str, list[str]] = {}
+    for successor, target_unit in working_set_currency.same_page_supersessions(
+        selected.document, path, rel_registry
+    ):
+        if successor.unit_ref and target_unit.unit_ref:
+            supersedes.setdefault(unit_id(successor), []).append(unit_id(target_unit))
+            superseded_by.setdefault(unit_id(target_unit), []).append(unit_id(successor))
     return [
-        {"id": unit_id(unit), "category": unit.category, "text": unit.content}
-        for unit in selected.document.units if unit.unit_ref
+        {
+            "id": unit_id(unit),
+            "category": unit.category,
+            "text": unit.content,
+            "as_of": unit.as_of,
+            "supersedes": supersedes.get(unit_id(unit), []),
+            "superseded_by": superseded_by.get(unit_id(unit), []),
+        }
+        for unit in units
     ]
 
 
@@ -724,6 +1018,215 @@ def _bind_unit_id(
             "Read the unit again and retry with the current id.",
         )
     return str(current.unit_ref), str(current.fingerprint)
+
+
+def _bind_claim_id(
+    vault_root: Path, document: Any, unit: str, *, definitions_unavailable: bool = False,
+) -> tuple[str, str]:
+    """The unit_ref and fingerprint of the claim `unit` names.
+
+    A supersede or assess target may name its claim by anchor (the stable name a
+    `supersedes` edge keeps, in any form the fragment resolver takes) or by the
+    versioned unit id a read returned. An anchor names the claim as it stands, so
+    it binds through the unit's current id; every id then binds as any other unit
+    write binds it (`_bind_unit_id`), with its visibility rule and refusals.
+    """
+    text = str(unit).strip()
+    if not egress.caller_restricted(vault_root):
+        resolution = document.resolve_fragment(text)
+        if resolution.status == "ambiguous":
+            raise ObserveMemoryError(
+                "AMBIGUOUS_UNIT_REFERENCE", f"unit {unit} names more than one unit of this note"
+            )
+        if resolution.unit is not None and resolution.unit.unit_ref:
+            text = unit_id(resolution.unit)
+    return _bind_unit_id(
+        vault_root, document, text, definitions_unavailable=definitions_unavailable
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedClaim:
+    """The claim a supersede or assess names: a parsed unit or a list item to convert."""
+
+    unit: Any | None
+    anchor: str
+    category: str
+    kind: str | None
+    form: str
+    content: str
+    span: tuple[int, int]
+    edits: tuple[tuple[int, int, str], ...] = ()
+
+
+def _resolved_claim(
+    body: str, unit: Any, existing_anchors: set[str | None],
+) -> _ResolvedClaim:
+    """A parsed unit as a claim target, gaining an anchor by splice when it has none."""
+    category = unit.category_key or _canonical_category(unit.category or "")
+    kind = unit.kind if unit.form == "rich" else None
+    anchor = unit.anchor
+    edits: tuple[tuple[int, int, str], ...] = ()
+    if not anchor:
+        anchor = _generated_anchor(
+            kind or _COMPACT_KIND,
+            category,
+            unit.content,
+            tuple(unit.tags),
+            unit.context,
+            (),
+            existing_anchors,
+        )
+        if unit.form == "compact":
+            edits = ((unit.span.end_offset, unit.span.end_offset, f" ^{anchor}"),)
+        else:
+            edits = (_rich_id_edit(body, unit, anchor),)
+    return _ResolvedClaim(
+        unit=unit,
+        anchor=anchor,
+        category=category,
+        kind=kind,
+        form=unit.form,
+        content=unit.content,
+        span=(unit.span.start_offset, unit.span.end_offset),
+        edits=edits,
+    )
+
+
+def _span_claim_target(
+    body: str, span: str, document: Any, existing_anchors: set[str | None],
+) -> _ResolvedClaim:
+    """The claim an exact span names: a unit it sits in, or the list item it converts."""
+    targets = [
+        target
+        for target in semantic_units.claim_targets(body, document.units)
+        # A rich unit's list rows are its metadata, not claims: `unit` names a rich unit.
+        if target.unit is None or target.unit.form != "rich"
+    ]
+    matches = [target for target in targets if span in target.item.text]
+    if len(matches) > 1:
+        raise ObserveMemoryError(
+            "SUPERSEDE_TARGET_AMBIGUOUS",
+            f"the span lies inside {len(matches)} claim list items",
+            "Quote more of the claim's exact text, or read the page's units "
+            "and pass the unit's `unit` id.",
+        )
+    if not matches:
+        raise ObserveMemoryError(
+            "SUPERSEDE_TARGET_NOT_FOUND",
+            "the span lies inside no top-level claim list item of this note",
+            "Quote the exact text of one claim line, or read the page's units "
+            "and pass the unit's `unit` id.",
+        )
+    target = matches[0]
+    if target.unit is not None:
+        return _resolved_claim(body, target.unit, existing_anchors)
+    if target.refusal is not None:
+        raise ObserveMemoryError("SUPERSEDE_TARGET_NOT_A_CLAIM", *_not_a_claim(target.refusal))
+    if target.category is None:
+        raise ObserveMemoryError(
+            "INVALID_SEMANTIC_CATEGORY",
+            "the claim's `##` section names no governed category",
+            "Move the claim under a section that names a category, or pass "
+            "`unit` naming the unit directly.",
+        )
+    anchor, conversion = claim_conversion(target, existing_anchors)
+    return _ResolvedClaim(
+        unit=None,
+        anchor=anchor,
+        category=target.category,
+        kind=None,
+        form="compact",
+        content=target.item.text,
+        span=(target.item.start, target.item.end),
+        edits=(conversion,),
+    )
+
+
+def _not_a_claim(refusal: semantic_units.ClaimRefusal) -> tuple[str, str]:
+    """Why a list item cannot become a unit in place, and the next step: one per refusal."""
+    edit = capabilities.active_tools_text("edit_memory")
+    other = "To correct a claim, quote that claim's own text or pass its `unit` id."
+    match refusal:
+        case "relation":
+            return (
+                "the span lies inside a typed relation line, which is a link, not a claim",
+                f"To change the relation, edit its line with {edit}. {other}",
+            )
+        case "links_only":
+            return (
+                "the span lies inside a list item that holds only links",
+                f"To change the links, edit the line with {edit}. {other}",
+            )
+        case "task":
+            return (
+                "the span lies inside a task item (`- [ ] ...`), which stays a task, not a claim",
+                f"To change the task, edit its line with {edit}. {other}",
+            )
+        case "inline_field":
+            return (
+                "the span lies inside a Dataview inline field (`key:: value`); "
+                "a converted line would change what Dataview reads",
+                f"Edit the field's value with {edit}. {other}",
+            )
+        case "wraps":
+            return (
+                "the claim item runs past one line, so it cannot become a compact unit in place",
+                f"Join the item into one line with {edit}, then send this call again.",
+            )
+    assert_never(refusal)
+
+
+def claim_conversion(
+    target: semantic_units.ClaimTarget, existing_anchors: set[str | None],
+) -> tuple[str, tuple[int, int, str]]:
+    """The anchor a convertible claim item gains and the splice that makes it a compact unit.
+
+    The span path and the reviewed audit fix both convert through here: the item
+    keeps its indent and text bytes and gains `[<category>]` and `^<anchor>`. The
+    anchor joins `existing_anchors`, so a batch of conversions never collides.
+    """
+    item = target.item
+    category = str(target.category)
+    anchor = _generated_anchor(_COMPACT_KIND, category, item.text, (), None, (), existing_anchors)
+    existing_anchors.add(anchor)
+    return anchor, (item.start, item.end, f"{item.indent}- [{category}] {item.text} ^{anchor}")
+
+
+def _rich_id_edit(body: str, unit: Any, anchor: str) -> tuple[int, int, str]:
+    """The splice giving a rich unit an `- id:` row: after `category`, else first."""
+    start = unit.span.start_offset
+    end = unit.span.end_offset
+    position = start
+    fallback = start
+    for index, line in enumerate(body[start:end].splitlines(keepends=True)):
+        position += len(line)
+        if index == 0:
+            fallback = position
+            continue
+        key = semantic_units.rich_metadata_key(line)
+        if key is None:
+            break
+        if key == "category":
+            return (position, position, f"- id: {anchor}\n")
+    return (fallback, fallback, f"- id: {anchor}\n")
+
+
+def _superseding_unit(
+    document: Any,
+    rel_registry: relation_registry.RelationRegistry,
+    path: str,
+    unit: Any | None,
+) -> Any | None:
+    """The unit already superseding `unit` on this page, if any; a converted item has none."""
+    if unit is None or unit.unit_ref is None:
+        return None
+    for successor, target in working_set_currency.same_page_supersessions(
+        document, path, rel_registry
+    ):
+        if target.unit_ref == unit.unit_ref:
+            return successor
+    return None
 
 
 def _legacy_page_given_form(path: str) -> str:
@@ -770,6 +1273,29 @@ def _select_kind(
         language, projects
     )
     resolution = registry.resolve_kind(raw, page_type=page_type)
+    keeps_its_kind = (
+        current_unit is not None
+        and current_unit.form == "rich"
+        and current_unit.kind == resolution.resolved
+    )
+    refusal = _kind_refusal(registry, raw, resolution, keeps_its_kind=keeps_its_kind)
+    if refusal is not None:
+        raise refusal
+    return str(resolution.resolved)
+
+
+def _kind_refusal(
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    raw: str,
+    resolution: Any,
+    *,
+    keeps_its_kind: bool,
+) -> ObserveMemoryError | None:
+    """Why this tool cannot write a unit of the resolved kind, or None when it can.
+
+    `_select_kind` raises it and `_admitted_kind_keys` lists only the kinds it
+    passes, so a remediation never offers a kind that the write then refuses.
+    """
     if resolution.resolved is None or resolution.status in {
         "unregistered",
         "registry_invalid",
@@ -777,26 +1303,19 @@ def _select_kind(
         "deprecated",
     }:
         replacement = f"; use {resolution.replacement!r}" if resolution.replacement else ""
-        raise ObserveMemoryError(
+        return ObserveMemoryError(
             "UNSUPPORTED_SEMANTIC_KIND",
             f"kind {raw!r} is not an active governed rich kind{replacement}",
         )
-    if resolution.resolved == _COMPACT_KIND:
-        return _COMPACT_KIND
-    keeps_its_kind = (
-        current_unit is not None
-        and current_unit.form == "rich"
-        and current_unit.kind == resolution.resolved
-    )
     if registry.has(resolution.resolved, "credence") and not keeps_its_kind:
         # This tool takes no holder or credence, so a new belief from it would be nobody's.
-        raise ObserveMemoryError(
+        return ObserveMemoryError(
             "UNSUPPORTED_SEMANTIC_KIND",
             f"kind {raw!r} records one holder's credence, and "
             f"{capabilities.active_tools_text('observe_memory')} takes no holder or credence",
             _belief_remediation(),
         )
-    return resolution.resolved
+    return None
 
 
 def _belief_remediation() -> str:
@@ -806,6 +1325,40 @@ def _belief_remediation() -> str:
         f"{capabilities.active_tools_text('edit_memory')}, or with "
         f"{capabilities.active_tools_text('remember')} for a new page."
     )
+
+
+def _admitted_kind_keys(
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    projects: tuple[str, ...],
+    page_type: str | None,
+) -> tuple[str, ...]:
+    """The rich kind keys the page's selected registry admits for a new unit."""
+    registry = semantic_language_registry.for_attached_projects(language, projects)
+    return tuple(sorted(
+        key
+        for key in set(registry.registry.core_kinds) | set(registry.registry.kinds)
+        if key not in semantic_kinds.compact_kinds()
+        and _kind_refusal(
+            registry, key, registry.resolve_kind(key, page_type=page_type), keeps_its_kind=False
+        ) is None
+    ))
+
+
+def _rich_kind_remediation(
+    language: semantic_language_registry.SemanticLanguageRegistry,
+    *,
+    category: str,
+    projects: tuple[str, ...],
+    page_type: str | None,
+) -> str:
+    """The named next step: pass `kind`, with the registry's admitted keys listed."""
+    kinds = _admitted_kind_keys(language, projects=projects, page_type=page_type)
+    hint = (
+        f"`category` names the admitted kind {category!r}: pass `kind=\"{category}\"` instead. "
+        if category in kinds else ""
+    )
+    return f"{hint}Pass `kind` with one of the admitted kinds: {', '.join(kinds)}."
 
 
 def _page_projects(frontmatter: dict[Any, Any]) -> tuple[str, ...]:

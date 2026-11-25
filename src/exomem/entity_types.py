@@ -1025,7 +1025,7 @@ class _Adapter:
     ) -> None:
         if key in ENTITY_TYPES_BY_ID:
             raise vocabulary_registry.RegistryError(
-                f"PACK_ENTRY_FIXED: {key!r} ships with Exomem; this overlay grammar cannot "
+                f"PACK_ENTRY_FIXED: {key!r} ships with Evermatter; this overlay grammar cannot "
                 "patch a shipped entity type"
             )
         rows = document["entity_types"]

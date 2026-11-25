@@ -36,7 +36,7 @@ Run from the repo root:
 uv sync
 uv run python -m pytest -q
 uvx ruff check .
-npm exec --yes @fission-ai/openspec -- validate --specs --strict
+source infra/tool-versions.env && node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --
 uv run exomem demo --json
 uv run python scripts/generate-capabilities.py --check
 uv build
@@ -45,7 +45,7 @@ uv build
 After a release with GHCR publishing enabled, smoke the published image:
 
 ```bash
-docker run --rm ghcr.io/artexis10/exomem:latest demo --json
+docker run --rm ghcr.io/substrate-systems/evermatter:latest demo --json
 ```
 
 Optional host-specific checks:
@@ -251,8 +251,17 @@ python scripts/check_pr_title.py "fix(release): preserve parsed squash commits"
 
 ## Release flow
 
-Pull requests, draft or ready, run the partial tier on Python 3.11, the
-supported floor. Docs-only pull requests narrow it to the tests that read docs.
+Pull requests, draft or ready, run the partial tier without its core and harness
+shards. A pull request runs the test modules that it adds or changes instead,
+and the repository-wide guard modules that `tests/pr_guard_modules.txt` lists:
+core modules on Python 3.11, the supported floor, and on 3.13, and harness
+modules on 3.11. A module belongs in that list when it guards an invariant that
+a change elsewhere can break, and it stays cheap. Docs-only pull requests narrow
+the tier to the tests that read docs. Every push to main runs all core and
+harness shards on Python 3.11. A failure that only those shards or the Full
+tier catch is fixed forward on main. When the required gate fails on a push to
+main, one open issue labelled `ci-main-failing` names the run and the commit,
+and a later green push run closes it.
 Full coverage runs only on schedule or dispatch, on main or on a source branch
 on request. It covers Python 3.11 and 3.13, every specialized Full job, and the
 latency gate. Paired recall uses four
@@ -269,11 +278,14 @@ One scope job selects the CI policy: Full runs only on schedule or dispatch.
 After its required gate passes, a Full run retains `full-ci-evidence-RUN-ATTEMPT`
 with the actual checkout commit and Git tree. The selector verifies repository,
 workflow, issuer gate, full scope, and the tested commit. It compares that tested
-tree with merged main. Release evidence is a Full run on main, or a Full run
-dispatched on the source branch whose tree equals the merged tree. Identical
+tree with merged main. Release evidence is a Full run on main or on the release
+cut, or a retained receipt from an earlier Full run on the pull request's head
+whose tree equals the merged tree. Identical
 trees reuse proof after squash; a changed tree, expired receipt, or incomplete
 proof uses the Full fallback. Legacy receipt-free evidence remains eligible only
-for a scheduled or dispatched Full run at its exact main commit.
+for a scheduled or dispatched Full run at its exact main commit. A feature
+branch cannot dispatch Full (`release_evidence.py scope` refuses it), so new
+evidence comes from main, the schedule or the release cut's own Full run.
 
 A retry can inherit an earlier successful gate. The receipt keeps its issuing
 attempt and names the latest successful attempt separately. Qualification does
@@ -284,11 +296,24 @@ at that commit and runs the pinned Release Please action against that branch.
 Later main commits do not change the selected source. Main remains available
 for normal merges and PR pushes.
 
-1. Resolve the merged source; expect one full immutable commit identity.
+1. In a checkout of this repository, pick the source; expect one full commit identity.
 
 ```bash
-source_commit=$(gh api "repos/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/commits/main" --jq .sha)
+source_commit=$(GH_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" python3 scripts/release_cuts.py pick-source | jq -er .source)
 ```
+
+`pick-source` picks the newest main commit since the last release that has
+successful Full evidence the cut can reuse. Its JSON names that evidence run.
+When no such commit exists, it picks main's tip and prints `"evidence_run": null`,
+and the cut runs its own Full fallback. Later main commits wait for the next
+release. To release main's tip regardless, set `source_commit` to main's head.
+The merge queue workflow keeps that evidence recent: after each landing on main
+it dispatches Full on main when no Full run on main or on a cut is running or
+has tested main's tip, no release-evidence run (such as an open cut's controller)
+is in progress, and no Full run on main started within `FULL_EVIDENCE_HOURS` (a
+repository variable, default 4; `0` turns it off) since the newest release
+reconciliation. So the first landing after a cut finishes usually starts the
+next Full.
 
 2. Start or resume the cut; expect one controller run on main for that source.
 
@@ -389,8 +414,9 @@ The receipt reports the verification attempt separately. Manual qualification
 uses `--attempt` for the original build and `--verification-attempt` for the
 publication retry to inspect. Verification defaults to the original attempt.
 The helper verifies actual bytes from the producer, GitHub Release, and PyPI.
-It retries missing PyPI distributions for at most six observations, ten seconds
-apart. Conflicting immutable bytes fail immediately.
+It retries missing PyPI distributions with a bounded backoff
+(`PYPI_OBSERVATION_PAUSES` in `infra/scripts/release_recovery.py`, five minutes
+in total). Conflicting immutable bytes fail immediately.
 
 Python qualification leaves images unqualified and consumer verification
 unverified. It grants no installation or rollout authority. Report source-ready

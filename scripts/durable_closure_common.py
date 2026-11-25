@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Bounded public-MCP diagnostic for Exomem and Basic Memory's Markdown core.
+"""Bounded public-MCP diagnostic for Evermatter and Basic Memory's Markdown core.
 
 This deliberately reports two product rows; it is not a competitive score.
 Only public MCP calls take part in the timed workflow.  Corpus construction
@@ -560,17 +560,28 @@ def runtime_provenance(
     expected_version: str | None,
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    if package == "exomem":
+        # The product was renamed; its own list names the distributions to try.
+        from exomem.install_info import DISTRIBUTION_NAMES as distributions
+    else:
+        distributions = (package,)
     probe = (
-        "import hashlib, importlib.metadata as m, json, os, pathlib, "
-        f"{package.replace('-', '_')} as p; "
-        "path=pathlib.Path(p.__file__); "
-        "deps=sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
-        'if d.metadata.get("Name")); '
-        "print(json.dumps({'version':m.version('"
-        + package
-        + "'),'module_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),"
-        "'dependencies':deps,'package_root':str(path.parent),"
-        "'runtime_pythonpath_root':os.environ.get('PYTHONPATH')}))"
+        "import hashlib, importlib.metadata as m, json, os, pathlib\n"
+        f"import {package.replace('-', '_')} as p\n"
+        "version = None\n"
+        f"for name in {tuple(distributions)!r}:\n"
+        "    try:\n"
+        "        version = m.version(name)\n"
+        "        break\n"
+        "    except m.PackageNotFoundError:\n"
+        "        continue\n"
+        "path = pathlib.Path(p.__file__)\n"
+        "deps = sorted(f'{d.metadata[\"Name\"]}=={d.version}' for d in m.distributions() "
+        'if d.metadata.get("Name"))\n'
+        "print(json.dumps({'version': version,"
+        "'module_sha256': hashlib.sha256(path.read_bytes()).hexdigest(),"
+        "'dependencies': deps, 'package_root': str(path.parent),"
+        "'runtime_pythonpath_root': os.environ.get('PYTHONPATH')}))\n"
     )
     try:
         installed = json.loads(
@@ -893,7 +904,7 @@ def inspect_indexed_fixture(
             version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
             if version != (str(EXOMEM_LEXICAL_SCHEMA_VERSION),):
                 raise AdapterFault(
-                    "incompatible indexed-store schema: unsupported Exomem lexical version"
+                    "incompatible indexed-store schema: unsupported Evermatter lexical version"
                 )
             _require_columns(conn, "pages", {"path", "in_kb", "in_vault"})
             _require_columns(conn, "fts", {"stemmed"})
@@ -1037,7 +1048,7 @@ async def _await_exomem_mutation(
 
 
 def _permit_refusal_envelopes(client: Any) -> None:
-    """Keep a valid Exomem warming/refusal envelope visible to this diagnostic."""
+    """Keep a valid Evermatter warming/refusal envelope visible to this diagnostic."""
     for owner in (client, getattr(client, "session", None)):
         schemas = getattr(owner, "_tool_output_schemas", None)
         if isinstance(schemas, dict):
@@ -1223,7 +1234,7 @@ def _written_path(reply: Mapping[str, Any]) -> str:
 def _remember_commit_arguments(
     validation: Mapping[str, Any], *, title: str, content: str
 ) -> dict[str, Any]:
-    """Replay the accepted Exomem draft, adding a review disposition only when required."""
+    """Replay the accepted Evermatter draft, adding a review disposition only when required."""
     arguments: dict[str, Any] = {
         "title": title,
         "note_type": "insight",
@@ -1450,7 +1461,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="bounded initial public and full-index readiness wait in seconds",
     )
     parser.add_argument(
-        "--python", type=Path, default=Path(sys.executable), help="explicit Exomem interpreter"
+        "--python", type=Path, default=Path(sys.executable), help="explicit Evermatter interpreter"
     )
     parser.add_argument("--basic-memory-executable", type=Path, required=True)
     parser.add_argument("--basic-memory-wheel", type=Path, default=None)

@@ -48,7 +48,7 @@ def _messy_vault(tmp_path: Path) -> Path:
 def test_default_claude_config_path_honors_relocated_config_dir(tmp_path: Path) -> None:
     config_dir = tmp_path / "relocated-claude"
 
-    assert setup_wizard._default_claude_config_path(  # noqa: SLF001
+    assert client_config.default_claude_config_path(
         {"CLAUDE_CONFIG_DIR": str(config_dir)}
     ) == config_dir / ".claude.json"
 
@@ -87,7 +87,7 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert code == 0
     # KB scaffold landed; skill installed under the injected home
     assert (vault / "Knowledge Base" / "index.md").is_file()
-    assert (home / "skills" / "exomem" / "SKILL.md").is_file()
+    assert (home / "skills" / "evermatter" / "SKILL.md").is_file()
     selected = json.loads((vault / "Knowledge Base" / "_Packs" / "selected-packs.json").read_text(encoding="utf-8"))
     assert selected["selected_pack_ids"] == ["personal-records"]
     # pre-init scan surfaced the existing content, likely packs, and write contract
@@ -104,7 +104,7 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
         if c[1:3] == ["mcp", "add-json"] and "claude" in c[0]
     ]
     assert reg[0].endswith("claude.CMD")
-    assert reg[1:6] == ["mcp", "add-json", "--scope", "user", "exomem"]
+    assert reg[1:6] == ["mcp", "add-json", "--scope", "user", "evermatter"]
     registration = json.loads(reg[6])
     assert registration["type"] == "stdio"
     assert registration["args"][-2:] == ["--transport", "stdio"]
@@ -176,7 +176,7 @@ def test_rerun_converges_to_skips(tmp_path: Path) -> None:
 
 def test_foreign_skill_is_preserved(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
-    target = home / "skills" / "exomem"
+    target = home / "skills" / "evermatter"
     target.mkdir(parents=True)
     (target / "SKILL.md").write_text("---\nname: my-custom-skill\n---\n", encoding="utf-8")
     code, out = _setup(vault, home, Recorder())
@@ -187,7 +187,7 @@ def test_foreign_skill_is_preserved(tmp_path: Path) -> None:
 
 def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     """A pre-rename install at skills/knowledge-base is retired once the renamed skill
-    lands at skills/exomem."""
+    lands at skills/evermatter."""
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     legacy = home / "skills" / "knowledge-base"
     legacy.mkdir(parents=True)
@@ -197,7 +197,7 @@ def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     )
     code, out = _setup(vault, home, Recorder())
     assert code == 0
-    assert (home / "skills" / "exomem" / "SKILL.md").is_file()
+    assert (home / "skills" / "evermatter" / "SKILL.md").is_file()
     assert not legacy.exists()
     assert "removed stale" in out
 
@@ -462,19 +462,19 @@ def test_http_route_registers_native_claude_and_codex_clients(tmp_path: Path) ->
         "http",
         "--scope",
         "user",
-        "exomem",
+        "evermatter",
         "https://kb.example.com/mcp",
     ]
     assert codex_add == [
         "C:/fake/codex.CMD",
         "mcp",
         "add",
-        "exomem",
+        "evermatter",
         "--url",
         "https://kb.example.com/mcp",
     ]
     assert "claude mcp" in out and "/mcp" in out
-    assert "codex mcp login exomem" in out
+    assert "codex mcp login evermatter" in out
 
 
 def _write_shadowing_claude_configs(config_path: Path, project_dir: Path) -> None:
@@ -521,6 +521,35 @@ def test_explicit_replacement_removes_every_shadowing_claude_scope(tmp_path: Pat
     assert {c[c.index("--scope") + 1] for c in removals} == {"local", "project", "user"}
     assert "local, project, user" in out
     assert [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+
+
+def test_explicit_replacement_keeps_a_claude_registration_under_the_evermatter_key(
+    tmp_path: Path,
+) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    config_path = tmp_path / ".claude.json"
+    config_path.write_text(
+        json.dumps({"mcpServers": {"evermatter": {"command": "exomem", "args": []}}}),
+        encoding="utf-8",
+    )
+    recorder = Recorder()
+
+    code, _out = _setup(
+        vault,
+        home,
+        recorder,
+        claude_config_path=config_path,
+        mcp_url="https://kb.example.com/mcp",
+        replace_client_registration=True,
+    )
+
+    assert code == 0
+    claude_removals = [c for c in recorder.calls if c[1:3] == ["mcp", "remove"] and "claude" in c[0]]
+    assert [c[3:] for c in claude_removals] == [["evermatter", "--scope", "user"]]
+    # The replacement keeps the user's key, so their tool prefix does not change.
+    claude_adds = [c for c in recorder.calls if c[1:3] == ["mcp", "add"] and "claude" in c[0]]
+    assert len(claude_adds) == 1
+    assert claude_adds[0][claude_adds[0].index("--scope") + 2] == "evermatter"
 
 
 def test_failed_claude_replacement_restores_every_snapshotted_file(tmp_path: Path) -> None:
@@ -805,7 +834,7 @@ def test_codex_is_registered_through_its_cli_when_available(tmp_path: Path) -> N
 
     assert code == 0
     (reg,) = [c for c in recorder.calls if "add" in c and "codex" in c[0]]
-    assert reg[1:4] == ["mcp", "add", "exomem"]
+    assert reg[1:4] == ["mcp", "add", "evermatter"]
     assert f"EXOMEM_VAULT_PATH={vault}" in reg
     # --transport stdio must be explicit: the server defaults to http.
     assert "--transport" in reg and "stdio" in reg
@@ -846,7 +875,7 @@ def test_codex_falls_back_to_config_toml_when_its_cli_cannot_register(
 
     assert code == 0
     written = (codex_home / "config.toml").read_text(encoding="utf-8")
-    assert "[mcp_servers.exomem]" in written
+    assert "[mcp_servers.evermatter]" in written
     assert 'model = "gpt-5"' in written, "must not clobber the user's other settings"
     assert "config.toml" in out
 
@@ -952,7 +981,7 @@ def test_scripted_setup_writes_no_instruction_file_unless_the_flag_asks(
 def test_a_level_saved_through_the_agent_keeps_setup_from_offering_the_instruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A user who told their agent "coding: off" asked Exomem to save only on request.
+    """A user who told their agent "coding: off" asked Evermatter to save only on request.
     Setup reads the vault's saved level as the owner, so it must not offer the
     instruction that asks for unprompted saves.
     """

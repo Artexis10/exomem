@@ -54,7 +54,7 @@ class MembershipUnresolved(Exception):
 
 @dataclass(frozen=True)
 class MembershipOutcome:
-    """Non-Markdown membership that is either proven or safely unresolved."""
+    """Non-Markdown membership with the proven scopes retained on an unresolved read."""
 
     state: Literal["classified", "unresolved"]
     scope_ids: frozenset[str]
@@ -145,6 +145,43 @@ def path_selector_matches(patterns: tuple[str, ...], rel_path: str) -> bool:
 def ref_selector_matches(values: tuple[str, ...], rel_path: str) -> bool:
     """Whether a path form in a `refs` or `exclude_refs` value list names `rel_path`, by the rule that scope membership applies."""
     return _matches_refs(values, rel_path)
+
+
+def _glob_below(pattern: str, folder: str) -> bool | None:
+    """Whether `fnmatchcase` matches `pattern` to every name longer than `folder` that starts with it (True),
+    to none (False), or maybe to some (None)."""
+    # fnmatch opens a wildcard at `*`, `?` or `[`; an unclosed `[` is literal there, which only shortens this prefix.
+    wild = min((index for index in map(pattern.find, "*?[") if index >= 0), default=len(pattern))
+    literal = pattern[:wild]
+    if not folder.startswith(literal):
+        return None if literal.startswith(folder) else False
+    if wild == len(pattern):
+        return False  # a literal no longer than the folder names no name below it
+    return True if not pattern[wild:].strip("*") else None
+
+
+def below_form(folder: str) -> str:
+    """The KB-relative form of `folder`: every path below `folder` has a KB-relative form below it."""
+    return _relative_to_kb(folder + "x")[:-1]
+
+
+def path_selector_below(patterns: tuple[str, ...], folder: str) -> bool | None:
+    """Whether `path_selector_matches(patterns, path)` holds for every path below `folder` (True), for none
+    (False), or maybe for some (None).
+
+    A path below `folder`, which ends with ``/``, starts with it and ends with a file name, so that no
+    normalization strips its end.
+    """
+    found = {_glob_below(pattern, form) for pattern in patterns for form in (folder, below_form(folder))}
+    return True if True in found else None if None in found else False
+
+
+def ref_selector_below(values: tuple[str, ...], folder: str) -> bool | None:
+    """False when no path form in `values` names a path below `folder` (as `path_selector_below` reads it),
+    else None: a ref names one path, so it may name some of them."""
+    forms = (folder, below_form(folder))
+    named = _normalized_refs(values, managed_root_rel())
+    return None if any(value.startswith(form) for value in named for form in forms) else False
 
 
 def _scope_matches(scope: Scope, subject: MetadataSubject) -> bool:
@@ -426,10 +463,8 @@ def evaluate_path_only(
 
     dependency = None
     inherited = frozenset()
-    if not resolve_bytes:
-        if document_containers.in_payload_tree(rel_path):
-            return MembershipOutcome("unresolved", frozenset(), "metadata_required")
-    else:
+    missing_metadata = not resolve_bytes and document_containers.in_payload_tree(rel_path)
+    if resolve_bytes:
         try:
             dependency = document_containers.parent_for_path(vault_root, rel_path, artifact_copy=artifact_copy)
             inherited = frozenset() if dependency is None else _current_parent_scopes(
@@ -474,7 +509,8 @@ def evaluate_path_only(
                 )
             )
             if not positive or semantic_exclusion:
-                return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
+                missing_metadata = True
+                continue
             matched.add(scope_id)
             continue
         if _path_ref_matches(scope, rel_path):
@@ -482,6 +518,8 @@ def evaluate_path_only(
             continue
         if _needs_frontmatter(scope):
             undecided.append((scope_id, scope))
+    if missing_metadata:
+        return MembershipOutcome("unresolved", frozenset(matched), "metadata_required")
     if undecided:
         if assigned is not None and proposed_companion is None:
             try:
@@ -622,7 +660,9 @@ def inheritance_edge(
     page = Path(rel_path)
     if part_of and (source := extraction_parts.source_page_for(page)) is not None:
         return InheritanceEdge(PART_EDGE, source.as_posix())
-    if parent_media is not None and page.parent == scene_frames.frames_dir_for(Path(parent_media)):
+    # A value without a file name, such as "/", names no video and so no frames folder.
+    if (parent_media is not None and (video := Path(parent_media)).name
+            and page.parent == scene_frames.frames_dir_for(video)):
         return InheritanceEdge(FRAME_EDGE, parent_media + ".md")
     return None
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://exomem.dev/schemas/upgrade-barriers-v1.json",
-  "title": "Exomem Cloud upgrade barriers",
+  "title": "Evermatter Cloud upgrade barriers",
   "description": "automate-cloud-releases D3: each release that is one-way or needs an operator step. The cloud-deploy workflow stops on an uncrossed entry, and cellctl holds a failed attempt across a one-way cell entry instead of restoring it.",
   "type": "object",
   "additionalProperties": false,

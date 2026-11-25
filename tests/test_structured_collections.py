@@ -575,3 +575,22 @@ def test_acceptance_fixtures_cover_log_item_and_query_only_dataset_storage(tmp_p
         collections.load_manifest(tmp_path / "dataset", dataset / "_collection.md").storage.strategy
         == "dataset"
     )
+
+
+def test_a_long_list_of_names_is_summarised_whole_names_first() -> None:
+    names = [f"registered-value-{number}" for number in range(100)]
+
+    text = collections.listed_within(names)
+
+    shown, _, more = text.rpartition(" and ")
+    assert set(shown.split(", ")) <= set(names)
+    assert len(shown) <= collections.LISTED_BUDGET
+    assert more == f"{100 - len(shown.split(', '))} more"
+    assert collections.listed_within(names[:3]) == ", ".join(names[:3])
+
+
+def test_a_first_name_longer_than_the_budget_is_counted_not_listed() -> None:
+    long_name = "x" * (collections.LISTED_BUDGET + 1)
+
+    assert collections.listed_within([long_name, "short", "other"]) == "3 items"
+    assert collections.listed_within([long_name]) == "1 item"

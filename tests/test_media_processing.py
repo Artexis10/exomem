@@ -860,9 +860,9 @@ def test_background_batch_rechecks_access_policy_changed_during_staging(
     original_create = vault_module._BatchWorkspace.create_artifact
     changed = False
 
-    def create_then_protect(self, name, content):  # noqa: ANN001
+    def create_then_protect(self, name, content, **options):  # noqa: ANN001, ANN003
         nonlocal changed
-        artifact = original_create(self, name, content)
+        artifact = original_create(self, name, content, **options)
         if not changed and name.startswith("stage-"):
             changed = True
             (vault / "Knowledge Base" / "_access.yaml").write_text(
@@ -1053,9 +1053,10 @@ def test_reconcile_all_media_is_bounded_pruned_and_soft_fails_per_artifact(
     calls: list[tuple[Path, bool]] = []
 
     def reconcile_media(
-        root: Path, path: Path, *, explicit: bool = True
+        root: Path, path: Path, *, explicit: bool = True, enqueue_preview: bool = True,
     ) -> None:
         assert root == vault
+        assert not enqueue_preview
         calls.append((path, explicit))
         if path == first:
             raise OSError("one unreadable artifact must not abort the pass")
@@ -3118,7 +3119,7 @@ def test_selected_media_batch_reports_policy_and_disappearance_failures_per_item
     )
 
     assert result["user_summary"] == (
-        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved (personal Exomem)"
+        f"Saved 1 of 3 files -> {first_relative}; 2 files could not be saved (personal Evermatter)"
     )
     assert result["media_results"][0]["outcome"] == "processed"
     assert result["media_results"][1:] == [
@@ -3185,7 +3186,7 @@ def test_a_reprocess_batch_that_lost_two_files_says_so(
     )
 
     assert result["user_summary"] == (
-        f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated (personal Exomem)"
+        f"Updated 1 of 3 files -> {relative[0]}; 2 files could not be updated (personal Evermatter)"
     )
     assert [row["outcome"] for row in result["media_results"]] == ["reprocessed", "failed", "failed"]
 
@@ -3205,7 +3206,7 @@ def test_a_media_batch_in_a_renamed_knowledge_base_folder_still_says_which_files
     result = _selected_media_batch(vault, monkeypatch, "process", "", vanished.name, relative)
 
     assert result["user_summary"] == (
-        f"Saved 1 of 2 files -> {relative[0]}; 1 file could not be saved (personal Exomem)"
+        f"Saved 1 of 2 files -> {relative[0]}; 1 file could not be saved (personal Evermatter)"
     )
 
 

@@ -33,6 +33,8 @@ ACTIVATION_PACKETS = ("maps", "anchors")
 class Arm:
     label: str
     root: Path
+    #: A method-fit placement file for the arm's server (`EXOMEM_METHOD_FIT_CONFIG`); session-close only.
+    placement: Path | None = None
 
 
 #: The checkout folders a worker imports or installs from: the package and its scaffold under `src`, the client hooks
@@ -41,10 +43,11 @@ PRODUCT_FOLDERS = ("src", "plugins")
 
 
 def parse_arm(text: str) -> Arm:
-    """`label=path`, or a path alone (its folder name is the label)."""
+    """`label=path[:placement.json]`, or a path alone (its folder name is the label)."""
     label, sep, path = text.partition("=")
-    root = Path(path if sep else text).expanduser().resolve()
-    return Arm(label if sep else root.name, root)
+    path, _, placement = path.partition(":") if sep else (text, "", "")
+    root = Path(path).expanduser().resolve()
+    return Arm(label if sep else root.name, root, Path(placement).expanduser().resolve() if placement else None)
 
 
 def checkout_sha(root: Path) -> str:

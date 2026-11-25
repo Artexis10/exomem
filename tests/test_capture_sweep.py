@@ -625,7 +625,12 @@ def test_the_copyable_instruction_blocks_have_no_room_for_the_clause() -> None:
 
     # 2026-11-18, keep-handed-files-as-sources: "chat transcripts" and
     # "get no note" cost 6 bytes per block. 2026-11-20: the balanced block
-    # dropped "or open questions" (-17 bytes), giving 1489/1474.
+    # dropped "or open questions" (-17 bytes), giving 1489/1474. 2026-11-21: the
+    # tail no longer lists tentative events as quiet (-18 bytes), giving 1471/1456.
+    # 2026-11-22: the Records route replaced "Records only for a compatible measurement"
+    # (+17 bytes), giving 1488/1473. Later that day the route became its own sentence,
+    # "Items compared or tracked: Records rows, not a note." (-7 bytes), giving 1481/1466.
+    # 2026-11-24: the product rename (Exomem to Evermatter, +4 bytes twice per block), giving 1489/1474.
     assert sizes == {"maximal": 1489, "balanced": 1474}, sizes
     # The maximal block keeps real headroom under the cap: the additive
     # entity-creation wording (ruling R1) was folded in, not appended.

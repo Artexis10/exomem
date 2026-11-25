@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1267,6 +1269,125 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (object, object))
     w = file_watcher.FileWatcher(tmp_path)
     assert w.start() is False
+    assert file_watcher.observing_inbound_recovery_stop(tmp_path) is None
+
+
+@pytest.mark.parametrize("lost", ["observer", "emitter"])
+def test_a_lost_promotion_observer_refences_graph_reads_before_dispatch(
+    vault: Path, lost: str,
+) -> None:
+    page = vault / "Knowledge Base" / "Notes" / "observer-gap.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Before\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    epistemic_graph.require_startup_source_proof(vault)
+    try:
+        deadline = time.monotonic() + 8
+        assert watcher.arm_promotion_observation(deadline=deadline)
+        observe = watcher.promotion_observation_stamp
+        initial = graph.promotion_proof_stamp(observe)
+        assert initial is not None
+        proof = graph.adopt_published_snapshot(
+            apply_residue=False, prime_resolver=False, deadline=deadline,
+        )
+        carried, reason = graph.seal_promoted_snapshot(
+            initial, proof, observe=observe, deadline=deadline,
+        )
+        assert carried is not None, reason
+        carried.bind(vault)
+        watcher.carry_startup_graph(carried)
+        assert graph.available()
+        observer = watcher._observer
+        assert observer is not None
+        stopped = observer if lost == "observer" else next(iter(observer.emitters))
+        stopped.stop()
+        stopped.join(2)
+        assert not stopped.is_alive()
+        assert observer.is_alive() is (lost == "emitter")
+        page.write_text("# Edited\n", encoding="utf-8")
+
+        assert epistemic_graph.startup_source_proof_pending(vault)
+        assert not graph.available()
+        assert watcher.start()
+        assert watcher.wait_until_seeded(10)
+        watcher.finish_startup_recovery()
+        assert not epistemic_graph.startup_source_proof_pending(vault)
+        assert graph.available()
+        assert not epistemic_graph.graph_drift(vault)
+    finally:
+        watcher.stop()
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["deadline", "shutdown"])
+def test_a_blocked_observer_does_not_hold_the_promotion_request(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool,
+) -> None:
+    import threading
+
+    from watchdog.events import FileSystemEventHandler
+
+    backend_entered = threading.Event()
+    allow_backend = threading.Event()
+    returned = threading.Event()
+    stopped = threading.Event()
+    outcomes: list[bool] = []
+    observe_calls: list[str] = []
+
+    class SlowObserver:
+        def schedule(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            observe_calls.append("start")
+            backend_entered.set()
+            if not allow_backend.wait(8):
+                raise RuntimeError("test did not release observer startup")
+
+        def is_alive(self):
+            return allow_backend.is_set() and not stopped.is_set()
+
+        def stop(self):
+            stopped.set()
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (SlowObserver, FileSystemEventHandler))
+    watcher = file_watcher.FileWatcher(vault)
+
+    def promote():
+        budget = 30 if cancelled else 0.5
+        outcomes.append(watcher.arm_promotion_observation(deadline=time.monotonic() + budget))
+        returned.set()
+
+    promotion = threading.Thread(target=promote)
+    shutdown = threading.Thread(target=watcher.stop)
+    promotion.start()
+    try:
+        assert backend_entered.wait(3)
+        if cancelled:
+            shutdown.start()
+        assert returned.wait(3), "observer startup outlasted the promotion or shutdown"
+        assert outcomes == [False]
+        assert watcher.promotion_observation_stamp() is None
+        if not cancelled:
+            assert watcher.start(), "fallback lost the owner of the pending observer"
+        allow_backend.set()
+        assert watcher._observer_armed.wait(3)
+        if not cancelled:
+            assert watcher.promotion_observation_stamp() is not None
+        assert observe_calls == ["start"], "fallback created a second observer"
+    finally:
+        allow_backend.set()
+        promotion.join(5)
+        if shutdown.ident is None:
+            watcher.stop()
+        else:
+            shutdown.join(5)
+    assert stopped.is_set()
 
 
 def test_file_watcher_dispatch_thread_restarts_after_stop(
@@ -1283,6 +1404,9 @@ def test_file_watcher_dispatch_thread_restarts_after_stop(
 
         def start(self) -> None:
             pass
+
+        def is_alive(self) -> bool:
+            return True
 
         def stop(self) -> None:
             pass
@@ -1301,6 +1425,59 @@ def test_file_watcher_dispatch_thread_restarts_after_stop(
         assert watcher._thread is not None
         time.sleep(0.02)
         assert watcher._thread.is_alive(), "resumed dispatch thread exited on the stale stop event"
+    finally:
+        watcher.stop()
+
+
+def test_restart_waits_for_the_previous_run_to_exit(vault):
+    watcher = file_watcher.FileWatcher(vault)
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, daemon=True)
+    watcher._reconcile_thread = worker
+    worker.start()
+    watcher.stop()
+    try:
+        assert not watcher.start()
+    finally:
+        release.set()
+        worker.join(5)
+
+    assert watcher.start()
+    try:
+        assert watcher.wait_until_seeded(10)
+        watcher.arm_optional_recovery()
+        assert file_watcher.observing_inbound_recovery_stop(vault) is not None
+    finally:
+        watcher.stop()
+
+
+def test_restart_cannot_replace_the_run_that_stop_is_still_cleaning_up(vault, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError
+
+    watcher = file_watcher.FileWatcher(vault)
+    entered, release = threading.Event(), threading.Event()
+    original = watcher._raw_witness.withdraw
+
+    def hold_shutdown(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original(**kwargs)
+
+    monkeypatch.setattr(watcher._raw_witness, "withdraw", hold_shutdown)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stopping = pool.submit(watcher.stop)
+            assert entered.wait(5)
+            restarting = pool.submit(watcher.start)
+            try:
+                with pytest.raises(TimeoutError):
+                    restarting.result(timeout=0.5)
+            finally:
+                release.set()
+            stopping.result(timeout=5)
+            assert restarting.result(timeout=5)
+        assert watcher.wait_until_seeded(10)
     finally:
         watcher.stop()
 
@@ -2219,9 +2396,9 @@ def _suspend_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     calls: list[str] = []
     real = epistemic_graph.EpistemicGraphIndex.suspend_reads
 
-    def spy(self: epistemic_graph.EpistemicGraphIndex) -> object:
+    def spy(self: epistemic_graph.EpistemicGraphIndex, **kwargs) -> object:
         calls.append("suspend_reads")
-        return real(self)
+        return real(self, **kwargs)
 
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy)
     return calls
@@ -2446,9 +2623,9 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
         events.append("available")
         return real_available(self)
 
-    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex) -> None:
+    def spy_suspend(self: epistemic_graph.EpistemicGraphIndex, **kwargs) -> None:
         events.append("suspend_reads")
-        return real_suspend(self)
+        return real_suspend(self, **kwargs)
 
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", spy_available)
     monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "suspend_reads", spy_suspend)
@@ -2459,6 +2636,105 @@ def test_incoherent_startup_short_circuits_before_the_source_proof(
         "durable incoherence must short-circuit ahead of the O(corpus) source proof; "
         f"observed call order: {events}"
     )
+
+
+@pytest.mark.parametrize("damage", ["missing_metadata", "not_a_database", "corrupt_metadata", "malformed_checkpoint"])
+def test_startup_finishes_with_a_stably_damaged_graph(
+    vault: Path, damage: str,
+) -> None:
+    from exomem import graph_sync
+
+    rel = "Knowledge Base/Notes/graph-recovery.md"
+    page = vault / rel
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# Before\n", encoding="utf-8")
+    watcher = file_watcher.FileWatcher(vault)
+    assert watcher._reconcile_once(seed=True)
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(page, "# Canonical title\n")],
+        vault_root=vault, post_commit_fanout=False,
+    )
+    graph.rebuild_all()
+    checkpoint = graph_sync.read_checkpoint(vault)
+    assert checkpoint is not None and checkpoint.generation > 0
+    assert graph_sync.acknowledged_checkpoint(vault) == graph_sync.GraphBuildOutcome.covering(checkpoint)
+    canonical = {
+        path: path.read_bytes() for path in (graph_sync.floor_path(vault), graph_sync.checkpoint_path(vault))
+    }
+
+    with closing(sqlite3.connect(graph.path)) as conn:
+        if damage == "missing_metadata":
+            conn.execute("DROP TABLE graph_meta")
+            conn.commit()
+        elif damage == "malformed_checkpoint":
+            assert conn.execute(
+                "UPDATE graph_meta SET value = 'invalid-json' WHERE key = 'recall_projection_checkpoint'"
+            ).rowcount == 1
+            conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if damage == "corrupt_metadata":
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            metadata_page = conn.execute(
+                "SELECT rootpage FROM sqlite_schema WHERE name = 'graph_meta'"
+            ).fetchone()[0]
+    if damage == "not_a_database":
+        graph.path.write_bytes(b"unreadable graph sidecar\n")
+    elif damage == "corrupt_metadata":
+        assert metadata_page > 1
+        with graph.path.open("r+b") as sidecar:
+            sidecar.seek((metadata_page - 1) * page_size)
+            sidecar.write(b"\xff")  # Corrupt the metadata B-tree, keeping the schema readable.
+        with closing(sqlite3.connect(graph.path)) as conn:
+            assert conn.execute("PRAGMA table_info(graph_meta)").fetchall()
+            with pytest.raises(sqlite3.DatabaseError) as corrupt:
+                conn.execute("SELECT value FROM graph_meta WHERE key = 'instance'").fetchone()
+            assert corrupt.value.sqlite_errorcode & 0xFF == sqlite3.SQLITE_CORRUPT
+    damaged_family = {
+        path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")
+    }
+    epistemic_graph.require_startup_source_proof(vault)
+
+    dispatches = []
+
+    def finish_startup() -> None:
+        with epistemic_graph.observe_full_marker_dispatches() as observed:
+            watcher.finish_startup_recovery()
+        dispatches.extend(observed)
+
+    startup = threading.Thread(target=finish_startup)
+    startup.start()
+    try:
+        startup.join(12)
+        assert not startup.is_alive(), "settled damage kept startup waiting"
+        assert all(path.read_bytes() == content for path, content in canonical.items())
+        if damage != "malformed_checkpoint":
+            assert [result.code for result in dispatches] == [
+                "graph_rebuild_completed" if damage == "missing_metadata"
+                else "graph_sidecar_requires_replacement"
+            ]
+        if damage in {"missing_metadata", "malformed_checkpoint"}:
+            assert not epistemic_graph.startup_source_proof_pending(vault)
+            assert graph.available()
+            assert any(row.get("title") == "Canonical title" for row in graph.nodes(path=rel))
+            assert graph_sync.acknowledged_checkpoint(vault) == graph_sync.GraphBuildOutcome.covering(checkpoint)
+            assert deferred_index.graph_full_rebuild_pending(vault) is None
+        else:
+            assert epistemic_graph.startup_source_proof_pending(vault)
+            assert not graph.available()
+            assert not dispatches[0].whole_vault_attempted
+            assert deferred_index.graph_full_rebuild_pending(vault) is not None
+            after = {path: path.read_bytes() for path in graph.path.parent.glob(graph.path.name + "*")}
+            if damage == "corrupt_metadata":
+                # Read-only SQLite may create WAL bookkeeping; it must preserve the damaged bytes.
+                assert all(after[path] == raw for path, raw in damaged_family.items())
+                assert after.get(graph.path.with_name(graph.path.name + "-wal"), b"") == b""
+            else:
+                assert after == damaged_family
+    finally:
+        watcher.stop()
+        startup.join(2)
 
 
 @pytest.mark.parametrize("stop_at", ["row", "publication", "replacement"])
@@ -2477,7 +2753,6 @@ def test_stopping_startup_graph_rebuild_retains_debt_and_releases_owner(
     graph.suspend_reads()
     deferred_index.mark_graph_full_rebuild(vault, generation=1)
     watcher = file_watcher.FileWatcher(vault)
-    monkeypatch.setattr(watcher, "_await_admissible_graph", lambda _graph: False)
     indexed = []
     real_index = epistemic_graph.EpistemicGraphIndex._index_path
 
@@ -2545,8 +2820,7 @@ def test_startup_boundary_retries_observe_owned_stop(vault, monkeypatch, retry_p
         raise OpError("MUTATION_BUSY", "held", details={"status": "retryable"})
 
     graph = SimpleNamespace(
-        durable_checkpoint_is_coherent=lambda: False,
-        _mutation_coordinator=SimpleNamespace(snapshot=lambda: {"state": "held"}),
+        validate_startup_snapshot=lambda: None,
         suspend_reads=busy,
     )
     monkeypatch.setattr(file_watcher.time, "sleep", stop_on_wait)
@@ -2557,3 +2831,76 @@ def test_startup_boundary_retries_observe_owned_stop(vault, monkeypatch, retry_p
                 watcher._await_admissible_graph(graph)
             else:
                 watcher._suspend_reads_within_budget(graph, context="startup", exhausted="pending")
+
+
+def test_startup_waits_for_the_actual_writer_after_its_old_admission_budget(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A slow governed publication must not turn valid queued work into corruption."""
+    import threading
+
+    from exomem import foreground_priority
+
+    graph = epistemic_graph.EpistemicGraphIndex(vault)
+    graph.rebuild_all()
+    watcher = file_watcher.FileWatcher(vault)
+    writer_entered = threading.Event()
+    finish_write = threading.Event()
+    admission_waited = threading.Event()
+    admission_done = threading.Event()
+    outcomes: list[bool] = []
+    errors: list[BaseException] = []
+    real_wait = foreground_priority.wait_for_retry
+    monkeypatch.setattr(file_watcher, "GRAPH_WITHDRAWAL_RETRY_SECONDS", 0.0)
+
+    def pending(seconds: float) -> None:
+        admission_waited.set()
+        return real_wait(seconds)
+
+    monkeypatch.setattr(foreground_priority, "wait_for_retry", pending)
+
+    def publish() -> None:
+        try:
+            with graph._mutation_coordinator.hold(operation="governed_test_publication"):
+                graph.suspend_reads()
+                writer_entered.set()
+                if not finish_write.wait(10):
+                    raise AssertionError("test did not release the governed writer")
+                graph.rebuild_all()
+        except (Exception, foreground_priority.BulkCancelled) as error:  # noqa: BLE001 - report thread failures
+            errors.append(error)
+            writer_entered.set()
+
+    def admit() -> None:
+        try:
+            with foreground_priority.bulk(stop=watcher._stop):
+                outcomes.append(watcher._await_admissible_graph(graph))
+        except (Exception, foreground_priority.BulkCancelled) as error:  # noqa: BLE001 - report thread failures
+            errors.append(error)
+        finally:
+            admission_done.set()
+
+    writer = threading.Thread(target=publish)
+    reader = threading.Thread(target=admit)
+    writer.start()
+    try:
+        assert writer_entered.wait(10)
+        assert not errors
+        reader.start()
+        assert admission_waited.wait(2), "startup treated a held boundary as incoherent"
+        assert not admission_done.is_set()
+        finish_write.set()
+        writer.join(10)
+        reader.join(10)
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+        assert not errors
+        assert outcomes == [True]
+        assert graph.available()
+        assert not deferred_index.graph_full_rebuild_pending(vault)
+    finally:
+        finish_write.set()
+        watcher._stop.set()
+        writer.join(10)
+        if reader.ident is not None:
+            reader.join(10)

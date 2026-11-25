@@ -351,8 +351,7 @@ def test_l6_projection_withholds_a_carrier_that_an_unclosed_fence_made_code() ->
     assert variant.search_fields == {"body": "```\nPublic prose."}
 
 
-def test_origin_prose_projector_version_invalidates_derived_identities() -> None:
-    assert projections.PROJECTOR_SCHEMA_VERSION == 3
+def test_projector_version_invalidates_derived_identities() -> None:
     fields = {"body": "Public prose."}
     arguments = {
         "item_identity": "Knowledge Base/Notes/projected.md",
@@ -360,7 +359,8 @@ def test_origin_prose_projector_version_invalidates_derived_identities() -> None
         "decision": Decision(level=6),
         "full_search_fields": fields,
     }
-    previous = projections.build_projection_variant(**arguments, projector_schema_version=1)
+    previous_version = 3  # The last namespace without transcript passage measurements.
+    previous = projections.build_projection_variant(**arguments, projector_schema_version=previous_version)
     current = projections.build_projection_variant(
         **arguments, projector_schema_version=projections.PROJECTOR_SCHEMA_VERSION
     )

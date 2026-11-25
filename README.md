@@ -1,15 +1,15 @@
-# exomem
+# Evermatter (formerly Exomem)
 
-<!-- mcp-name: io.github.Artexis10/exomem -->
+<!-- mcp-name: io.github.substrate-systems/evermatter -->
 
-[![PyPI](https://img.shields.io/pypi/v/exomem.svg)](https://pypi.org/project/exomem/)
-[![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/exomem/)
-[![CI](https://github.com/Artexis10/exomem/actions/workflows/ci.yml/badge.svg)](https://github.com/Artexis10/exomem/actions/workflows/ci.yml)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/evermatter.svg)](https://pypi.org/project/evermatter/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/evermatter/)
+[![CI](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml/badge.svg)](https://github.com/substrate-systems/evermatter/actions/workflows/ci.yml)
+[![License: FSL-1.1-ALv2](https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg)](LICENSE)
 
 Durable memory with sources, proof, history, and review for MCP-capable agents.
 
-exomem turns an owned Markdown/Obsidian vault into a local knowledge substrate
+Evermatter turns an owned Markdown/Obsidian vault into a local knowledge substrate
 for Codex, Claude Code, Cursor, chatbots, CLI agents, and any client that can
 call MCP tools. Your files stay plain, local, portable, and editable outside the
 server.
@@ -21,19 +21,19 @@ agent -> MCP tools -> exomem -> your Markdown / Obsidian vault
 ## Prove it in 30 seconds
 
 ```bash
-uvx exomem demo
+uvx evermatter demo
 ```
 
 One command, no install, no config, no vault of your own needed:
 
 ```text
-exomem demo — bundled sample vault, keyword mode, fully local
+Evermatter demo — bundled sample vault, keyword mode, fully local
 vault: /tmp/exomem-demo-XXXXXX
 
 1. doctor: PASS (0.8s)
 2. find "retrieval": PASS (0.1s)
    - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
-   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
+   - Knowledge Base/Notes/Insights/Retrieval needs owned files.md
 3. get retrieval insight: PASS (0.0s)
    - title: Retrieval needs owned files
    - type: insight
@@ -52,16 +52,16 @@ Add `--keep` to leave that copy on disk afterward and open it in Obsidian.
 **Mac / Linux** — paste into Terminal:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.sh | sh
 ```
 
 **Windows** — paste into PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 ```
 
-Either one installs `uv`, installs exomem, and walks you through `exomem setup`,
+Either one installs `uv`, installs Evermatter, and walks you through `exomem setup`,
 which wires up **every agent client on the machine** — Claude Code and Codex both
 get the MCP server, all ten skills, and the capture/retrieve hooks.
 
@@ -69,7 +69,7 @@ Safe to run again later — it skips whatever's already done. If it can't prompt
 you interactively (e.g. run from another script), it prints the exact command to
 run next instead of guessing. Prefer to run each step yourself? See below or the
 full manual walkthrough in
-[QUICKSTART.md](https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md).
+[QUICKSTART.md](https://github.com/substrate-systems/evermatter/blob/main/QUICKSTART.md).
 
 ### Claude Code: install as a plugin
 
@@ -78,11 +78,11 @@ HTTP URL; it deliberately does **not** auto-start a full stdio server in every
 Claude Code session:
 
 ```
-/plugin marketplace add Artexis10/exomem
+/plugin marketplace add substrate-systems/evermatter
 /plugin install exomem@exomem
 ```
 
-Then choose the route. If you already run Exomem as a service for phone or
+Then choose the route. If you already run Evermatter as a service for phone or
 hosted access, reuse that one authenticated core:
 
 ```bash
@@ -93,7 +93,43 @@ For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
 Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime. When updating from an older plugin,
 run `/plugin update exomem@exomem`, then `/reload-plugins` or restart Claude
-Code before rerunning setup.
+Code before rerunning setup. The plugin keeps the name `exomem` for now. Its URL
+server stores a sign-in under that name, so a rename signs every user out. A later
+release renames it and says so first. The skills inside it are `evermatter-*`.
+
+### Move an existing install to the Evermatter names
+
+After you update, an install made before the rename keeps working until you run
+`evermatter setup` or `evermatter install-skill`. Its `exomem` server key, tool names,
+hooks, permission rules and managed instruction block still match. Those two commands
+install the `evermatter` skills. They move each old `exomem` skill folder, with your
+edits, to `exomem-retired-skills` beside the client's `skills` folder, where the client
+does not load it.
+
+To rename the server key and the instruction block too, run:
+
+```bash
+evermatter setup --migrate
+```
+
+1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex, for each stdio server.
+2. It keeps the `exomem` key of each server that has a URL, and prints that URL. Claude Code and Codex store a sign-in under the server name, so a rename signs you out. A later release moves those servers and says so first.
+3. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
+4. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
+5. It backs up each file it changes beside the original, once per run, as `<file>.exomem-bak`.
+6. Restart Claude Code and Codex.
+
+Claude Code keeps a project's local registration per directory. The command renames
+the one for the current directory and lists the others. Run it in each of those
+directories. A new install registers the `evermatter` key from the start, because
+a new registration has no stored sign-in.
+
+Setup never edits a permission rule or hook that you wrote. A rule that names
+`mcp__exomem__*` stops matching for a server that the command renamed. Change it to
+the `mcp__evermatter__*` prefix. A rule still matches while a client holds an
+`exomem` server, such as a URL server that the command kept. `evermatter setup --migrate`
+and `evermatter doctor` list each rule that no `exomem` server answers any more, with
+the file that holds it. Settings keep their `EXOMEM_*` names.
 
 ### claude.ai and ChatGPT
 
@@ -111,21 +147,23 @@ hook system, so capture there is skill-driven rather than automatic.
 ## Set it up in 5 minutes
 
 ```bash
-uv tool install exomem   # or: pip install exomem
+uv tool install evermatter==<version>
 exomem setup --vault "/path/to/your/Obsidian"
 ```
 
-Re-running the one-line installer upgrades an existing uv-tool install instead
-of leaving an older `exomem` command on PATH. `exomem --version --json` is a
-model-free provenance check, so it also works in the intentional lean CLI paired
-with a fuller managed service.
+Replace `<version>` with the newest release on
+[PyPI](https://pypi.org/project/evermatter/). An existing install named `exomem`
+keeps upgrading under that name: rerun the one-line installer or
+`uv tool upgrade exomem`, and do not install `evermatter` beside it.
+`exomem --version --json` is a model-free provenance check, so it also works in
+the intentional lean CLI paired with a fuller managed service.
 
 One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
 preflight, registers the server with every client it detects (Claude Code and
-Codex), and installs the skills into each. Last, it offers Exomem's learning
+Codex), and installs the skills into each. Last, it offers Evermatter's learning
 instruction for each client's `CLAUDE.md` or `AGENTS.md`, and writes it only if
-you agree. The instruction asks the agent to recall Exomem before a task and
+you agree. The instruction asks the agent to recall Evermatter before a task and
 save what it learns.
 
 If cwd `.env` or the process contains `EXOMEM_BASE_URL`, setup registers its
@@ -141,7 +179,7 @@ overwrites, backs the file up first, and prints the diff.
 
 Already have a vault full of notes? That's the normal case: `adopt` gives a
 scan-first, read-only report of what's there, suggested knowledge packs, and
-safe copy/compile-planning next actions. Exomem only ever writes under `Knowledge Base/` — your
+safe copy/compile-planning next actions. Evermatter only ever writes under `Knowledge Base/` — your
 existing files stay untouched unless you explicitly copy or compile selected material. See
 [QUICKSTART.md § Already have a vault full of notes?](QUICKSTART.md#already-have-a-vault-full-of-notes)
 for the full contract, including daily-notes vaults. Re-running `setup` is
@@ -162,7 +200,7 @@ reminder before answers, a write-side reminder at natural stopping points, and
 a shared local continuation checkpoint around compaction. The checkpoint stores
 bounded structural evidence (repository state, artifact hashes/counts, and
 transcript provenance hashes), never conversation, tool, summary, or artifact
-content. It needs no MCP connection or Exomem credential.
+content. It needs no MCP connection or Evermatter credential.
 The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
@@ -175,7 +213,7 @@ see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
 Both clients checkpoint on manual or automatic `PreCompact` and reinject on
 `SessionStart(compact|resume)`; Claude also checkpoints on `SessionEnd`. Pinned
-Codex CLI 0.144.3 has no `SessionEnd` hook, so Exomem does not invent one.
+Codex CLI 0.144.3 has no `SessionEnd` hook, so Evermatter does not invent one.
 Other MCP clients can still use the server. If they do not support Skills,
 have them call `bootstrap()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to
@@ -193,7 +231,7 @@ blocks.
 
 For client-specific assistant instructions, see
 [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md). For the boundary
-between Exomem and a chat product's built-in memory, see
+between Evermatter and a chat product's built-in memory, see
 [docs/vs-built-in-memory.md](docs/vs-built-in-memory.md).
 
 Full local setup is in [QUICKSTART.md](QUICKSTART.md). Remote/mobile setup is
@@ -201,18 +239,18 @@ in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 [docs/deployment.md](docs/deployment.md).
 
 Remote OAuth uses GitHub once to prove the configured login plus immutable user
-ID, then issues an Exomem-owned durable session. Operators can inspect and revoke
+ID, then issues an Evermatter-owned durable session. Operators can inspect and revoke
 those sessions with `exomem auth sessions`, `exomem auth revoke <session-id>`,
 and `exomem auth revoke --all`; session administration is never an MCP tool.
 
-The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/records.md](docs/records.md) for human-owned longitudinal Records, [docs/tui.md](docs/tui.md) for the interactive terminal UI (`exomem tui`, optional `tui` extra), [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Evermatter stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/records.md](docs/records.md) for human-owned longitudinal Records, [docs/tui.md](docs/tui.md) for the interactive terminal UI (`exomem tui`, optional `tui` extra), [docs/review-studio.md](docs/review-studio.md) for the packaged browser review loop, [docs/epistemic-inbox.md](docs/epistemic-inbox.md) for daily review and relation repair, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:
 
 ```bash
-git clone https://github.com/Artexis10/exomem.git
-cd exomem
+git clone https://github.com/substrate-systems/evermatter.git
+cd evermatter
 uv sync
 uv run exomem demo
 ```
@@ -234,7 +272,7 @@ uv run exomem demo
 codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
 ```
 
-Optional local hooks, using the same Exomem scripts as Claude Code:
+Optional local hooks, using the same Evermatter scripts as Claude Code:
 
 ```bash
 exomem install-hook --client codex
@@ -252,7 +290,7 @@ policy, see [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 Or add it directly to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.exomem]
+[mcp_servers.evermatter]
 command = "exomem"
 args = ["--transport", "stdio"]
 env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
@@ -264,12 +302,12 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 <summary>Any MCP client (generic stdio)</summary>
 
 ```json
-{"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
+{"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
 
 After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
 Skills are still the best UX where available, but `bootstrap()` lets generic MCP
-clients learn Exomem's search/save/upload contract without a separate skill file,
+clients learn Evermatter's search/save/upload contract without a separate skill file,
 including the write loop for compiled notes.
 See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md) for the copyable
 standing instruction.
@@ -279,8 +317,13 @@ standing instruction.
 <details>
 <summary>Docker (no Python on the host)</summary>
 
+> **Images moved.** Releases publish to `ghcr.io/substrate-systems/evermatter`.
+> The old `ghcr.io/artexis10/exomem` tags stop at the last release before the
+> rename and receive no updates. Change the image name in your `docker run`
+> lines and compose files to keep upgrading.
+
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/exomem:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or
@@ -302,7 +345,7 @@ once the models land. Run `exomem warm` to pre-download them ahead of time.
 
 ## Resource modes
 
-Exomem is CPU-first by default so an idle server does not quietly occupy GPU
+Evermatter is CPU-first by default so an idle server does not quietly occupy GPU
 memory. Control the machine footprint without editing code:
 
 ```bash
@@ -325,7 +368,7 @@ the previous mode.
 On affected WSL/NVIDIA systems, repeated Linux `nvidia-smi` processes can grow
 the Windows driver's kernel memory and disrupt foreground work.
 [Microsoft WSL issue #12756](https://github.com/microsoft/WSL/issues/12756)
-records a reproduction. For older Exomem versions, a service configured with
+records a reproduction. For older Evermatter versions, a service configured with
 `EXOMEM_AUTO_QUIET=0` stops its watcher after that service restarts.
 An empty `CUDA_VISIBLE_DEVICES` also disables GPU work and GPU headroom queries.
 These settings do not require a Windows reboot; existing driver state may remain.
@@ -431,7 +474,7 @@ Examples:
 ```bash
 kb find "project handoff" --mode keyword
 kb find "stale decision" --json
-kb get "Notes/Insights/retrieval-needs-owned-files" --json
+kb get "Notes/Insights/Retrieval needs owned files" --json
 kb note --note-type insight --title "Agents need durable context" \
   --content "# Agents need durable context"
 ```
@@ -564,20 +607,25 @@ operations.
 
 ## License
 
-The server, CLI and everything not listed below are AGPL-3.0-or-later. See
-[LICENSE](LICENSE).
+The server, CLI and everything not listed below, except third-party files that carry their own
+licence, are source-available under the
+[Functional Source License, Version 1.1, ALv2 Future License](LICENSE) (FSL-1.1-ALv2).
+Self-hosting is free, and so is every other use except a commercial product or service that
+competes with it or with a service we offer using it. Each version becomes Apache-2.0 two
+years after it is published. Earlier versions stay AGPL-3.0-or-later;
+[the licence change](docs/licensing/licence-change.md) says what changed and from which release.
 
 | Path | Licence |
 |---|---|
-| `plugins/` (the Claude Code and Exomem Cloud client plugins) | Apache-2.0, see [`plugins/claude-code/LICENSE`](plugins/claude-code/LICENSE) |
+| `plugins/` (the Claude Code and Evermatter Cloud client plugins) | Apache-2.0, see [`plugins/claude-code/LICENSE`](plugins/claude-code/LICENSE) |
 | `src/exomem/_scaffold/` (the starter skill and vault scaffold) | Apache-2.0, see [`src/exomem/_licenses/Apache-2.0.txt`](src/exomem/_licenses/Apache-2.0.txt) |
 | `infra/topolvm/` | Apache-2.0, upstream's own licence |
 
 The plugin hooks under `plugins/claude-code/hooks/` are copies of `src/exomem/_hooks/`. The
-source stays AGPL-3.0-or-later; the copies the plugin ships are Apache-2.0.
+source stays FSL-1.1-ALv2; the copies the plugin ships are Apache-2.0.
 
-Exomem Cloud offers its source from the app and from the MCP handshake, which names the
-running release and this repository. The names Exomem and Substrate Systems follow
+Evermatter Cloud offers its source from the app and from the MCP handshake, which names the
+running release and this repository. The names Evermatter and Substrate Systems follow
 [TRADEMARK.md](TRADEMARK.md). Contributions need a signed [CLA](CLA.md).
 
-[docs/cloud-security-model.md](docs/cloud-security-model.md) lists Exomem Cloud's security claims and the evidence behind each one, with its limits.
+[docs/cloud-security-model.md](docs/cloud-security-model.md) lists Evermatter Cloud's security claims and the evidence behind each one, with its limits.

@@ -2,7 +2,7 @@
 
 # Personal vault backup
 
-This guide is for the owner of a personal install. It does not cover Exomem Cloud, which keeps its own backup Jobs.
+This guide is for the owner of a personal install. It does not cover Evermatter Cloud, which keeps its own backup Jobs.
 
 The service keeps dated [restic](https://restic.net) snapshots of your vault and of the machine-local state that nothing can rebuild (review decisions, voice profiles, the collection store and its archive, the media jobs store and the procedure approval key). It never copies an index or a cache, because the product rebuilds them.
 

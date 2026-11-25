@@ -7,7 +7,7 @@ rows below it. That shape does three jobs a stepped wizard cannot:
 * **It is inspectable.** The transcript IS the progress indicator, so there is
   no rail widget claiming a state the screen cannot prove.
 * **It is honest about writes.** A line appears only after the thing happened,
-  and it names what happened ("created ~/Exomem — 28 files"). `esc` rewinds one
+  and it names what happened ("created ~/Evermatter — 28 files"). `esc` rewinds one
   line, and stops at any line that performed a write — because you cannot
   un-create a folder, and a UI that pretends otherwise is lying.
 * **It ends in a demo built from the user's own words.** The closing receipt
@@ -188,7 +188,18 @@ class FirstRunScreen(ExomemScreen):
     # Ledger rendering
     # ------------------------------------------------------------------ #
     def _default_path(self) -> Path:
-        return Path.home() / "Exomem"
+        return Path.home() / "Evermatter"
+
+    def _found_vault(self) -> Path | None:
+        """A vault already in a folder that setup creates by default, else None.
+
+        Setup created ~/Exomem before the product was renamed, so that folder
+        comes first: an existing user connects the vault they already have.
+        """
+        for folder in (Path.home() / "Exomem", self._default_path()):
+            if self.app.backend.holds_vault(folder):
+                return folder
+        return None
 
     def _display_path(self, path: Path) -> str:
         try:
@@ -303,7 +314,8 @@ class FirstRunScreen(ExomemScreen):
                 [("enter", "create"), ("tab", "complete"), ("esc", "back, typing kept")]
             )
         else:
-            path_input.value = self._path_draft
+            found = self._found_vault()
+            path_input.value = self._path_draft or (self._display_path(found) if found else "")
             path_input.placeholder = "folder that already holds a Knowledge Base"
             self._prose("note", "Nothing is written — the folder is opened as it stands.")
             self.set_footer(
@@ -334,7 +346,7 @@ class FirstRunScreen(ExomemScreen):
             Text(line, style=skin.dim)
             for line in wrap(
                 "Plain markdown, Obsidian-compatible. Delete the folder and the vault is "
-                "gone — Exomem owns nothing outside it.",
+                "gone — Evermatter owns nothing outside it.",
                 budget - 2,
             )
         ]
@@ -411,7 +423,7 @@ class FirstRunScreen(ExomemScreen):
         self.run_backend(job, self._on_vault_created, self._on_vault_error, group="first-run-vault")
 
     def _receipt_detail(self, verb: str, path: Path | None, tail: str) -> str:
-        """`created …/Exomem — 28 files` — the path yields, the tail never does.
+        """`created …/Evermatter — 28 files` — the path yields, the tail never does.
 
         A receipt is one row, so something has to give when the path is long.
         The tail states what happened and must survive; the path truncates

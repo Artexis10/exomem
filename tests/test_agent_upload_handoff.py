@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
+import time
+from contextlib import contextmanager
 from dataclasses import replace
 from io import BytesIO
 
@@ -21,6 +24,8 @@ from exomem.governance import principal
 @pytest.fixture
 def upload_env(vault, tmp_path, monkeypatch):
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://capture.example")
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "42")
+    monkeypatch.setenv("EXOMEM_OWNER_OAUTH_SUBJECT", "github:42")
     monkeypatch.delenv("EXOMEM_UPLOAD_TOKEN", raising=False)
     monkeypatch.delenv("EXOMEM_CF_ACCESS_TEAM_DOMAIN", raising=False)
     authority = auth_sessions.SessionAuthority.local(
@@ -57,14 +62,14 @@ def _prepare(env, data=b"exact original\n", *, lane="source", **kwargs):
         )
 
 
-def _post(env, descriptor, data=b"exact original\n", **fields):
+def _post(env, descriptor, data=b"exact original\n", *, filename="original.txt", **fields):
     async def send():
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=env[-1]), base_url="https://capture.example",
         ) as client:
             return await client.post(
                 "/upload", headers={"Authorization": "Bearer " + descriptor["token"]},
-                files={"file": ("original.txt", data, "text/plain")},
+                files={"file": (filename, data, "text/plain")},
                 data={"hold": "1", "lane": "source", **fields},
             )
     return asyncio.run(send())
@@ -83,6 +88,20 @@ class _ASGISyncTransport(httpx.BaseTransport):
                 )
         response = asyncio.run(send())
         return httpx.Response(response.status_code, headers=response.headers, content=response.content)
+
+
+def _settled_source_receipt(client, location, headers):
+    from exomem import upload_sessions
+
+    deadline = time.monotonic() + 6
+    while True:
+        response = client.get(location, headers=headers)
+        body = response.json()
+        if body.get("code") != upload_sessions.SOURCE_RECEIPT_PENDING:
+            return response
+        assert "receipt" not in body
+        assert time.monotonic() < deadline
+        time.sleep(0.025)
 
 
 @pytest.mark.parametrize("endpoint", ["https://capture.example/upload", "http://127.0.0.1:9123/upload"])
@@ -116,6 +135,435 @@ def test_cli_handoff_holds_exact_bytes_for_only_the_issuing_session(upload_env, 
     assert _post(upload_env, descriptor, original).status_code == 401
 
 
+def test_upload_files_selects_a_resumable_handoff_for_a_large_source(upload_env):
+    from exomem import commands, public_tools, upload_handoff, upload_sessions
+
+    vault, who, *_ = upload_env
+    size = upload_handoff.MAX_BYTES + 1
+    digest = hashlib.sha256(b"sample original").hexdigest()
+    wire = public_tools.UploadFiles(lane="source", expected_sha256=digest, size_bytes=size)
+    leaf, arguments = public_tools._upload_files(wire.model_dump(exclude_none=True), None)
+
+    with principal.request_scope(who):
+        assert leaf == "transfer_artifact"
+        handoff = commands.op_transfer_artifact(vault, **arguments)
+
+    assert handoff["committed"] is False and handoff["expected_sha256"] == digest
+    assert handoff["size_bytes"] == size
+    assert handoff["resumable"]["create_url"] == "https://capture.example" + upload_sessions.SESSIONS_PATH
+
+
+def test_large_source_respects_the_session_limit_and_an_explicit_hold(upload_env, monkeypatch):
+    from exomem import upload_handoff, upload_sessions
+
+    limit = upload_handoff.MAX_BYTES + 1
+    monkeypatch.setenv(upload_sessions.MAX_BYTES_ENV, str(limit))
+    with pytest.raises(ValueError, match=f"TOO_LARGE: a Source session holds at most {limit:,} bytes"):
+        _prepare(upload_env, size_bytes=limit + 1)
+    with pytest.raises(ValueError, match=f"TOO_LARGE: this handoff holds at most {upload_handoff.MAX_BYTES:,} bytes"):
+        _prepare(upload_env, size_bytes=limit, held_only=True)
+    assert _prepare(upload_env)["hold"] is True
+
+
+def test_resumable_ticket_cannot_be_read_as_a_legacy_multipart_ticket(upload_env, monkeypatch):
+    from exomem import private_state, upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault = upload_env[0]
+    data = b"recording"
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+    legacy = _prepare(upload_env, b"legacy")
+
+    # A downgraded worker locates a multipart ticket by nonce in the original store.
+    legacy_store = private_state.store(vault, upload_handoff.STORE_DIRNAME)
+    legacy_nonce = upload_handoff.parse_ticket(legacy["token"])
+    delegated_nonce = upload_handoff.parse_ticket(handoff["token"], resumable=True)
+    assert legacy_nonce is not None and delegated_nonce is not None
+    assert (legacy_store / (hashlib.sha256(legacy_nonce.encode()).hexdigest() + ".json")).is_file()
+    assert not (legacy_store / (hashlib.sha256(delegated_nonce.encode()).hexdigest() + ".json")).exists()
+    assert _post(upload_env, legacy, b"legacy").status_code == 201
+
+
+def test_resumable_ticket_survives_access_refresh(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, who, authority, _, _ = upload_env
+    clock = [time.time()]
+    monkeypatch.setattr(authority, "clock", lambda: clock[0])
+    access, record, refresh = asyncio.run(authority.issue_offline(
+        client_id=who.client_binding.client_id, scopes=["mcp", "offline_access"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+    ))
+    issuer = replace(who, origin_session=principal.OriginSessionBinding(
+        record.session_id, record.generation, record.audience,
+    ))
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    assert record.expires_at is not None
+    clock[0] = record.expires_at - 1
+    with principal.request_scope(issuer):
+        handoff = upload_handoff.prepare_upload(vault, lane="source", expected_sha256=digest, size_bytes=len(data))
+
+    clock[0] += 2
+    refreshed, _, _ = asyncio.run(authority.rotate_refresh(refresh, client_id=record.client_id, scopes=["mcp"]))
+    assert asyncio.run(authority.validate(access)) is None
+    assert asyncio.run(authority.validate(refreshed)) is not None
+    claimed = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert claimed["principal"] == issuer
+
+
+def test_resumable_ticket_rechecks_the_current_owner_before_spending(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, _, authority, bearer, _ = upload_env
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+    monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT")
+
+    assert asyncio.run(authority.validate(bearer)) is not None
+    with pytest.raises(ValueError, match="UPLOAD_HANDOFF_UNAVAILABLE"):
+        asyncio.run(upload_handoff.claim_upload(
+            vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+        ))
+
+
+def test_resumable_ticket_survives_an_unreadable_login_store(upload_env, monkeypatch):
+    from exomem import upload_handoff
+
+    monkeypatch.setenv("EXOMEM_UPLOAD_MAX_BYTES", "8")
+    vault, _, authority, _, _ = upload_env
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    handoff = _prepare(upload_env, data, size_bytes=len(data))
+
+    async def unavailable(**_):
+        raise auth_sessions.SessionStoreUnavailable("temporary read failure")
+
+    with monkeypatch.context() as offline:
+        offline.setattr(authority, "revalidate_login", unavailable)
+        with pytest.raises(upload_handoff.SourceOriginBusy, match="UPLOAD_ORIGIN_BUSY"):
+            asyncio.run(upload_handoff.claim_upload(
+                vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+            ))
+    recovered = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert recovered["size_bytes"] == len(data)
+
+
+def test_resumable_ticket_uses_shared_login_when_optional_cache_cannot_open(vault, tmp_path, monkeypatch):
+    from exomem import upload_handoff
+    from exomem.lease_coordinator import create_app
+
+    cache_parent = tmp_path / "cache-parent"
+    cache_parent.write_text("an existing file")
+    for key, value in {
+        "EXOMEM_BASE_URL": "https://capture.example",
+        "EXOMEM_GITHUB_USER_ID": "42",
+        "EXOMEM_OWNER_OAUTH_SUBJECT": "github:42",
+        "EXOMEM_JWT_SIGNING_KEY": "test-signing-key",
+        "EXOMEM_UPLOAD_MAX_BYTES": "8",
+        "EXOMEM_OAUTH_STORAGE_URL": "https://coordinator.example",
+        "EXOMEM_OAUTH_STORAGE_NAMESPACE": "fixture",
+        "EXOMEM_OAUTH_STORAGE_TOKEN": "test-coordinator-token",
+        "EXOMEM_SESSION_STALE_GRACE_SECONDS": "3600",
+        "EXOMEM_WRITER_LEASE_STATE_DIR": str(cache_parent),
+    }.items():
+        monkeypatch.setenv(key, value)
+    transport = httpx.ASGITransport(app=create_app(
+        database=tmp_path / "coord.sqlite", bearer_token="test-coordinator-token",
+    ))
+    build_remote = auth_sessions.SessionAuthority.remote
+    monkeypatch.setattr(auth_sessions.SessionAuthority, "remote", staticmethod(
+        lambda **settings: build_remote(transport=transport, **settings),
+    ))
+    with pytest.raises(FileExistsError):
+        server_auth.build_session_authority(base_url="https://capture.example")
+    authority = server_auth.build_session_authority(base_url="https://capture.example", authoritative_only=True)
+    _, record = asyncio.run(authority.issue(
+        client_id="fixture", scopes=["mcp"],
+        identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+    ))
+    who = principal.RequestPrincipal(
+        audience_id="owner", surface="mcp", issuer_family="mcp-oauth:fixture", remote_owner=True,
+        client_binding=principal.ClientBinding(record.issuer, record.client_id),
+        origin_session=principal.OriginSessionBinding(record.session_id, record.generation, record.audience),
+    )
+    data = b"recording"
+    digest = hashlib.sha256(data).hexdigest()
+    with principal.request_scope(who):
+        handoff = upload_handoff.prepare_upload(vault, lane="source", expected_sha256=digest, size_bytes=len(data))
+    claimed = asyncio.run(upload_handoff.claim_upload(
+        vault, handoff["token"], resumable=True, size_bytes=len(data), sha256=digest,
+    ))
+    assert claimed["principal"] == who
+
+
+def test_attach_resumes_the_large_source_and_returns_one_verified_receipt(
+    upload_env, tmp_path, monkeypatch, capsys,
+):
+    from exomem import reserved_paths, source_imports, upload_handoff, upload_sessions
+    from exomem.governance import lifecycle
+    from test_governance_receipts import _write_restricting_policy
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    monkeypatch.setattr(upload_sessions, "MAX_PATCH_BYTES", 16)
+    data = b"A complete recording arrives in many parts."
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    handoff = tmp_path / "handoff.json"
+    handoff.write_text(json.dumps(descriptor))
+    original = tmp_path / "recording.bin"
+    original.write_bytes(data)
+    vault = upload_env[0]
+    old_note = "Knowledge Base/Notes/Insights/withdrawn.md"
+    (vault / old_note).write_text("# Withdrawn note\n", encoding="utf-8")
+    _write_restricting_policy(vault, old_note.removeprefix("Knowledge Base/"))
+    earlier_deletion = lifecycle.begin_deletion(
+        vault, source_rel=old_note, trash_rel="Knowledge Base/_trash/withdrawn.md",
+    )
+    assert earlier_deletion.tombstone_path is not None
+
+    class InterruptedPart(_ASGISyncTransport):
+        interrupted = False
+        resumed = False
+        waited_for_receipt = False
+        locator = None
+
+        def handle_request(self, request):
+            if request.method != "POST":
+                assert "authorization" not in request.headers
+            response = super().handle_request(request)
+            if request.method == "POST" and response.status_code == 201:
+                self.locator = (response.headers["location"], response.headers[upload_sessions.SECRET_HEADER])
+            if request.method == "PATCH" and response.status_code == 204 and not self.interrupted:
+                self.interrupted = True
+                raise httpx.ReadError("the part acknowledgement was lost", request=request)
+            if request.method == "HEAD":
+                assert response.headers["upload-offset"] == "8"
+                self.resumed = True
+            if request.method == "GET" and response.json().get("code") == upload_sessions.SOURCE_RECEIPT_PENDING:
+                assert "receipt" not in response.json()
+                self.waited_for_receipt = True
+            return response
+
+    transport = InterruptedPart(upload_env[-1])
+    assert _attach_main(["--handoff-file", str(handoff), "--root", str(tmp_path), str(original)],
+                        transport=transport) == 0
+    assert transport.interrupted and transport.resumed and transport.waited_for_receipt
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["hash"] == hashlib.sha256(data).hexdigest()
+    assert receipt["size"] == len(data)
+    assert (upload_env[0] / receipt["artifact_path"]).read_bytes() == data
+    assert len(list((upload_env[0] / receipt["artifact_path"]).parent.glob("*.bin"))) == 1
+    # The same invocation can recover the receipt if its first stdout consumer missed it.
+    assert _attach_main(
+        ["--handoff-file", str(handoff), "--root", str(tmp_path), str(original)],
+        transport=_ASGISyncTransport(upload_env[-1]),
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == receipt
+
+    location, secret = transport.locator
+    lifecycle.abort_deletion(earlier_deletion)
+    _write_restricting_policy(vault, receipt["path"].removeprefix("Knowledge Base/"))
+    with httpx.Client(transport=_ASGISyncTransport(upload_env[-1]), base_url="https://capture.example") as client:
+        headers = {upload_sessions.SECRET_HEADER: secret}
+        deletion = lifecycle.begin_deletion(vault, source_rel=receipt["path"],
+                                            trash_rel="Knowledge Base/_trash/test-receipt.md")
+        assert deletion.tombstone_path is not None
+        hidden = _settled_source_receipt(client, location, headers).json()
+        assert "receipt" not in hidden
+        assert hidden["code"] == "SOURCE_OUTCOME_UNKNOWN"
+        session = upload_sessions.open_session(vault, location.rsplit("/", 1)[-1], secret)
+        assert session.record["state"] == upload_sessions.COMMITTED
+        lifecycle.abort_deletion(deletion)
+        assert _settled_source_receipt(client, location, headers).json()["receipt"] == receipt
+
+        with monkeypatch.context() as withheld:
+            withheld.setattr(source_imports, "_RECEIPT_READ_SECONDS", 0)
+            hidden = client.get(location, headers=headers)
+            assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+        assert client.get(location, headers=headers).json()["receipt"] == receipt
+
+        scope = vault / "Knowledge Base/_Governance/scopes/lifecycle.yaml"
+        path_scope = scope.read_text(encoding="utf-8")
+        scope.write_text(path_scope + "tags: [requires-artifact-metadata]\n", encoding="utf-8")
+        read = reserved_paths.read_generic_bytes
+
+        def no_payload_read(root, path, **kwargs):
+            assert path != receipt["artifact_path"], "receipt GET read the accepted original"
+            return read(root, path, **kwargs)
+
+        with monkeypatch.context() as metadata_only:
+            metadata_only.setattr(reserved_paths, "read_generic_bytes", no_payload_read)
+            hidden = client.get(location, headers=headers)
+            assert hidden.json()["code"] == "SOURCE_OUTCOME_UNKNOWN" and "receipt" not in hidden.json()
+            scope.write_text(path_scope, encoding="utf-8")
+            assert client.get(location, headers=headers).json()["receipt"] == receipt
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("protocol", "tus 0.2.0"), ("resend_header", "Authorization"), ("metadata", ["filename"]),
+])
+def test_attach_checks_the_advertised_source_session_contract(upload_env, monkeypatch, tmp_path, field, value):
+    from exomem import upload_handoff
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"exact Source original"
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    descriptor["resumable"][field] = value
+    handoff = tmp_path / "contract.json"
+    handoff.write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(data)
+
+    def never_send(_request):
+        pytest.fail("an incompatible descriptor contacted the service")
+
+    assert _attach_main(
+        ["--handoff-file", str(handoff), "--root", str(tmp_path), "original.bin"],
+        transport=httpx.MockTransport(never_send),
+    ) == 2
+
+
+def test_attach_reads_the_definitive_failure_of_a_retained_source_session(upload_env, monkeypatch, tmp_path, capsys):
+    from exomem import upload_handoff, upload_sessions
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"exact Source original"
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    handoff = tmp_path / "contract.json"
+    handoff.write_text(json.dumps(descriptor))
+    (tmp_path / "original.bin").write_bytes(data)
+    args = ["--handoff-file", str(handoff), "--root", str(tmp_path), "original.bin"]
+
+    def lose_the_transfer(request):
+        if request.method == "POST":
+            return httpx.Response(201, headers={
+                "location": upload_sessions.SESSIONS_PATH + "/source-" + "f" * 32,
+                upload_sessions.SECRET_HEADER: "s" * 43,
+            })
+        raise httpx.ReadError("local transfer stopped", request=request)
+
+    assert _attach_main(args, transport=httpx.MockTransport(lose_the_transfer)) == 1
+    capsys.readouterr()
+
+    def failed_upload(request):
+        if request.method == "HEAD":
+            return httpx.Response(410)
+        assert request.method == "GET"
+        return httpx.Response(200, json={"state": "failed", "code": "UPLOAD_SHA256_MISMATCH"})
+
+    assert _attach_main(args, transport=httpx.MockTransport(failed_upload)) == 1
+    assert "the upload failed (UPLOAD_SHA256_MISMATCH)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("revoke_at", [None, "restart", "staging", "owner_binding", "publication"])
+def test_a_complete_source_part_recovers_under_its_issuing_login(upload_env, monkeypatch, revoke_at):
+    from exomem import upload_handoff, upload_sessions, upload_stage
+
+    monkeypatch.setattr(upload_handoff, "MAX_BYTES", 8)
+    data = b"Durable bytes before the state can change."
+    digest = hashlib.sha256(data).hexdigest()
+    descriptor = _prepare(upload_env, data, size_bytes=len(data))
+    vault, _, authority, bearer, app = upload_env
+    client = httpx.Client(transport=_ASGISyncTransport(app), base_url="https://capture.example")
+    content = {"filename": "recording.bin", "title": "Resumed recording", "sha256": digest}
+    open_headers = {
+        "Tus-Resumable": "1.0.0",
+        "Authorization": "Bearer " + descriptor["token"],
+        "Upload-Length": str(len(data)),
+        "Upload-Metadata": ",".join(f"{key} {base64.b64encode(value.encode()).decode()}"
+                                    for key, value in content.items()),
+    }
+    wrong_size = {**open_headers, "Upload-Length": str(len(data) + 1)}
+    assert client.post(upload_sessions.SESSIONS_PATH, headers=wrong_size).status_code == 401
+    invalid_flags = {**open_headers, "Upload-Metadata": open_headers["Upload-Metadata"] + ",raw_protection bm90LWEtZmxhZw=="}
+    refused = client.post(upload_sessions.SESSIONS_PATH, headers=invalid_flags)
+    assert refused.status_code == 400 and "handoff_spent" not in refused.json()
+    assert _post(upload_env, descriptor, data).status_code != 201
+    created = client.post(upload_sessions.SESSIONS_PATH, headers=open_headers)
+    assert created.status_code == 201, created.text
+    assert client.post(upload_sessions.SESSIONS_PATH, headers=open_headers).status_code == 401
+    location = created.headers["location"]
+    session_id = location.rsplit("/", 1)[1]
+    secret = created.headers[upload_sessions.SECRET_HEADER]
+    headers = {"Tus-Resumable": "1.0.0", upload_sessions.SECRET_HEADER: secret}
+
+    write_record = upload_sessions._write_record
+
+    def stop_after_part(store, record):
+        if record["state"] == upload_sessions.VERIFYING:
+            raise OSError("listener stopped before writing the verifying record")
+        return write_record(store, record)
+
+    with monkeypatch.context() as stopped:
+        stopped.setattr(upload_sessions, "_write_record", stop_after_part)
+        with pytest.raises(OSError, match="listener stopped"):
+            client.patch(location, headers={**headers, "Upload-Offset": "0",
+                         "Content-Type": "application/offset+octet-stream"}, content=data)
+    # A fresh serving runtime owns the durable part and record, without the old digest or request context.
+    monkeypatch.setattr(upload_sessions, "_RUNNING", {})
+    if revoke_at == "restart":
+        asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+    if revoke_at == "owner_binding":
+        monkeypatch.delenv("EXOMEM_OWNER_OAUTH_SUBJECT")
+        assert asyncio.run(authority.validate(bearer)) is not None
+    if revoke_at == "staging":
+        stage = upload_stage.stage
+
+        @contextmanager
+        def revoke_after_staging(*args, **kwargs):
+            with stage(*args, **kwargs) as staged:
+                asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+                yield staged
+
+        monkeypatch.setattr(upload_stage, "stage", revoke_after_staging)
+    if revoke_at == "publication":
+        from exomem import vault as vault_module
+
+        after = vault_module._after_batch_destination_published
+        revoked = False
+
+        def revoke_after_original_is_installed(path):
+            nonlocal revoked
+            after(path)
+            if not revoked and path.suffix == ".bin":
+                assert path.read_bytes() == data
+                revoked = True
+                asyncio.run(authority.revoke_bearer(bearer, reason="test"))
+
+        monkeypatch.setattr(vault_module, "_after_batch_destination_published", revoke_after_original_is_installed)
+    server_transfer.resume_upload_sessions(vault)
+    deadline = time.monotonic() + 20
+    while True:
+        state = upload_sessions.open_session(vault, session_id, secret).view()
+        if state["state"] in (upload_sessions.COMMITTED, upload_sessions.FAILED):
+            break
+        assert time.monotonic() < deadline, state
+        time.sleep(0.03)
+    session = upload_sessions.open_session(vault, session_id, secret)
+    # The terminal record can be visible while the commit still syncs directory cleanup.
+    with upload_sessions._session_lock(session.store, session_id).acquire(timeout=6):
+        pass
+    response = _settled_source_receipt(client, location, headers)
+    if revoke_at is not None:
+        if revoke_at == "publication":
+            assert revoked
+        assert response.status_code == 404
+        assert state["state"] == upload_sessions.FAILED
+        assert not list(vault.rglob("*.bin"))
+    else:
+        assert response.status_code == 200
+        assert state["state"] == upload_sessions.COMMITTED
+        assert response.json()["receipt"]["hash"] == digest
+        assert (vault / response.json()["receipt"]["artifact_path"]).read_bytes() == data
+        assert len(list(vault.rglob("*.bin"))) == 1
+
+
 def test_cli_accepts_the_result_of_a_handoff_issued_after_a_write(upload_env, tmp_path):
     # Once a write has synced the graph, every later write result also carries graph_sync.
     descriptor = {**_prepare(upload_env), "graph_sync": "completed"}
@@ -125,6 +573,91 @@ def test_cli_accepts_the_result_of_a_handoff_issued_after_a_write(upload_env, tm
         ["--handoff-file", str(tmp_path / "handoff.json"), "--root", str(tmp_path), "original.bin"],
         transport=_ASGISyncTransport(upload_env[-1]),
     ) == 0
+
+
+@pytest.mark.parametrize("lane", ["evidence", "source"])
+def test_held_audio_capture_preserves_the_per_item_diarization_choice(
+    upload_env, source_schema, lane, monkeypatch,
+):
+    from exomem import commands, media_jobs
+    from exomem.vault import parse_frontmatter
+
+    vault, who, *_ = upload_env
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    data = b"held audio bytes"
+    ticket = _prepare(upload_env, data, lane=lane)
+    uploaded = _post(upload_env, ticket, data, filename="recording.m4a", lane=lane)
+    assert uploaded.status_code == 201, uploaded.text
+    file = {**uploaded.json()["file"], "diarize": False}
+
+    with principal.request_scope(who):
+        if lane == "source":
+            result = commands.op_capture_source(
+                vault, source_schema=source_schema, title="Recording", source_kind="session", files=[file],
+            )
+        else:
+            result = commands.op_preserve_artifacts(vault, scope="Test", category="Audio", files=[file])
+
+    [stored] = result["files"]
+    assert stored["outcome"] == "stored", stored
+    assert (vault / stored["stored_path"]).read_bytes() == data
+    queued = media_jobs.MediaJobStore(vault).get_by_binary(vault / stored["stored_path"])
+    assert queued is not None
+    assert parse_frontmatter(queued.sidecar_path.read_text())[0]["diarize_requested"] is False
+
+
+@pytest.mark.parametrize("override", [None, True])
+def test_source_title_correction_keeps_the_original_speaker_choice(upload_env, source_schema, override):
+    from exomem import commands, preserve
+    from exomem.vault import content_hash
+
+    vault, who, *_ = upload_env
+    data = b"source audio bytes"
+    ticket = _prepare(upload_env, data, lane="source")
+    uploaded = _post(upload_env, ticket, data, filename="recording.wav", lane="source")
+    assert uploaded.status_code == 201, uploaded.text
+    file = {**uploaded.json()["file"], "diarize": False}
+    with principal.request_scope(who):
+        [stored] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Recording", source_kind="session", files=[file],
+        )["files"]
+        if override is not None:
+            commands.op_process_media(vault, path=stored["stored_path"], diarize=override)
+        old_hash = content_hash((vault / stored["page"]).read_text())
+        [corrected] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Corrected recording",
+            correction={"supersedes": stored["ref"], "expected_hash": old_hash, "reason": "Correct the title."},
+        )["files"]
+
+    assert corrected["outcome"] == "stored"
+    assert (vault / corrected["stored_path"]).read_bytes() == data
+    assert preserve.diarize_pin((vault / corrected["page"]).read_text()) is (override is True)
+
+
+def test_non_speech_source_correction_does_not_depend_on_the_media_ledger(upload_env, source_schema):
+    from exomem import commands, media_jobs
+    from exomem.vault import content_hash
+
+    vault, who, *_ = upload_env
+    data = b"original binary bytes"
+    ticket = _prepare(upload_env, data, lane="source")
+    uploaded = _post(upload_env, ticket, data, filename="original.bin", lane="source")
+    assert uploaded.status_code == 201, uploaded.text
+    with principal.request_scope(who):
+        [stored] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Original", source_kind="session",
+            files=[uploaded.json()["file"]],
+        )["files"]
+        media_jobs.MediaJobStore(vault)
+        media_jobs.job_store_path(vault).write_bytes(b"unreadable ledger")
+        old_hash = content_hash((vault / stored["page"]).read_text())
+        [corrected] = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Corrected original",
+            correction={"supersedes": stored["ref"], "expected_hash": old_hash, "reason": "Correct the title."},
+        )["files"]
+
+    assert corrected["outcome"] == "stored"
+    assert (vault / corrected["stored_path"]).read_bytes() == data
 
 
 def test_revoked_expired_and_foreign_tickets_share_one_refusal(upload_env, monkeypatch):
@@ -715,3 +1248,201 @@ def test_a_refused_send_says_a_retry_needs_a_new_upload(upload_env):
     retried = _post(upload_env, descriptor)
     assert retried.status_code == 401
     assert retried.json()["reason"] == upload_handoff.TICKET_UNUSABLE_REASON
+
+
+def test_import_id_survives_a_new_hosted_upload_and_stays_scoped_to_the_importer(
+    upload_env, monkeypatch,
+):
+    from fastmcp import Client
+
+    from exomem import server
+
+    vault, who, authority, _, _ = upload_env
+    monkeypatch.setattr(server, "load_dotenv", lambda *a, **kw: None)
+    monkeypatch.setattr(principal, "resolve_mcp_principal", lambda: active)
+    original = b"[0:09] Gate opened.\r\n[0:14] Gate shut.\r\n"
+    first_bytes = hashlib.sha256(original).hexdigest()
+    active = who
+    app = server.build_server(require_auth=False)
+
+    def caller(client_id):
+        _, record = asyncio.run(authority.issue(
+            client_id=client_id, scopes=["mcp"],
+            identity=auth_sessions.SessionIdentity(github_user_id=42, github_login="example"),
+        ))
+        return replace(
+            who, client_binding=principal.ClientBinding(authority.issuer, record.client_id),
+            origin_session=principal.OriginSessionBinding(record.session_id, record.generation, record.audience),
+        )
+
+    def capture(data, import_identity="meeting-42"):
+        descriptor = _prepare(
+            (vault, active, *upload_env[2:]), data, import_identity=import_identity,
+        )
+        sent = _post(upload_env, descriptor, data)
+        assert sent.status_code == 201, sent.text
+
+        async def invoke():
+            async with Client(app) as client:
+                return (await client.call_tool("save_source", {
+                    "title": "Gate log", "source_kind": "session", "files": [sent.json()["file"]],
+                    "detail": "full",
+                })).structured_content
+
+        result = asyncio.run(invoke())
+        [receipt] = result["files"]
+        return receipt
+
+    first = capture(original)
+    assert first["hash"] == first_bytes
+    assert first["outcome"] == "stored"
+    active = caller("agent")
+    repeated = capture(original)
+    assert repeated["ref"] == first["ref"] and repeated["hash"] == first_bytes
+    assert repeated["state"] == "already_stored"
+    conflict = capture(b"different file\r\n")
+    assert conflict["code"] == "IMPORT_IDENTITY_CONFLICT"
+    from exomem import lexstore
+
+    lexstore.get_store(vault).rebuild_atomic()
+    reused = capture(original, import_identity="same-meeting-in-a-second-feed")
+    assert reused["ref"] == first["ref"] and reused["state"] == "already_stored"
+    replayed_reuse = capture(original, import_identity="same-meeting-in-a-second-feed")
+    assert replayed_reuse["ref"] == first["ref"] and replayed_reuse["state"] == "already_stored"
+    active = caller("different-agent")
+    second = capture(b"different file\r\n")
+    assert second["outcome"] == "stored" and second["ref"] != first["ref"]
+
+    from exomem import source_custody
+
+    # This duplicate has a managed erasure obligation. A new import ID must
+    # leave no durable pointer to it, while a different file can bind that ID.
+    original_read_manifest = source_custody.read_manifest
+    monkeypatch.setattr(
+        source_custody, "read_manifest",
+        lambda root, ref: (object(), None) if ref == first["ref"] else original_read_manifest(root, ref),
+    )
+    lexstore.get_store(vault).rebuild_atomic()
+    retirement_bound = capture(original, import_identity="retirement-check")
+    assert retirement_bound["code"] == "IMPORT_RECEIPT_UNAVAILABLE"
+    available = capture(b"another file\r\n", import_identity="retirement-check")
+    assert available["outcome"] == "stored"
+
+
+def test_import_id_refuses_a_container_with_a_normalized_extension(upload_env, source_schema):
+    from test_document_containers import container_bytes
+
+    from exomem import commands
+
+    vault, who, *_ = upload_env
+    data = container_bytes([("note.txt", b"Original document.")])
+    handoff = _prepare(upload_env, data, import_identity="example-container")
+    uploaded = _post(upload_env, handoff, data, filename="record.asi?ce")
+    assert uploaded.status_code == 201, uploaded.text
+
+    with principal.request_scope(who):
+        result = commands.op_capture_source(
+            vault, source_schema=source_schema, title="Example container", source_kind="session",
+            files=[uploaded.json()["file"]],
+        )
+
+    assert result["files"][0]["code"] == "IMPORT_IDENTITY_COMPOUND_SOURCE"
+    assert result["summary"] == {"stored": 0, "failed": 1}
+
+
+def test_import_retry_completes_the_original_after_source_publication_stops(
+    upload_env, source_schema, monkeypatch,
+):
+    from exomem import commands
+    from exomem import vault as vault_module
+
+    vault, who, *_ = upload_env
+    original = b"Record bytes\x00\xff"
+    source_paths = []
+
+    class Interrupted(BaseException):
+        pass
+
+    def stop_at_source(path):
+        if path.name.endswith(".txt.md") and path.is_relative_to(vault) and (
+            vault_module.in_append_only_tree(path.relative_to(vault).as_posix()) == "Sources"
+        ):
+            source_paths.append(path)
+            raise Interrupted()
+
+    def invoke():
+        handoff = _prepare(upload_env, original, import_identity="repeatable-file")
+        uploaded = _post(upload_env, handoff, original)
+        assert uploaded.status_code == 201, uploaded.text
+        with principal.request_scope(who):
+            return commands.op_capture_source(
+                vault, source_schema=source_schema, title="Gate district records", source_kind="session",
+                files=[uploaded.json()["file"]],
+            )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vault_module, "_after_batch_destination_published", stop_at_source)
+        with pytest.raises(Interrupted):
+            invoke()
+    [source] = source_paths
+    before, text, _ = vault_module.parse_frontmatter(source.read_text(encoding="utf-8"))
+    target = source.with_suffix("")
+    assert not target.exists()
+
+    [receipt] = invoke()["files"]
+    assert receipt["state"] == "already_stored"
+    assert receipt["hash"] == hashlib.sha256(original).hexdigest()
+    after, recovered_text, _ = vault_module.parse_frontmatter(source.read_text(encoding="utf-8"))
+    assert recovered_text == text
+    assert after["evidence_file"] == before["evidence_file"]
+    assert after["exomem_id"] == before["exomem_id"]
+    assert target.read_bytes() == original
+    assert invoke()["files"][0]["ref"] == receipt["ref"]
+
+
+def test_concurrent_held_uploads_with_the_same_import_id_file_once(upload_env, source_schema):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from exomem import commands
+
+    vault, who, *_ = upload_env
+    original = b"The gate survey is complete.\r\n"
+    uploads = []
+    for _ in range(2):
+        handoff = _prepare(upload_env, original, import_identity="parallel-survey")
+        uploaded = _post(upload_env, handoff, original)
+        assert uploaded.status_code == 201, uploaded.text
+        uploads.append(uploaded.json()["file"])
+    ready = Barrier(2)
+
+    def save(file):
+        with principal.request_scope(who):
+            ready.wait(timeout=10)
+            return commands.op_capture_source(
+                vault, source_schema=source_schema, title="Gate survey", source_kind="session", files=[file],
+            )["files"][0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(save, uploads)
+
+    assert first["ref"] == second["ref"]
+    assert first["hash"] == second["hash"] == hashlib.sha256(original).hexdigest()
+    assert sum(row.get("state") == "already_stored" for row in (first, second)) == 1
+
+    from exomem import note
+    from exomem import vault as vault_module
+
+    page = vault / first["page"]
+    frontmatter, body, _ = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    with principal.request_scope(who):
+        summary = note.note(
+            vault, title="Gate survey summary", note_type="insight", status="draft",
+            content="## Findings\n\n- [finding] The survey team completed its inspection.",
+            sources=[first["page"]],
+        )
+    updated, updated_body, _ = vault_module.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert updated_body == body
+    assert updated["evidence_file"] == frontmatter["evidence_file"]
+    assert (vault / updated["evidence_file"]).read_bytes() == original
+    assert summary.path.removesuffix(".md") in str(updated["ingested_into"])

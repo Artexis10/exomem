@@ -33,7 +33,7 @@ def _surfaces(command) -> str:
     if "cli" in command.surfaces:
         labels.append("CLI")
     text = ", ".join(labels) or "-"
-    # The registry's executor attribute declares which commands only an Exomem Cloud cell lists.
+    # The registry's executor attribute declares which commands only an Evermatter Cloud cell lists.
     return f"{text} (Cloud only)" if command.cloud_only else text
 
 
@@ -109,13 +109,13 @@ def build_capabilities_markdown() -> str:
         "forwards a compatible registry command. Public callers cannot select a tenant, cell,",
         "private endpoint, credential, or vault path.",
         "",
-        "Exomem cells own command execution, mutation safety, private readiness, bounded feature",
+        "Evermatter cells own command execution, mutation safety, private readiness, bounded feature",
         "enforcement, and canonical export/restore. They do not own accounts, public sessions,",
         "Paddle, provisioning, encrypted backup retention, KMS, or destructive external deletion.",
         "Paddle is never a cell request-path or package runtime dependency; Substrate projects its",
         "billing state into internal provider-neutral capabilities before routing.",
         "",
-        "See the Exomem Cloud runbooks in [runbooks/](runbooks/) and the",
+        "See the Evermatter Cloud runbooks in [runbooks/](runbooks/) and the",
         "[Substrate control-plane contract](substrate-control-plane-contract.md).",
         "",
         "## Public MCP Tools",

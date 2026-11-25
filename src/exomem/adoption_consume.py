@@ -233,7 +233,7 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     filed text that `finish` did not reach before its call budget ran out, so no one has compared it with its
     Source page. A run that opted out of consuming never checks, so its filed text stays `text`. `unfiled` counts
     the files of those reasons, and `summary` says in one sentence what needs review. The Cloud route discards a
-    stage with `transfer_memory`; a local import has no Exomem command, so its stage goes by hand. Both name the
+    stage with `transfer_memory`; a local import has no Evermatter command, so its stage goes by hand. Both name the
     whole stage folder, which holds the residual and nothing else. A page that later pages follow names no discard
     route, because the folder still holds their files: `more_pages` says so.
     """
@@ -254,7 +254,7 @@ def residual(root: Path, run: dict, filed_statuses: tuple[str, ...], earlier_pag
     route = (
         f"call transfer_memory with action import_discard, import_id {recorded_stage['stage']} and confirm=true"
         if recorded_stage.get("proof") == import_stage.CLOUD_PROOF
-        else f"delete the folder {folder} by hand; no Exomem command discards a local import"
+        else f"delete the folder {folder} by hand; no Evermatter command discards a local import"
     )
     more_pages = bool((run.get("paging") or {}).get("more"))
     report = {

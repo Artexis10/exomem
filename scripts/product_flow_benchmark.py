@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Product-flow benchmark for Exomem.
+"""Product-flow benchmark for Evermatter.
 
 This is a local product harness, not an algorithm benchmark. It exercises the
 CLI/MCP-facing flows a user or assistant actually depends on, then rates each
@@ -314,7 +314,7 @@ def summarize_flows(flows: list[FlowResult]) -> dict:
 
 def render_text_report(report: dict) -> str:
     lines = [
-        "# Exomem product flow benchmark",
+        "# Evermatter product flow benchmark",
         "",
         f"Generated: {report['generated_at']}",
         f"Repo: {report['repo']}",
@@ -400,7 +400,7 @@ def flow_fresh_setup(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowR
     )
     kb = vault / "Knowledge Base"
     contract = vault / ".exomem" / "schema" / "SKILL.md"
-    skill = home / ".claude" / "skills" / "exomem" / "SKILL.md"
+    skill = home / ".claude" / "skills" / "evermatter" / "SKILL.md"
     checks = [
         Check("setup exits successfully", run.ok, f"exit={run.returncode}"),
         Check("vault scaffold exists", contract.is_file(), str(contract)),
@@ -408,12 +408,12 @@ def flow_fresh_setup(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowR
         Check("skill install isolated to temp HOME", skill.is_file(), str(skill)),
     ]
     evidence = [
-        "Exomem setup can create a fresh governed vault from the CLI.",
+        "Evermatter setup can create a fresh governed vault from the CLI.",
         "Setup still does more than a pure smoke: skill install is part of the flow.",
     ]
     gaps = [
         "Basic Memory has a shorter public local install path and a cloud no-install path.",
-        "Exomem setup remains more configuration-heavy than Basic Memory's first-run story.",
+        "Evermatter setup remains more configuration-heavy than Basic Memory's first-run story.",
     ]
     return runner.flow(
         flow_id="fresh_setup",
@@ -454,7 +454,7 @@ def flow_messy_vault_adoption(ctx: HarnessContext, runner: FlowRunner, bm: dict)
             "The product CLI can scan a messy existing vault before any copy/adoption write.",
         ],
         gaps=[
-            "Basic Memory has richer importers for common AI exports; Exomem adoption is safer in design but less usable today.",
+            "Basic Memory has richer importers for common AI exports; Evermatter adoption is safer in design but less usable today.",
         ],
     )
 
@@ -485,7 +485,7 @@ def flow_search_recall(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Flo
         rating="comparable",
         checks=checks,
         evidence=[
-            "Exomem supports keyword and hybrid-facing recall; lean benchmark uses keyword to avoid model downloads.",
+            "Evermatter supports keyword and hybrid-facing recall; lean benchmark uses keyword to avoid model downloads.",
             "Find results expose vault-relative paths.",
         ],
         gaps=[
@@ -538,10 +538,10 @@ def flow_write_remember(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Fl
         rating="ahead",
         checks=checks,
         evidence=[
-            "Exomem separates raw Sources from compiled notes and updates source-to-note provenance.",
+            "Evermatter separates raw Sources from compiled notes and updates source-to-note provenance.",
         ],
         gaps=[
-            "Basic Memory's `write_note` is simpler for an assistant; Exomem's governed write is safer but more verbose.",
+            "Basic Memory's `write_note` is simpler for an assistant; Evermatter's governed write is safer but more verbose.",
         ],
     )
 
@@ -587,10 +587,10 @@ def flow_source_preservation(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
         rating="ahead",
         checks=checks,
         evidence=[
-            "Exomem can copy selected legacy files as Sources while preserving original path and SHA-256.",
+            "Evermatter can copy selected legacy files as Sources while preserving original path and SHA-256.",
         ],
         gaps=[
-            "Basic Memory importers cover more source formats, but Exomem's preservation contract is stricter.",
+            "Basic Memory importers cover more source formats, but Evermatter's preservation contract is stricter.",
         ],
     )
 
@@ -649,7 +649,7 @@ def flow_evidence_provenance(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
         rating="ahead",
         checks=checks,
         evidence=[
-            "Exomem has a distinct Evidence tree plus read-only provenance reporting.",
+            "Evermatter has a distinct Evidence tree plus read-only provenance reporting.",
         ],
         gaps=[
             "The provenance tag mechanism is powerful but still too hidden for ordinary users.",
@@ -723,10 +723,10 @@ def flow_schema_inference_validation(ctx: HarnessContext, runner: FlowRunner, bm
         checks=checks,
         evidence=[
             "Basic Memory public docs list `schema_infer`, `schema_validate`, and `schema_diff`.",
-            "Exomem infers optional corpus-backed contracts, validates them strictly, and diffs corpus drift through one registry-generated command.",
+            "Evermatter infers optional corpus-backed contracts, validates them strictly, and diffs corpus drift through one registry-generated command.",
         ],
         gaps=[
-            "Basic Memory's schema workflow is more established publicly; Exomem's hash-guarded contract persistence is more conservative.",
+            "Basic Memory's schema workflow is more established publicly; Evermatter's hash-guarded contract persistence is more conservative.",
         ],
     )
 
@@ -812,10 +812,10 @@ def flow_graph_context_building(ctx: HarnessContext, runner: FlowRunner, bm: dic
         rating="comparable",
         checks=checks,
         evidence=[
-            "Exomem has graph primitives plus one bounded context operation over stored documents, typed edges, provenance, evidence, and history.",
+            "Evermatter has graph primitives plus one bounded context operation over stored documents, typed edges, provenance, evidence, and history.",
         ],
         gaps=[
-            "Basic Memory still exposes a broader canvas workflow; Exomem now matches the technical context-building front door without adding a canvas product.",
+            "Basic Memory still exposes a broader canvas workflow; Evermatter now matches the technical context-building front door without adding a canvas product.",
         ],
     )
 
@@ -863,7 +863,7 @@ def flow_review_stale_contradiction(ctx: HarnessContext, runner: FlowRunner, bm:
         rating="ahead",
         checks=checks,
         evidence=[
-            "Exomem has first-class audit, attention, stale review, contradiction, and compilation scaffolding surfaces.",
+            "Evermatter has first-class audit, attention, stale review, contradiction, and compilation scaffolding surfaces.",
         ],
         gaps=[
             "The review system is strong but needs a clearer daily product workflow and fewer tool names.",
@@ -902,11 +902,11 @@ def flow_assistant_onboarding(ctx: HarnessContext, runner: FlowRunner, bm: dict)
         rating="comparable",
         checks=checks,
         evidence=[
-            "Exomem exposes `bootstrap` and `demo` as assistant-facing onboarding surfaces.",
+            "Evermatter exposes `bootstrap` and `demo` as assistant-facing onboarding surfaces.",
             "Basic Memory has broader packaged plugins/skills and public docs across clients.",
         ],
         gaps=[
-            "Exomem's assistant onboarding is technically explicit, but Basic Memory's ecosystem packaging is ahead.",
+            "Evermatter's assistant onboarding is technically explicit, but Basic Memory's ecosystem packaging is ahead.",
         ],
     )
 

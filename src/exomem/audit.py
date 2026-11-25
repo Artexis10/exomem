@@ -63,6 +63,12 @@ Checks (all read-only; no writes ever):
   the connected agent, never as a claim that the page is misfiled, and listed
   with the other backlog items after dated obligations. One item per page; a dismissal holds until the page's project key,
   home folder or title changes.
+- `name_drift`: pages that a rename-only `curation.relocate` would rename today, because their
+  file name no longer follows their title (`name_drift`). Reported at `info`, as one item for the
+  vault anchored on the top index, that carries the call that renames the next batch, and
+  listed with the backlog items after dated obligations. Its fingerprint changes with the drifted
+  set. A page with no usable title, or whose rename this caller cannot plan, is counted, never
+  proposed.
 - `supersession_integrity`: a `supersedes`/`superseded_by` pointer that does not
   resolve, and a supersession component with more than one current head. Both
   are `warn` DEFECTS in authored state with no threshold anywhere, which is why
@@ -196,10 +202,12 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "question_aging",
     "supersession_integrity",
     "entity_type_unregistered",
+    "entity_facet_unaddressed",
     "unreflected_outcomes",
     "unreflected_observations",
     "note_cohesion",
     "ownership_review",
+    "name_drift",
     "entity_recurrence",
     "collection_candidate",
     "artifact_role_promotion",
@@ -607,8 +615,7 @@ def audit(
     projection_checks = _SEMANTIC_AUDIT_CATEGORIES | {RELATION_GENERIC_SHARE_CATEGORY} | set(DUPLICATE_CATEGORIES)
     sense_scope = None
     release = _AUDIT_RELEASE_DEFAULT
-    # An explicit entity-recurrence sweep reads only the pages that changed since the
-    # last one. Every other composition keeps the full parse.
+    # An explicit entity-recurrence sweep reads only the pages that changed since the last one.
     from_store = selected == {"entity_recurrence"}
     corpus_complete = True
     pages = []
@@ -616,7 +623,13 @@ def audit(
         request_budget.checkpoint()
         if "corpus_contradictions" in selected:
             sense_scope, release = _capture_audit_scope(vault_root)
-        if not from_store and not selected <= projection_checks:
+        if selected == {CUSTODY_SOURCE}:
+            # Only a custody-marked Source can produce this finding, so its
+            # frontmatter mark selects the corpus before admission runs.
+            pages = _parse_all(kb, vault_root, select=_custody_marked_selector(vault_root))
+        elif selected == {"source_pointer_drift"}:
+            pages = _parse_all(kb, vault_root, append_only=True)
+        elif not from_store and not selected <= projection_checks:
             pages = _parse_all(kb, vault_root, keep=release)
         request_budget.checkpoint()
     except request_budget.ReadBudgetExhausted:
@@ -696,6 +709,9 @@ def audit(
         # One snapshot, built on first use, for both backlog checks.
         return find_module.writer_resolver_snapshot(vault_root)
 
+    # A custody-only parse admitted no derivative or predecessor: the pages a
+    # Source names are admitted and parsed on demand, through the same rule.
+    named_page = _named_page_lookup(kb, vault_root, pages) if selected == {CUSTODY_SOURCE} else None
     backlog_families = selected & {"unprocessed_source", CUSTODY_SOURCE}
     with stage(backlog_families) as run:
         if run:
@@ -703,6 +719,7 @@ def audit(
                 _check_unprocessed_sources(
                     vault_root, pages, today=today, source_context=source_context,
                     resolver=backlog_resolver, families=backlog_families,
+                    lookup=named_page,
                 )
             )
     with stage(review_state_module.EPISODE_BACKLOG) as run:
@@ -786,12 +803,18 @@ def audit(
                     vault_root, pages, today=today, status_basis=status_basis, sense_scope=sense_scope
                 )
             )
+    with stage('entity_facet_unaddressed') as run:
+        if run:
+            findings.extend(_check_entity_facets(vault_root, pages))
     with stage('note_cohesion') as run:
         if run:
             findings.extend(_check_note_cohesion(vault_root, pages))
     with stage('ownership_review') as run:
         if run:
             findings.extend(_check_ownership_review(vault_root, pages))
+    with stage('name_drift') as run:
+        if run:
+            findings.extend(_check_name_drift(vault_root, pages))
     with stage('entity_recurrence') as run:
         if run:
             findings.extend(
@@ -2499,9 +2522,19 @@ _AUDIT_RELEASE_DEFAULT = object()
 
 @call_spans.timed("audit.parse_corpus")
 def _parse_all(
-    kb: Path, vault_root: Path, *, keep: Any = _AUDIT_RELEASE_DEFAULT
+    kb: Path,
+    vault_root: Path,
+    *,
+    keep: Any = _AUDIT_RELEASE_DEFAULT,
+    append_only: bool = False,
+    select: Callable[[str, bytes | None], bool] | None = None,
 ) -> list[find_module.ParsedPage]:
-    """Parse the admitted Markdown pages in the knowledge base."""
+    """Parse the admitted Markdown pages in the knowledge base.
+
+    `select` runs before authorization: an unselected page is never admitted
+    or parsed, so a check whose findings can come only from marked pages pays
+    a frontmatter read where it used to pay the whole admission.
+    """
     from .governance import egress
     from .governance.principal import effective_principal
 
@@ -2515,13 +2548,163 @@ def _parse_all(
     for page in find_corpus.corpus_pages(
         vault_root, "kb", lambda **walk: find_module._walk_md(kb, **walk),
         lambda path: find_module._parse_page(path, path.stat().st_mtime, vault_root),
-        keep=lambda rel, content: egress.content_permits(vault_root, rel, who, snapshot=content)
+        keep=lambda rel, content: (select is None or select(rel, content))
+        and (not append_only or in_append_only_tree(rel) is not None)
+        and egress.content_permits(vault_root, rel, who, snapshot=content)
         and (admitted is None or admitted(rel)),
     ):
         # A hidden part page is its Source's own text, so no check counts or flags it as a memory.
         if page.part_of is None:
             pages.append(page)
     return pages
+
+
+def _custody_marked_selector(vault_root: Path) -> Callable[[str, bytes | None], bool]:
+    """Keep pages whose frontmatter records `custody_only: true`.
+
+    Only a decided negative drops a page: on any uncertainty — an unreadable,
+    unterminated or oversized frontmatter block, a fence spelling the bounded
+    reader does not recognise, or frontmatter that does not parse — the page
+    stays in and the ordinary admission and full parse decide it, exactly as
+    without a selector.
+    """
+
+    def select(rel: str, content: bytes | None) -> bool:
+        if content is None:
+            # A file-mode page: read only its fenced block through a plain
+            # no-follow open — the wikilink resolver build reads walked pages
+            # the same way. The boolean only narrows the admission set; every
+            # page kept here is read again through the held reader in
+            # admission and the full parse. Any doubt keeps the page.
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            if nofollow is None:
+                return True
+            path = vault_root.joinpath(*rel.split("/"))
+            fd = -1
+            try:
+                fd = os.open(
+                    path,
+                    os.O_RDONLY | nofollow | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0),
+                )
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    return True
+                with os.fdopen(fd, "rb", closefd=True) as stream:
+                    fd = -1
+                    probe = stream.read(8)
+                    stream.seek(0)
+                    content = vault_module.read_frontmatter_header(
+                        stream, 64 * 1024
+                    )
+            except (OSError, vault_module.FrontmatterError):
+                return True
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            if not content and probe.removeprefix(b"\xef\xbb\xbf").startswith(b"---"):
+                # The opener is there but the bounded reader could not fence
+                # the block (a CR-only page's `\r` opener): undecided.
+                return True
+        return _custody_marked(content)
+
+    return select
+
+
+def _custody_marked(content: bytes) -> bool:
+    """Whether page bytes, or the page's fenced block alone, record `custody_only: true`.
+
+    Parsed the way `_parse_page_after_checkpoint` parses it (LF normalization,
+    frontmatter pattern, safe loader). A page whose bytes do not decode or
+    carry no frontmatter is a decided negative; one whose frontmatter does not
+    parse is undecided, and the caller keeps it.
+    """
+    try:
+        text = vault_module.markdown_lf(content.decode("utf-8"))
+    except UnicodeDecodeError:
+        return False
+    fm_match = find_module.FRONTMATTER_PATTERN.match(text)
+    if fm_match is None:
+        return False
+    try:
+        frontmatter = vault_module.yaml_safe_load(fm_match.group(1)) or {}
+    except vault_module.MALFORMED_FRONTMATTER_ERRORS + (yaml.YAMLError,):
+        return True
+    return isinstance(frontmatter, dict) and frontmatter.get("custody_only") is True
+
+
+def _named_page_lookup(
+    kb: Path, vault_root: Path, pages: list[find_module.ParsedPage]
+) -> Callable[[str], find_module.ParsedPage | None]:
+    """A `lookup` that admits and parses one named page when a check asks for it.
+
+    The answer for a vault-relative path is the one a full `_parse_all` would
+    have given: a page already parsed, else `None` when the corpus walk does
+    not reach it, authorization refuses it or it parses to a hidden part page.
+    Each answer is cached for the call, `None` included, and the read is
+    budgeted so an exhausted lookup truncates the stage as the corpus read's
+    exhaustion does.
+    """
+    from . import find_corpus
+    from .governance import egress
+    from .governance.principal import effective_principal
+
+    who = effective_principal()
+    admitted = egress.restricted_release_filter(vault_root)
+    parsed = {page.rel_path: page for page in pages}
+    resolved: dict[str, find_module.ParsedPage | None] = {}
+    listings: dict[Path, frozenset[str] | None] = {}
+
+    def lookup(rel: str) -> find_module.ParsedPage | None:
+        if rel in parsed:
+            return parsed[rel]
+        if rel not in resolved:
+            request_budget.checkpoint()
+            resolved[rel] = _admit_named_page(rel)
+        return resolved[rel]
+
+    def _admit_named_page(rel: str) -> find_module.ParsedPage | None:
+        path = vault_root.joinpath(*rel.split("/"))
+        source = _named_corpus_source(rel, path)
+        if source is None:
+            return None
+        content = source.stored.body if source.stored is not None else None
+        if not egress.content_permits(vault_root, rel, who, snapshot=content):
+            return None
+        if admitted is not None and not admitted(rel):
+            return None
+        try:
+            page = source.parse(
+                lambda file: find_module._parse_page(file, file.stat().st_mtime, vault_root)
+            )
+        except OSError:
+            return None
+        # A hidden part page is its Source's own text: `_parse_all` drops it.
+        if page is None or page.part_of is not None:
+            return None
+        return page
+
+    def _named_corpus_source(rel: str, path: Path) -> find_corpus.CorpusSource | None:
+        stored_rel = find_corpus.stored_relative(path, vault_root)
+        if stored_rel is not None:
+            # A stored page may have no file at all; the store's row is its membership.
+            from .vault_store import read
+
+            if not read.corpus_member(stored_rel, "kb"):
+                return None
+            with read.snapshot(vault_root) as view:
+                stored = view.page(stored_rel)
+            if stored is None:
+                return None
+            return find_corpus.CorpusSource(path, vault_root, stored)
+        if not find_corpus.kb_walk_member(rel):
+            return None
+        # The walk's own entry rule on this one path's ancestry, so a link or a
+        # hard-linked file is no more read than the walk would read it.
+        if not find_corpus.walk_md_admits(kb, path, listings):
+            return None
+        return find_corpus.CorpusSource(path, vault_root)
+
+    return lookup
 
 
 def _page_signal_version(page: find_module.ParsedPage) -> str:
@@ -2720,12 +2903,14 @@ def _check_unregistered_entity_types(
         if finding_path == carrier_path:
             meta["proposal"] = proposal
             meta["expected_hash"] = registry.extension_hash
+            save = capabilities.active_call_text("schema_memory", {
+                "operation": "save-entity-types", "proposal": "<meta.proposal>",
+                "why": "<reason>", "expected_hash": "<meta.expected_hash>",
+            })
             return (
                 meta,
                 "Save `meta.proposal` — the full registry with this entry merged — "
-                'via `schema_memory(operation="save-entity-types", '
-                "proposal=meta.proposal, why=..., "
-                "expected_hash=meta.expected_hash)`. Do not save "
+                f"via `{save}`. Do not save "
                 "`proposed_entry` on its own; it is a description, not a registry.",
             )
         meta["proposal_carrier"] = carrier_path
@@ -3979,8 +4164,9 @@ def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
             path=str(item.get("path") or managed_join("")),
             detail=str(item.get("detail") or item.get("code") or "relation registry finding"),
             proposed_fix=(
-                "Review corpus evidence with schema_memory(subject='relations') and save "
-                "a complete, hash-guarded proposal."
+                "Review corpus evidence with "
+                f"{capabilities.active_call_text('schema_memory', {'subject': 'relations', 'operation': 'infer'})}"
+                " and save a complete, hash-guarded proposal."
             ),
             meta=item,
             )
@@ -6157,8 +6343,9 @@ def _collection_candidate_finding(
             "and dates to review as a structured collection."
         ),
         proposed_fix=(
-            "Review the cited units, draft and validate a collection schema, then ask "
-            "for confirmation before creating it. Nothing is auto-created or backfilled."
+            "Review the cited units, draft and validate a collection schema, then create it "
+            "under the served capture disposition: automatic when silent and within the bounds, "
+            "after one confirmation when advisory. This audit creates and backfills nothing."
         ),
         paths=paths,
         meta=meta,
@@ -6539,6 +6726,68 @@ def _check_question_aging(
 # ---------------- check: note_cohesion ----------------
 
 
+def entity_facet_claims(body: str, document: Any) -> list[semantic_units.ClaimTarget]:
+    """An entity page's facet items that carry a claim nothing can address yet.
+
+    The audit check and the reviewed fix share this list, so the finding and the
+    conversion never disagree. `semantic_units.claim_targets` decides what
+    converts; the audit's own scope is the facets, the sections other than
+    `## Observations`, where compact units already live.
+    """
+    return [
+        target
+        for target in semantic_units.claim_targets(body, document.units)
+        if target.convertible
+        and semantic_language_registry.normalize_label(target.item.heading or "")
+        != "observations"
+    ]
+
+
+def _check_entity_facets(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Entity pages whose facet bullets carry claims nothing can address.
+
+    A claim in a facet has no anchor, so no supersession, verdict or link can
+    name it; the reviewed fix converts it to a compact unit in place under its
+    `##` section's category.
+    """
+    from . import semantic_index
+
+    type_basis = note_types.Basis(vault_root)
+    findings: list[AuditFinding] = []
+    for page in pages:
+        request_budget.checkpoint()
+        if not type_basis.selects(page.page_type, note_types.entity_role):
+            continue
+        try:
+            state = semantic_index.selected_parent_index_state(
+                vault_root, page.rel_path
+            )
+        except (OSError, ValueError):
+            continue
+        for target in entity_facet_claims(page.body, state.document):
+            item = target.item
+            findings.append(
+                AuditFinding(
+                    category="entity_facet_unaddressed",
+                    severity="warn",
+                    path=page.rel_path,
+                    detail=(
+                        f"facet {item.heading!r} holds an unaddressed claim at "
+                        f"line {item.line}: {item.text!r}"
+                    ),
+                    proposed_fix=(
+                        f"convert the item in place to a compact unit "
+                        f"- [{target.category}] ... ^<anchor>; a reviewed maintenance "
+                        "plan applies it"
+                    ),
+                )
+            )
+    return findings
+
+
 @call_spans.timed("audit.note_cohesion")
 def _check_note_cohesion(
     vault_root: Path,
@@ -6635,6 +6884,25 @@ def _check_ownership_review(
                 )
             )
     return findings
+
+
+# ---------------- check: name_drift ----------------
+
+
+@call_spans.timed("audit.name_drift")
+def _check_name_drift(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """One finding for the vault while any page's file name differs from its title's name.
+
+    The batch and the call live in `name_drift`, which the read operation and the write path use
+    as well; the rule is the one relocation plans with. It claims nothing about a page's title.
+    """
+    from . import name_drift
+
+    found = name_drift.finding(vault_root, name_drift.scan(vault_root, pages))
+    return [found] if found is not None else []
 
 
 # ---------------- check: supersession_integrity ----------------

@@ -1,0 +1,11 @@
+{
+  "id": "m09-outcome-tested",
+  "title": "A trial with mixed results and no verdict yet is reported",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "pg_ivm results for Fernwatch are in.",
+    "The weekly totals view refreshed about 40 times faster than recalculating it, but the lag was around a minute when the sensors burst-write, and the dashboard is supposed to feel live. I haven't decided if a minute is acceptable. I'll watch it for another month before I call it."
+  ]
+}

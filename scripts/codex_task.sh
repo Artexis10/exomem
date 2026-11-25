@@ -111,9 +111,9 @@ preflight_sandbox() {
 
   echo "codex_task: preflight -- can this environment run one test?"
   local out
-  # The live Exomem service legitimately updates the machine-default state
+  # The live Evermatter service legitimately updates the machine-default state
   # root while this probe runs.  Point both the platform default and the
-  # explicit Exomem root into the lane so pytest's cross-process guard tests
+  # explicit Evermatter root into the lane so pytest's cross-process guard tests
   # the worker rather than observing unrelated service activity.
   local preflight_xdg="$wt/.task/preflight-xdg"
   local preflight_localappdata="$wt/.task/preflight-localappdata"

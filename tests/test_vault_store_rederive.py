@@ -31,6 +31,7 @@ from test_vault_store_migration import (  # noqa: F401
     vault,
 )
 from test_vault_store_read_write import stored, writer  # noqa: F401
+from test_vault_store_write_path import commits_since
 
 from exomem import commands, epistemic_graph, lexstore, note_types, semantic_index, writer_lease
 from exomem import find as find_module
@@ -449,7 +450,7 @@ def test_a_commit_between_two_batches_is_not_blocked_and_its_page_is_derived_by_
         write.StoreChange(write.Origin.GOVERNED, "note", puts=(write.PagePut(GAMMA, GAMMA_TEXT),)),
     )
     project(writer, stored)
-    assert revision(stored) == during + 1, "the write committed while the pass was part way"
+    assert commits_since(stored, during) == 1, "the write committed while the pass was part way"
     assert mode.status(stored)["registry"] == rederive.REBUILDING
 
     settle_to_the_end(stored, writer, limit=200)
@@ -952,16 +953,19 @@ def test_a_registry_tick_runs_a_batch_once_the_overlay_is_on_disk_and_not_before
                 "VALUES (?, 6, 'write', 'now')",
                 (PROFILES,),
             )
-    generation = writer_lease.read_commit_generation(root)
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        before = rederive.read(reader)
+    assert before.state != rederive.CURRENT
 
     assert runtime.StoreServer._registry_tick(served_store) == runtime.DERIVED_RETRY_SECONDS
-    assert writer_lease.read_commit_generation(root) == generation
+    # A batch takes no vault boundary, so the registry state, not the commit generation, says one ran.
+    with closing(connection.open_reader(connection.store_path(root))) as reader:
+        assert rederive.read(reader) == before
     with connection.open_writer(connection.store_path(root), lease_check=lambda: True) as handle:
         with handle.transaction() as tx:
             tx.execute("DELETE FROM store_projection_queue")
 
     runtime.StoreServer._registry_tick(served_store)
 
-    assert writer_lease.read_commit_generation(root) == generation + 1
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         assert rederive.read(reader).state == rederive.CURRENT

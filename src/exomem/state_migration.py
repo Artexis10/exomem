@@ -87,7 +87,7 @@ _REMEDIATION = (
 
 
 class StatePlacementConflict(RuntimeError):
-    """State exists on two authorities and Exomem cannot choose for the user."""
+    """State exists on two authorities and Evermatter cannot choose for the user."""
 
     code = "STATE_PLACEMENT_CONFLICT"
 
@@ -132,7 +132,7 @@ class StateMigrationOfflineRequired(RuntimeError):
         super().__init__(
             "STATE_MIGRATION_OFFLINE_REQUIRED: machine-local state is not ready; "
             "stop every legacy writer and run `exomem maintain --migrate-state "
-            "--offline` before starting Exomem"
+            "--offline` before starting Evermatter"
         )
 
 
@@ -1652,15 +1652,11 @@ def _valid_rollback_endpoint_path(instance_id: object, value: object) -> bool:
         return False
     prefix = managed_join(f"_Governance/events/{instance_id}/")
     leaf = value.removeprefix(prefix)
-    return (
-        value.startswith(prefix)
-        and len(leaf) == len("2026-08.jsonl")
-        and leaf[4:5] == "-"
-        and leaf[7:] == ".jsonl"
-        and leaf[:4].isdigit()
-        and leaf[5:7].isdigit()
-        and 1 <= int(leaf[5:7]) <= 12
-    )
+    if not value.startswith(prefix):
+        return False
+    from .governance import receipts
+
+    return receipts.is_receipt_evidence_name(leaf)
 
 
 def _normalized_member_name(value: object) -> str | None:

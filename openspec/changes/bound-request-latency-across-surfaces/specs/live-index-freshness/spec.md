@@ -191,3 +191,19 @@ callers and deployments with event-maintained indexes disabled MAY keep their sy
 
 - **WHEN** an explicit offline caller or a deployment with event-maintained indexes disabled reads
 - **THEN** the caller may walk, scan or rebuild as before this requirement existed
+
+### Requirement: A lexical catch-up that writes outran stays a catch-up
+
+When the exact-current proof fails after a successful lag-only catch-up, the lexical repair worker SHALL re-read the lag the way the catch-up reads it. When lag remains, the worker SHALL queue another lag-only catch-up instead of a whole-corpus pass. When no lag remains or the re-read is refused, the worker SHALL run the whole-corpus pass as before.
+
+#### Scenario: A catch-up outrun before its admission proof stays a catch-up
+
+- **WHEN** a write lands between a successful lag-only catch-up and its exact-current proof
+- **THEN** the worker queues another lag-only catch-up and logs the result `advanced`
+- **AND** it runs no whole-corpus pass
+- **AND** readiness keeps reporting the catalogue as lagging until the strict proof admits it
+
+#### Scenario: A catalogue that is wrong at the live checkpoint is still rebuilt
+
+- **WHEN** the proof fails with no lag remaining, or the lag re-read is refused
+- **THEN** the worker runs the whole-corpus pass and logs the reason

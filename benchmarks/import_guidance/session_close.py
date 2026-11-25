@@ -11,6 +11,7 @@ measured session never writes or sees the key.
 
 from __future__ import annotations
 
+import base64
 import difflib
 import hashlib
 import importlib.util
@@ -24,7 +25,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +43,7 @@ from epistemic.journeys.f33_referent_replay import _lines as stream_events
 from epistemic.journeys.f33_referent_replay import tool_calls
 from membench.trackc.witness_join import parse_stream_json_transcript
 
-from exomem import memory_refs, note_types, prominence, source_closure
+from exomem import activation_result, context_fit, memory_refs, note_types, prominence, source_closure
 
 from . import checks
 from .recording import Arm, checkout_sha, worker_env
@@ -50,14 +51,28 @@ from .scripted_replies import SCENARIO_DIR
 from .session_seed import READY_SECONDS
 
 SUITE = "session-close"
-# Client modes are a closed harness protocol, not vault vocabulary.
-CLIENT_MODES = ("plugin", "tool-only")
+# Client modes are a closed harness protocol, not vault vocabulary. `deferred-skill` stands in for a chat app such as
+# claude.ai: no hooks, the MCP tools deferred behind tool search, the server instructions not shown, and the skill seen
+# by its description until the agent loads it.
+CLIENT_MODES = ("plugin", "tool-only", "deferred-skill")
 DEFAULT_CLIENT_MODE = CLIENT_MODES[0]
+#: The modes whose runs must show no hook activity.
+HOOKLESS_MODES = ("tool-only", "deferred-skill")
+#: The built-in tools each mode allows; every other mode allows none.
+CLIENT_TOOLS = {"deferred-skill": "ToolSearch,Skill"}
+#: Starts the arm's stdio server with its initialize instructions removed. claude.ai shows a third-party server's
+#: instructions to the model only after a tool loads (operator check, 2026-11-24), so this mode must not send them.
+#: This relies on `build_server` reading the module global at call time.
+INSTRUCTIONLESS_SERVER = (
+    "import runpy, sys; import exomem.server as server; server.SERVER_INSTRUCTIONS = None; "
+    "sys.argv = ['exomem', *sys.argv[1:]]; runpy.run_module('exomem', run_name='__main__', alter_sys=True)"
+)
 SEED_WORKER = Path(__file__).resolve().parent / "session_seed.py"
 #: The engagement levels, read from the product so the list lives in one place; a typo would
 #: silently read as balanced.
 ENGAGEMENTS = prominence.CANON
-#: A fresh server answers `RETRIEVAL_INDEX_WARMING` for about ten seconds; the first turn waits for the index.
+#: The hold covers the actor's server start. A cold catalogue keeps a fresh server answering warming for longer; only
+#: `--ready-graph` seeding builds it first, so a run that reads recall needs that option.
 WARM_HOLD_SECONDS = 15.0
 TURN_TIMEOUT_SECONDS = 300.0
 EXIT_GRACE_SECONDS = 30.0
@@ -66,11 +81,16 @@ RECAP_FOLDER = "Sources/Episodes/"
 #: Files the server maintains itself; a change to them is not a page the agent wrote.
 GENERATED_PAGES = ("index.md", "log.md")
 WARMING_MARK = "RETRIEVAL_INDEX_WARMING"
+#: The abstention reason `recall_context` gives while its catalogue warms.
+WARMING_REASON = activation_result.INDEX_WARMING
 HOOK_EVENTS = ("Stop", "UserPromptSubmit")
 #: The retrieve hook's inject modes a run may pin: the hook's own documented values, one for every arm of a run.
 HOOK_INJECTS = ("mcp", "working_set")
 DEFAULT_HOOK_INJECT = "mcp"
 SKILL_FILES = ("SKILL.md", "references/engagement.md")
+#: The keys of a turn that carries images, and the image types a model accepts: the provider's documented set.
+TURN_KEYS = ("text", "images")
+IMAGE_MEDIA_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp"}
 
 
 @dataclass(frozen=True)
@@ -82,6 +102,8 @@ class Case:
     turns: tuple[str, ...]
     path: Path
     recall_turn: str | None = None
+    #: The image files each turn carries, in the order of `turns`; empty when no turn carries one.
+    turn_images: tuple[tuple[Path, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +137,44 @@ def suite_dir() -> Path:
     return SCENARIO_DIR / SUITE
 
 
+def parse_turns(raw: object, folder: Path) -> tuple[tuple[str, ...], tuple[tuple[Path, ...], ...], list[str]]:
+    """The turns of a case: each a non-empty string, or a `{"text", "images"}` object whose images are files inside
+    `folder`. Returns the texts, the image paths of each turn (empty when no turn has one) and the problems found."""
+    if not (isinstance(raw, list) and raw):
+        return (), (), ["turns must be a non-empty list of strings or {text, images} objects"]
+    texts: list[str] = []
+    images: list[tuple[Path, ...]] = []
+    problems: list[str] = []
+    root = folder.resolve()
+    for number, turn in enumerate(raw, start=1):
+        listed: object = ()
+        if isinstance(turn, dict):
+            if unknown := sorted(set(turn) - set(TURN_KEYS)):
+                problems.append(f"turn {number} has unknown keys {unknown}")
+            turn, listed = turn.get("text"), turn.get("images")
+            if not (isinstance(listed, list) and listed and all(isinstance(name, str) and name.strip() for name in listed)):
+                problems.append(f"turn {number}: images must be a non-empty list of file names")
+                listed = ()
+        if not (isinstance(turn, str) and turn.strip()):
+            problems.append(f"turn {number} needs non-empty text")
+            turn = ""
+        texts.append(turn)
+        found = []
+        for name in listed:
+            # `resolve` follows links, so a fixture cannot point out of the case folder.
+            path = (root / name).resolve()
+            if not path.is_relative_to(root):
+                problems.append(f"turn {number}: image {name!r} is outside the case folder")
+            elif not path.is_file():
+                problems.append(f"turn {number}: image {name!r} is not a file")
+            elif path.suffix.lower() not in IMAGE_MEDIA_TYPES:
+                problems.append(f"turn {number}: image {name!r} must be one of {sorted(IMAGE_MEDIA_TYPES)}")
+            else:
+                found.append(path)
+        images.append(tuple(found))
+    return tuple(texts), tuple(images) if any(images) else (), problems
+
+
 def load_case(path: Path) -> Case:
     """One case file. `session_of` takes the seed and the turns of another case, so two cases differ in one field."""
     raw = json.loads(path.read_text(encoding="utf-8"))
@@ -129,9 +189,8 @@ def load_case(path: Path) -> Case:
         problems.append(f"suite must be {SUITE!r}")
     if raw.get("engagement") not in ENGAGEMENTS:
         problems.append(f"engagement must be one of {ENGAGEMENTS}")
-    turns = base.get("turns")
-    if not (isinstance(turns, list) and turns and all(isinstance(t, str) and t.strip() for t in turns)):
-        problems.append("turns must be a non-empty list of strings")
+    turns, turn_images, turn_problems = parse_turns(base.get("turns"), path.parent)
+    problems += turn_problems
     # The case folder's own `seeds/` comes first: a seed of that name there is the case's data, not a shipped seed.
     candidates = (path.parent / "seeds" / str(base.get("seed")), suite_dir() / "seeds" / str(base.get("seed")))
     seed = next((folder for folder in candidates if folder.is_dir()), candidates[-1])
@@ -144,9 +203,7 @@ def load_case(path: Path) -> Case:
         problems.append("recall_turn must be a non-empty string when supplied")
     if problems:
         raise SystemExit(f"{path.name}: " + "; ".join(problems))
-    return Case(
-        raw["id"], raw["title"], seed, raw["engagement"], tuple(turns), path, recall_turn
-    )
+    return Case(raw["id"], raw["title"], seed, raw["engagement"], turns, path, recall_turn, turn_images)
 
 
 #: A case folder's judged criteria for the context-replay suite (`replay_cases.py`). The name is part of the case-folder
@@ -180,7 +237,7 @@ def pinned_env(arm: Arm, work: Path, case: Case, activation_packet: str | None =
         "EXOMEM_DISABLE_EMBEDDINGS": "1",
         "EXOMEM_DISABLE_MEDIA_EXTRACTION": "1",
         "EXOMEM_DISABLE_QUERY_LOG": "1",
-    }
+    } | ({context_fit.METHOD_FIT_ENV: str(arm.placement)} if arm.placement else {})
 
 
 def seed_vault(case: Case, arm: Arm, work: Path, env: dict[str, str], ready_graph: bool = False) -> dict | None:
@@ -359,11 +416,20 @@ def hook_env(work: Path, engagement: str, inject: str = DEFAULT_HOOK_INJECT) -> 
 def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: str = DEFAULT_CLIENT_MODE) -> dict[str, Path]:
     """Stage the same real MCP server, with plugin guidance or an explicit request to disable hooks."""
     mcp = work / "mcp.json"
+    server = ["-c", INSTRUCTIONLESS_SERVER] if client_mode == "deferred-skill" else ["-m", "exomem"]
     mcp.write_text(json.dumps({"mcpServers": {checks.SERVER: {
-        "command": sys.executable, "args": ["-m", "exomem", "--transport", "stdio"], "env": env,
+        "command": sys.executable, "args": [*server, "--transport", "stdio"], "env": env,
     }}}), encoding="utf-8")
     files = {"mcp": mcp, "settings": work / "settings.json"}
     settings = {"disableAllHooks": True}
+    if client_mode == "deferred-skill":
+        # A project skill, so the agent sees its description and loads the body through the Skill tool.
+        schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
+        skill_dir = work / "cwd" / ".claude" / "skills" / "evermatter"
+        shutil.rmtree(skill_dir, ignore_errors=True)
+        shutil.copytree(schema, skill_dir, ignore=shutil.ignore_patterns("project-keys.yaml"))
+        files["project_skill"] = skill_dir / "SKILL.md"
+        settings = {"disableAllHooks": True, "env": {"ENABLE_TOOL_SEARCH": "true"}}
     if client_mode == DEFAULT_CLIENT_MODE:
         schema = arm.root / "src" / "exomem" / "_scaffold" / "_Schema"
         files["skill"] = work / "skill.md"
@@ -373,7 +439,7 @@ def stage_agent_files(arm: Arm, work: Path, env: dict[str, str], client_mode: st
     return files
 
 
-def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: CreditsRun | None = None) -> list[str]:
+def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: CreditsRun | None = None, client_mode: str = DEFAULT_CLIENT_MODE) -> list[str]:
     shared = [
         "--include-hook-events",
         "--strict-mcp-config",
@@ -384,9 +450,9 @@ def agent_argv(executable: Path, files: dict[str, Path], model: str, credits: Cr
         "--setting-sources",
         "project",
         "--allowedTools",
-        f"mcp__{checks.SERVER}",
+        ",".join(filter(None, (f"mcp__{checks.SERVER}", CLIENT_TOOLS.get(client_mode, "")))),
         "--tools",
-        "",
+        CLIENT_TOOLS.get(client_mode, ""),
         "--max-turns",
         "40",
     ] + (["--append-system-prompt-file", str(files["skill"])] if "skill" in files else [])
@@ -410,9 +476,21 @@ def agent_env(work: Path, case: Case, inject: str = DEFAULT_HOOK_INJECT, pinned:
     return floor | cli | hook_env(work, case.engagement, inject)
 
 
-def user_message(text: str) -> str:
+def user_message(text: str, images: Sequence[Path] = ()) -> str:
+    """One stream-json user turn: each image as a base64 block, then the text, as a chat client sends an attachment."""
+    blocks = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": IMAGE_MEDIA_TYPES[image.suffix.lower()],
+                "data": base64.b64encode(image.read_bytes()).decode("ascii"),
+            },
+        }
+        for image in images
+    ]
     return json.dumps(
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
+        {"type": "user", "message": {"role": "user", "content": [*blocks, {"type": "text", "text": text}]}}
     )
 
 
@@ -423,10 +501,14 @@ def drive_session(
     turns: tuple[str, ...],
     stream_path: Path,
     hook_turn: Callable[[str], str] | None = None,
+    turn_images: Sequence[Sequence[Path]] = (),
 ) -> SimpleNamespace:
     """Start the agent, hold the first turn for the index warm, then send each turn after the previous one's `result`
-    event. With `hook_turn`, one more turn follows the last: its text is built from the session id of the stream.
+    event. `turn_images` lists the image files of each turn, in the order of `turns`. With `hook_turn`, one more turn
+    follows the last: its text is built from the session id of the stream.
     Returns the whole stream, the exit code and why it stopped early, if it did."""
+    # Every message is encoded before the agent starts, so an unreadable image stops the run with no process to clean up.
+    messages = [user_message(text, turn_images[index] if turn_images else ()) for index, text in enumerate(turns)]
     lines: queue.Queue[str | None] = queue.Queue()
     proc = subprocess.Popen(  # noqa: S603
         argv,
@@ -450,11 +532,11 @@ def drive_session(
     stream, finished, eof_seen = [], 0, False
     time.sleep(WARM_HOLD_SECONDS)
 
-    def exchange(number: int, turn: str, sink: TextIO) -> str | None:
-        """One user turn and the agent's answer to it; the reason the session stopped, or None."""
+    def exchange(number: int, message: str, sink: TextIO) -> str | None:
+        """One user turn, already encoded, and the agent's answer to it; the reason the session stopped, or None."""
         nonlocal finished, eof_seen
         try:
-            proc.stdin.write(user_message(turn) + "\n")
+            proc.stdin.write(message + "\n")
             proc.stdin.flush()
         except OSError:
             return f"the agent closed its input before turn {number}"
@@ -480,13 +562,13 @@ def drive_session(
 
     stopped, hook_text = None, None
     with stream_path.open("w", encoding="utf-8") as sink:
-        for number, turn in enumerate(turns, start=1):
-            stopped = exchange(number, turn, sink)
+        for number, message in enumerate(messages, start=1):
+            stopped = exchange(number, message, sink)
             if stopped:
                 break
         if not stopped and hook_turn is not None:
             hook_text = hook_turn(str(init_field("".join(stream), "session_id")))
-            stopped = exchange(len(turns) + 1, hook_text, sink)
+            stopped = exchange(len(turns) + 1, user_message(hook_text), sink)
         try:
             proc.stdin.close()
         except OSError:
@@ -554,17 +636,48 @@ def hook_ask(arm: Arm, session_id: str) -> str:
     return module.EPISODE_ASK.replace("{key}", module.episode_key("claude", session_id))
 
 
+def call_turns(stdout: str) -> dict[str, int]:
+    """The turn (counted from 0) each tool call was made in, by call id: the number of `result` events, one per
+    finished turn, that came before the call."""
+    turn, by_id = 0, {}
+    for event in stream_events(stdout):
+        if event.get("type") == "result":
+            turn += 1
+        message = event.get("message")
+        blocks = message.get("content") if isinstance(message, dict) else None
+        for block in blocks if event.get("type") == "assistant" and isinstance(blocks, list) else ():
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                by_id[str(block.get("id"))] = turn
+    return by_id
+
+
 def tool_trail(stdout: str) -> dict:
-    """The tool calls in order, each with its reply, read from the stream. `compile` holds the `compile` block of each
-    `record_episode` reply, and `warming` counts the replies that said the index was still warming."""
-    calls = tool_calls(stdout)
+    """The tool calls in order, each with its reply and the turn it was made in, read from the stream. `compile` holds
+    the `compile` block of each `record_episode` reply, and `warming` counts the replies that said the index was still
+    warming."""
+    turns = call_turns(stdout)
+    calls = [{**call, "turn": turns.get(str(call["id"]))} for call in tool_calls(stdout)]
     compile_blocks: list[object] = []
     warming = 0
     for call in calls:
-        warming += WARMING_MARK in json.dumps(call["result"])
+        warming += WARMING_MARK in json.dumps(call["result"]) or warming_abstention(call["result"])
         if str(call["name"]).endswith("record_episode"):
             compile_blocks.append(compile_block_of(call["result"]))
     return {"calls": calls, "compile": compile_blocks, "warming": warming}
+
+
+def warming_abstention(content: object) -> bool:
+    """Whether a tool reply is a `recall_context` packet that abstained because its catalogue was still warming."""
+    blocks = content if isinstance(content, list) else [content]
+    for block in blocks:
+        text = block.get("text") if isinstance(block, dict) else block
+        try:
+            packet = json.loads(text) if isinstance(text, str) else None
+        except ValueError:
+            continue
+        if isinstance(packet, dict) and (packet.get("abstention") or {}).get("reason") == WARMING_REASON:
+            return True
+    return False
 
 
 def compile_block_of(content: object) -> object:
@@ -608,14 +721,16 @@ def replies_by_turn(stdout: str) -> list[str]:
 def client_mode_error(client_mode: str, result: dict) -> str | None:
     """A no-hook measurement needs a complete connected trace; contamination preserves evidence as unknown."""
     error = result.get("error")
-    if error is not None or client_mode != "tool-only":
+    if error is not None or client_mode not in HOOKLESS_MODES:
         return error
     count = result.get("hook_invocations")
     starts = result.get("hook_starts")
     if type(count) is not int or count < 0 or type(starts) is not int or starts < 0 or (result.get("server_connected") or {}).get(checks.SERVER) != "connected":
-        return "tool-only hook observations are unavailable; no-hook acceptance is unknown"
+        return f"{client_mode} hook observations are unavailable; no-hook acceptance is unknown"
     if count or starts:
-        return f"tool-only observed {count} completed hook invocation(s) and {starts} hook start(s); no-hook acceptance is unknown"
+        return f"{client_mode} observed {count} completed hook invocation(s) and {starts} hook start(s); no-hook acceptance is unknown"
+    if client_mode == "deferred-skill" and (checks.SERVER not in (result.get("init_skills") or ()) or "ToolSearch" not in (result.get("init_tools") or ())):
+        return "deferred-skill did not list the skill or tool search at start; the chat-app stand-in is unproven"
     return None
 
 
@@ -641,6 +756,8 @@ def session_result(done: SimpleNamespace, expected_turns: int, client_mode: str 
         "capture_nudges": firings,
         "session_id": init_field(done.stdout, "session_id"),
         "actor_version": init_field(done.stdout, "claude_code_version"),
+        "init_skills": init_field(done.stdout, "skills"),
+        "init_tools": init_field(done.stdout, "tools"),
         "replies": replies_by_turn(done.stdout),
         "calls": trail["calls"],
         "compile_blocks": trail["compile"],
@@ -682,7 +799,7 @@ def fresh_recall(case: Case, arm: Arm, work: Path, *, model: str, executable: Pa
             (fresh / name).mkdir(parents=True)
         row["before"] = snapshot(work / "vault")
         files = stage_agent_files(arm, fresh, env, client_mode)
-        row.update(argv=agent_argv(executable, files, model, credits), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
+        row.update(argv=agent_argv(executable, files, model, credits, client_mode), settings=json.loads(files["settings"].read_text(encoding="utf-8")))
         done = drive_session(
             row["argv"],
             fresh / "cwd",
@@ -719,7 +836,7 @@ def run_session(
     hook_inject: str = DEFAULT_HOOK_INJECT,
     activation_packet: str | None = None,
 ) -> dict:
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     work = out / "work" / client_mode / model / arm.label / f"{case.id}-{repeat}"
     shutil.rmtree(work, ignore_errors=True)
@@ -727,7 +844,7 @@ def run_session(
         (work / name).mkdir(parents=True)
     env = pinned_env(arm, work, case, activation_packet)
     files = stage_agent_files(arm, work, env, client_mode)
-    argv = agent_argv(executable, files, model, credits)
+    argv = agent_argv(executable, files, model, credits, client_mode)
     row: dict = {
         "scenario": case.id,
         "repeat": repeat,
@@ -742,9 +859,11 @@ def run_session(
         "hook_invocations": None,
         "hook_starts": None,
         "product_sha": stamp["product_shas"][arm.label],
-        "skill_sha256": hashlib.sha256(files["skill"].read_bytes()).hexdigest() if "skill" in files else None,
+        "skill_sha256": hashlib.sha256(skill.read_bytes()).hexdigest() if (skill := files.get("skill") or files.get("project_skill")) else None,
         "engagement": case.engagement,
         "turns": list(case.turns),
+        # Which turns carried images, as file names; left out when none did, so the row of a text-only case keeps its shape.
+        **({"turn_images": [[path.name for path in images] for images in case.turn_images]} if case.turn_images else {}),
         "hooked": hooked,
         "stream": str(work / "stream.jsonl"),
         "recall_enabled": case.recall_turn is not None,
@@ -764,6 +883,7 @@ def run_session(
             case.turns,
             work / "stream.jsonl",
             hook_turn=(lambda session_id: hook_ask(arm, session_id)) if hooked else None,
+            **({"turn_images": case.turn_images} if case.turn_images else {}),
         )
         after = snapshot(work / "vault")
         row.update(session_result(done, len(case.turns) + hooked, client_mode))
@@ -814,7 +934,7 @@ def run_all(
     activation_packet: str | None = None,
 ) -> list[dict]:
     """Every case `repeats` times, the arms one after the other inside each repeat, so a slow hour falls on both."""
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     if (error := hook_inject_error(hook_inject)) is not None:
         raise ValueError(error)
@@ -879,7 +999,7 @@ def dry_run(
     """No model. The case file loads, and on this arm the seed lays down, the snapshot finds the seeded pages, and the
     server, skill and hook files stage; with `hooked`, the arm's episode ask reads from its hook script. Returns the
     problems found."""
-    if hooked and client_mode == "tool-only":
+    if hooked and client_mode in HOOKLESS_MODES:
         raise ValueError("--hook-turn requires --client-mode plugin")
     problems: list[str] = []
     work = scratch / client_mode / f"{arm.label}-{case.id}"

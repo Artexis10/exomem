@@ -1,0 +1,11 @@
+{
+  "id": "m10-forgot-saved-fact",
+  "title": "The assistant denies something the person says they told it",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "When is my next dentist appointment?",
+    "That's wrong. Last week I told you I'd booked it for the fourteenth, and now you're telling me I never mentioned a dentist. I definitely did."
+  ]
+}

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import threading
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -1041,6 +1042,31 @@ def test_a_failed_cutover_leaves_the_old_sidecar_serving(world) -> None:
 
     recall_migration.cut_over(vault, plan)
     assert index_paths.sidecar_path(vault) == plan.shadow_path
+
+
+def test_a_query_on_the_serving_sidecar_does_not_wait_for_a_build_batch_on_the_shared_turn(world) -> None:
+    """The serving sidecar's encoder has its own slot, so a query never waits behind the build's batches."""
+    vault, log, _loads = world
+    _warm(vault)
+    holding, release = threading.Event(), threading.Event()
+
+    def build_batch():
+        # The build encodes with the recall encoder, one batch per shared turn.
+        with runtime_resources.model_admission(), runtime_resources.model_execution():
+            holding.set()
+            assert release.wait(10)
+
+    log.clear()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        batch = pool.submit(build_batch)
+        assert holding.wait(5)
+        try:
+            vector = pool.submit(_vector_lane, vault).result(timeout=5)
+        finally:
+            release.set()
+        batch.result()
+    assert vector["status"] == "participated", vector
+    assert _query_encoders(log) == [OLD]
 
 
 def test_no_request_thread_loads_a_model(world) -> None:

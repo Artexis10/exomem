@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+from packaging.requirements import Requirement
 from packaging.utils import (
     InvalidSdistFilename,
     InvalidWheelFilename,
@@ -38,6 +39,9 @@ from packaging.version import Version
 
 # GitHub's image attestation protocol fixes this predicate and these field formats.
 SLSA_PREDICATE = "https://slsa.dev/provenance/v1"
+# PyPI's JSON API can trail the first upload of a new project by more than a minute, so
+# qualification observes it with a bounded backoff that fits inside the job timeout.
+PYPI_OBSERVATION_PAUSES = (10, 20, 30, 60, 60, 60, 60)
 
 
 def _digest(value: object, *, label: str) -> str:
@@ -102,6 +106,17 @@ def project(tag: str) -> dict:
     return tomllib.loads(run("git", "show", f"{tag}:pyproject.toml"))["project"]
 
 
+def package_names(package: dict) -> tuple[str, ...]:
+    # The Evermatter rename (D3) publishes the same release twice: once under
+    # the new distribution name and once under `exomem` so existing installs
+    # keep resolving. Tags cut before the rename name `exomem` directly and
+    # publish that one distribution only.
+    names = [package["name"]]
+    if package["name"] == "evermatter":
+        names.append("exomem")
+    return tuple(names)
+
+
 def distribution_kind(filename: str, package: str, version: str) -> str | None:
     try:
         if filename.endswith(".whl"):
@@ -115,9 +130,15 @@ def distribution_kind(filename: str, package: str, version: str) -> str | None:
     return kind if name == canonicalize_name(package) and parsed == Version(version) else None
 
 
-def distributions_complete(names, package: str, version: str) -> bool:
-    # These are the two distribution formats required by the release contract.
-    return {distribution_kind(name, package, version) for name in names} >= {"wheel", "sdist"}
+def distributions_complete(names, packages: str | tuple[str, ...], version: str) -> bool:
+    # These are the two distribution formats required by the release contract,
+    # for every published distribution name.
+    if isinstance(packages, str):
+        packages = (packages,)
+    return all(
+        {distribution_kind(name, package, version) for name in names} >= {"wheel", "sdist"}
+        for package in packages
+    )
 
 
 def missing_distributions(files: list[Path], urls: list[dict]) -> list[Path]:
@@ -141,6 +162,48 @@ def pypi_files(package: str, version: str) -> list[dict]:
         if error.code == 404:
             return []
         raise
+
+
+def release_pypi_files(packages: tuple[str, ...], version: str) -> list[dict]:
+    return [row for package in packages for row in pypi_files(package, version)]
+
+
+def compat_pyproject(original: str, name: str) -> str:
+    """The release's pyproject.toml under the compatibility distribution name."""
+    primary = tomllib.loads(original)["project"]["name"]
+    # tomllib cannot write, so the rewrite is textual and the parse below checks it.
+    # Self-referencing extras ("evermatter[image-codecs]") must name this distribution
+    # too: otherwise installing an exomem extra pulls in evermatter, and the two
+    # distributions then own the same module files.
+    rewritten, count = re.subn(r'(?m)^name = "[^"]+"', f'name = "{name}"', original, count=1)
+    rewritten = rewritten.replace(f'"{primary}[', f'"{name}[')
+    project = tomllib.loads(rewritten)["project"]
+    requirements = list(project.get("dependencies", [])) + [
+        requirement
+        for extra in project.get("optional-dependencies", {}).values()
+        for requirement in extra
+    ]
+    if (
+        count != 1
+        or project["name"] != name
+        or any(Requirement(r).name == primary for r in requirements)
+    ):
+        raise ValueError("compatibility build could not rewrite the project name")
+    return rewritten
+
+
+def _compat_build(name: str, kind: str, tag: str, directory: Path) -> None:
+    # The compatibility distribution is the same source tree with only its
+    # distribution name rewritten, so both wheels carry identical module files.
+    with tempfile.TemporaryDirectory(prefix=f"{name}-build-") as temporary:
+        archive = Path(temporary) / "source.tar"
+        run("git", "archive", "--output", str(archive), tag)
+        source = Path(temporary) / "source"
+        source.mkdir()
+        shutil.unpack_archive(archive, source)
+        pyproject = source / "pyproject.toml"
+        pyproject.write_text(compat_pyproject(pyproject.read_text(), name))
+        run("uv", "build", f"--{kind}", "--out-dir", str(directory), str(source))
 
 
 def cloud_files(tag: str) -> dict[str, tuple[str, str]]:
@@ -313,19 +376,24 @@ def qualify_python(
         root = Path(temporary)
         original = root / "producer"
         download_artifact(artifact, repository, original)
+        packages = package_names(package)
         files = [
             path
             for path in original.iterdir()
-            if distribution_kind(path.name, package["name"], package["version"])
+            if any(
+                distribution_kind(path.name, name, package["version"]) for name in packages
+            )
         ]
         names = {path.name for path in files}
         official_names = {
             asset["name"]
             for asset in release_assets(tag)
-            if distribution_kind(asset["name"], package["name"], package["version"])
+            if any(
+                distribution_kind(asset["name"], name, package["version"]) for name in packages
+            )
         }
         if (
-            not distributions_complete(names, package["name"], package["version"])
+            not distributions_complete(names, packages, package["version"])
             or official_names != names
         ):
             raise ValueError("official GitHub distributions differ from the complete producer set")
@@ -333,20 +401,23 @@ def qualify_python(
         download_release(tag, sorted(names), official)
         if any(sha256(path) != sha256(official / path.name) for path in files):
             raise ValueError("immutable distribution differs between producer and GitHub")
-        for observation in range(6):
+        for pause in (*PYPI_OBSERVATION_PAUSES, None):
             urls = [
                 row
-                for row in pypi_files(package["name"], package["version"])
-                if distribution_kind(row["filename"], package["name"], package["version"])
+                for row in release_pypi_files(packages, package["version"])
+                if any(
+                    distribution_kind(row["filename"], name, package["version"])
+                    for name in packages
+                )
             ]
             missing = missing_distributions(files, urls)
             if not missing:
                 break
-            if observation == 5:
+            if pause is None:
                 raise ValueError(
                     "official PyPI distributions remain missing after bounded observation"
                 )
-            time.sleep(10)
+            time.sleep(pause)
         if {row["filename"] for row in urls} != names:
             raise ValueError("official PyPI filenames differ from the producer set")
         for row in urls:
@@ -457,13 +528,17 @@ def producer_artifacts(
                         source = Path(temporary) / "files"
                         download_artifact(artifact, repository, source)
                         if package is not None:
+                            packages = package_names(package)
                             files = [
                                 p
                                 for p in source.iterdir()
-                                if distribution_kind(p.name, package["name"], package["version"])
+                                if any(
+                                    distribution_kind(p.name, name, package["version"])
+                                    for name in packages
+                                )
                             ]
                             if not distributions_complete(
-                                [p.name for p in files], package["name"], package["version"]
+                                [p.name for p in files], packages, package["version"]
                             ):
                                 continue
                             if any(
@@ -481,6 +556,7 @@ def producer_artifacts(
 
 def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
     package = project(tag)
+    packages = package_names(package)
     version = package["version"]
     if Version(version) != Version(tag.removeprefix("v")):
         raise ValueError("package version differs from release tag")
@@ -488,11 +564,13 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
     if not dry_run:
         assets = release_assets(tag)
         names = [
-            a["name"] for a in assets if distribution_kind(a["name"], package["name"], version)
+            a["name"]
+            for a in assets
+            if any(distribution_kind(a["name"], name, version) for name in packages)
         ]
         download_release(tag, names, directory)
-        for row in pypi_files(package["name"], version):
-            if not distribution_kind(row["filename"], package["name"], version):
+        for row in release_pypi_files(packages, version):
+            if not any(distribution_kind(row["filename"], name, version) for name in packages):
                 continue
             target = directory / row["filename"]
             if not target.exists():
@@ -500,7 +578,7 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
             if sha256(target) != row["digests"]["sha256"]:
                 raise ValueError(f"immutable distribution differs: {target.name}")
         if not distributions_complete(
-            [p.name for p in directory.iterdir()], package["name"], version
+            [p.name for p in directory.iterdir()], packages, version
         ):
             producer_artifacts(
                 tag,
@@ -510,21 +588,31 @@ def prepare_distributions(tag: str, directory: Path, *, dry_run: bool) -> None:
                 package=package,
             )
         if any(directory.iterdir()) and not distributions_complete(
-            [p.name for p in directory.iterdir()], package["name"], version
+            [p.name for p in directory.iterdir()], packages, version
         ):
             raise ValueError(
                 "original publication distributions are incomplete; recover the producer artifact"
             )
-    kinds = {distribution_kind(p.name, package["name"], version) for p in directory.iterdir()}
     # uv owns the actual wheel/sdist filenames; never infer Python build tags.
-    for kind in ("wheel", "sdist"):
-        if kind not in kinds:
-            run("uv", "build", f"--{kind}", "--out-dir", str(directory))
-    files = [p for p in directory.iterdir() if distribution_kind(p.name, package["name"], version)]
-    if not distributions_complete([p.name for p in files], package["name"], version):
-        raise ValueError("build did not produce both release distributions")
+    for name in packages:
+        kinds = {
+            distribution_kind(p.name, name, version) for p in directory.iterdir()
+        }
+        for kind in ("wheel", "sdist"):
+            if kind not in kinds:
+                if name == package["name"]:
+                    run("uv", "build", f"--{kind}", "--out-dir", str(directory))
+                else:
+                    _compat_build(name, kind, tag, directory)
+    files = [
+        p
+        for p in directory.iterdir()
+        if any(distribution_kind(p.name, name, version) for name in packages)
+    ]
+    if not distributions_complete([p.name for p in files], packages, version):
+        raise ValueError("build did not produce all release distributions")
     if not dry_run:
-        missing_distributions(files, pypi_files(package["name"], version))
+        missing_distributions(files, release_pypi_files(packages, version))
 
 
 def stage_cloud(tag: str, directory: Path) -> None:
@@ -551,6 +639,7 @@ def upload_missing(tag: str, paths: Iterable[Path]) -> None:
 
 def asset_status(tag: str) -> dict:
     package = project(tag)
+    packages = package_names(package)
     assets = release_assets(tag)
     with tempfile.TemporaryDirectory() as temporary:
         directory = Path(temporary)
@@ -559,23 +648,27 @@ def asset_status(tag: str) -> dict:
             a["name"]
             for a in assets
             if a["name"] in expected_cloud
-            or distribution_kind(a["name"], package["name"], package["version"])
+            or any(
+                distribution_kind(a["name"], name, package["version"]) for name in packages
+            )
         ]
         download_release(tag, names, directory)
         distributions = [
             p
             for p in directory.iterdir()
-            if distribution_kind(p.name, package["name"], package["version"])
+            if any(
+                distribution_kind(p.name, name, package["version"]) for name in packages
+            )
         ]
         complete = distributions_complete(
-            [p.name for p in distributions], package["name"], package["version"]
+            [p.name for p in distributions], packages, package["version"]
         )
         cloud_complete = all(
             (directory / name).is_file() and sha256(directory / name) == digest
             for name, (_, digest) in expected_cloud.items()
         )
         try:
-            urls = pypi_files(package["name"], package["version"])
+            urls = release_pypi_files(packages, package["version"])
             pypi_complete = complete and not missing_distributions(distributions, urls)
             pypi_state = "present" if pypi_complete else "missing"
         except (OSError, ValueError) as error:
@@ -661,6 +754,30 @@ def verify_build_target(image: str, name: str) -> None:
             raise ValueError(f"BuildKit target differs from {name}: {image}")
 
 
+RELEASE_CUTS = Path(__file__).resolve().parents[2] / ".github" / "release-cuts"
+
+
+def release_builder(tag: str) -> str:
+    """The repository whose release workflow built `tag`.
+
+    A release cut records the repository it ran in, and that repository's workflow signed
+    the release's images under its own name. A repository move keeps old releases signed
+    under the old name, so they verify against their builder, not against this repository.
+    A tag with no cut record is built here.
+    """
+
+    if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?", tag):
+        raise ValueError("release tag must use v followed by a SemVer version")
+    record = RELEASE_CUTS / f"{tag}.json"
+    if not record.exists():
+        return os.environ["GITHUB_REPOSITORY"]
+    builder = json.loads(record.read_text())["evidence"]["repository"]
+    # GitHub owner/name format; the value names a repository, not a vocabulary entry.
+    if not isinstance(builder, str) or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", builder):
+        raise ValueError("release cut record names no builder repository")
+    return builder
+
+
 def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, name: str) -> str:
     envelope = json.loads(bundle.read_text())["dsseEnvelope"]
     statement = json.loads(base64.b64decode(envelope["payload"]))
@@ -673,6 +790,7 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
     digest = _digest("sha256:" + digest_hex, label="image receipt subject digest")
     _require_verified_subject(statement, repository, digest, label="release image")
     target = f"{repository}@{digest}"
+    builder = release_builder(tag)
     verified = json.loads(
         run(
             "gh",
@@ -682,9 +800,9 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
             "--bundle",
             str(bundle),
             "--repo",
-            os.environ["GITHUB_REPOSITORY"],
+            builder,
             "--signer-workflow",
-            f"{os.environ['GITHUB_REPOSITORY']}/.github/workflows/release-please.yml",
+            f"{builder}/.github/workflows/release-please.yml",
             "--signer-digest",
             commit,
             "--source-digest",
@@ -702,7 +820,7 @@ def verify_image_bundle(bundle: Path, tag: str, commit: str, repository: str, na
         _require_verified_subject(proof, repository, digest, label="release image")
         predicate = cast(dict, proof["predicate"])
         invocation = urlsplit(predicate["runDetails"]["metadata"]["invocationId"])
-        prefix = f"/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+        prefix = f"/{builder}/actions/runs/"
         # The GitHub SLSA invocation URL is a fixed protocol, not a filename claim.
         if (
             invocation.scheme != "https"
@@ -748,7 +866,7 @@ def family_assertion(
         "predicate": {
             "family": name,
             "source": {
-                "repository": os.environ["GITHUB_REPOSITORY"],
+                "repository": release_builder(tag),
                 "ref": f"refs/tags/{tag}",
                 "commit": commit,
             },
@@ -964,6 +1082,7 @@ def main() -> None:
             "finish-images",
             "join-image",
             "image-family",
+            "builder",
         ),
     )
     parser.add_argument("--tag", required=True)
@@ -981,6 +1100,9 @@ def main() -> None:
         "--bundle", type=Path, help="Original image provenance bundle for family verification"
     )
     args = parser.parse_args()
+    if args.command == "builder":
+        print(release_builder(args.tag))
+        return
     args.directory.mkdir(parents=True, exist_ok=True)
     if args.command == "qualify-python":
         if args.dry_run or not all((args.source, args.run_id, args.attempt)):
@@ -1007,20 +1129,27 @@ def main() -> None:
         stage_cloud(args.tag, args.directory)
     elif args.command == "upload":
         package = project(args.tag)
+        packages = package_names(package)
         cloud = cloud_files(args.tag)
         upload_missing(
             args.tag,
             (
                 path
                 for path in args.directory.iterdir()
-                if distribution_kind(path.name, package["name"], package["version"])
+                if any(
+                    distribution_kind(path.name, name, package["version"])
+                    for name in packages
+                )
                 or path.name in cloud
             ),
         )
     elif args.command == "pypi":
         package = project(args.tag)
         files = list(args.directory.iterdir())
-        missing = missing_distributions(files, pypi_files(package["name"], package["version"]))
+        missing = missing_distributions(
+            files,
+            release_pypi_files(package_names(package), package["version"]),
+        )
         destination = args.directory / "missing"
         destination.mkdir()
         for path in missing:

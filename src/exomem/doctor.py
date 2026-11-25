@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from . import __version__, cuda_containment, install_info, process_memory
+from . import __version__, cuda_containment, install_info, media_types, process_memory
 from .cli_ops import OpError
 from .collection_store.ownership import reader as ownership_reader
 from .kbdir import managed_join, managed_root, managed_root_rel
@@ -352,7 +352,7 @@ def infer_profile() -> Profile:
         return "lean"
     media_ready = all(
         _module_available(name)
-        for name in ("faster_whisper", "PIL", "fitz", "markitdown")
+        for name in ("faster_whisper", "PIL", *media_types.PDF_READERS, "markitdown")
     )
     if media_ready:
         return "media" if shutil.which("tesseract") else "standard"
@@ -1549,7 +1549,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
                 "ordinary startup refuses until an explicit offline migration completes."
             ),
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     if migration_status != "complete":
@@ -1559,7 +1559,7 @@ def _check_state_placement(vault_root: Path | None) -> DoctorCheck:
             "Machine-local state migration is required before startup "
             f"(manifest status: {migration_status}).",
             "Stop every process that can write this vault, then run `exomem maintain "
-            "--migrate-state --offline` before restarting Exomem.",
+            "--migrate-state --offline` before restarting Evermatter.",
             details=details,
         )
     return _check(
@@ -2118,7 +2118,7 @@ def _check_mps_headroom() -> DoctorCheck | None:
         "mps.headroom",
         "pass",
         "Apple Silicon MPS is available. macOS does not expose a stable non-torch "
-        "free-memory probe for Metal, so Exomem uses policy controls: lazy model "
+        "free-memory probe for Metal, so Evermatter uses policy controls: lazy model "
         "preload by default, live-write burst deferral, and explicit indexing for imports.",
         details={
             "model_preload_allowed": warmup.model_preload_allowed(mode.resolve_mode()),
@@ -3220,12 +3220,12 @@ def _ha_replica_urls(explicit: list[str] | tuple[str, ...] | None) -> list[str]:
 def _evaluate_ha_readiness(
     body: object, *, supported_contracts: set[int]
 ) -> tuple[list[str], dict[str, object]]:
-    from .runtime_readiness import HTTP_TRANSPORT
+    from .runtime_readiness import HTTP_TRANSPORT, SERVICE_NAMES
 
     if not isinstance(body, dict):
         return ["invalid readiness payload"], {}
     reasons: list[str] = []
-    if body.get("status") != "ready" or body.get("service") != "exomem":
+    if body.get("status") != "ready" or body.get("service") not in SERVICE_NAMES:
         reasons.append("runtime is not ready")
     contract = body.get("runtime_contract")
     if isinstance(contract, bool) or not isinstance(contract, int) or contract not in supported_contracts:
@@ -4049,6 +4049,57 @@ def _check_managed_hook_refresh() -> DoctorCheck:
     )
 
 
+def _check_legacy_tool_references() -> DoctorCheck:
+    """Warn about permission rules and hooks of the user's that no server answers any more.
+
+    A rule that names `mcp__exomem__` matches while the client holds an `exomem` server, which
+    includes a URL server that `evermatter setup --migrate` keeps under that key. It is dead
+    only in a client that holds no `exomem` server. A warning, never a failure: the install
+    works either way. Read-only; setup never edits what the user wrote.
+    """
+    from . import client_config
+    from .install_skill import client_home
+
+    try:
+        dead, read = client_config.dead_references(
+            claude_home=client_home("claude"),
+            codex_home=client_home("codex"),
+            claude_config_path=client_config.default_claude_config_path(dict(os.environ)),
+            project_dir=Path.cwd(),
+        )
+    except ValueError as exc:
+        return _check(
+            "migration.tool_prefix",
+            "warn",
+            f"could not read a client's server registrations, so no rule naming "
+            f"`{client_config.LEGACY_TOOL_PREFIX}` was judged: {exc}",
+        )
+    if not dead:
+        checked = ", ".join(str(path) for path in read) or "no Claude or Codex settings file found"
+        return _check(
+            "migration.tool_prefix",
+            "pass",
+            f"checked {checked}: no permission rule or hook there names "
+            f"`{client_config.LEGACY_TOOL_PREFIX}` in a client without an `exomem` server. "
+            "A rule that still names it matches that server. Rules kept anywhere else are not read.",
+        )
+    listed = "; ".join(f"{ref.kind} {ref.name} in {ref.path}" for ref in dead)
+    return _check(
+        "migration.tool_prefix",
+        "warn",
+        f"{len(dead)} permission rule(s) or hook(s) of yours name `{client_config.LEGACY_TOOL_PREFIX}` "
+        f"in a client with no `exomem` server, so they match no tool: {listed}",
+        f"Change each listed rule or hook to the `{client_config.TOOL_PREFIX}` prefix. "
+        "Setup never edits what you wrote.",
+        details={
+            "references": [
+                {"client": ref.client, "path": str(ref.path), "kind": ref.kind, "name": ref.name}
+                for ref in dead
+            ]
+        },
+    )
+
+
 def _check_edge_ingress(*, probe: bool) -> list[DoctorCheck]:
     """Doctor's `edge-ingress` section (design.md Decision 3): verifies the public
     apex is fronted by the HA edge worker rather than tunnel-direct. Skipped
@@ -4257,7 +4308,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
             _check_dependency("pillow", "media", import_name="PIL"),
-            _check_dependency("pymupdf", "media", import_name="fitz"),
+            *(_check_dependency(module, "media") for module in media_types.PDF_READERS),
             _check_dependency("markitdown", "media"),
             _check_tesseract(required=profile == "media"),
             _check_asr_backend(),
@@ -4308,6 +4359,7 @@ def _doctor_report(vault_root, vault_check, *, profile, probe, replica_urls):
     checks.append(_check_recall_canary())
     checks.append(_check_idempotency_store())
     checks.append(_check_managed_hook_refresh())
+    checks.append(_check_legacy_tool_references())
 
     return DoctorReport(profile=profile, checks=checks)
 

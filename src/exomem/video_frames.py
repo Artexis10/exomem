@@ -93,7 +93,7 @@ def _probe_duration(source: Path | BinaryIO) -> float | None:
     return None
 
 
-def _encode_jpeg(img, max_side: int | None) -> bytes:
+def _encode_jpeg(img, max_side: int | None, *, inline_bytes: int | None = None) -> bytes:
     """JPEG encode of a PIL image, its longest side at most `max_side` (None keeps its size)."""
     try:
         from PIL import Image  # noqa: F401 — decoded frames are PIL images
@@ -102,9 +102,17 @@ def _encode_jpeg(img, max_side: int | None) -> bytes:
     out = img.convert("RGB")
     if max_side is not None:
         out.thumbnail((max_side, max_side))
-    buf = io.BytesIO()
-    out.save(buf, format="JPEG", quality=FRAME_JPEG_QUALITY)
-    return buf.getvalue()
+
+    def encode(image) -> bytes:
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=FRAME_JPEG_QUALITY)
+        return buf.getvalue()
+
+    if inline_bytes is None:
+        return encode(out)
+    from .image_view import fit_jpeg
+
+    return fit_jpeg(out, inline_bytes, encode)[0]
 
 
 def get_frames(
@@ -180,6 +188,7 @@ def sample_stream(
     source: BinaryIO, rel_path: str, *, max_frames: int = DEFAULT_TOOL_FRAMES,
     start_sec: float | None = None, end_sec: float | None = None,
     resize_candidates: bool = False, max_side: int | None = DEFAULT_MAX_SIDE,
+    inline_bytes: int | None = None,
 ) -> FramesResult:
     """Sample one retained seekable stream; the caller owns custody and disclosure.
 
@@ -243,7 +252,11 @@ def sample_stream(
         idx = sorted(set(np.linspace(0, len(kept) - 1, effective).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     try:
-        frames = [Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img, max_side)) for ts, img in kept]
+        encode_limits = {} if inline_bytes is None else {"inline_bytes": inline_bytes}
+        frames = [
+            Frame(timestamp_sec=round(float(ts), 3), jpeg=_encode_jpeg(img, max_side, **encode_limits))
+            for ts, img in kept
+        ]
     except embeddings.ClipUnavailable as e:
         raise VideoFramesError(
             "VIDEO_DEPS_MISSING", f"{e} — install the media extra to encode frames"

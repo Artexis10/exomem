@@ -12,7 +12,7 @@
 - [x] 2.2 Serve the `positions` block in maps responses with its state, its framing passage and its items (text, authored date, page title, unit reference). Record its references in the served-context row.
 - [x] 2.3 Add the vault budget `positions_max_chars`, pinned to the engineering bounds the hook reads. Overflow becomes references.
 - [x] 2.4 Teach the scaffold skill to read the block and to capture a person's position under a category that carries the trait. Refresh the skill contract stamps.
-- [x] 2.5 Serve a position whole when it fits the block's bound, end the maps response with the block, and open it with its framing, which names the units as the person's own recorded positions.
+- [x] 2.5 Serve a position whole when it fits the block's bound, and open the block with its framing, which names the units as the person's own recorded positions. Section 5 moved the block from the end of the response to the front.
 
 ## 3. Proof
 
@@ -23,6 +23,13 @@
 ## 4. Delivery
 
 - [ ] 4.1 Run the full corpus, independent review, CI, merge and the ordinary release.
-- [ ] 4.2 After release, declare the vault's existing position categories through a reviewed registry save that the owner confirms. Verify on the installed service that a turn on such a subject serves the block.
-- [ ] 4.3 Have an independent lane reproduce the corrected behaviour before either incident is closed.
+- [x] 4.2 After release, declare the vault's existing position categories through a reviewed registry save that the owner confirms. Verify on the installed service that a turn on such a subject serves the block. Evidence: verified on the installed service 2026-11-20, positions state ready on the incident turn.
+- [ ] 4.3 Have an independent lane reproduce the corrected behaviour before either incident is closed. The first reproduction failed on the first answer, which led with a default explanation; section 5 revises the framing and the placement, and this task reruns after it ships.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+
+## 5. First answer states the position
+
+- [x] 5.1 Replace the framing passage so that it asks the agent to open its first answer with the position, attributed and dated, and to state it before any yes or no. Lead the maps response and the hook's rendering with the block, and keep `budget.serialized_chars` correct. Evidence: `tests/test_recorded_positions.py` pins the first field of the response, the served words and the hook's order; the dev replays are in the design's "Read first, framing first" section.
+- [x] 5.2 Bound a page's units in total for a caller served only an excerpt of it, drop units on a page whose text bound is 0, count and never name the units that caller cannot read by reference, and decide the page bounds again at terminal egress. Evidence: five tests in `tests/test_recorded_positions.py`. Four fail against the earlier code. The fifth, the count-only recheck, fails against the block without the counted-page recheck. It does not fail on the base, which turned that unit into a reference that terminal egress already decided.
+- [ ] 5.3 Run the held-out real-model round for the first answer: fresh cases with a leading yes/no question that presupposes a default cause, one control with no recorded position, and one with a position that the evidence contradicts, judged blind with the same reference view for every arm. Add the reproduced incident conversations to the real-model regression set. Rerun it when the framing passage, the model or the code that reads the answer changes.
+- [x] 5.4 Report the block `unavailable` or `partial`, with the cause as its reason, when the request deadline skips or stops task discovery, a discovery lane that decides the served pages fails, or discovery does not run, so an unknown never reads as no position. Render that state in the hook, even with no item. The installed reproduction of 4.3 found a recall that spent its budget before task discovery and served `empty`.

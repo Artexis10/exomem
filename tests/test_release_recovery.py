@@ -112,9 +112,12 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
         }
         for name in names
     ]
-    observations = iter([[], urls])
+    # A new PyPI project can stay invisible for over a minute after its first upload (one release
+    # on 2026-11-24 failed 55 s in): six empty observations outlast the old 50 s window.
+    observations = iter([[], [], [], [], [], [], urls])
     monkeypatch.setattr(recovery, "pypi_files", lambda *args: next(observations))
-    monkeypatch.setattr(recovery.time, "sleep", lambda seconds: None)
+    pauses = []
+    monkeypatch.setattr(recovery.time, "sleep", pauses.append)
     monkeypatch.setattr(
         recovery.urllib.request, "urlopen", lambda url, timeout: io.BytesIO(url.encode())
     )
@@ -134,6 +137,16 @@ def test_python_qualification_uses_exact_producer_while_images_are_running(
     assert receipt["python"]["state"] == "qualified"
     assert receipt["images"]["state"] == "unqualified"
     assert receipt["consumer_verification"]["state"] == "unverified"
+    assert sum(pauses) > 60
+
+    # Distributions that never appear fail within the bounded observation.
+    pauses.clear()
+    monkeypatch.setattr(recovery, "pypi_files", lambda *args: [])
+    with pytest.raises(ValueError, match="bounded observation"):
+        recovery.qualify_python(
+            "v1.2.3", source, "12", "1", tmp_path, verification_attempt=verification_attempt
+        )
+    assert sum(pauses) <= 300
 
     if verification_attempt == "2":
         with pytest.raises(ValueError, match="predates.*producer attempt"):
@@ -165,6 +178,21 @@ def test_distribution_completeness_requires_matching_package_and_both_kinds():
     assert recovery.distributions_complete(
         ["sample-1.2.3-py3-none-any.whl", "sample-1.2.3.tar.gz"], "sample", "1.2.3"
     )
+
+
+def test_evermatter_releases_publish_the_compat_distribution_under_exomem():
+    assert recovery.package_names({"name": "evermatter"}) == ("evermatter", "exomem")
+    assert recovery.package_names({"name": "exomem"}) == ("exomem",)
+
+    complete = [
+        "evermatter-1.2.3-py3-none-any.whl",
+        "evermatter-1.2.3.tar.gz",
+        "exomem-1.2.3-py3-none-any.whl",
+        "exomem-1.2.3.tar.gz",
+    ]
+    assert recovery.distributions_complete(complete, ("evermatter", "exomem"), "1.2.3")
+    # Missing the compat wheel or sdist is incomplete even with a full evermatter set.
+    assert not recovery.distributions_complete(complete[:2], ("evermatter", "exomem"), "1.2.3")
 
 
 def test_pypi_retry_keeps_matching_bytes_and_rejects_conflicting_immutable_file(tmp_path):
@@ -806,3 +834,76 @@ def test_failed_original_evidence_cannot_emit_a_family_assertion(tmp_path, monke
             {"cloud": {"ref": "ghcr.io/example/runtime:v1.2.3"}},
             "cloud",
         )
+
+
+def test_compat_pyproject_names_exomem_in_its_own_extras():
+    # An exomem extra that still required evermatter[...] would install both
+    # distributions over the same module files.
+    import tomllib
+    from packaging.requirements import Requirement
+
+    source = (ROOT / "pyproject.toml").read_text()
+    project = tomllib.loads(recovery.compat_pyproject(source, "exomem"))["project"]
+    requirements = list(project["dependencies"]) + [
+        r for extra in project["optional-dependencies"].values() for r in extra
+    ]
+    assert project["name"] == "exomem"
+    assert "evermatter" not in {Requirement(r).name for r in requirements}
+    assert any(Requirement(r).name == "exomem" for r in requirements)
+
+
+def test_a_release_cut_before_a_repository_move_verifies_against_the_repository_that_built_it(
+    tmp_path, monkeypatch
+):
+    """A moved repository keeps old releases signed under the old name; they must still verify."""
+    import base64
+    import json
+
+    commit = "a" * 40
+    digest = "b" * 64
+    cuts = tmp_path / "release-cuts"
+    cuts.mkdir()
+    (cuts / "v1.2.3.json").write_text(json.dumps({"evidence": {"repository": "Example/former"}}))
+    monkeypatch.setattr(recovery, "RELEASE_CUTS", cuts)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/runtime")
+    bundle = tmp_path / f"exomem-image-cloud-{commit}-{digest}-123-1.sigstore.json"
+    statement = {
+        "subject": [{"name": "ghcr.io/example/former", "digest": {"sha256": digest}}],
+        "predicate": {
+            "runDetails": {
+                "metadata": {
+                    "invocationId": "https://github.com/Example/former/actions/runs/123/attempts/1"
+                }
+            }
+        },
+    }
+    bundle.write_text(
+        json.dumps(
+            {"dsseEnvelope": {"payload": base64.b64encode(json.dumps(statement).encode()).decode()}}
+        )
+    )
+    inspection = {
+        "images": {"linux/amd64": {}},
+        "provenance": {
+            "linux/amd64": {"SLSA": {"invocation": {"parameters": {"args": {"target": "cloud"}}}}}
+        },
+    }
+    calls = []
+
+    def run(*args):
+        calls.append(args)
+        if args[0] == "gh":
+            return json.dumps([{"verificationResult": {"statement": statement}}])
+        return json.dumps(inspection)
+
+    monkeypatch.setattr(recovery, "run", run)
+
+    assert (
+        recovery.verify_image_bundle(bundle, "v1.2.3", commit, "ghcr.io/example/former", "cloud")
+        == "sha256:" + digest
+    )
+    verify = next(call for call in calls if call[:3] == ("gh", "attestation", "verify"))
+    assert verify[verify.index("--repo") + 1] == "Example/former"
+    assert verify[verify.index("--signer-workflow") + 1] == (
+        "Example/former/.github/workflows/release-please.yml"
+    )

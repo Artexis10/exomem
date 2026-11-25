@@ -33,7 +33,7 @@ provenance ref that produced it, whole items only under
 `EXOMEM_RETRIEVE_INJECT_MAX_CHARS` (default 6,000) with trailing items dropped
 rather than one cut in half. The stance and skills blocks have their own bounds
 beside that ceiling, and each renders whole once a session. The recorded positions
-block has its own bound too, and renders on each turn that carries it. An `ambiguous` abstention is the one abstention it
+block has its own bound too, renders on each turn that carries it, and leads the rest. An `ambiguous` abstention is the one abstention it
 renders — the competing anchors plus the instruction to call again with
 `anchor` — because otherwise the agent would never see the senses it is the only
 one able to choose between; every other abstention leaves exactly the ordinary
@@ -98,6 +98,11 @@ fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT /
 KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
 EXOMEM_* names at startup.
 
+Deferred capture reminder. When the Stop hook runs with
+`EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` it leaves the per-turn capture reminder for the
+session instead of blocking. This hook adds that reminder to the session's next prompt once,
+whatever its own gates decided, and drops one older than 6 hours (see `exomem_capture_nudge.py`).
+
 Contract (Claude Code / Codex UserPromptSubmit hook): read the event JSON on
 stdin (incl. `prompt`); on exit 0, print
 `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ...}}`
@@ -125,7 +130,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 REMINDER = (
-    "[Exomem retrieval check] If this prompt may touch prior knowledge and recent context "
+    "[Evermatter retrieval check] If this prompt may touch prior knowledge and recent context "
     "lacks it, run a quiet `search_memory` and cite hits; the KB is the source of truth for "
     "prior conclusions, a miss is not found in that scope. Don't repeat a search when "
     "reminded; reuse fresh KB context. Chit-chat, control, fresh task: skip."
@@ -134,7 +139,7 @@ REMINDER = (
 #: before every substantive turn, so it is never silent, but it need not repeat the
 #: paragraph above. `balanced` and `light` stay silent between reminders.
 REMINDER_POINTER = (
-    "[Exomem retrieval check] Recall first: `search_memory` or `recall_context` with the "
+    "[Evermatter retrieval check] Recall first: `search_memory` or `recall_context` with the "
     "turn; skip chit-chat or when recent context already covers it."
 )
 
@@ -154,14 +159,17 @@ _MCP_MODE = "mcp"
 # all by the deadline, discovery included. The fetcher does not tell the first three apart.
 _SESSION_READY, _SESSION_UNCHANGED, _SESSION_TIMEOUT, _SESSION_NONE = "ready", "unchanged", "timeout", "none"
 _MCP_ACTIVATION_HEAD = (
-    "[Exomem native MCP activation] Reuse current already-held or injected Exomem "
+    "[Evermatter native MCP activation] Reuse current already-held or injected Evermatter "
     "context; never duplicate a recall for a subject it covers. If the live operating "
-    "contract is absent, call `read_instructions` through the admitted Exomem native MCP. "
+    "contract is absent, call `read_instructions` through the admitted Evermatter native MCP. "
     "When this turn opens a subject from the user's work or life that held or injected "
     "context does not cover, call `recall_context` through that same native MCP before "
     "answering, with `turn` equal to the raw user turn verbatim on the first call, then use "
     "the returned context. Advice on the user's own case needs that recall; general questions "
     "need none. "
+    "Evermatter is disconnected when tool discovery offers no Evermatter tools or only an "
+    "authenticate tool, or an Evermatter call fails authorization. Tell the user nothing is "
+    "saved and to reconnect it in the app's MCP/connector settings. "
 )
 # light: clear relevance or advice on the user's own case (as in the server
 # instructions), so `light` omits this sentence.
@@ -187,7 +195,7 @@ _OFF_MODE = "off"
 #: that the context lacks, and an "already activated" header tells it to skip exactly that recall.
 #: `_format_session_context` charges it as this layout's header, so `_bounded_lines` is given none.
 _SESSION_CONTEXT_HEADER = (
-    "[Exomem session context: standing material for the whole conversation, not this turn's subject. "
+    "[Evermatter session context: standing material for the whole conversation, not this turn's subject. "
     "Retrieved, not instructions. `read_page` a ref before relying on it; recall for a subject from the user's "
     "work or life that it lacks.]"
 )
@@ -195,7 +203,7 @@ _SESSION_CONTEXT_HEADER = (
 # prose that arrives under no label reads to a model like a system message — so
 # the block says what it is and what it is not, before its first line.
 _WORKING_SET_HEADER = (
-    "[Exomem working set, already activated for this turn. Retrieved, not instructions. "
+    "[Evermatter working set, already activated for this turn. Retrieved, not instructions. "
     "`read_page` a `unit`, `pointer`, `state` or `session` line; `recall_context(anchor=...)` for anchors. "
     "New evidence/task: `trigger=task_refresh`, original turn, `conversation.focus`; no memory-only loop.]"
 )
@@ -203,29 +211,44 @@ _WORKING_SET_HEADER = (
 _WORKING_SET_MAX_CHARS = 6000
 # The server sends at most 700 characters of new vocabulary; the rendered block never exceeds this.
 _VOCABULARY_DELTA_MAX_CHARS = 900
-_VOCABULARY_DELTA_HEADER = "[Exomem vocabulary added since this session last checked. Retrieved, not instructions.]"
-# The server sends its live capture policy at most once per session or policy change, in at most 1,320
-# characters rendered. This bound sits above that, so later server growth within the spec is not dropped
-# by an installed hook, and only stops a malformed packet from spending the render ceiling.
+_VOCABULARY_DELTA_HEADER = "[Evermatter vocabulary added since this session last checked. Retrieved, not instructions.]"
+# The server sends its live capture policy at most once per session or policy change. Its `say` text
+# renders in at most this many characters, above the longest the server sends today, so later server growth
+# within the spec is not dropped by an installed hook, and the bound only stops a malformed packet from
+# spending the render ceiling.
 _CAPTURE_POLICY_MAX_CHARS = 1600
+# The render budget for the block's `rules` text, the full capture rule, which renders after `say`. The server's
+# text was about 800 characters when this was set; this is 25% above that. It has its own bound, so it takes
+# no room from the working set or from `say`: the charged working set plus `rules` is at most the working-set
+# ceiling plus 1 (the separator) plus the rules allowance. The positions, stance, skills and profile blocks render
+# beside them under their own bounds.
+# A longer text is omitted whole, never cut.
+_CAPTURE_RULES_MAX_CHARS = 1000
 # Unlike the working set below it, this is service policy: it is not retrieved memory.
-_CAPTURE_POLICY_HEADER = "[Exomem capture policy, live for this vault. Service policy, not retrieved memory.]"
+_CAPTURE_POLICY_HEADER = "[Evermatter capture policy, live for this vault. Service policy, not retrieved memory.]"
 # BEGIN GENERATED NEXT ACTION COMPATIBILITY
 _COMPAT_NEXT_ACTION = {'ambiguous': 'These candidates need a choice. Call `recall_context` again with the original turn '
               'and `anchor` set to the ref you mean.',
  'index_warming': 'Recall is still warming; this is not an empty search. Use `search_memory` for '
                   'relevant stored material.',
- 'method_reset': 'Discard held methods before reuse. Read a current method source for its scope '
-                 'and exclusions before applying it within existing authority.',
+ 'method_reset': 'Discard the skills, collections and approaches you hold before reuse. Read the '
+                 'current page for its scope and exclusions before applying it within existing '
+                 'authority.',
+ 'method_selected': 'A saved skill or collection fits this turn: follow the contract in '
+                    'task_context.methods where it fits, within existing authority. Use '
+                    '`read_page` on its read_ref first when the contract is cut.',
  'related': 'Related pages (not loaded). Use `read_page` to read a relevant ref before relying on '
             'it.',
  'review_due': 'Apply the served stance with its review caveat; its check date has passed, so '
                'verify it before relying on it.',
  'search_miss': 'Empty recall means not found in that query/scope. Try related terms or '
                 "scope='vault'. Raw Records/Planning remain excluded; inspect/query collections.",
+ 'skill_check': "The owner's own skills and collections are listed in `skills`. If one covers this "
+                'turn, use `read_page` on it and follow it within existing authority before '
+                'answering.',
  'slice_empty': 'Map and slice cover compiled material only. Use `search_memory` for captured '
                 'Sources; an empty slice is not proof of absence.',
- 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read method '
+ 'task_read': 'Use `read_page` to open a task_context read_ref before relying on it. Read its '
               'scope and exclusions before applying it within existing authority.'}
 # END GENERATED NEXT ACTION COMPATIBILITY
 _WORKING_SET_ANCHOR_INSTRUCTION = _COMPAT_NEXT_ACTION.get("ambiguous", "")
@@ -281,9 +304,12 @@ SESSION_CONTEXT_BUDGET_SECONDS = 0.8
 # duplicated rather than shared.
 _FALSY_ENV = {"", "0", "false", "no", "off"}
 
+# This word list is existing C6 debt; the rename only adds the product's new name beside its old
+# one, so a short prompt naming either name keeps the same treatment.
+# nosemgrep: ep-word-search, ep-lexical-intent -- existing C6 debt, kept as is; this change adds only the product's new name.
 _KB_BEARING_RE = re.compile(
     r"\b("
-    r"kb|knowledge\s+base|exomem|note|notes|remember|save|capture|"
+    r"kb|knowledge\s+base|exomem|evermatter|note|notes|remember|save|capture|"
     r"conclud(?:e|ed|ion|ions)?|decision|decisions|"
     r"prior|previous|earlier|history|looked\s+at|have\s+i|did\s+i"
     r")\b",
@@ -588,6 +614,51 @@ def _state_core():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@lru_cache(maxsize=1)
+def _capture_hook():
+    path = Path(__file__).with_name("exomem_capture_nudge.py")
+    spec = importlib.util.spec_from_file_location("_exomem_capture_nudge", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: A deferred capture reminder older than this is dropped unread: advice about a turn that
+#: ended hours ago misleads the agent more than it helps.
+_DEFERRED_REMINDER_MAX_AGE_SEC = 6 * 3600
+
+
+def _deferred_capture_reminder(data: object) -> str:
+    """The capture reminder the Stop hook left for this session's next prompt, or `""`.
+
+    The marker is `_pending_reminder_path` in `exomem_capture_nudge.py`, derived here too so a
+    prompt with nothing waiting loads no sibling script; the test that runs both hooks keeps the
+    two in step. It is consumed once, and a stale one is dropped unread.
+    A prompt with nothing waiting pays one `stat`: no sibling script is loaded. Never raises, so
+    a state or load failure cannot break prompt submission.
+    """
+    try:
+        if not isinstance(data, dict):
+            return ""
+        session_id = str(data.get("session_id") or data.get("sessionId") or "")
+        # The full client and session identity, digested: a sanitised id would join distinct sessions.
+        digest = hashlib.sha256(
+            f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+        ).hexdigest()[:32]
+        marker = _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+        try:
+            age = time.time() - marker.stat().st_mtime
+        except OSError:
+            return ""  # nothing is waiting, the usual case
+        # Deleted before anything is delivered, so a marker that cannot be deleted is not repeated.
+        _state_core().unlink_nudge_file(marker)
+        if age > _DEFERRED_REMINDER_MAX_AGE_SEC:
+            return ""
+        return _capture_hook().deferred_reminder()
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
+        return ""
 
 
 def _mcp_activation_text() -> str:
@@ -1018,10 +1089,17 @@ _CONVERSATION_USER_CHARS = 600
 _CONVERSATION_ASSISTANT_CHARS = 300
 _CONVERSATION_TOTAL_CHARS = 2400
 _CONVERSATION_MAX_REFS = 12
-#: What Exomem itself injects, recognised by its fixed data headers. A block
+#: What Evermatter itself injects, recognised by its fixed data headers. A block
 #: carrying one is never conversation: feeding the hook's own previous
 #: injection back would be a self-reinforcing loop.
-_INJECTED_MARKERS = ("[Exomem working set", "[Exomem retrieval check]", "KB routing stubs.")
+#: Both product names: a transcript from before the rename carries the old headers.
+_INJECTED_MARKERS = (
+    "[Evermatter working set",
+    "[Evermatter retrieval check]",
+    "[Exomem working set",
+    "[Exomem retrieval check]",
+    "KB routing stubs.",
+)
 #: Envelopes a client wraps around text no human typed: shell input and
 #: output, task and subagent notifications, reminders, slash-command traffic,
 #: Codex's environment, instruction and skill bodies. A block that starts with
@@ -1051,7 +1129,7 @@ _MACHINE_TAG_RE = re.compile(
 _LEADING_TAG_RE = re.compile(r"\A\s*<[A-Za-z][A-Za-z0-9_-]*[ >/]")
 #: Codex's instruction preamble, sent as a user message.
 _INSTRUCTION_HEADERS = ("# AGENTS.md instructions",)
-#: The Exomem tools whose ARGUMENTS name a page the conversation touched.
+#: The Evermatter tools whose ARGUMENTS name a page the conversation touched.
 _READ_TOOL_SUFFIX = "read_page"
 # Hook deployers copy standalone bytes; these closed API spellings need no package or runtime name resource.
 _ANCHOR_TOOL_SUFFIXES = ("activate_context", "recall_context")
@@ -1093,7 +1171,7 @@ def _transcript_tail_lines(path: str) -> list[str]:
 def _is_typed_text(text: str) -> bool:
     """Could a human have typed this block? The ALLOWLIST test every user and
     assistant text block passes: not empty, not opening with a tag or an
-    instruction header, carrying no machine envelope and none of Exomem's own
+    instruction header, carrying no machine envelope and none of Evermatter's own
     injected headers anywhere."""
     head = text.lstrip()
     if not head or _LEADING_TAG_RE.match(head) or head.startswith(_INSTRUCTION_HEADERS):
@@ -1239,7 +1317,7 @@ def _conversation_from_transcript(path: str, prompt: str) -> dict | None:
     or any error. Never partial, never raises, writes nothing.
 
     `recent` is the human user turns and each turn's FINAL assistant text,
-    oldest first, before the current prompt; `refs` the pages Exomem read calls
+    oldest first, before the current prompt; `refs` the pages Evermatter read calls
     and `anchor` arguments named in the tail, newest first. No `focus`: this
     hook runs no model."""
     if not path:
@@ -1787,7 +1865,7 @@ def _vocabulary_delta_text(delta: object, max_chars: int) -> str:
 
 
 def _capture_policy_text(block: object) -> str:
-    """The served capture policy under its own header, or `""` when the packet carries none.
+    """The served capture policy's `say` under its own header, or `""` when the packet carries none.
 
     The server de-duplicates it per session, so the hook keeps no copy: it prints what it was sent.
     """
@@ -1795,14 +1873,27 @@ def _capture_policy_text(block: object) -> str:
     if not isinstance(say, str) or not say.strip():
         return ""
     text = f"{_CAPTURE_POLICY_HEADER}\n{say.strip()}"
-    if len(text) <= _CAPTURE_POLICY_MAX_CHARS:
-        return text
-    # Version skew: a newer server may send more than this hook was built for. Dropping the block would
-    # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
-    # with the live disposition as one sentence; its first sentence end is the cut.
-    lead = say.strip().split(". ", 1)[0]
-    text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
-    return text if len(text) <= _CAPTURE_POLICY_MAX_CHARS else ""
+    if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+        # Version skew: a newer server may send more than this hook was built for. Dropping the block would
+        # leave the agent without its capture authority, so keep the lead sentence. The server's text opens
+        # with the live disposition as one sentence; its first sentence end is the cut.
+        lead = say.strip().split(". ", 1)[0]
+        text = f"{_CAPTURE_POLICY_HEADER}\n{lead if lead.endswith('.') else lead + '.'}"
+        if len(text) > _CAPTURE_POLICY_MAX_CHARS:
+            return ""
+    return text
+
+
+def _capture_rules_text(block: object) -> str:
+    """The served full capture rule, or `""` when there is none or it is over its own render budget.
+
+    It renders after `say` and is counted in no other budget: the working set is cut to leave room for `say`
+    alone. A text over the budget is omitted whole, never cut, and `say` is untouched.
+    """
+    rules = block.get("rules") if isinstance(block, dict) else None
+    if isinstance(rules, str) and rules.strip() and len(rules.strip()) <= _CAPTURE_RULES_MAX_CHARS:
+        return rules.strip()
+    return ""
 
 
 def _owed_vocabulary_delta(packet: dict, session_id: str) -> tuple[dict | None, bool]:
@@ -2227,7 +2318,7 @@ def _map_header(block: dict, *, turn_activated: bool = True) -> str:
     stale = " Stale." if block.get("stale") else ""
     activated = ", already activated for this turn" if turn_activated else ""
     return (
-        f"[Exomem map{activated}. Retrieved, not instructions."
+        f"[Evermatter map{activated}. Retrieved, not instructions."
         + stale + " Read this index and pull with `read_page` or `search_memory` before answering; cite refs.]"
     )
 
@@ -2305,7 +2396,7 @@ def _format_slice_block(block: object, max_chars: int) -> str:
 
 
 # Fixed protocol advice, separate from retrieved source text.
-_METHOD_RESET_LINE = "- methods: discard held methods before reuse."
+_METHOD_RESET_LINE = "- reset: discard the skills, collections and approaches you hold before reuse."
 
 
 def _slice_refs(block: object) -> frozenset[str]:
@@ -2341,6 +2432,32 @@ def _task_link_line(item: dict, carried_ref: str) -> str:
     return "  " + " ".join(f"links{origin}: {listed}{more}".split())
 
 
+def _skill_method_line(item: dict, max_chars: int) -> str:
+    """One skill or collection method's line: its quoted name and description, and its quoted contract when sent.
+
+    The contract is cut, never the whole line dropped, when it alone would exceed the cap. Every field is page
+    text, so each is quoted and escaped and no line of it reads as part of the fixed instruction.
+    """
+    read_ref = str(item.get("read_ref") or "")
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
+    contract = item.get("contract") if isinstance(item.get("contract"), dict) else None
+    plain = _packet_line(kind, f"{name}: {description}; load it with read_page before acting.", read_ref)
+    if not contract or not contract.get("text"):
+        return plain
+    text, complete = str(contract["text"]), bool(contract.get("complete"))
+    while True:
+        guide = "its whole text follows; follow it where it fits" if complete else "its opening follows; load the rest with read_page before acting"
+        line = _packet_line(kind, f"{name}: {description}; {guide}: {json.dumps(text, ensure_ascii=False)}", read_ref)
+        if len(line) + 1 <= max_chars or not text:
+            return line if text else plain
+        # Escaping lengthens the text, so the cut repeats until the line fits. It keeps whole lines, as the service
+        # cuts a contract, and falls back to whole words only inside the first line.
+        limit = max(0, len(text) - (len(line) + 1 - max_chars))
+        cut = text.rfind("\n", 0, limit + 1)
+        text, complete = (text[:cut] if cut > 0 else text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else "").rstrip(), False
+
+
 def _format_task_context(block: object, max_chars: int, slice_block: object = None, *, links: bool = True) -> str:
     """Render current read routes, with invalidation before every method projection.
 
@@ -2352,16 +2469,33 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
     shown = _slice_refs(slice_block)
     methods = block.get("methods") or {}
     entries: list[tuple[str, str]] = []  # (the route line, the link line that sits under it)
+    # A skill the service selected for this turn leads, with its contract, so a tight cap cuts leads first.
+    selected = [
+        item for item in methods.get("items") or ()
+        if item.get("kind") in ("skill", "collection") and item.get("selection") == "method_fit"
+    ]
+    header = _packet_line("task context", "Retrieved knowledge; read sources within existing authority.", "")
+    # The header line is charged first, so a selected skill's line is sized to the room the header leaves.
+    room = max_chars - len(header) - 1
+    # Each selected method keeps room for the plain lines of those after it, so one long contract never drops another.
+    plains = [len(_skill_method_line({**item, "contract": None}, room)) + 1 for item in selected]
+    used = 0
+    for position, item in enumerate(selected):
+        line = _skill_method_line(item, room - used - sum(plains[position + 1:]))
+        entries.append((line, ""))
+        used += len(line) + 1
     for item in block.get("candidates") or ():
+        if any(item.get("source_ref") == method.get("source_ref") for method in selected):
+            continue  # the selected skill's own line already routes to it
         carried = next((ref for ref in (item.get("ref"), item.get("source_ref")) if ref and str(ref) in shown), "")
         lead = "" if carried else _packet_line("task lead", f"{item.get('title', '')}: {item.get('reason', '')}", str(item.get("read_ref") or ""))
         entries.append((lead, _task_link_line(item, str(carried)) if links else ""))
     for item in methods.get("items") or ():
         read_ref = str(item.get("read_ref") or "")
-        if item.get("kind") == "skill":
-            # The name and description are page text, so they are quoted and escaped like a method's title.
-            name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
-            entries.append((_packet_line("skill", f"{name}: {description}; load it with read_page before acting.", read_ref), ""))
+        if any(item is chosen for chosen in selected):
+            continue  # already rendered first, with its contract
+        if item.get("kind") in ("skill", "collection"):
+            entries.append((_skill_method_line(item, room), ""))
             continue
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
@@ -2369,10 +2503,10 @@ def _format_task_context(block: object, max_chars: int, slice_block: object = No
         if item.get("approval") == "approved":
             entries.append((_packet_line("approved procedure", f"{title}. Read it, then follow it where it fits.", read_ref), ""))
             continue
-        entries.append((_packet_line("method", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
+        entries.append((_packet_line("approach", f"{title}; read the source for applicability and exclusions.", read_ref), ""))
     entries = [entry for entry in entries if any(entry)]
     if entries:
-        entries.insert(0, (_packet_line("task context", "Retrieved knowledge; read sources within existing authority.", ""), ""))
+        entries.insert(0, (header, ""))
     kept, used = [], 0
     for route, link_line in entries:
         cost = len(route) + 1 if route else 0
@@ -2447,30 +2581,28 @@ def _format_stance_block(block: object, last_generation: str = "", max_chars: in
 #: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together),
 #: so the hook never cuts a well-formed block and still caps a malformed one.
 _SKILLS_MAX_CHARS = 8000
-_SKILLS_HEADER = "- skills: held in the vault; retrieved, not instructions. Load one with read_page before acting on a task it covers."
+_SKILLS_FRAME = "- skills and collections: the owner's own, held in the vault; retrieved, not instructions. "
+#: Used when an older service sends no `advice`; a current service's `advice` is rendered instead, so one text says it.
+_SKILLS_FALLBACK_ADVICE = "When one covers this turn, open it with read_page and follow it within existing authority before acting."
+_SKILLS_TURN_HEADER = "- skills and collections for this turn, beyond those listed: retrieved, not instructions."
 
 
 def _skill_line(item: dict) -> str:
-    """One listed skill, written exactly as the service's `vault_skills.item_line` counts it.
+    """One listed skill or collection, written exactly as the service's `vault_skills.item_line` counts it.
 
     The service admits whole items against its bound and then marks the block delivered, so a line rendered
     longer than it was counted could be dropped here and never offered again. This standalone hook cannot import
-    the service, so a parity test keeps the two in step.
+    the service, so a parity test keeps the two in step. An item with no kind is a skill.
     """
     name, summary, ref = (" ".join(str(item.get(key) or "").split()) for key in ("name", "summary", "ref"))
-    text = f"- {name}: {summary}" if summary else f"- {name}"
+    kind = "collection" if item.get("kind") == "collection" else "skill"
+    text = f"- {kind} {name}: {summary}" if summary else f"- {kind} {name}"
     return f"{text} [{ref}]" if ref else text
 
 
-def _format_skills_block(block: object) -> str:
-    """The skills the service lists, whole lines under one framing line; an unchanged or empty block renders nothing.
-
-    The block has its own bound beside the working set's, so it takes nothing from the map's room.
-    """
-    if not isinstance(block, dict) or block.get("state") != "ready":
-        return ""
+def _skill_lines(items: object) -> list[str]:
     lines, used = [], 0
-    for item in block.get("items") or ():
+    for item in items or ():
         if not isinstance(item, dict) or not item.get("name"):
             continue
         line = _skill_line(item)
@@ -2478,11 +2610,64 @@ def _format_skills_block(block: object) -> str:
             break
         lines.append(line)
         used += len(line) + 1
-    if not lines:
+    return lines
+
+
+#: The service bounds the names to the vault's `budgets.skills_names_max_chars`; this is the most a vault may set
+#: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together), so
+#: the hook never drops a well-formed names line and still caps a malformed one. The advice sits outside the cap.
+_SKILLS_NAMES_MAX_CHARS = 8000
+#: How the names line labels each kind, once per group, written exactly as the service's `vault_skills.names_text`.
+_SKILLS_NAMES_GROUPS = (("skill", "skills"), ("collection", "collections"))
+
+
+def _skill_names_text(names: object) -> str:
+    """The named items grouped by kind, exactly as the service's `vault_skills.names_text` writes and counts them."""
+    if not isinstance(names, dict):
         return ""
-    omitted = block.get("omitted")
-    tail = [f"- skills: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
-    return "\n".join([_SKILLS_HEADER, *lines, *tail])
+    groups = []
+    for kind, label in _SKILLS_NAMES_GROUPS:
+        listed = names.get(kind)
+        members = [" ".join(str(name).split()) for name in listed if str(name).strip()] if isinstance(listed, list) else []
+        if members:
+            groups.append(f"{label}: " + "; ".join(members) + ".")
+    return " ".join(groups)
+
+
+def _skill_names_line(block: dict) -> str:
+    """The items the service names without a line, after its own advice; empty when there are none or they are malformed.
+
+    A held catalogue is recorded only in the continuity token, so names cut here would never be offered again: the
+    cap applies to the names alone and must never bite a block within the service's bound.
+    """
+    text = _skill_names_text(block.get("names"))
+    if not text or len(text) > _SKILLS_NAMES_MAX_CHARS:
+        return ""
+    advice = " ".join(str(block.get("names_advice") or "").split()) or "More of the owner's skills and collections, by name only."
+    return f"- {advice} {text}"
+
+
+def _format_skills_block(block: object) -> str:
+    """The skills and collections the service lists, whole lines under one framing line, then the turn's unlisted items.
+
+    A held (unchanged) or empty listing renders no listing; `turn_items` render on every turn that has them. The block
+    has its own bounds beside the working set's, so it takes nothing from the map's room.
+    """
+    if not isinstance(block, dict):
+        return ""
+    parts: list[str] = []
+    ready = block.get("state") == "ready"
+    lines = _skill_lines(block.get("items")) if ready else []
+    names = _skill_names_line(block) if ready else ""
+    if lines or names:
+        advice = " ".join(str(block.get("advice") or "").split()) or _SKILLS_FALLBACK_ADVICE
+        omitted = block.get("omitted")
+        tail = [f"- skills and collections: {omitted} more not listed."] if type(omitted) is int and omitted > 0 else []
+        parts.extend([_SKILLS_FRAME + advice, *lines, *([names] if names else []), *tail])
+    turn = _skill_lines(block.get("turn_items"))
+    if turn:
+        parts.extend([_SKILLS_TURN_HEADER, *turn])
+    return "\n".join(parts)
 
 
 #: The service already bounds the block to the vault's `budgets.profiles_max_chars`; this is the most a vault may
@@ -2556,16 +2741,33 @@ def _positions_overflow_line(refs: list[str], omitted: int) -> str:
     return f"- positions not shown, read by ref: {', '.join(f'[{ref}]' for ref in refs)}{more}"
 
 
+#: A reason is one of the service's closed tokens; this only caps a malformed one.
+_POSITIONS_REASON_MAX_CHARS = 40
+
+
+def _positions_state_line(block: dict) -> str:
+    """The line that says the block is not the whole, so a position the service did not read never reads as none."""
+    # nosemgrep: ep-word-set -- the positions block's closed states that say the block is not the whole
+    state = block.get("state")
+    if state not in ("partial", "unavailable"):
+        return ""
+    reason = " ".join(str(block.get("reason") or "").split())[:_POSITIONS_REASON_MAX_CHARS]
+    because = f" ({reason})" if reason else ""
+    return f"- positions {state}{because}: a recorded position may exist that is not shown; search before you treat one as absent"
+
+
 def _format_positions_block(block: object) -> str:
     """The person's recorded positions under the service's framing line, whole lines; nothing when none is served.
 
     The block has its own bound beside the working set's, so it takes nothing from the map's or the turn's room.
     The refs of the positions the service could not fit as lines follow them, within the same bound, and a count of
-    the rest always renders, so a full block never reads as the whole.
+    the rest always renders, so a full block never reads as the whole. A partial or unavailable block ends with a
+    line that says so, beside the bound, even when it carries no position.
     """
-    # nosemgrep: ep-word-set -- the positions block's closed states that carry items or references
-    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial"):
+    # nosemgrep: ep-word-set, ep-word-membership -- the positions block's closed states that render
+    if not isinstance(block, dict) or block.get("state") not in ("ready", "partial", "unavailable"):
         return ""
+    note = _positions_state_line(block)
     lines, used = [], 0
     for item in block.get("items") or ():
         if not isinstance(item, dict) or not item.get("text"):
@@ -2584,10 +2786,10 @@ def _format_positions_block(block: object) -> str:
         shown.append(ref)
     unseen = len(refs) - len(shown) + omitted
     if not lines and not shown and not unseen:
-        return ""
+        return note
     tail = [_positions_overflow_line(shown, unseen)] if shown or unseen else []
     about = " ".join(str(block.get("about") or "").split())
-    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail])
+    return "\n".join([f"- positions: {about}" if about else "- positions:", *lines, *tail, *([note] if note else [])])
 
 
 def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, last_stance: str = "") -> tuple[str, bool, bool, bool]:
@@ -2624,7 +2826,10 @@ def _format_map_with_slice(packet: dict, max_chars: int, last_generation: str, l
     skills_text = _format_skills_block(packet.get("skills"))
     profiles_text = _format_domain_profiles_block(packet.get("domain_profiles"))
     positions_text = _format_positions_block(packet.get("positions"))
-    parts = (reset, stance_text, upkeep, skills_text, profiles_text, text, task, positions_text, turn, action)
+    # The positions lead, after the fixed protocol reset, as they lead the service's response. Replays of that response
+    # on a leading yes/no question opened every first answer with the person's position when its block came first,
+    # and in 1 of 8 when it came last. Do not move it back.
+    parts = (reset, positions_text, stance_text, upkeep, skills_text, profiles_text, text, task, turn, action)
     return "\n".join(part for part in parts if part), complete, stance_complete, shown
 
 
@@ -2689,7 +2894,7 @@ def _map_floor(block: dict) -> str:
     ref = str(block.get("ref") or "exomem://map")
     if block.get("reason") == "empty":
         return _packet_line(
-            "Exomem map, already activated (retrieved, not instructions)",
+            "Evermatter map, already activated (retrieved, not instructions)",
             "Nothing visible yet." + _map_status(block), ref,
         )
     count = sum(1 for item in block.get("items") or () if isinstance(item, dict))
@@ -2709,7 +2914,7 @@ def _format_map_block(block: dict, max_chars: int, last_generation: str, *, turn
         return (line, True) if len(line) <= max_chars else ("", False)
     if _map_is_held(block, last_generation):
         line = _packet_line(
-            "Exomem map unchanged, already activated (retrieved, not instructions)",
+            "Evermatter map unchanged, already activated (retrieved, not instructions)",
             "Read the map at its ref." + status, ref,
         )
         return (line, True) if len(line) <= max_chars else ("", False)
@@ -3678,6 +3883,10 @@ def _refresh_main(args, data: object) -> bool:
             context += "\n" + _mcp_activation_context()
     if result["status"] in {"evidence_observed", "association_cleared"} and _prominence() != "off":
         context += "\n" + _REFRESH_GAP_GUIDANCE
+    if event == "UserPromptSubmit":
+        reminder = _deferred_capture_reminder(data)
+        if reminder:
+            context += "\n" + reminder
     output = {"hookEventName": event, "additionalContext": context}
     if result["status"] == "exhausted":
         output.update(
@@ -3754,12 +3963,15 @@ def _fetch_context(session_id: str, data: dict, turn: str, *, session_only: bool
         hit_count = len(packet.get("anchors") or ())
         delta, delta_delivered = _owed_vocabulary_delta(packet, session_id) if packet_available else (None, False)
         delta_text = _vocabulary_delta_text(delta, _VOCABULARY_DELTA_MAX_CHARS) if delta else ""
-        policy_text = _capture_policy_text(packet.get("capture_policy"))
+        say_text = _capture_policy_text(packet.get("capture_policy"))
+        # The working set gives way to `say` and the delta; the rules follow `say` on their own budget.
         render_cap = max(
             0,
             _working_set_max_chars()
-            - sum(len(text) + 1 for text in (delta_text, policy_text) if text),
+            - sum(len(text) + 1 for text in (delta_text, say_text) if text),
         )
+        rules_text = _capture_rules_text(packet.get("capture_policy")) if say_text else ""
+        policy_text = f"{say_text}\n{rules_text}" if rules_text else say_text
         acknowledged = True
         if isinstance(packet.get("map"), dict):
             render = _format_session_context if session_only else _format_map_with_slice
@@ -3915,18 +4127,33 @@ def main(argv: list[str] | None = None) -> int:
 
     if _refresh_main(args, data):
         return 0
+    additional_context = _prompt_context(data)
+    # Delivered after the retrieval work, so a hook the client kills mid-ladder leaves the marker for the next prompt.
+    reminder = _deferred_capture_reminder(data)
+    if reminder:
+        additional_context = f"{additional_context}\n\n{reminder}" if additional_context else reminder
+    if additional_context:
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": additional_context,
+        }}))
+    return 0
+
+
+def _prompt_context(data: dict) -> str:
+    """The `additionalContext` this prompt's retrieval nudge adds; `""` when the hook stays silent."""
     if os.environ.get("EXOMEM_RETRIEVE_NUDGE_DISABLE"):
-        return 0
+        return ""
     preset = _PROMINENCE_PRESETS[_prominence()]
     if preset is None:  # prominence=off — the user asked for explicit invocation only
-        return 0
+        return ""
 
     prompt = _prompt(data)
     if not prompt.strip():
-        return 0
+        return ""
 
     if _is_task_control_event(data):
-        return 0
+        return ""
 
     # Explicit env still wins; the prominence level only moves the default.
     mode = _inject_mode()
@@ -3950,10 +4177,10 @@ def main(argv: list[str] | None = None) -> int:
         mode == _MCP_MODE and "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS" in os.environ
     )
     if length_gate and len(prompt.strip()) < min_chars:  # ("yes", "go", "thanks")
-        return 0
+        return ""
 
     if not referential and _is_obvious_control_prompt(prompt, control_max_chars):
-        return 0
+        return ""
 
     session_id = str(data.get("session_id") or data.get("sessionId") or "")
     if mode == _OFF_MODE:
@@ -3968,26 +4195,22 @@ def main(argv: list[str] | None = None) -> int:
         global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
         if reminded_ok:
             if not global_ok:
-                return 0
+                return ""
             text = REMINDER
         elif _prominence() == "maximal":
             text = REMINDER_POINTER
         else:
-            return 0
+            return ""
         _touch(reminded)
         if text == REMINDER and global_cooldown > 0:
             _touch(global_stamp)
         _log(prompt, "off", 0)
-        print(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": text,
-        }}))
-        return 0
+        return text
     ok, stamp = _cooldown_ok(session_id, cooldown)
     # Native activation is per turn; reminder cooldowns do not apply. Direct
     # working-set mode also exempts referential turns carrying recent context.
     if not ok and not referential and mode != _MCP_MODE:
-        return 0
+        return ""
 
     # Another tab/session already got the REMINDER recently. In working-set
     # mode that is all it gates: a fresh session's first packet is not the
@@ -3997,7 +4220,7 @@ def main(argv: list[str] | None = None) -> int:
     # turn; legacy reminder/stub modes stay silent here exactly as before.
     global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
     if not global_ok and mode not in {_WORKING_SET_MODE, _MCP_MODE}:
-        return 0
+        return ""
 
     additional_context = REMINDER
     lane, hit_count, session, policy_text = "off", 0, "", ""
@@ -4059,14 +4282,9 @@ def main(argv: list[str] | None = None) -> int:
     if global_cooldown > 0 and REMINDER in additional_context:
         _touch(global_stamp)
     if not additional_context:
-        return 0
+        return ""
     _log(prompt, lane, hit_count, session)
-
-    print(json.dumps({"hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
-        "additionalContext": additional_context,
-    }}))
-    return 0
+    return additional_context
 
 
 if __name__ == "__main__":

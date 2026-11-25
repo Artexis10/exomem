@@ -2,7 +2,7 @@
 
 `Knowledge Base/_Schema/` held 17 product-owned markdown files -- 265 KB in the
 package, 404 KB as observed on a real vault -- inside the directory Obsidian and
-every other indexer treat as notes. Exomem skipped them in its own index
+every other indexer treat as notes. Evermatter skipped them in its own index
 (`VAULT_SCAN_SKIP_DIRS`); nothing else could, and a second tool ranked three
 scaffold documents above every real note for a natural-language query.
 

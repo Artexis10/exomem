@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import (
+    automatic_collection,
     call_spans,
     held_fs,
     item_keys,
@@ -51,6 +52,8 @@ from . import (
     governance,
     held_sources,
     index_migrations,
+    link_declarations,
+    link_values,
     log_view,
     multirow,
     record_inputs,
@@ -105,6 +108,14 @@ def _natural_key(manifest: collections.CollectionManifest, values: Mapping[str, 
 def _renders_rows(manifest) -> bool:
     """Items-mode Markdown items get one view file per row; logs and summaries do not."""
     return manifest.storage.strategy == "markdown-items" and manifest.view_mode == "items"
+
+
+def _revived(before) -> bool:
+    """Whether the predecessor row is a retracted one: a write that names it brings it back as a new version.
+
+    Only a row read from ``item_rows`` has ``retracted_txn``; the ``items`` view holds current rows alone.
+    """
+    return before is not None and before.get("retracted_txn") is not None
 
 
 def _affected(manifest, path) -> list[str]:
@@ -392,6 +403,15 @@ class CollectionWriter:
         )
         return None if row is None else typed_storage.hydrate(self.connection, [row])[0]
 
+    def _retracted(self, cid: str, key: str) -> dict[str, Any] | None:
+        """The retracted row that holds ``key``, unhydrated: a retraction removes its current payload.
+
+        A write that names the key brings this row back as its next version; the row keeps its identity.
+        """
+        return _row(self.connection.execute(
+            "SELECT * FROM item_rows WHERE collection_id = ? AND item_key = ? AND retracted_txn IS NOT NULL",
+            (cid, key)))
+
     def row_body(self, cid: str, key: str) -> dict[str, str]:
         """``body``: the Markdown body of row ``key`` of ``cid``; or ``body_withheld`` with its reason.
 
@@ -565,6 +585,12 @@ class CollectionWriter:
                 "SELECT 1 FROM items WHERE view_path=? LIMIT 1", (path, path, path),
             ).fetchone() is not None
 
+    def _link_inspection(self, visible: collections.CollectionManifest) -> dict[str, Any]:
+        """The ``links`` section of an inspection: only a collection that declares a link field has one."""
+        if not collections.declared_links(visible.schema):
+            return {}
+        return {"links": reference_report.check_links(self.root, self.handle.path, visible.collection_id)}
+
     def inspect_collection(self, collection, *, facade_profile: str | None = None) -> dict[str, Any]:
         """Report the dark writer's canonical state without publishing or repairing.
 
@@ -610,7 +636,7 @@ class CollectionWriter:
         history.verify(self.connection, manifest.collection_id, proofs=self.handle.release_cache.history)
         selection = self._operation.inspection_selection(manifest.collection_id, notices=True)
         field_plan = self._operation.field_plan(manifest)
-        if not field_plan.owner and (field_plan.whole_fields != set(manifest.schema.fields)):
+        if not field_plan.holds_every_field(manifest):
             rows, snapshot, _ = self._operation.authorized_rows(manifest.collection_id)
             diagnostics = []
             record_governance._inspection_templates(
@@ -627,6 +653,7 @@ class CollectionWriter:
                           if collections.declared_references(field_plan.manifest.schema) else [])
             return {"kind": "collection", "report_only": True,
                     "references": references,
+                    **self._link_inspection(field_plan.manifest),
                     "inbound": reference_index.inbound(
                         self._operation, self.connection, field_plan.manifest),
                     "contract": record_governance._inspection_contract(field_plan.manifest),
@@ -758,6 +785,7 @@ class CollectionWriter:
         payload = {
             "kind": "collection", "report_only": True,
             "references": references,
+            **self._link_inspection(field_plan.manifest),
             "inbound": reference_index.inbound(
                 self._operation, self.connection, manifest),
             "contract": record_governance._inspection_contract(manifest),
@@ -1089,7 +1117,7 @@ class CollectionWriter:
         if bindings:
             keys = tuple(dict.fromkeys(binding.item_key for binding in bindings))
             row_ids = dict(self.connection.execute(
-                "SELECT item_key,row_id FROM items WHERE collection_id=? "
+                "SELECT item_key,row_id FROM item_rows WHERE collection_id=? "
                 "AND item_key IN (SELECT value FROM json_each(?))", (txn["collection_id"], _json(keys))))
             version_sources.persist(self, bindings, txn_id=txn["txn_id"], row_ids=row_ids)
         from . import history
@@ -1484,18 +1512,15 @@ class CollectionWriter:
             projection = (None if item is None else self._publication.previous(item["view_path"]))
             if outside and (projection is None or projection["path"] != facts["old_path"]):
                 raise connection.CollectionStoreError("COLLECTION_STORE_PROJECTION_PENDING", "moved source basis changed")
-            stamp, identity = facts["stamp"], self._publication.identity
-            lineage = {entry["instance_id"] for entry in json.loads(self.connection.execute(
-                "SELECT value FROM store_meta WHERE key='lineage'").fetchone()[0])}
+            stamp, owned = facts["stamp"], edit_back.owned_stamp(self.connection)
             code = edit_back.MOVED if outside else edit_back.UNBOUND if item is None else edit_back.CONFLICT
-            current = bool(item is not None and projection is not None and stamp is not None
-                           and stamp["s"] == identity["store_id"] and stamp["i"] in lineage
+            current = bool(item is not None and projection is not None and stamp is not None and owned(stamp)
                            and stamp["v"] == item["row_version"] and stamp["h"] == item["payload_hash"][:12])
             legacy = None if projection is None or stamp is not None else legacy_originals.view_basis(
                 self.connection, projection)
             legacy_exact = legacy is not None and legacy[0] == facts["digest"]
             current = current or legacy_exact
-            if stamp is not None and (stamp["s"] != identity["store_id"] or stamp["i"] not in lineage):
+            if stamp is not None and not owned(stamp):
                 code = edit_back.FOREIGN
             elif item is not None and not current:
                 code = edit_back.CONFLICT if stamp and stamp["v"] < item["row_version"] else edit_back.INVALID
@@ -1553,7 +1578,7 @@ class CollectionWriter:
                 # Immutable receipt/effect facts reconstruct audit; request identity still binds the discarded formatting digest.
                 effects = {name: arguments[name] for name in ("old_path", "path", "generation", "version")}
                 txn = self._txn(row, manifest, "view_move", edit_back.why(path), request, digest, effects=effects)
-                self._execute("UPDATE items SET view_path=? WHERE row_id=?", (path, item["row_id"]))
+                self._execute("UPDATE item_rows SET view_path=? WHERE row_id=?", (path, item["row_id"]))
                 self._execute("UPDATE projection_state SET path=?,install_json=NULL,stat_identity=NULL WHERE path=?",
                               (path, projection["path"]))
                 moved = self._publication.previous(path)
@@ -2250,24 +2275,34 @@ class CollectionWriter:
         why: str,
         scaffold: bool = True,
         request_id: str | None = None,
+        automatic: bool = False,
     ) -> dict[str, Any]:
-        return self._create_collection(manifest_path, manifest_text, why=why,
-                                       scaffold=scaffold, request_id=request_id)
+        return self._create_collection(manifest_path, manifest_text, why=why, scaffold=scaffold,
+                                       request_id=request_id, automatic=automatic)
+
+    @staticmethod
+    def create_arguments(manifest_text, why, scaffold, automatic=False):
+        """The arguments a create's request identity covers, one shape for the direct and the admitted create.
+
+        Only a flagged request carries the flag, so every earlier request keeps its recorded hash.
+        """
+        return {"manifest_text": manifest_text, "why": why, "scaffold": scaffold,
+                **({"automatic": True} if automatic else {})}
 
     def _create_collection(self, manifest_path, manifest_text, *, why, scaffold,
-                           request_id, admission=None):
+                           request_id, admission=None, automatic=False):
         records._validate_why(why)
         with self._mutation():
             identity, digest, replay = self._identity(
-                "create",
-                manifest_path,
-                {"manifest_text": manifest_text, "why": why, "scaffold": scaffold},
-                request_id,
+                "create", manifest_path, self.create_arguments(manifest_text, why, scaffold, automatic), request_id,
             )
             if admission is not None:
                 admission.check(identity, digest, replay)
             if replay is not None:
                 return replay
+            if automatic:
+                # Under the mutation lock, so two concurrent creates cannot both pass the count.
+                automatic_collection.require_daily_room(self.root, self.connection)
             manifest, manifest_text, declared = self._prepare_create(manifest_path, manifest_text, scaffold)
             try:
                 connector_boundary.require_create(self.root, manifest.path)
@@ -2309,9 +2344,7 @@ class CollectionWriter:
             )
             self._manifest(manifest, manifest_text, 1, txn["txn_id"])
             reference_index.revise(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                manifest.collection_id, dropped=(),
-                added=tuple(collections.declared_references(manifest.schema)), retargeted=())
+                index_migrations.AccountedWriter(self.connection, self._execute), None, manifest)
             if manifest.view_mode == summary.SUMMARY:
                 # An empty summary collection publishes its native payload/query pair here.
                 if typed_storage.migrate_batch(index_migrations.AccountedWriter(self.connection, self._execute),
@@ -2344,6 +2377,9 @@ class CollectionWriter:
                 outcome="committed",
                 audit_correlation=txn["transition_id"],
             )
+            if automatic:
+                # Stored with the receipt: the daily count and the inventory read it back from the create's transaction.
+                receipt = {**receipt, "automatic": True}
             # Stored with the receipt, so a replay and the served create report it too.
             receipt = records._with_warnings(receipt, [
                 f"{warning['code']}: {warning['message']}" for warning in records.ignored_recipe_warnings(manifest)])
@@ -2378,6 +2414,7 @@ class CollectionWriter:
             diagnostic = manifest.view_diagnostics[0]
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)
         reference_declarations.require_targets(self._operation, manifest)
+        link_declarations.require_relations(self.root, manifest)
         return manifest, manifest_text, declared
 
     def validate_create(self, manifest_path, manifest_text, *, scaffold=True):
@@ -2387,6 +2424,16 @@ class CollectionWriter:
         """
         with self.read_snapshot(mutation=True):
             self._prepare_create(manifest_path, manifest_text, scaffold)
+
+    def automatic_collection_ids(self) -> frozenset[str]:
+        """The collections whose create transaction recorded the automatic flag (a legacy import has none), in one read."""
+        with self.read_snapshot():
+            rows = self.connection.execute(automatic_collection.AUTOMATIC_COLLECTION_IDS).fetchall()
+        return frozenset(row[0] for row in rows)
+
+    def created_automatically(self, collection_id: str) -> bool:
+        """Whether the collection's create transaction recorded the automatic flag."""
+        return collection_id in self.automatic_collection_ids()
 
     def _new_item_key_scheme(self, manifest) -> str:
         """The item key scheme a collection takes at creation; the store fixes it for the collection's life.
@@ -2829,9 +2876,11 @@ class CollectionWriter:
 
     def _item_effect(self, manifest, key, txn, before, resumed, ordinal, row_id, version, payload):
         # The built-in v1 audit wire contract fixes Planning's replan label.
+        # A revival is an insert of the retracted row: it names the retracted version as its predecessor.
+        revived = _revived(before)
         effect = {"txn_id": txn["txn_id"], "ordinal": ordinal, "row_id": row_id, "item_key": key,
-                "effect": "resume" if resumed else "insert" if before is None else "update",
-                "effect_label": ("edit" if self._view_edit is not None and before else
+                "effect": "insert" if revived else "resume" if resumed else "insert" if before is None else "update",
+                "effect_label": None if revived else ("edit" if self._view_edit is not None and before else
                                  "replan" if manifest.semantic_profile == "planning" else "correction" if before else None),
                 "version_before": None if before is None else before["row_version"], "version_after": version,
                 "hash_before": None if before is None else before["payload_hash"], "hash_after": payload}
@@ -2842,14 +2891,15 @@ class CollectionWriter:
 
     def _write_item(self, manifest, key, values, body, path, txn, before, resumed, sources,
                     *, ordinal=0, queue_log=True, scope=None):
-        if before is None and manifest.view_mode == "items":
+        revived = _revived(before)
+        if (before is None or revived) and manifest.view_mode == "items":
             self._require_items_capacity(manifest.collection_id)
         if _renders_rows(manifest):
             self._publication.capture_previous(path)
         manifest_metadata, encoding, layout = self._item_write_context(manifest)
         parameters = self._item_parameters(manifest, key, values, body, path, txn, before, manifest_metadata, encoding)
         version, payload, stored = parameters["row_version"], parameters["payload_hash"], parameters["values_json"]
-        if before is None:
+        if before is None or revived:
             self._history_reselection(manifest.collection_id, new_row=True)
         elif parameters["governance_json"] != before["governance_json"] or path != before["view_path"]:
             self._history_reselection(manifest.collection_id)
@@ -2858,7 +2908,7 @@ class CollectionWriter:
             row_id = cursor.lastrowid
         else:
             row_id = before["row_id"]
-            self._execute(tables.UPDATE_ITEM, {**parameters, "target_row_id": row_id})
+            self._execute(tables.REVIVE_ITEM if revived else tables.UPDATE_ITEM, {**parameters, "target_row_id": row_id})
         if encoding == typed_storage.JSON_V1:
             # The JSON payload mints its json-v1 version_identity in the same statement.
             self._execute(tables.INSERT_VERSION, {
@@ -2874,7 +2924,7 @@ class CollectionWriter:
             )
         index_migrations.maintain_item(index_migrations.AccountedWriter(self.connection, self._execute),
                                        manifest.collection_id, row_id, key, version, values,
-                                       previous=json.loads(before["values_json"]) if before else None)
+                                       previous=None if before is None or revived else json.loads(before["values_json"]))
         reference_index.maintain(index_migrations.AccountedWriter(self.connection, self._execute),
                                  manifest, row_id, values)
         for source_ordinal, source in enumerate(sources):
@@ -2904,7 +2954,7 @@ class CollectionWriter:
         self._history_reselection(manifest.collection_id, new_row=True)
         parameters = [self._item_parameters(manifest, key, values, body, path, txn, None, manifest_metadata, encoding)
                       for key, values, body, path, _, _ in plans]
-        self._insert_rows("items", parameters)
+        self._insert_rows("item_rows", parameters)
         row_ids = self._row_ids(manifest.collection_id, [row["item_key"] for row in parameters])
         if encoding == typed_storage.JSON_V1:
             self._insert_rows("item_versions", [{"row_id": row_ids[row["item_key"]], "row_version": 1,
@@ -3003,12 +3053,14 @@ class CollectionWriter:
         # Reuse placement within this synchronous batch; each carrier still reads live state.
         with state_paths.resolution_scope():
             for key, values, _, path, before, _ in plans:
-                advisory = records._due_state_carrier(self.root, manifest, path=path or manifest.path, key=key,
-                                                      values=values, previous=json.loads(before["values_json"]) if before else None)
+                advisory = records._due_state_carrier(
+                    self.root, manifest, path=path or manifest.path, key=key, values=values,
+                    previous=None if before is None or _revived(before) else json.loads(before["values_json"]))
         result = {"due_state": advisory, **result} if advisory else result
-        return self._reference_check(result, manifest, [values for _, values, *_ in plans])
+        result = self._reference_check(result, manifest, [values for _, values, *_ in plans])
+        return link_values.with_notes(result, prepared.link_notes)
 
-    def _item_carriers(self, result, manifest, *, path, key, values, previous=None):
+    def _item_carriers(self, result, manifest, *, path, key, values, previous=None, link_notes=None):
         """Refresh derived state only after a new item write has committed."""
         if result["outcome"] != "committed":
             return result
@@ -3019,7 +3071,10 @@ class CollectionWriter:
         sweep = records._capture_sweep_carrier(self.root, manifest, key=key)
         result = {"due_state": advisory, **result} if advisory else result
         result = {"capture_sweep": sweep, **result} if sweep else result
-        return self._reference_check(result, manifest, [values] if values is not None else [])
+        result = self._reference_check(result, manifest, [values] if values is not None else [])
+        if manifest.semantic_profile == "planning" and previous is not None and values is not None:
+            result = {**result, **planning.completion_advisory(self.root, manifest, previous, values)}
+        return link_values.with_notes(result, link_notes or {})
 
     def _reference_check(self, result, manifest, rows: list):
         """Report unresolved declared references of the committed rows; never fails the write."""
@@ -3097,6 +3152,7 @@ class CollectionWriter:
                     records._expect_hash(expected_container_hash, before_container, "container")
                 self._twins(manifest.collection_id, key, _natural_key(manifest, values))
                 existing = self._item(manifest.collection_id, key)
+                revived = None if existing is not None else self._retracted(manifest.collection_id, key)
                 payload = tokens.payload_hash(manifest.schema.version, key, values, body)
                 delivery_guard = (
                     records._validate_artifact_delivery(self.root, manifest, values, delivery)
@@ -3108,7 +3164,7 @@ class CollectionWriter:
                     raise collections.CollectionError("RECORD_ID_CONFLICT", "record key already exists")
                 if existing is not None:
                     insert = self.connection.execute(
-                        "SELECT t.transition_id FROM audit_effects e JOIN txns t ON t.txn_id = e.txn_id WHERE e.row_id = ? AND e.version_before IS NULL AND e.effect IN ('insert', 'resume') ORDER BY e.txn_id LIMIT 1",
+                        "SELECT t.transition_id FROM audit_effects e JOIN txns t ON t.txn_id = e.txn_id WHERE e.row_id = ? AND (e.effect = 'insert' OR (e.effect = 'resume' AND e.version_before IS NULL)) ORDER BY e.txn_id DESC LIMIT 1",
                         (existing["row_id"],),
                     ).fetchone()
                     if existing["payload_hash"] != payload or insert is None:
@@ -3161,11 +3217,11 @@ class CollectionWriter:
                         identity,
                         digest,
                         effects={"key": key, "payload_hash": payload, "sources": verified},
-                        _source_inputs=[version_sources.effect_input(key, payload, body, None,
+                        _source_inputs=[version_sources.effect_input(key, payload, body, revived,
                             explicit=resolved_sources, prepared=origin_inputs)],
                     )
                     item_hash = self._write_item(
-                        manifest, key, values, body, path, txn, None, resumed, verified
+                        manifest, key, values, body, path, txn, revived, resumed, verified
                     )
                     after_container = self._advance(txn)
                     result = records._result(
@@ -3189,7 +3245,7 @@ class CollectionWriter:
                     self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, key=key, values=values,
+        return self._item_carriers(result, manifest, key=key, values=values, link_notes=candidate.link_notes,
                                    path=result["affected_paths"][0] if manifest.view_mode == "items" else manifest.path)
 
     @source_dependencies.record_operation
@@ -3312,8 +3368,65 @@ class CollectionWriter:
                 self._insert_txn(txn, result)
         if isinstance(result, collections.CollectionError):
             raise result
-        return self._item_carriers(result, manifest, path=row_source(manifest, before),
-                                   key=key, values=final, previous=old_values)
+        return self._item_carriers(result, manifest, path=row_source(manifest, before), key=key, values=final,
+                                   previous=old_values, link_notes=candidate.link_notes)
+
+    def retract_record(self, collection, *, item_key, expected_container_hash, expected_item_version, why,
+                       request_id=None):
+        """Take one row out of current state, keeping its history and its identity.
+
+        Its audit chain gains a ``retract`` event. A later write of the same key revives the row as its next
+        version. A collection with one view file per row refuses, since that file would need its own removal.
+        """
+        records._validate_why(why)
+        arguments = dict(item_key=item_key, expected_container_hash=expected_container_hash,
+                         expected_item_version=expected_item_version, why=why)
+        with self._mutation():
+            identity, digest, replay, row, manifest, _ = self._identified_collection(
+                "retract", collection, arguments, request_id, facade_profile="records")
+            if replay is not None:
+                return replay
+            self._rows_writable(manifest, "retract")
+            if _renders_rows(manifest):
+                raise collections.CollectionError(
+                    "RETRACT_UNAVAILABLE",
+                    "a collection with one view file per row cannot retract a row; its file would remain")
+            cid = manifest.collection_id
+            key = records._validate_item_key(item_key, manifest=manifest)
+            before = self._item(cid, key)
+            if before is None:
+                raise collections.CollectionError("RECORD_NOT_FOUND", "record key does not exist")
+            before_container = self._container(row)
+            records._expect_hash(expected_container_hash, before_container, "container")
+            records._expect_hash(expected_item_version, self._version(before), "item")
+            row_id, version, payload = before["row_id"], before["row_version"], before["payload_hash"]
+            txn = self._txn(row, manifest, "retract", why, identity, digest,
+                            effects={"key": key, "retracted_version": version, "payload_hash": payload})
+            maintained = index_migrations.AccountedWriter(self.connection, self._execute)
+            self._execute(tables.RETRACT_ITEM, {"target_row_id": row_id, "retracted_txn": txn["txn_id"]})
+            layout = self._item_write_context(manifest)[2]
+            if layout is not None:
+                typed_storage.forget_current(maintained, layout, row_id)
+            index_migrations.forget_item(maintained, cid, row_id, key, json.loads(before["values_json"]))
+            reference_index.forget(maintained, row_id)
+            self._execute(tables.INSERT_EFFECT, {
+                "txn_id": txn["txn_id"], "ordinal": 0, "row_id": row_id, "item_key": key, "effect": "retract",
+                "version_before": version, "hash_before": payload})
+            if manifest.view_mode == summary.SUMMARY:
+                self._pending_summary(manifest, txn["generation_after"])
+            else:
+                self._pending_log(manifest, txn["generation_after"])
+            self.handle.release_cache.touch(
+                cid, f"exomem://{types.type_for_manifest(manifest).item_type}/{cid}/{key}")
+            result = records._result(
+                operation="retract", manifest=manifest, key=key, before_item_hash=self._version(before),
+                after_item_hash=None, before_container_hash=before_container,
+                after_container_hash=self._advance(txn), affected_paths=_affected(manifest, before["view_path"]),
+                payload_hash=None, outcome="committed", audit_correlation=txn["transition_id"])
+            self._precommit(manifest)
+            self._insert_txn(txn, result)
+        writer_lease.mark_active_mutation_committed()
+        return result
 
     def rebaseline_collection(self, collection, *, expected_manifest_hash, expected_container_hash,
                              acknowledged_gap_codes, why, request_id=None):
@@ -3428,6 +3541,7 @@ class CollectionWriter:
             raise collections.CollectionError(diagnostic.code, diagnostic.reason)
         record_formats.validate_storage_contract(proposed)
         reference_declarations.require_targets(self._operation, proposed, current)
+        link_declarations.require_relations(self.root, proposed, current)
         if declared.kind == "intended":
             planning.require_planning_profile(proposed)
         newly_required = records._newly_required(current, proposed)
@@ -3442,6 +3556,16 @@ class CollectionWriter:
         row_metadata = {key: governance.row_metadata(proposed.schema, values, metadata)
                         for key, values in plans.items()}
         return proposed, mode_change, plans, metadata, row_metadata
+
+    def manifest_text(self, collection):
+        """The collection's current manifest and the text the store holds for it: what an additive revision edits."""
+        with self.read_snapshot(mutation=True):
+            row, current, _declared = self._collection(collection)
+            (text,) = self.connection.execute(
+                "SELECT manifest_text FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (row["collection_id"], row["manifest_version"]),
+            ).fetchone()
+            return current, text
 
     def validate_revision(self, collection, *, manifest_text):
         """Return current guards for a valid proposal without writer admission or side effects."""
@@ -3500,16 +3624,8 @@ class CollectionWriter:
                 raise summary.mode_change_refused(current.view_mode, proposed.view_mode)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
-            old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
-            new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
             reference_index.revise(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                current.collection_id,
-                dropped=tuple(sorted(set(old_refs) - set(new_refs))),
-                added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
-                retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
-                                 if new_refs[name].collection != old_refs[name].collection),
-            )
+                index_migrations.AccountedWriter(self.connection, self._execute), current, proposed)
             if mode_change:
                 self._execute("UPDATE collections SET view_mode=? WHERE collection_id=?",
                               (proposed.view_mode, current.collection_id))
@@ -3523,18 +3639,33 @@ class CollectionWriter:
                 "UPDATE collections SET manifest_version = ?, audit_reader_version = 2 WHERE collection_id = ?",
                 (txn["manifest_version_after"], current.collection_id),
             )
-            self._execute("UPDATE items SET governance_json=? WHERE collection_id=? AND item_key=?",
+            self._execute("UPDATE item_rows SET governance_json=? WHERE collection_id=? AND item_key=?",
                 ((value, current.collection_id, key) for key, value in row_metadata.items()), many=True)
+            # A retracted row is not validated again; its history is judged on the revised projects. Only a change of
+            # projects touches them, and then in fixed-size batches by row id, so memory and statements stay bounded.
+            before_metadata = self.connection.execute(
+                "SELECT governance_json FROM collection_manifests WHERE collection_id=? AND manifest_version=?",
+                (current.collection_id, row["manifest_version"])).fetchone()[0]
+            if governance.projects_changed(before_metadata, metadata):
+                last = 0
+                while batch := self.connection.execute(
+                        "SELECT row_id,governance_json FROM item_rows "
+                        "WHERE collection_id=? AND retracted_txn IS NOT NULL AND row_id>? ORDER BY row_id LIMIT 500",
+                        (current.collection_id, last)).fetchall():
+                    last = batch[-1][0]
+                    self._execute("UPDATE item_rows SET governance_json=? WHERE row_id=?",
+                                  [(governance.reprojected(captured, metadata), row_id) for row_id, captured in batch],
+                                  many=True)
             for held_id, kind, encoded, captured, path in self.connection.execute(
                 "SELECT held_id,kind,candidate_json,governance_json,view_path FROM held_candidates WHERE collection_id=?",
                 (current.collection_id,),
             ).fetchall():
-                if kind == "view-correction":
-                    preserved = governance._metadata(captured)
-                    preserved["projects"] = governance._metadata(metadata)["projects"]
-                    held_metadata = _json(preserved)
+                candidate = None if kind == "view-correction" else records._decode_held_value(json.loads(encoded))
+                if candidate is None or (candidate.get("action") == "update" and candidate.get("item_key") not in plans):
+                    # A view correction, or an update held against a row since retracted, has no current row to
+                    # validate again; it keeps its own tags and classes.
+                    held_metadata = governance.reprojected(captured, metadata)
                 else:
-                    candidate = records._decode_held_value(json.loads(encoded))
                     before = plans.get(candidate.get("item_key"))
                     held_metadata = governance.held_metadata(proposed.schema, candidate, metadata, before)
                 self._execute("UPDATE held_candidates SET governance_json=? WHERE held_id=?",
@@ -3633,16 +3764,8 @@ class CollectionWriter:
             manifest_text, proposed = conversion.summary_form(self.root, self._operation, current, declared, stored)
             txn = self._txn(row, proposed, "revise", why, identity, digest)
             self._manifest(proposed, manifest_text, txn["manifest_version_after"], txn["txn_id"])
-            old_refs = {d.dotted: d for d in collections.declared_references(current.schema)}
-            new_refs = {d.dotted: d for d in collections.declared_references(proposed.schema)}
             reference_index.revise(
-                index_migrations.AccountedWriter(self.connection, self._execute),
-                current.collection_id,
-                dropped=tuple(sorted(set(old_refs) - set(new_refs))),
-                added=tuple(new_refs[name] for name in sorted(set(new_refs) - set(old_refs))),
-                retargeted=tuple(new_refs[name] for name in sorted(set(old_refs) & set(new_refs))
-                                 if new_refs[name].collection != old_refs[name].collection),
-            )
+                index_migrations.AccountedWriter(self.connection, self._execute), current, proposed)
             self._execute("UPDATE collections SET view_mode=?, manifest_version=?, audit_reader_version=2 "
                           "WHERE collection_id=?", (summary.SUMMARY, txn["manifest_version_after"], cid))
             self._execute("DELETE FROM projection_state WHERE collection_id=? AND kind='item'", (cid,))
@@ -3785,7 +3908,7 @@ class CollectionWriter:
                                    *(items[key]["view_path"] for key in plan.bodies.keys() - moves.keys()),
                                    *(items[key]["view_path"] for key in plan.rerenders)])
             # Every row takes its new path first, so each render resolves its links to the moved views.
-            self._execute("UPDATE items SET view_path=? WHERE collection_id=? AND item_key=?",
+            self._execute("UPDATE item_rows SET view_path=? WHERE collection_id=? AND item_key=?",
                           [(target, cid, key) for key, (_, target) in moves.items()], many=True)
             receipts = []
             item_type = types.type_for_manifest(manifest).item_type

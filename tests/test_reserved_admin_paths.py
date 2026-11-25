@@ -341,12 +341,14 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         index_paths,
         lexstore,
         media_jobs,
+        media_previews,
         memory_refs,
         ownership_rotation,
         procedure_approval,
         review_state,
         served_context,
         source_custody,
+        source_imports,
         voice_profiles,
     )
     from exomem.collection_store import connection as collection_connection
@@ -394,7 +396,9 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "lexical-staged-lock",
         "maintenance-jobs-store",
         "media-jobs-store",
+        "media-previews",
         "ownership-review",
+        "write-intake-store",
         "procedure-approval-key",
         "procedure-approvals",
         "original-pool",
@@ -403,7 +407,10 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         "review-state",
         "source-corrections",
         "source-custody",
+        "source-import-intents",
+        "source-imports",
         "served-context",
+        "upload-stage",
         "voice-profile-store",
     }
 
@@ -421,6 +428,9 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
     claims_from_owners = [
         (root / compiled_history.history_root(), "compiled-history"),
         (source_custody.manifest_root(root) / "6b1f2c3e-0d4a-4e5f-8a9b-1c2d3e4f5a6b.json", "source-custody"),
+        (source_imports.receipt_root(root) / ("a" * 64 + ".json"), "source-imports"),
+        (state_paths.vault_state_dir(root) / source_imports._PREPARED_STORE / ("a" * 64 + ".json"),
+         "source-import-intents"),
         (governance_policy.governance_root(root), "governance-tree"),
         (root / connector_boundary.requirement_relative_path(), "connector-boundary"),
         (index_paths.governance_sidecar_path(root), "governance-store"),
@@ -435,6 +445,7 @@ def test_closed_registry_matches_independent_owner_inventory(tmp_path: Path) -> 
         (collection_conversion.archive_folder(root, "c" * 32, 1) / "manifest.json", "collection-archive"),
         (media_jobs.job_store_path(root), "media-jobs-store"),
         (media_jobs.worker_lock_path(root), "media-jobs-store"),
+        (state_paths.vault_state_dir(root) / media_previews.STORE / "aa" / ("a" * 64 + ".json"), "media-previews"),
         (voice_profiles.voice_profiles_path(root), "voice-profile-store"),
         (procedure_approval.key_path(root), "procedure-approval-key"),
         (
@@ -3045,7 +3056,7 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
 ) -> None:
     from exomem import graph_sync, review_state, voice_profiles
 
-    observed: list[tuple[str, str, int]] = []
+    observed: list[tuple[str, str, int, float | None]] = []
 
     def observe(
         vault_root: Path,
@@ -3053,10 +3064,11 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
         descriptor_id: str,
         *,
         limit: int,
+        deadline: float | None = None,
     ) -> bytes:
         assert Path(vault_root) == tmp_path
         assert reserved_paths.owner_authorized(descriptor_id)
-        observed.append((descriptor_id, path.name, limit))
+        observed.append((descriptor_id, path.name, limit, deadline))
         if descriptor_id == "review-state":
             return b'{"records":{},"version":1}'
         if descriptor_id == "voice-profile-store":
@@ -3075,13 +3087,15 @@ def test_json_and_graph_private_owners_read_through_their_named_authority(
     assert voice_profiles.load_store(
         voice_profiles.voice_profiles_path(tmp_path), vault_root=tmp_path
     ) == {}
-    assert graph_sync.read_floor(tmp_path) is not None
+    deadline = 100.0
+    assert graph_sync.floor_state(tmp_path, deadline=deadline)[1] is not None
 
-    assert [(descriptor, name) for descriptor, name, _limit in observed] == [
+    assert [(descriptor, name) for descriptor, name, _limit, _deadline in observed] == [
         ("review-state", ".review-state.json"),
         ("voice-profile-store", ".voice_profiles.json"),
         ("graph-handoff", ".graph-sync-floor.json"),
     ]
+    assert observed[-1][2:] == (graph_sync._FLOOR_READ_LIMIT, deadline)
 
 
 def test_owner_byte_read_requires_exact_named_authority(tmp_path: Path) -> None:

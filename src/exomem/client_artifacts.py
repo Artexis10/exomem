@@ -33,6 +33,8 @@ from .preserve import (
     DuplicateArtifact,
     PreserveError,
     destination_segment_refusal,
+    diarize_pin,
+    disclose_retained_speaker_choice,
     preserve_stream,
     validate_raw_capture,
 )
@@ -170,6 +172,7 @@ class StagedArtifact:
     #: The claimed hold behind a local client's held upload, so a command that
     #: stores nothing can put it back.
     held: object | None = None
+    diarize: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -492,19 +495,23 @@ def stage_artifact(
     A local client's held upload (`exomem-held:`) is claimed from machine-local
     state instead; it never reaches the network code below.
     """
+    from .cloud_cell import cloud_mode_enabled
     from .held_uploads import is_held_reference
 
+    diarize = file.get("diarize")
+    if diarize is not None and not isinstance(diarize, bool):
+        raise SafeFetchError("INVALID_FILE", "diarize must be true or false")
     if is_held_reference(file.get("download_url")):
-        return _redeem_held(file, budget, vault_root=vault_root, lane=lane)
-    from .cloud_cell import cloud_mode_enabled
-
-    if cloud_mode_enabled():
+        artifact = _redeem_held(file, budget, vault_root=vault_root, lane=lane)
+    elif cloud_mode_enabled():
         from .cloud_artifact_transport import stage_cloud_artifact
 
-        return stage_cloud_artifact(
+        artifact = stage_cloud_artifact(
             file, budget, index=index, lane=lane, batch_deadline=batch_deadline
         )
-    return stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    else:
+        artifact = stage_direct_artifact(file, budget, batch_deadline=batch_deadline)
+    return artifact if diarize is None else replace(artifact, diarize=diarize)
 
 
 def stage_direct_artifact(
@@ -1270,12 +1277,15 @@ def _already_stored_outcome(
         # A stored row names its page as `page`; the earlier copy's page answers the same question.
         "page": duplicate.sidecar_path,
     }
+    disclose_retained_speaker_choice(out, artifact.diarize)
     return source_result_attribution.bind(out, (duplicate.ref,)) if lane == "source" else out
 
 
 def _validate_staged_adoption(
     artifact: StagedArtifact, envelope: AdoptionEnvelope
 ) -> None:
+    if artifact.held is not None and (artifact.held.record or {}).get("import_key") is not None:
+        raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Save this held Source without adoption.")
     if (
         artifact.file_id != envelope.selected_file_id
         or not artifact.filename.strip()
@@ -1320,7 +1330,7 @@ def _assert_replay_identity(
 
 
 def _replayed_outcome(
-    receipt: Mapping[str, object], *, source_refs: tuple[str, ...] | None = None,
+    receipt: Mapping[str, object], *, diarize: bool | None, source_refs: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
     out = {
         "file_id": receipt["selected_file_id"],
@@ -1336,6 +1346,7 @@ def _replayed_outcome(
         "warnings": [],
         "adoption": dict(receipt),
     }
+    disclose_retained_speaker_choice(out, diarize)
     return source_result_attribution.bind(out, source_refs) if source_refs is not None else out
 
 
@@ -1458,7 +1469,9 @@ def _capture_source_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt, source_refs=(receipt.source_ref,))
+            outcomes[selected_index] = _replayed_outcome(
+                receipt.receipt, diarize=artifact.diarize, source_refs=(receipt.source_ref,)
+            )
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1493,6 +1506,7 @@ def _capture_source_adoption(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=artifact.diarize,
                             ),
                             adoption_seed=envelope.seed(
                                 lane="source", destination=destination
@@ -1501,7 +1515,9 @@ def _capture_source_adoption(
                         )
                         payload = _with_unavailable_warning(result.as_dict(), available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt, source_refs=(raced.source_ref,))
+                outcomes[selected_index] = _replayed_outcome(
+                    raced.receipt, diarize=artifact.diarize, source_refs=(raced.source_ref,)
+                )
             elif duplicate is not None:
                 # Nothing is written: the earlier copy answers, and the call settles without a commit.
                 outcomes[selected_index] = _already_stored_outcome(artifact, duplicate, lane="source")
@@ -1605,7 +1621,7 @@ def _preserve_evidence_adoption(
             except SafeFetchError as error:
                 outcomes[selected_index] = _failed(artifact.file_id, error)
                 return _finish_adoption(outcomes)
-            outcomes[selected_index] = _replayed_outcome(receipt.receipt)
+            outcomes[selected_index] = _replayed_outcome(receipt.receipt, diarize=artifact.diarize)
             return _finish_adoption(outcomes)
 
         manager = active_manager()
@@ -1648,10 +1664,11 @@ def _preserve_evidence_adoption(
                                 ),
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
                             )
                         payload = _with_unavailable_warning(result.as_dict(), held.available, "this file")
             if raced is not None:
-                outcomes[selected_index] = _replayed_outcome(raced.receipt)
+                outcomes[selected_index] = _replayed_outcome(raced.receipt, diarize=artifact.diarize)
                 return _finish_adoption(outcomes)
 
             if _wrote(duplicate):
@@ -1689,6 +1706,7 @@ def capture_source_artifacts(
     title: str,
     files: list[Mapping[str, object]],
     adoption: Mapping[str, object] | None = None,
+    import_key: str | None = None,
     **source_fields: object,
 ) -> dict:
     """Stage remote files first, then capture each as a Source under a guard.
@@ -1743,7 +1761,7 @@ def capture_source_artifacts(
 
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged=staged, outcomes=outcomes,
-        source_fields=source_fields,
+        source_fields=source_fields, import_key=import_key,
     )
 
 
@@ -1755,20 +1773,31 @@ def _commit_staged_sources(
     staged: Mapping[int, StagedArtifact],
     outcomes: list[dict | None],
     source_fields: Mapping[str, object],
+    import_key: str | None = None,
+    correction_speech_original: Path | None = None,
 ) -> dict:
     """Capture each staged file as a Source under the mutation guard, releasing the staged bytes.
 
     A correction names its predecessor, so it never meets an earlier Source that holds the same bytes.
     """
     from . import add as add_module
-    from . import document_identity, source_corrections
+    from . import (
+        document_containers,
+        document_identity,
+        media_jobs,
+        source_capture,
+        source_corrections,
+        source_imports,
+    )
 
     resolution: dict | None = None
     manager = active_manager()
     refusals: list[OpError] = []
+    wrote_import_receipt = False
     try:
         for index, artifact in staged.items():
             body_started = False
+            key = import_key
             try:
                 if (
                     not artifact.file_id
@@ -1787,21 +1816,69 @@ def _commit_staged_sources(
                     document_identity.inspect(artifact.path, claimed_url if isinstance(claimed_url, str) else None)
                     if document_identity.is_pdf(artifact.filename) else None
                 )
+                held_key = (artifact.held.record or {}).get("import_key") if artifact.held is not None else None
+                if held_key is not None and (
+                    len(outcomes) != 1 or source_fields.get("correction") is not None
+                    or import_key is not None and import_key != held_key
+                ):
+                    raise SafeFetchError("INVALID_IMPORT_IDENTITY", "Use the held Source's import ID in a single-file capture.")
+                key = import_key or held_key
+                if key is not None:
+                    safe_name = add_module.source_artifact_name(artifact.filename)
+                    if document_containers.is_container(safe_name):
+                        raise SafeFetchError(
+                            "IMPORT_IDENTITY_COMPOUND_SOURCE", "Save this container without an import ID.",
+                        )
+                import_capture = (
+                    source_imports.ImportCapture.bind(vault_root, key, artifact, title=item_title, source_fields=source_fields)
+                    if key is not None else None
+                )
                 with manager.absorbing_mutation_guard(
                     vault_root,
                     request_id=active_mutation_request_id(),
                     operation="capture_source_artifacts_commit",
                 ):
                     body_started = True
+                    resumed = None
+                    if import_capture is not None:
+                        previous, repaired, resumed = import_capture.lookup(vault_root, artifact)
+                        if repaired:
+                            wrote_import_receipt = True
+                            mark_active_mutation_committed()
+                        if previous is not None:
+                            duplicate = DuplicateArtifact(
+                                artifact.sha256, previous.payload.artifact_path, previous.path, previous.ref,
+                            )
+                            outcomes[index] = _already_stored_outcome(artifact, duplicate, lane="source")
+                            if repaired:
+                                warnings = list(outcomes[index].get("warnings", []))
+                                _schedule_media(
+                                    manager, vault_root, duplicate.path, warnings,
+                                    kept="the original", operation="capture_source_media",
+                                )
+                                if warnings:
+                                    outcomes[index]["warnings"] = warnings
+                                import_capture.finish(vault_root)
+                            continue
                     # Looked up and committed under this one acquisition, so two identical hand-overs
                     # cannot both find nothing.
-                    if source_fields.get("correction") is not None:
+                    if source_fields.get("correction") is not None or resumed is not None:
                         duplicate, available = None, True
                     else:
                         duplicate, available = _earlier_source(
                             vault_root, artifact.sha256, raw_protection=bool(source_fields.get("raw_protection")),
                         )
                     if duplicate is None:
+                        diarize = artifact.diarize
+                        if (
+                            correction_speech_original is not None
+                            and media_jobs.job_store_path(vault_root).is_file()
+                        ):
+                            # A request can update the queue while we copy the original.
+                            store = media_jobs.MediaJobStore(vault_root, create=False)
+                            pending = store.get_by_binary(correction_speech_original, readonly=True)
+                            if pending is not None and pending.do_ocr and pending.diarize is not None:
+                                diarize = pending.diarize
                         result = add_module.add(
                             vault_root,
                             source_schema,
@@ -1811,10 +1888,23 @@ def _commit_staged_sources(
                                 staged_path=artifact.path,
                                 filename=artifact.filename,
                                 content_type=artifact.content_type,
+                                diarize=diarize,
                             ),
                             identity_check=identity.frontmatter() if identity is not None else None,
+                            import_capture=import_capture,
+                            _import_resume=resumed,
                             **source_fields,
                         )
+                    elif import_capture is not None:
+                        admitted = duplicates.named_duplicate(
+                            vault_root, duplicate.sidecar_path, sha256=artifact.sha256,
+                            lane=duplicates.SOURCES, protected=import_capture.protected, keeps_original=True,
+                        )
+                        if admitted is None or admitted.ref != duplicate.ref:
+                            raise SafeFetchError("IMPORT_RECEIPT_UNAVAILABLE", "The duplicate Source could not be verified.")
+                        import_capture.commit_duplicate(vault_root, admitted)
+                        wrote_import_receipt = True
+                        mark_active_mutation_committed()
                 if _wrote(duplicate):
                     mark_active_mutation_committed()
                 if duplicate is not None:
@@ -1858,8 +1948,15 @@ def _commit_staged_sources(
                     # Stored with the row, so a replayed reply offers the same next step.
                     outcomes[index]["correctable"] = source_corrections.can_record(vault_root, payload["ref"])
                 source_result_attribution.bind(outcomes[index], (result.ref,))
+                if import_capture is not None:
+                    import_capture.finish(vault_root)
             except (SafeFetchError, PreserveError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
+            except source_capture.SourceCaptureError as error:
+                if key is None:
+                    raise
+                code, _, reason = str(error).partition(":")
+                outcomes[index] = _failed(artifact.file_id, SafeFetchError(code, reason.strip()))
             except add_module.AddError as error:
                 outcomes[index] = _failed(
                     artifact.file_id, SafeFetchError(error.code, error.reason)
@@ -1890,7 +1987,7 @@ def _commit_staged_sources(
     if source_fields.get("custody_only") is True:
         # The resolved mark (a correction carries its predecessor's): the outcome line says so.
         out["custody_only"] = True
-    return _unless_written(out)
+    return out if wrote_import_receipt else _unless_written(out)
 
 
 def capture_source_correction(
@@ -1911,7 +2008,7 @@ def capture_source_correction(
     applies: the historical page hash, one successor per predecessor, canonical identity, authority and egress.
     """
     from . import add as add_module
-    from . import media_store, reserved_paths, source_capture, source_corrections
+    from . import media_engines, media_store, media_types, reserved_paths, source_capture, source_corrections
     from .governance import raw_protection as raw_guard
 
     plan = source_corrections.prepare_correction(vault_root, correction)
@@ -1963,9 +2060,15 @@ def capture_source_correction(
     staged = StagedArtifact(
         "stored-original", staged_path, size, digest.hexdigest(),
         str(metadata["original_content_type"]) if metadata.get("original_content_type") else None, str(filename),
+        diarize=diarize_pin(plan.old_source),
+    )
+    original_path = vault_root.resolve() / stored
+    speech_original = (
+        original_path if media_types.media_type_for(original_path) in media_engines.SPEECH_KINDS else None
     )
     return _commit_staged_sources(
         vault_root, source_schema=source_schema, title=title, staged={0: staged}, outcomes=[None],
+        correction_speech_original=speech_original,
         source_fields={
             **source_fields,
             # The plan read above, so `add` commits it without scanning every canonical Source again.
@@ -1987,12 +2090,16 @@ def preserve_artifacts(
     transcriptions: list[Mapping[str, object]] | tuple = (),
     raw_protection: bool = False,
     archive: str | None = None,
+    description: str | None = None,
 ) -> dict:
     """Stage remote files first, then preserve each append-only artifact under a narrow guard.
 
     A transcription is written only with its original: as the extracted text
     of the original's own page, in the same write that stores the bytes. An
     original that is already stored or that fails records no transcription.
+
+    `description` is one caption for every file in the call. Like a
+    transcription, it is written only with a newly stored original.
 
     With `archive="members"` each file is a held zip, kept as its members
     exactly as `/upload` with `archive=members` keeps it; see `_preserve_members`.
@@ -2013,6 +2120,20 @@ def preserve_artifacts(
             "Preserve the held zip with archive alone, or drop archive to keep the zip as one file.",
             details={"field": "archive", "accepted_form": "archive with scope, category and held files"},
         )
+    if (archive is not None or adoption is not None) and description is not None:
+        # Either would drop it silently: an adoption commits the handed file's own page,
+        # and a members preservation has no original page to carry a caption.
+        raise OpError(
+            "INVALID_PRESERVE",
+            "a caption is not accepted with an adoption or archive=members",
+            "Drop the caption, or save the file without adoption or archive.",
+            details={"field": "description"},
+        )
+    caption_warnings: list[str] = []
+    if description is not None:
+        from .preserve import redact_capture_text
+
+        _content, description, _text, caption_warnings = redact_capture_text(description=description)
     if adoption is not None:
         if transcriptions:
             _refuse_transcriptions("transcriptions are not accepted with an adoption")
@@ -2055,6 +2176,8 @@ def preserve_artifacts(
             if archive is not None:
                 from .held_uploads import is_held_reference
 
+                if file.get("diarize") is not None:
+                    raise SafeFetchError("INVALID_FILE", "archive=members takes no speaker-label choice")
                 if not is_held_reference(file["download_url"]):
                     # The manifest records what verified the zip's SHA-256 (`upload` or `session`);
                     # a fetched attachment had neither, so only a held upload can be kept as members.
@@ -2115,7 +2238,7 @@ def preserve_artifacts(
                     # that stores a miss.
                     held = evidence_reuse.reuse(
                         vault_root, scope=scope, category=category, sha256=artifact.sha256, protected=protected,
-                        filename=artifact.filename,
+                        filename=artifact.filename, description=description,
                     )
                     if held.duplicate is None:
                         with artifact.path.open("rb") as stream:
@@ -2129,6 +2252,8 @@ def preserve_artifacts(
                                 max_bytes=budget.max_file_bytes,
                                 raw_protection=raw_protection,
                                 media_pending=True,
+                                diarize=artifact.diarize,
+                                description=description,
                                 **(
                                     {"text": transcription, "text_origin": "client"}
                                     if transcription
@@ -2146,11 +2271,18 @@ def preserve_artifacts(
                         "file_id": artifact.file_id,
                         **held.duplicate.receipt(size=artifact.size, content_type=artifact.content_type),
                     }
+                    disclose_retained_speaker_choice(outcomes[index], artifact.diarize)
                     if index in transcribed:
                         outcomes[index]["transcription"] = {
                             "state": "not_recorded",
                             "reason": "the original was already preserved; its page is unchanged",
                         }
+                    if description is not None:
+                        outcomes[index]["caption"] = {
+                            "state": "not_recorded",
+                            "reason": "the original was already preserved; its page is unchanged",
+                        }
+                    _add_citation(outcomes[index], held.duplicate.sidecar_path)
                     continue
                 payload = result.as_dict()
                 warnings = list(payload.get("warnings") or [])
@@ -2182,6 +2314,10 @@ def preserve_artifacts(
                         "state": "recorded",
                         "page": payload.get("sidecar_path"),
                     }
+                if description is not None:
+                    outcomes[index]["caption"] = {"state": "recorded", "page": payload.get("sidecar_path")}
+                    outcomes[index]["warnings"] = [*caption_warnings, *outcomes[index]["warnings"]]
+                _add_citation(outcomes[index], payload.get("sidecar_path"))
             except (PreserveError, SafeFetchError) as error:
                 outcomes[index] = _failed(artifact.file_id, error)
             except OpError as error:
@@ -2195,6 +2331,21 @@ def preserve_artifacts(
         # Nothing began, so the call stays retryable under its own key instead of recording a failure.
         raise refusals[0]
     return _batch_result(outcomes)
+
+
+#: Characters that end or split a wikilink target (`#` heading, `|` alias, brackets), so a path holding one cannot be cited.
+_WIKILINK_DELIMITERS = frozenset("#|[]")
+
+
+def _add_citation(outcome: dict, page_path: object) -> None:
+    """Give a kept original the wikilink that text about it carries, as an observation cites a Source."""
+    if not (isinstance(page_path, str) and page_path.endswith(".md") and isinstance(outcome.get("stored_path"), str)):
+        return
+    if _WIKILINK_DELIMITERS & set(page_path):
+        outcome["warnings"] = [*(outcome.get("warnings") or []),
+                               "No cite: the file name holds a wikilink delimiter; cite its page by its ref."]
+        return
+    outcome["cite"] = f"[[{page_path[: -len('.md')]}|{Path(outcome['stored_path']).name}]]"
 
 
 def _preserve_members(

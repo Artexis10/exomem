@@ -75,6 +75,7 @@ from . import (
 )
 from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
+from .governance import principal
 
 log = logging.getLogger(__name__)
 
@@ -1146,7 +1147,11 @@ def ensure_index(
     registry_changed = (
         index.project_registry_hash() != project_keys.load_project_registry(root).content_hash
     )
-    if registry_changed or (freshness_stamp and index.freshness_stamp() != freshness_stamp):
+    if (
+        registry_changed
+        or (freshness_stamp and index.freshness_stamp() != freshness_stamp)
+        or _store_readable_again(root, index)
+    ):
         built_at = index.freshness_stamp()
         refreshed = refresh_index(index, freshness_stamp=freshness_stamp)
         if not refreshed and visible is not None:
@@ -1161,6 +1166,19 @@ def ensure_index(
     if _managed():
         _schedule_reembed(root, index, freshness_stamp=freshness_stamp)
     return READY, index, False
+
+
+def _store_readable_again(root: Path, index: working_set_index.WorkingSetIndex) -> bool:
+    """Whether the catalogue missed store collections that this process can now read.
+
+    The build that missed them recorded its freshness stamp all the same, so the first request after a writer
+    is admitted builds once more; a host that never gets a writer never rebuilds for it.
+    """
+    if not index.store_unread():
+        return False
+    from .collection_store import runtime as store_runtime
+
+    return store_runtime.writer_admitted(root)
 
 
 #: The registry checkpoint each freshness stamp was derived from, oldest first.
@@ -2686,6 +2704,7 @@ def _schedule_build(
             log.warning("%s background build could not start", label, exc_info=True)
 
 
+@principal.invocation_scope()
 def serve(
     vault_root: Path,
     *,
@@ -2930,16 +2949,6 @@ def serve(
         heat_digest=heat_digest,
         conventions_turn_hash=conventions_registry.turn_hash,
     )
-    # The band depends on the audience under a governed policy, so one audience's
-    # banded packet is never served to another (`working_set.band_audience_allowed`).
-    cache_identity = (
-        str(root.absolute()),
-        key,
-        lexical_state,
-        index.token(),
-        working_set.band_audience_allowed(root),
-        leads_only,
-    )
     # A reader other than the owner resolves anchors over its own view
     # (`working_set_resolve.audience_view`), so its packet is neither served
     # from nor stored in this cache: keying it by audience and purpose would be
@@ -2950,6 +2959,18 @@ def serve(
         and not with_conversation
         and not index_stale
         and trigger == "user_turn"
+    )
+    # The band depends on audience. Graph quotes depend on unrestricted source access,
+    # which can change while the same owner's anchor index and freshness key stay fixed.
+    quote_access = cacheable and working_set.graph_quote_access(root, purpose=purpose)
+    cache_identity = (
+        str(root.absolute()),
+        key,
+        lexical_state,
+        index.token(),
+        working_set.band_audience_allowed(root),
+        quote_access,
+        leads_only,
     )
     with _CACHE_LOCK:
         cached = _PACKET_CACHE.get(cache_identity) if cacheable else None

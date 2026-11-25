@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .. import semantic_index, state_migration, state_paths
 from ..collection_store import capability, connection, schema
+from . import resident_catalogue
 
 #: The values of ``store_mode.mode``: a closed set that the CHECK of schema 15 fixes.
 FILE_MODE = "file"
@@ -64,7 +65,7 @@ def _manifest_signature(manifest: Path) -> tuple[int, ...] | None:
 
     An atomic replace changes the inode and an in-place rewrite changes ``st_ctime_ns``, which no caller can
     set back, so an unchanged signature means the same bytes. On Windows ``st_ctime_ns`` is the
-    creation time, so only the file ID covers a rewrite there; Exomem writes the manifest by
+    creation time, so only the file ID covers a rewrite there; Evermatter writes the manifest by
     ``os.replace``, which gives it a new ID, and only a hand edit that restores the mtime would go
     unseen.
     """
@@ -153,8 +154,12 @@ def store_mode_or_unreadable(vault_root: Path) -> tuple[bool, str | None]:
 
 
 def forget_read_mode(vault_root: Path) -> None:
-    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records."""
+    """Drop the kept answer of ``store_mode_for_reads``, so the next read re-reads the records.
+
+    The vault has left store mode, so the commit's resident catalogue resolver goes with the answer.
+    """
     _READ_MODES.pop((os.fspath(vault_root), state_paths._placement_environment()), None)
+    resident_catalogue.forget(vault_root)
     if _held_mode(vault_root) is not None:
         _REQUEST_MODE.set(None)
 
@@ -220,13 +225,20 @@ STORE_FIGURES = (
     "parser_version",
     "required_parser_version",
     "unowned_rows_as_of",
+    "derived",
+    "derived_pending",
+    "derived_failed",
+    "derived_failed_by_code",
+    "oldest_derivation_age_seconds",
 )
 
 
 def status(vault_root: Path) -> dict:
     """What the records say about this vault, read-only and without a lease.
 
-    A file-mode vault reports only the mode, the release gate and the vault-side marker. A crash
+    A file-mode vault reports the mode, migration gate and vault-side marker. The gate says
+    whether this build and platform allow migration. ``migration_refusal`` names a platform refusal
+    when present. Migration preflight checks the vault. A crash
     window reports its own state. A store-mode vault adds the figures that an operator checks before
     a rollback: stored pages and binaries, queued projections, the age in seconds of the oldest
     queued projection that no hold sits on (None when none waits, "unknown" when the clock says it
@@ -242,6 +254,10 @@ def status(vault_root: Path) -> dict:
     names this build's parser input. A mismatch keeps semantic answers unavailable during repair.
     ``unowned_rows_as_of`` is when the importer's last complete sweep began to read the files that
     the store does not own, whose rows are as fresh as that sweep (None when no sweep is recorded).
+    ``derived`` says whether the search, identity and graph rows follow every committed page
+    (``current``), wait for the store thread (``behind``), or hold an intent that failed its retries
+    (``failed``), with ``derived_pending``, ``derived_failed`` by reason code and the age of the
+    oldest intent; a store that has no queue yet reports ``unknown``.
     ``vault_marker`` is what the replica under the vault says: ``store`` makes a file-mode start
     on another state root refuse. ``vault_decision`` is the newest store-mode decision that this
     root's store or the replica carries (``n``, ``mode``, ``id``, ``at`` and its ``source``), and
@@ -253,7 +269,11 @@ def status(vault_root: Path) -> dict:
     """
     from . import marker
 
-    report: dict = {"gate": "on" if capability.vault_store_enabled() else "off"}
+    platform_refusal = capability.vault_store_migration_platform_refusal()
+    can_migrate = capability.vault_store_enabled() and platform_refusal is None
+    report: dict = {"gate": "on" if can_migrate else "off"}
+    if platform_refusal:
+        report["migration_refusal"] = platform_refusal
     # A damaged manifest raises here, so the command refuses and names it.
     recorded = state_migration.vault_store_recorded(vault_root)
     try:
@@ -277,7 +297,7 @@ def _reason(error: Exception) -> str:
 
 
 def _store_figures(vault_root: Path) -> dict:
-    from . import read, rederive
+    from . import derivation, read, rederive
 
     reader, _ = connection._open_read_only(
         connection.store_path(vault_root), connection.BUSY_TIMEOUT_MS
@@ -288,10 +308,21 @@ def _store_figures(vault_root: Path) -> dict:
         revision, release, changed_at = reader.execute(
             "SELECT revision, release, changed_at FROM store_mode WHERE id = 1"
         ).fetchone()
+        present = {
+            name for (name,) in reader.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        # A store that an earlier release wrote lacks the tables of a later schema until the service
+        # opens it; their figures are unknown, never zero.
         counts = {
             table: reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in schema.VAULT_STORE_TABLES
+            if table in present
         }
+        derived = (
+            derivation.figures(reader)
+            if "store_derivation_queue" in present
+            else {"derived": UNKNOWN}
+        )
         # The queue stamps whole seconds in UTC, which SQLite's own clock reads: no format here.
         # The age counts what the projector can still act on: a held path waits for a person. An
         # intent that the projector deferred is counted, so that it never hides as a quiet queue.
@@ -316,6 +347,8 @@ def _store_figures(vault_root: Path) -> dict:
         "held": counts["store_held"],
         "held_by_kind": held_by_kind,
         "audit_rows": counts["store_audit"],
+        # Whether the search, identity and graph rows follow every committed page (``derivation``).
+        **derived,
         "registry": registry.state,
         "registry_revision": registry.revision if registry.revision is not None else UNKNOWN,
         "registry_target_revision": registry.target if registry.target is not None else UNKNOWN,

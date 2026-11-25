@@ -48,7 +48,7 @@ ITEM_ROW_STORAGE = frozenset({"markdown-items", SQLITE_STORAGE})
 # The manifest schema fixes these field names: each recipe renders one item view, which summary mode has not.
 # Only the record_presentation tables outlive summary mode: they declare child rows, not a rendering.
 PER_ITEM_RECIPES = ("record_presentation", "item_filename", "item_presentation")
-#: The strategies whose rows Exomem writes as Markdown files; a vault with a collection store creates none of them.
+#: The strategies whose rows Evermatter writes as Markdown files; a vault with a collection store creates none of them.
 MARKDOWN_ROW_STORAGE = frozenset({"markdown-items", "markdown-log"})
 _SUPPORTED_FIELD_TYPES = frozenset(
     {
@@ -159,6 +159,34 @@ class CollectionError(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.reason}")
 
 
+#: A listed name set past this many UTF-8 bytes is summarised, so neither the public Planning
+#: message cap (512) nor inspect's 512-byte reason cap cuts a name in half or drops the reason.
+LISTED_BUDGET = 300
+
+
+def listed_within(names: Iterable[str]) -> str:
+    """`names` joined by commas, ended with "and N more" once the next name would pass `LISTED_BUDGET` bytes.
+
+    When the first name alone passes the budget, nothing is listed and the text is the count:
+    a cut name would read as a real one.
+    """
+    names = list(names)
+    shown: list[str] = []
+    for name in names:
+        if len(", ".join([*shown, name]).encode("utf-8")) > LISTED_BUDGET:
+            break
+        shown.append(name)
+    if names and not shown:
+        return f"{len(names)} item" if len(names) == 1 else f"{len(names)} items"
+    more = f" and {len(names) - len(shown)} more" if len(shown) < len(names) else ""
+    return f"{', '.join(shown)}{more}"
+
+
+def enum_listing(options: Iterable[Any]) -> str:
+    """An enum's options in their JSON spelling, so `"1"` and `1` read apart as the validator tells them apart."""
+    return listed_within(json.dumps(option, ensure_ascii=False) for option in options)
+
+
 def sqlite_store_required() -> CollectionError:
     """The refusal for a sqlite manifest that no collection store holds: no file reader stands in for it."""
     return CollectionError(
@@ -202,6 +230,9 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
             "items": {"$ref": "#/$defs/field"},
             "units": {"type": "array", "items": {"type": "string"}},
             "link_kind": {"type": "string"},
+            # A `link` field's relation names a registry relation whose origins include
+            # `collection_link`; create and revise list the admissible keys when it names another.
+            "relation": {"type": "string"},
             # The S1 specification fixes the location class; declarations never infer it from names.
             "classification": {"enum": [None, "location"]},
             "properties": {"type": "object", "maxProperties": _MAX_SCHEMA_FIELDS,
@@ -225,7 +256,7 @@ def manifest_authoring_contract(*, store: bool = False) -> dict[str, Any]:
     manifest_schema: dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://exomem.dev/contracts/collection-manifest-v1.schema.json",
-        "title": "Exomem collection manifest frontmatter",
+        "title": "Evermatter collection manifest frontmatter",
         "type": "object",
         "required": [
             "type",
@@ -915,6 +946,9 @@ class FieldSpec:
     items: FieldSpec | None = None
     units: tuple[str, ...] = ()
     link_kind: str | None = None
+    #: A `link` field's declared relation: a registry key whose origins include `collection_link`.
+    #: Create and revise check it against the registry; parsing only fixes its shape.
+    relation: str | None = None
     #: A datetime field's per-record UTC offset field: the source-local day basis (§3).
     offset: str | None = None
     classification: str | None = None
@@ -954,6 +988,41 @@ class ReferenceDeclaration:
         else:
             found = head if isinstance(head, list) else [head]
         return tuple(dict.fromkeys(value for value in found if type(value) is str and value))
+
+
+#: What an ``item_references`` state row names as its target for a link field: a link names pages, not a collection.
+LINK_TARGET = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LinkDeclaration:
+    """One ``link`` field: where a row holds its page links and the relation the manifest declares for them.
+
+    It shares the surface of `ReferenceDeclaration` that the derived reference index reads
+    (``dotted``, ``collection``, ``values``), so one index code path serves both.
+    """
+
+    path: tuple[str, ...]
+    relation: str | None = None
+    collection: str = LINK_TARGET
+
+    @property
+    def dotted(self) -> str:
+        return ".".join(self.path)
+
+    def values(self, row: Mapping[str, Any]) -> tuple[str, ...]:
+        """The distinct, non-empty text values one row's values hold in this link field, in order of appearance."""
+        found: list[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, list | tuple):
+                for item in value:
+                    walk(item)
+            elif type(value) is str and value:
+                found.append(value)
+
+        walk(row.get(self.path[0]))
+        return tuple(dict.fromkeys(found))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1330,6 +1399,10 @@ def discover_collections(
     return manifests
 
 
+#: The code a sweep gives a collection that the collection store owns but this call cannot read.
+STORE_UNAVAILABLE = "COLLECTION_STORE_UNAVAILABLE"
+
+
 def discover_collections_with_errors(
     vault_root: Path,
     *,
@@ -1407,7 +1480,7 @@ def discover_collections_with_errors(
         if writer is not None and entry["collection_id"] in proof.admitted:
             continue  # The writer already assessed release; an omitted manifest is withheld, not unreadable.
         if notice(entry["manifest_path"]):
-            unreadable.append(UnreadableManifest(entry["manifest_path"], "COLLECTION_STORE_UNAVAILABLE",
+            unreadable.append(UnreadableManifest(entry["manifest_path"], STORE_UNAVAILABLE,
                                                  UNSERVED, entry["semantic_profile"]))
     if len(stored) + len(unreadable) > max_raw_candidates:
         raise CollectionError("COLLECTION_DISCOVERY_LIMIT", "too many collection manifests to inspect")
@@ -1647,7 +1720,7 @@ def plan_ref_spellings(collection_id: str, item_key: str) -> tuple[tuple[str | N
     that ``parse_plan_ref`` reads (another case, a leading space, another UUID form) differs from the
     canonical collection prefix before its end, so it sorts below or above that prefix's range.
     Not held: a spelling inside the canonical prefix that percent-encodes the key differently from
-    ``plan_ref``, which writes every reference that Exomem returns.
+    ``plan_ref``, which writes every reference that Evermatter returns.
     """
     canonical = plan_ref(collection_id, item_key)
     prefix = canonical.rpartition("/")[0] + "/"
@@ -2176,32 +2249,42 @@ def _parse_view_mode(value: object, storage: StorageSpec, links: CollectionLinks
     return value
 
 
-def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
-    """Resolve one manifest view into the exact definition used for query provenance."""
+def resolve_saved_view(
+    manifest: CollectionManifest, name: str, *, readable: CollectionManifest | None = None
+) -> SavedView:
+    """Resolve one manifest view into the exact definition used for query provenance.
+
+    A view's names are its author's, so it resolves against `manifest`. Pass `readable`, the
+    manifest after the caller's field plan, exactly when that plan withholds a field; leave it
+    None for a caller who reads every field whole. For a caller with `readable`, a view that names
+    a part `readable` lacks, or a view that is invalid for its author, refuses exactly as an
+    undeclared view does, so the reply never tells which withheld names exist.
+    """
     if type(name) is not str or not name or len(name.encode("utf-8")) > _MAX_SAVED_VIEW_NAME_BYTES:
         raise CollectionError("INVALID_SAVED_VIEW", "saved view name is invalid")
     for diagnostic in manifest.view_diagnostics:
         if diagnostic.location == f"views.{name}":
+            # A reason is free text that can name any field of the view, and the view never parsed,
+            # so its names cannot be checked against `readable`: only a caller who reads every field sees it.
+            if readable is not None:
+                raise _saved_view_not_found()
             raise CollectionError(diagnostic.code, diagnostic.reason)
     definition = manifest.normalized_views.get(name)
     if definition is None:
         definition = manifest.views.get(name)
     if definition is None:
-        raise CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
+        raise _saved_view_not_found()
     if not isinstance(definition, Mapping):  # Defensive: manifests normalize this on load.
         raise CollectionError("INVALID_SAVED_VIEW", "saved view definition is invalid")
     plain_definition = _plain_json_value(definition)
     assert isinstance(plain_definition, dict)
-    normalized_definition = _normalize_saved_view(
-        plain_definition,
-        _saved_view_fields(
-            manifest.schema,
-            manifest.storage,
-            manifest.semantic_profile,
-        ),
-        _saved_view_child_shapes(manifest.storage, manifest.child_tables),
-        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
-    )
+    normalized_definition = _normalize_saved_view_against(manifest, plain_definition)
+    if readable is not None:
+        try:
+            _normalize_saved_view_against(readable, plain_definition)
+        except CollectionError:
+            # The view resolved against the whole manifest, so only a withheld name can fail here.
+            raise _saved_view_not_found() from None
     canonical = json.dumps(
         {
             "collection_id": manifest.collection_id,
@@ -2218,6 +2301,26 @@ def resolve_saved_view(manifest: CollectionManifest, name: str) -> SavedView:
         name=name,
         definition=normalized_definition,
         identity=hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _saved_view_not_found() -> CollectionError:
+    return CollectionError("SAVED_VIEW_NOT_FOUND", "saved view was not found")
+
+
+def _normalize_saved_view_against(
+    manifest: CollectionManifest, definition: dict[str, Any]
+) -> dict[str, Any]:
+    """`definition` normalized against the fields, child tables and references `manifest` declares."""
+    return _normalize_saved_view(
+        definition,
+        _saved_view_fields(
+            manifest.schema,
+            manifest.storage,
+            manifest.semantic_profile,
+        ),
+        _saved_view_child_shapes(manifest.storage, manifest.child_tables),
+        frozenset(declaration.dotted for declaration in declared_references(manifest.schema)),
     )
 
 
@@ -2289,14 +2392,16 @@ def _validate_saved_view_literals(
         candidates = raw if operator in {"in", "nin"} and isinstance(raw, list | tuple) else (raw,)
         if semantic_profile == "planning" and field_name == "horizon":
             valid = all(_registered_horizon(planning_values, item) for item in candidates)
+            allowed = ""
         elif field is not None and field.enum:
             valid = all(item in field.enum for item in candidates)
+            allowed = f"; allowed: {enum_listing(field.enum)}"
         else:
             continue
         if not valid:
             raise CollectionError(
                 "INVALID_SAVED_VIEW",
-                f"saved view {field_name} literal is outside the profile vocabulary",
+                f"saved view {field_name} literal is outside the profile vocabulary{allowed}",
             )
 
 
@@ -3256,6 +3361,20 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     link_kind = raw.get("link_kind")
     if link_kind is not None and type(link_kind) is not str:
         raise CollectionError("INVALID_ITEM_SCHEMA", "link_kind must be a string")
+    relation = raw.get("relation")
+    if relation is not None and (kind != "link" or type(relation) is not str or not relation.strip()):
+        from . import relation_registry
+        from .collection_store import link_declarations
+
+        # The parser has no vault, so its example names a shipped relation; create and revise check the overlay.
+        admissible = link_declarations.admissible_relations(relation_registry.core_registry())
+        raise CollectionError(
+            "INVALID_ITEM_SCHEMA",
+            "relation is a non-empty registry relation key, and only a link field declares it",
+            {"field": f"{at}.relation", "received": relation if kind == "link" else f"a {kind} field",
+             "expected": "a link field with relation: <registry relation key>",
+             "example": link_declarations.example(at.rsplit(".", 1)[-1], admissible)},
+        )
     offset = raw.get("offset")
     if offset is not None and (kind != "datetime" or depth or type(offset) is not str):
         raise CollectionError("INVALID_ITEM_SCHEMA", "offset names a top-level datetime field's offset field")
@@ -3271,7 +3390,7 @@ def _parse_field_spec(value: object, depth: int = 0, at: str = "item_schema.fiel
     dependencies = raw.get("depends_on", [])
     if not isinstance(dependencies, list) or len(dependencies) > _MAX_SCHEMA_FIELDS or any(not isinstance(name, str) or not name for name in dependencies):
         raise CollectionError("INVALID_ITEM_SCHEMA", "depends_on must name declared fields")
-    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, offset, classification,
+    return FieldSpec(kind, required, enum, items, tuple(units_raw), link_kind, relation, offset, classification,
                      MappingProxyType({name: _parse_field_spec(spec, depth + 1, f"{at}.properties.{name}")
                                        for name, spec in properties.items()}),
                      tuple(dependencies), references=_parse_field_reference(raw.get("references"), at))
@@ -3328,6 +3447,35 @@ def declared_references(schema: ItemSchema) -> tuple[ReferenceDeclaration, ...]:
         for path, carrier, many in _reference_slots(name, spec)
         if carrier.references is not None
     )
+
+
+def _link_spec(spec: FieldSpec) -> FieldSpec | None:
+    """The spec that makes this field a link: itself, or the items of an array of links, however nested."""
+    if spec.type == "link":
+        return spec
+    if spec.type == "array" and spec.items is not None:
+        return _link_spec(spec.items)
+    return None
+
+
+def declared_links(schema: ItemSchema) -> tuple[LinkDeclaration, ...]:
+    """Every top-level link field a schema declares (a link or an array of links), in field order."""
+    return tuple(
+        LinkDeclaration((name,), carrier.relation)
+        for name, spec in schema.fields.items()
+        if (carrier := _link_spec(spec)) is not None
+    )
+
+
+def indexed_fields(
+    schema: ItemSchema, *, derived: bool = False
+) -> tuple[ReferenceDeclaration | LinkDeclaration, ...]:
+    """The fields whose values the derived ``item_references`` index holds: references, then links.
+
+    A derived collection keeps its rows outside the store's maintained write path, so its links
+    are not indexed and its inspection says so.
+    """
+    return (*declared_references(schema), *(() if derived else declared_links(schema)))
 
 
 def _require_reference_positions(name: str, spec: FieldSpec) -> None:
@@ -3575,7 +3723,7 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}; allowed: {enum_listing(spec.enum)}")
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:

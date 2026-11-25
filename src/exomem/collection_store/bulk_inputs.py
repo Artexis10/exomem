@@ -7,11 +7,11 @@ import uuid
 from collections import ChainMap
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .. import origin_bindings, provenance, records
 from .. import structured_collections as collections
-from . import summary, tokens, typed_storage, version_sources, views
+from . import link_values, summary, tokens, typed_storage, version_sources, views
 
 
 @dataclass
@@ -29,6 +29,7 @@ class PreparedBulk:
     source_inputs: list | None = None
     origins: list | None = None
     source_guards: dict | None = None
+    link_notes: dict = field(default_factory=dict)
 
 
 def validate(rows, why, source, on_reject):
@@ -64,10 +65,11 @@ def detach(writer, collection, arguments):
         occupied = (dict(writer.handle.release_cache.state(manifest.collection_id).occupied_path_keys)
                     if manifest.item_filename and manifest.storage.strategy != "markdown-log"
                     and manifest.view_mode != summary.SUMMARY else {})
-        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"])
+        links = link_values.for_write(writer, manifest)
+        candidates = prepare(writer, manifest, arguments["rows"], arguments["source"], arguments["_import"], links)
         identity = views.store_identity(writer.connection)
     return PreparedBulk(manifest, before, uuid.uuid4().hex[:12], candidates, occupied, identity,
-                        _digest, arguments), None
+                        _digest, arguments, link_notes=links.notes() if links is not None else {}), None
 
 
 def acquire(root, prepared, *, why, on_reject, lifetime):
@@ -131,10 +133,12 @@ def acquire(root, prepared, *, why, on_reject, lifetime):
         if path is not None:
             occupied[collections._portable_path_key(path)] = 1
         source_guards[resolved.path] = resolved.guard
-        plans.append((key, values, effective, path, before, resolved.path))
+        # A retracted row is the predecessor of its revival: the write names its version, never its content.
+        predecessor = before or candidate.retracted
+        plans.append((key, values, effective, path, predecessor, resolved.path))
         source_inputs.append(version_sources.effect_input(key,
             tokens.payload_hash(manifest.schema.version, key, values, effective), effective,
-            before, explicit=[resolved], prepared=origin))
+            predecessor, explicit=[resolved], prepared=origin))
         if origin is not None:
             origins.append(origin)
         outcomes.append({"index": index, **base, "outcome": "updated" if before else "inserted"})
@@ -160,6 +164,7 @@ class Candidate:
     natural_key: str | None = None
     derived: bool = False
     before: dict | None = None
+    retracted: dict | None = None
     conflict: list[str] | None = None
 
     @property
@@ -168,7 +173,7 @@ class Candidate:
                 "source": self.source.path}
 
 
-def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
+def prepare(writer, manifest, rows, source, settlement=None, links=None) -> list[Candidate]:
     """Resolve row values once, then fetch touched identities together under the caller's snapshot."""
     from .writer import _natural_key, _refuse_view_stamp
 
@@ -180,7 +185,7 @@ def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
         if (not isinstance(raw, Mapping) or set(raw) - records._BULK_ROW_KEYS
                 or not isinstance(raw.get("item"), Mapping)):
             candidate.error = records._bulk_reject(index, "INVALID_BULK_ROW",
-                "a row is an object of item, optional body and optional source")
+                "a row is an object of item, optional body and source; a source is required on the row or once for the batch")
             continue
         body = raw.get("body")
         reference = raw["source"] if raw.get("source") is not None else source
@@ -212,7 +217,8 @@ def prepare(writer, manifest, rows, source, settlement=None) -> list[Candidate]:
         derived = collections.derived_item_key(manifest, values)
         candidate.key = records._validate_item_key(derived or str(uuid.uuid4()))
         candidate.natural_key = _natural_key(manifest, values)
-        candidate.values, candidate.body, candidate.source = values, body, resolved
+        candidate.values, candidate.body, candidate.source = (
+            values if links is None else links.apply(values)), body, resolved
         candidate.derived = derived is not None
     _current(writer, manifest.collection_id, candidates)
     return candidates
@@ -223,19 +229,23 @@ def _current(writer, cid, candidates):
     if not requested:
         return
     # Keep bounded request rows outside indexed lookups; SQLite can otherwise choose a whole-collection scan.
+    # The rows come from item_rows so a retracted row under a requested key is found; it holds no natural key,
+    # so the natural-key branch can only meet current rows.
     cursor = writer.connection.execute(
         "WITH requested AS (SELECT json_extract(value,'$[0]') AS item_key,"
         "json_extract(value,'$[1]') AS natural_key FROM json_each(?)), touched AS ("
-        "SELECT i.row_id FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.item_key=r.item_key UNION "
-        "SELECT i.row_id FROM requested r CROSS JOIN items i ON i.collection_id=? AND i.natural_key=r.natural_key "
+        "SELECT i.row_id FROM requested r CROSS JOIN item_rows i ON i.collection_id=? AND i.item_key=r.item_key UNION "
+        "SELECT i.row_id FROM requested r CROSS JOIN item_rows i ON i.collection_id=? AND i.natural_key=r.natural_key "
         "WHERE r.natural_key IS NOT NULL) "
-        "SELECT i.* FROM touched t JOIN items i ON i.row_id=t.row_id", (json.dumps(requested), cid, cid))
+        "SELECT i.* FROM touched t JOIN item_rows i ON i.row_id=t.row_id", (json.dumps(requested), cid, cid))
     try:
         columns = [column[0] for column in cursor.description]
         rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
     finally:
         cursor.close()
-    current = typed_storage.hydrate(writer.connection, rows)
+    # A retracted row has no current payload to hydrate, and its content never carries into a revival.
+    gone = {row["item_key"]: row for row in rows if row["retracted_txn"] is not None}
+    current = typed_storage.hydrate(writer.connection, [row for row in rows if row["retracted_txn"] is None])
     by_key = {row["item_key"]: row for row in current}
     holders = {}
     for row in current:
@@ -245,4 +255,5 @@ def _current(writer, cid, candidates):
         if candidate.error is not None:
             continue
         candidate.before = by_key.get(candidate.key)
+        candidate.retracted = gone.get(candidate.key)
         candidate.conflict = sorted(holder for holder in holders.get(candidate.natural_key, ()) if holder != candidate.key)

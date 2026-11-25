@@ -234,8 +234,8 @@ runs the four commands against two in-process servers over invented queries.
 
 ## Degradation modes (recorded, never silent)
 
-PDF artifacts require pymupdf (else emitted as `pdf_unavailable` markdown and
-listed in the manifest); binary artifacts are never faked as text (title-only
+PDF artifacts are written by `membench.artifacts.pdf` (a text that does not fit one page is emitted as `pdf_unavailable` markdown and
+listed in the manifest); a PNG needs Pillow (else `png_unavailable`); binary artifacts are never faked as text (title-only
 capture, parity `degraded`); embeddings profiles are opt-in and may fail on
 this machine (recorded env failure); model-backed answer/judge backends are
 default-off and emit verbatim user-run commands when unavailable. An

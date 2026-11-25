@@ -50,6 +50,34 @@ A source release does not activate a cell, change a deployment or authorize a pr
 To undo activation, remove `frames` from the cell or fleet selection and let the existing controller reconcile the cell.
 Media status and stored originals remain available.
 
+## Stored media previews
+
+Add `previews` to the cell's media engine selection to generate previews for new image and video filings.
+On personal installs, include `previews` in `EXOMEM_MEDIA_ENGINES` with the other engines you use.
+Preview generation is off by default. The existing worker claims due preview jobs after ordinary media work.
+Previews can run with the text and CLIP engines off. `EXOMEM_DISABLE_MEDIA_EXTRACTION` disables the whole worker, including preview generation.
+Enabling previews adds no backfill for existing companions. Source and Evidence capture record preview demand for the exact original digest.
+Startup and periodic discovery record demand when they first bind an original or change its binding. A first binding can use an existing prose companion.
+If queue admission fails, media reconciliation can recover that demand while retaining the filing.
+After a restore omits preview records, reconciliation can rebuild previously successful previews for current marked versions.
+The codec child needs POSIX resource limits. Its wall time is at most 15 seconds within the remaining job budget.
+Preview generation is unavailable in the inline debug worker. Stored previews remain readable through the same proof.
+The preview engine uses the existing memory brakes. The video decoder caps input frames at 16 million pixels.
+The worker yields to foreground writers before publishing. It retries a busy publication at most twice after the first attempt.
+A temporary hydration refusal delays the job without spending an attempt.
+If the worker stops at the attempt limit, it queues a check of the installed record. Ordinary media jobs run first.
+A read or flush refusal delays the check. The check opens only the private record.
+An unavailable record delays generation and preserves a successful receipt during reconciliation.
+The worker retains the outcome for that digest so reconciliation does not replay an exhausted preview.
+A retry leaves extraction results intact.
+The worker keeps one private record of at most 64 KiB per filing, including one JPEG with a long edge of at most 512 pixels.
+
+Use `inspect_memory` with operation `media.preview` and the canonical original path.
+On Cloud, select `frames` to offer this operation.
+Each read adds one keyed record lookup and reads at most 64 KiB of preview state, with a 25 ms p95 lookup budget at 500,000 records.
+Before hydration, the recovery slot checks access-tier, cold-blocked, RAW derived-pixel and path-only disclosure and connector denials.
+The held proof checks current lifecycle state and byte-bound grants. It can hydrate an original to prove custody before release.
+
 ## Speech and image query artifacts
 
 With `speech` enabled, ingestion queues transcription through the existing serialized media worker.
@@ -236,9 +264,12 @@ The smallest VmData limit under which one small sample still extracts:
 |---|---|
 | OCR (English, Estonian) | 266-267 MiB |
 | OCR (Japanese, horizontal and vertical) | 204 MiB |
-| PDF text layer (PyMuPDF) | 236 MiB |
+| PDF text layer (PyMuPDF, before the move to PDFium) | 236 MiB |
 | Word, Excel, PowerPoint, HTML, EPUB (MarkItDown) | 327-329 MiB |
 | OpenDocument, RTF | 111-112 MiB |
+
+The PDF row predates the move to PDFium and has not been re-measured in the Cloud image.
+On 2026-11-23, on a developer host and without the media worker's own imports, the same sample extracted under 50 MiB with PyMuPDF and under 16 MiB with PDFium.
 
 A local cell container with 2 CPUs and 3 GiB ran with the default budgets in this table:
 
@@ -325,12 +356,38 @@ That measurement excludes the speech runtime and the speech and image query arti
 Record their image growth during qualification instead of reusing the earlier total.
 `scripts/make-media-samples.py` regenerates the document and OCR samples; preserve the attributed speech fixtures separately.
 
+## Audio and video decoder
+
+The Cloud image decodes audio and video through PyAV, built in the `av-lgpl` stage of the `Dockerfile` against an FFmpeg that carries no GPL code.
+The PyPI `av` wheel bundles an FFmpeg linked with libx264 and libx265, which are GPL, so the Cloud image does not install it.
+No Evermatter module encodes or muxes, so the stage builds FFmpeg from its release tarball without `--enable-gpl` or `--enable-nonfree`, and without encoders, muxers, devices or network protocols.
+AV1 decoding uses libdav1d from the Debian package `libdav1d7`.
+The PyAV release is the one `uv.lock` pins, built from its hash-checked source distribution with pinned build tools.
+The build gate decodes only PCM audio and MPEG-4 Part 2 video.
+Parity with the wheel for H.264, HEVC, VP9 and AV1 was shown once on a local amd64 build on 2026-11-23, by comparing the two decoders.
+No build step checks it again.
+The image keeps the FFmpeg libraries as separate files in `/opt/ffmpeg-lgpl/lib`.
+Their licence, source address, checksum and configure line are in `/usr/share/doc/ffmpeg-lgpl/`.
+Pip installs keep the PyPI wheel.
+
+To move to a new FFmpeg release:
+
+1. Download the `.tar.xz` and its `.asc` from `https://ffmpeg.org/releases/`.
+2. Verify the signature against the FFmpeg release signing key, fingerprint `FCF986EA15E6E293A5644F10B4322F04D67658D8`.
+3. Set `FFMPEG_VERSION` and `FFMPEG_SHA256` together in the `av-lgpl` stage.
+4. Build `--target cloud`; the build gate decodes its PCM audio and MPEG-4 Part 2 video samples.
+5. Compare the new build's H.264, HEVC, VP9 and AV1 decoders against the old wheel; the gate does not.
+
+The build fails if the tarball differs from `FFMPEG_SHA256`.
+A PyAV release that needs a newer FFmpeg major version moves both pins in one change.
+
 ## HEIC photos
 
-The `media-cpu` and `embeddings` extras share the pinned `pillow-heif` decoder through `image-codecs`.
+The `media-cpu` and `embeddings` extras share the pinned `pi-heif` decoder through `image-codecs`.
+Its wheels bundle only the LGPL libheif and libde265 libraries and carry no encoder.
 The decoder registers only when a HEIC image opens, with one decoding thread.
 OCR still requires the selected OCR engine; image embeddings keep their existing switch.
-Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pillow-heif-1.8.1/`.
+Distributed packages retain upstream notices and corresponding-source links under `exomem/_licenses/pi-heif-1.4.0/`.
 Those software licence terms do not establish patent clearance.
 
 
@@ -351,5 +408,6 @@ The capture time comes from LibRaw's reading of the raw file's EXIF.
 - A pressure or watchdog stop kills the media child's whole session and then reaps the tools that were reparented to the server. In a Cloud cell the server is PID 1, so a killed tool would otherwise stay a zombie.
 - An engine that fails an allocation must raise a Python `MemoryError` at its boundary, or the child records an artifact failure. The existing engines show the ways to recognise one without reading a file name:
   - MarkItDown wraps every converter's exception; the extractor reads the wrapped exception types.
-  - PyMuPDF raises `FzErrorSystem` with MuPDF's own allocator message, such as `malloc (N bytes) failed`.
+  - PDFium aborts the process when its own allocator fails, and the exit shows only the signal. The supervisor reads the abort of a child that ran a PDF job under the brakes as a hard-limit memory stop, so the job ends over budget after the stop limit. An abort from another cause reads the same. The bounded identity read treats an abort the same way and reports `too_large`.
+  - A page raster too large for the child's limit fails in Python's buffer allocation and raises `MemoryError`.
   - Tesseract reports a failed allocation only on standard error, and can still exit 0 with partial text. OCR checks standard error for the allocator names. Tesseract echoes only its own temporary file names there.

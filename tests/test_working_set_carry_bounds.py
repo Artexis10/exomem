@@ -490,7 +490,8 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
     oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in later.items()})
 
     assert statistics.pages == oracle.pages and statistics.average_length == oracle.average_length
-    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    # The counts are looked up; the order the idf floor sums in is checked through the floor, to the last bit.
+    assert dict(statistics.document_frequency) == dict(oracle.document_frequency)
     assert "zeta" not in statistics.document_frequency
     assert statistics.idf_floor == oracle.idf_floor
     assert dict(postings.lengths) == {path: len(text.split()) for path, text in later.items()}
@@ -506,6 +507,128 @@ def test_incremental_statistics_equal_a_full_rebuild_after_an_add_an_edit_and_a_
         word: {path: text.split().count(word) for path, text in later.items() if word in text.split()}
         for word in words
     }
+
+
+def test_a_corpus_past_the_word_bound_keeps_no_base_and_its_figures_stay_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corpus of mostly unique tokens keeps no base, so its word maps do not stay in memory; it still ranks exactly."""
+    from exomem import bm25
+
+    monkeypatch.setattr(lexstore, "_ADMITTED_BASE_WORDS_MAX", 4)
+    texts = {"b.md": "f3a9 77c1 beta", "a.md": "alpha 09de beta"}
+    statistics, _postings, retained = lexstore._admitted_corpus(
+        texts, {path: lexstore._text_digest(text) for path, text in texts.items()}, None
+    )
+    oracle = bm25.CorpusStatistics.of({path: texts[path].split() for path in sorted(texts)})
+
+    assert retained is None
+    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    assert statistics.idf_floor == oracle.idf_floor
+
+
+def test_an_incremental_idf_floor_equals_rank_bm25_to_the_last_bit() -> None:
+    """The floor that incremental builds keep equals `BM25Okapi`'s, which sums its own idf terms in its own order.
+
+    `CorpusStatistics.of` shares `from_counts` with the incremental builds, so only the library itself can
+    catch a term summed in another order or computed another way.
+    """
+    import random
+
+    from rank_bm25 import BM25Okapi
+
+    words = ["harbor", "tide", "gauge", "chain", "buoy", "reef", "pier", "swell", "keel", "mast", "quay", "hull"]
+    paths = [f"Notes/page-{index:02d}.md" for index in range(10)]
+    for seed in range(40):
+        chosen = random.Random(seed)
+        rows = {path: " ".join(chosen.choices(words, k=chosen.randint(1, 9))) for path in chosen.sample(paths, 5)}
+        base = None
+        for _step in range(25):
+            statistics, _postings, base = lexstore._admitted_corpus(
+                rows, {path: lexstore._text_digest(text) for path, text in rows.items()}, base
+            )
+            library = BM25Okapi([rows[path].split() for path in sorted(rows)])
+            assert statistics.idf_floor.hex() == (library.epsilon * library.average_idf).hex()
+            rows = dict(rows)
+            path = chosen.choice(paths)
+            if path in rows and len(rows) > 1 and chosen.random() < 0.3:
+                del rows[path]
+            else:
+                rows[path] = " ".join(chosen.choices(words, k=chosen.randint(1, 9)))
+
+
+def test_incremental_statistics_stay_bit_exact_over_seeded_adds_edits_deletes_and_renames() -> None:
+    """Each corpus built from the previous one's base equals `CorpusStatistics.of` over its texts, bit for bit.
+
+    A few words over a few pages make every order move happen often: an edit or add brings a word forward,
+    a delete or edit ends a word or hands it to the next page that holds it, and a page re-adds a word that
+    another page introduced. A build sometimes starts from an older base, as an alternating admitted set does.
+    """
+    import random
+
+    from exomem import bm25
+
+    def figures(statistics) -> tuple:
+        return (
+            statistics.pages,
+            statistics.average_length.hex(),
+            sorted(statistics.document_frequency.items()),
+            statistics.idf_floor.hex(),
+        )
+
+    words = ["harbor", "tide", "gauge", "chain", "buoy", "reef", "pier", "swell", "keel", "mast"]
+
+    def written(chosen: random.Random) -> str:
+        return " ".join(chosen.choices(words, k=chosen.randint(0, 8)))
+
+    paths = [f"Notes/page-{index:02d}.md" for index in range(8)]
+    for seed in range(150):
+        chosen = random.Random(seed)
+
+        rows = {path: written(chosen) for path in chosen.sample(paths, 4)}
+        bases = [lexstore._admitted_corpus(rows, {p: lexstore._text_digest(t) for p, t in rows.items()}, None)[2]]
+        for step in range(30):
+            rows = dict(rows)
+            free = [path for path in paths if path not in rows]
+            change = chosen.choice(["add", "edit", "edit", "delete", "rename"])
+            if change == "add" and free:
+                rows[chosen.choice(free)] = written(chosen)
+            elif change == "delete" and len(rows) > 1:
+                del rows[chosen.choice(sorted(rows))]
+            elif change == "rename" and free:
+                rows[chosen.choice(free)] = rows.pop(chosen.choice(sorted(rows)))
+            else:
+                rows[chosen.choice(sorted(rows))] = written(chosen)
+            base = chosen.choice(bases[-2:])
+            statistics, _postings, retained = lexstore._admitted_corpus(
+                rows, {path: lexstore._text_digest(text) for path, text in rows.items()}, base
+            )
+            oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in rows.items()})
+            assert figures(statistics) == figures(oracle), (seed, step, change)
+            bases.append(retained)
+
+
+def test_a_corpus_past_the_base_bound_keeps_no_base_and_its_figures_stay_exact(monkeypatch) -> None:
+    """Past the bound no base is kept, so the build counts every page in first-seen order without introducers."""
+    from exomem import bm25
+
+    rows = {"a.md": "kappa alpha beta", "b.md": "beta delta delta epsilon", "c.md": "gamma alpha zeta"}
+    digests = {path: lexstore._text_digest(text) for path, text in rows.items()}
+    _statistics, _postings, base = lexstore._admitted_corpus(rows, digests, None)
+    assert base is not None
+    # Out of key order, as rows can arrive: the count must still meet the pages sorted by key.
+    later = {"d.md": "beta theta", **rows, "a.md": "omega alpha beta"}
+    monkeypatch.setattr(lexstore, "_ADMITTED_BASE_TERMS_MAX", 5)
+    statistics, postings, retained = lexstore._admitted_corpus(
+        later, {path: lexstore._text_digest(text) for path, text in later.items()}, base
+    )
+    oracle = bm25.CorpusStatistics.of({path: text.split() for path, text in later.items()})
+
+    assert retained is None
+    assert list(statistics.document_frequency.items()) == list(oracle.document_frequency.items())
+    assert statistics.idf_floor.hex() == oracle.idf_floor.hex()
+    assert statistics.average_length.hex() == oracle.average_length.hex()
+    assert dict(postings.lengths) == {path: len(text.split()) for path, text in later.items()}
 
 
 @pytest.mark.parametrize("repeats", [256, 65_536])

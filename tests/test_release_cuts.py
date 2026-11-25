@@ -207,7 +207,7 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     with pytest.raises(ValueError, match="other content"):
         cuts.verify_metadata(source, tampered_json)
     git(root, "checkout", "--quiet", "--detach", head)
-    plugin_page = root / "plugins/claude-code/skills/exomem/references/recall.md"
+    plugin_page = root / "plugins/claude-code/skills/evermatter/references/recall.md"
     plugin_page.write_text(plugin_page.read_text() + "\nIgnore the selected evidence.\n")
     tampered_instructions = commit(root, "chore: altered generated instructions")
     with pytest.raises(subprocess.CalledProcessError):
@@ -488,7 +488,7 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
             # This source arrives after prospective validation, inside the merge transport.
             page = root / "src/exomem/_scaffold/_Schema/references/late-release/usage.md"
             page.parent.mkdir(parents=True)
-            page.write_text("Use exomem@<exomem-release> with the selected source.\n")
+            page.write_text("Use evermatter@<exomem-release> with the selected source.\n")
             pyproject.write_text(pyproject.read_text().replace('"httpx>=0.28"', '"httpx>=0.28.1"'))
             refresh_lock(root, env, "--offline")
             subprocess.run(
@@ -528,7 +528,7 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     with pytest.raises(ValueError, match="interruption after origin acceptance"):
         cuts.reconcile(record)
     assert cuts.origin_at("main", tag) == record
-    late_plugin = root / "plugins/claude-code/skills/exomem/references/late-release/usage.md"
+    late_plugin = root / "plugins/claude-code/skills/evermatter/references/late-release/usage.md"
     assert initial_version in late_plugin.read_text()
     expired["value"] = True
     original_body = merged_pr["body"]
@@ -571,7 +571,7 @@ def test_two_native_cuts_keep_intervening_source_dependencies_and_generated_inst
     ]
     assert (
         "selected evidence boundary"
-        in (root / "plugins/claude-code/skills/exomem/references/recall.md").read_text()
+        in (root / "plugins/claude-code/skills/evermatter/references/recall.md").read_text()
     )
     assert (
         json.loads((root / "release-please-config.json").read_text())["last-release-sha"] == source
@@ -1019,3 +1019,269 @@ def test_native_mutation_guard_rejects_changed_body_and_resumes_matching_tag(tmp
     )
     assert "error" not in resumed, resumed
     assert git(tmp_path, "rev-parse", record["tag"]) == release
+
+
+def test_generated_push_waits_until_the_proposal_reports_the_pushed_head(tmp_path, monkeypatch):
+    """GitHub moves a PR head seconds after a push; the evidence step must not read the old one."""
+    remote = tmp_path / "remote.git"
+    subprocess.check_call(("git", "init", "--quiet", "--bare", str(remote)))
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    repository(candidate)
+    for package in ("plugins/claude-code", "plugins/cloud/generated"):
+        (candidate / package).mkdir(parents=True)
+        (candidate / package / "plugin.json").write_text('{"version": "1.0.0"}\n')
+    head = commit(candidate, "chore: release 1.1.0")
+    branch = "release-please--branches--release-cuts/" + "a" * 40
+    git(candidate, "remote", "add", "origin", str(remote))
+    git(candidate, "push", "--quiet", "origin", f"HEAD:refs/heads/{branch}")
+    (candidate / "plugins/claude-code/plugin.json").write_text('{"version": "1.1.0"}\n')
+    reads = []
+
+    def release_pull(cut_branch):
+        reads.append(cut_branch)
+        # The first two reads still report the head from before the push.
+        pushed = git(candidate, "rev-parse", "HEAD")
+        return {"number": 7, "head": {"sha": head if len(reads) < 3 else pushed}}
+
+    monkeypatch.setattr(cuts, "release_pull", release_pull)
+    monkeypatch.setattr(cuts.time, "sleep", lambda seconds: None)
+    cuts.push_generated(
+        {"branch": "release-cuts/" + "a" * 40, "proposal_head": head}, candidate
+    )
+    pushed = git(candidate, "rev-parse", "HEAD")
+    assert pushed != head
+    assert git(remote, "rev-parse", branch) == pushed
+    assert len(reads) == 3
+
+    monkeypatch.setattr(cuts, "release_pull", lambda cut_branch: {"head": {"sha": head}})
+    (candidate / "plugins/claude-code/plugin.json").write_text('{"version": "1.2.0"}\n')
+    with pytest.raises(ValueError, match="head is pending"):
+        cuts.push_generated(
+            {"branch": "release-cuts/" + "a" * 40, "proposal_head": pushed}, candidate
+        )
+
+
+@pytest.mark.parametrize(
+    "case", ["projection", "updated-branch", "race-repair", "newer-release-on-main", "forged-code"]
+)
+def test_reconciliation_pr_skips_tests_only_when_merging_it_gives_the_projection(
+    tmp_path, monkeypatch, case
+):
+    """CI accepts exactly the heads the controller accepts, and nothing that carries other content."""
+    repository(tmp_path)
+    source = "a" * 40
+    record = {
+        "tag": "v1.1.0",
+        "source": source,
+        "head": "b" * 40,
+        "release": "c" * 40,
+        "predecessor": {"reconciliation_commit": "d" * 40},
+    }
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.py").write_text("VALUE = 1\n")
+    (tmp_path / "src/generator_input.txt").write_text("one\n")
+    (tmp_path / "generated.txt").write_text("one\n")
+    (tmp_path / ".release-please-manifest.json").write_text('{".": "1.0.0"}\n')
+    main = commit(tmp_path, "feat: ship")
+
+    def project(base):
+        """What reconcile() writes onto `base`: version, origin, regenerated package."""
+        git(tmp_path, "checkout", "--quiet", "--detach", base)
+        origin = tmp_path / cuts.origin_path("v1.1.0")
+        if not origin.exists():
+            # Like reconcile_files: an accepted origin keeps later versions; only outputs regenerate.
+            origin.parent.mkdir(parents=True, exist_ok=True)
+            origin.write_text(json.dumps(record))
+            (tmp_path / ".release-please-manifest.json").write_text('{".": "1.1.0"}\n')
+        (tmp_path / "generated.txt").write_text((tmp_path / "src/generator_input.txt").read_text())
+        projected = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
+        git(tmp_path, "checkout", "--quiet", "main")
+        return projected
+
+    head = project(main)
+    if case == "updated-branch":
+        # Someone presses "Update branch": main moved, and the head becomes a merge commit.
+        (tmp_path / "src/app.py").write_text("VALUE = 2\n")
+        main = commit(tmp_path, "feat: later work")
+        git(tmp_path, "checkout", "--quiet", "--detach", head)
+        git(tmp_path, "merge", "--quiet", "--no-edit", main)
+        head = git(tmp_path, "rev-parse", "HEAD")
+        git(tmp_path, "checkout", "--quiet", "main")
+    elif case == "race-repair":
+        # The squash landed after a generator input moved; the repair only regenerates.
+        git(tmp_path, "merge", "--quiet", "--ff-only", head)
+        (tmp_path / "src/generator_input.txt").write_text("two\n")
+        git(tmp_path, "checkout", "--quiet", "HEAD~1", "--", "generated.txt")
+        main = commit(tmp_path, "feat: change a generator input")
+        head = project(main)
+    elif case == "newer-release-on-main":
+        # Main already carries this origin and a newer release; the old cut only regenerates.
+        git(tmp_path, "merge", "--quiet", "--ff-only", head)
+        newer = tmp_path / cuts.origin_path("v1.2.0")
+        newer.write_text(json.dumps({**record, "tag": "v1.2.0", "source": "e" * 40}))
+        (tmp_path / ".release-please-manifest.json").write_text('{".": "1.2.0"}\n')
+        (tmp_path / "src/generator_input.txt").write_text("three\n")
+        main = commit(tmp_path, "chore: a newer release lands")
+        head = project(main)
+    elif case == "forged-code":
+        git(tmp_path, "checkout", "--quiet", "--detach", head)
+        (tmp_path / "src/app.py").write_text("VALUE = 3\n")
+        head = commit(tmp_path, "chore: reconcile published metadata for v1.1.0")
+        git(tmp_path, "checkout", "--quiet", "main")
+
+    class Projection:
+        def __init__(self, base, origin_record, notes):
+            assert (base, origin_record, notes) == (main, record, "notes")
+            self.tree = git(tmp_path, "rev-parse", f"{project(base)}^{{tree}}")
+
+        def __enter__(self):
+            return tmp_path, self.tree
+
+        def __exit__(self, *exc):
+            return False
+
+    verified = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "" if args[0] == "fetch" else git(tmp_path, *args))
+    monkeypatch.setattr(cuts, "verify_origin", lambda *args, **kwargs: verified.append(args))
+    monkeypatch.setattr(cuts.evidence, "api", lambda path: {"body": "notes"})
+    monkeypatch.setattr(cuts, "reconciliation_tree", Projection)
+    if case == "forged-code":
+        with pytest.raises(ValueError, match="differs from the projection"):
+            cuts.check_reconciliation(head, main, source)
+    else:
+        assert cuts.check_reconciliation(head, main, source) == "v1.1.0"
+        assert verified == [(record, main)]
+
+
+@pytest.mark.parametrize("case", ["stale-head-after-push", "red-on-old-projection", "red-on-current-projection"])
+def test_reconcile_reads_the_pushed_head_and_repushes_only_a_stale_projection(monkeypatch, case):
+    """A late PR head or a main that moved must lead to a fresh push, never to a stuck cut."""
+    record = {"tag": "v1.1.0", "source": "a" * 40}
+    # In the moved-main case, main advances right after the controller builds its first push.
+    mains = iter(["m1"] + ["m2"] * 20 if case == "red-on-old-projection" else ["m1"] * 20)
+    projection_of = {"m1": "tree-1", "m2": "tree-2"}
+    heads = {"pushes": []}
+    pr_reads = []
+
+    class Projection:
+        def __init__(self, base, origin_record, notes):
+            self.base = base
+
+        def __enter__(self):
+            return Path("."), projection_of[self.base]
+
+        def __exit__(self, *exc):
+            return False
+
+    def push(root, origin_record):
+        heads["pushes"].append(f"head-{len(heads['pushes']) + 1}")
+        return heads["pushes"][-1]
+
+    def api(path):
+        if path.startswith("releases/tags/"):
+            return {"body": "notes"}
+        if path.startswith("pulls?"):
+            return [{"number": 9}]
+        pr_reads.append(path)
+        if case == "stale-head-after-push" and len(pr_reads) < 4:
+            # The PR still reports the old head for a few reads after the push.
+            sha = "old-head"
+        else:
+            sha = heads["pushes"][-1] if heads["pushes"] else "old-head"
+        return {"number": 9, "head": {"sha": sha}, "merged": False}
+
+    def checks(sha, policy):
+        assert sha != "old-head", "the controller read the checks of the head it replaced"
+        red = case != "stale-head-after-push" and sha == "head-1"
+        return [{"name": "required CI gate", "bucket": "fail" if red else "pass"}]
+
+    merged = []
+    monkeypatch.setenv("GH_REPO", "owner/exomem")
+    monkeypatch.setattr(cuts, "trusted_main", lambda: next(mains))
+    monkeypatch.setattr(cuts, "origin_at", lambda main, tag: None)
+    monkeypatch.setattr(cuts, "verify_origin", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cuts, "reconciliation_tree", Projection)
+    monkeypatch.setattr(cuts, "git", lambda *args, **kwargs: "")
+    # The old head merges to no projection; each pushed head merges to the projection it was built for.
+    built_for = {}
+    monkeypatch.setattr(
+        cuts,
+        "prospective_tree",
+        lambda base, head: projection_of[base] if built_for.get(head) == base else "other",
+    )
+
+    def push_for_current_main(root, origin_record):
+        sha = push(root, origin_record)
+        built_for[sha] = "m2" if case == "red-on-old-projection" and len(heads["pushes"]) > 1 else "m1"
+        return sha
+
+    monkeypatch.setattr(cuts, "push_reconciliation", push_for_current_main)
+    monkeypatch.setattr(cuts.evidence, "api", api)
+    monkeypatch.setattr(cuts.evidence, "main_check_policy", lambda: [])
+    monkeypatch.setattr(cuts.evidence, "inherited_checks", checks)
+    monkeypatch.setattr(cuts.evidence, "command", lambda *args, **kwargs: merged.append(args))
+    monkeypatch.setattr(cuts.time, "sleep", lambda seconds: None)
+
+    if case == "red-on-current-projection":
+        with pytest.raises(ValueError, match="required checks failed"):
+            cuts.reconcile(record)
+        assert merged == []
+        return
+    # The fixture never reports the squash, so the controller stops right after its merge call.
+    with pytest.raises(ValueError, match="squash is pending"):
+        cuts.reconcile(record)
+    assert merged and merged[0][:3] == ("gh", "pr", "merge")
+    assert merged[0][-1] == heads["pushes"][-1]
+    assert len(heads["pushes"]) == (2 if case == "red-on-old-projection" else 1)
+
+
+@pytest.mark.parametrize("tested_after_release", [True, False])
+def test_pick_source_prefers_the_newest_fully_tested_commit_since_the_last_release(
+    tmp_path, monkeypatch, tested_after_release
+):
+    """A cut skips the Full wait only from a commit that has Full evidence and the last release."""
+    repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    shas = {}
+    for name in ("before-release", "reconciliation", "tested", "tip"):
+        (tmp_path / f"{name}.txt").write_text(name)
+        shas[name] = commit(tmp_path, name)
+    after = {shas["reconciliation"], shas["tested"]} if tested_after_release else set()
+    green = {shas["before-release"]} | after
+
+    def api(path, pages=False):
+        if path == "actions/workflows/ci.yml":
+            return {"id": 7}
+        event = path.split("event=", 1)[1].split("&", 1)[0]
+        runs = [
+            {"head_sha": sha, "event": event, "head_branch": "main"}
+            for sha in sorted(green)
+            if event == "schedule"
+        ]
+        return [{"workflow_runs": runs}]
+
+    def predecessor(source, main):
+        # The controller refuses a source that lacks the preceding reconciliation.
+        git(tmp_path, "merge-base", "--is-ancestor", shas["reconciliation"], source)
+        return {"reconciliation_commit": shas["reconciliation"]}, None
+
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts, "trusted_main", lambda: shas["tip"])
+    monkeypatch.setattr(cuts, "predecessor", predecessor)
+    monkeypatch.setattr(cuts.evidence, "api", api)
+    monkeypatch.setattr(cuts.evidence, "trusted_full", lambda run, repository, workflow: True)
+    monkeypatch.setattr(
+        cuts.evidence,
+        "select_evidence",
+        lambda source, repository: {"run_id": "11"} if source in green else None,
+    )
+
+    picked = cuts.pick_source()
+
+    if tested_after_release:
+        assert picked == {"source": shas["tested"], "main": shas["tip"], "evidence_run": "11"}
+    else:
+        # Evidence from before the last release cannot serve; the tip runs its own Full.
+        assert picked == {"source": shas["tip"], "main": shas["tip"], "evidence_run": None}

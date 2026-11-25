@@ -35,6 +35,8 @@ HELM = shutil.which("helm")
 # live here, away from every namespace that holds a durable key.
 EDGE_NAMESPACE = "exomem-edge"
 TRAEFIK = "platform-header-test-traefik"
+# A route's service entry for the Cloud gateway: it names the ServersTransport that closes idle connections.
+CLOUD_GATEWAY_SERVICE = {"name": "exomem-cloud-gateway", "port": 8080, "serversTransport": "exomem-cloud-gateway"}
 
 
 def _helm_render(*extra_args: str, chart: Path = PLATFORM_CHART) -> subprocess.CompletedProcess[str]:
@@ -92,6 +94,37 @@ def test_cloud_gateway_route_does_not_strip_x_real_ip() -> None:
                 f"Middleware {doc['metadata']['name']!r}, used by the Cloud gateway's route, "
                 "blanks X-Real-Ip"
             )
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_every_route_to_the_cloud_gateway_closes_idle_connections_before_the_gateway_does() -> None:
+    """The gateway closes an idle connection after 6 s, and Traefik does not retry a POST that meets the closed
+    socket: the client gets a plain-text 502. A route that reaches the gateway without the ServersTransport
+    brings that race back, so each service entry must name a transport that sets an idle timeout."""
+    documents = _helm_template(*UPLOAD_ARGS, "--set", "cloudIngress.functionalHealthEnabled=true")
+    gateway = next(doc for doc in documents if doc.get("kind") == "Service"
+                   and doc["spec"].get("type") == "ExternalName"
+                   and doc["metadata"].get("namespace") == EDGE_NAMESPACE)
+    route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
+    matches = [rule["match"] for rule in route["spec"]["routes"]]
+    assert any("/upload" in match for match in matches) and any("/healthz" in match for match in matches), (
+        "the render must include the optional routes, or this test would not see them")
+    services = [service for rule in route["spec"]["routes"] for service in rule["services"]
+                if service["name"] == gateway["metadata"]["name"]]
+    assert len(services) == len(matches)
+    for service in services:
+        transport = _find(documents, "ServersTransport", service.get("serversTransport", "(none)"))
+        assert transport["metadata"]["namespace"] == route["metadata"]["namespace"]
+        assert transport["spec"]["forwardingTimeouts"]["idleConnTimeout"], service
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+@pytest.mark.parametrize("value", ["0s", "6s", "1m"])
+def test_the_edge_idle_timeout_refuses_a_value_that_brings_the_race_back(value: str) -> None:
+    # 0s keeps idle connections forever; 6 s and more outlive the gateway's own idle close.
+    result = _helm_template_result("--set-string", f"cloudIngress.gatewayIdleConnTimeout={value}")
+    assert result.returncode != 0, value
+    assert "/cloudIngress/gatewayIdleConnTimeout" in result.stderr, result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -158,7 +191,7 @@ def _helm_template_result(*extra: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_both_database_clients_are_pinned_to_the_k3s_server_node() -> None:
-    # Decision 10: the shared database admits the Exomem roles only from the
+    # Decision 10: the shared database admits the Evermatter roles only from the
     # K3s server's public /32, so a client scheduled on an agent is refused.
     documents = _helm_template()
     for name in ("cellctl", "exomem-cloud-gateway"):
@@ -518,7 +551,8 @@ def test_cloud_workload_images_and_cell_admission_are_digest_pinned() -> None:
 
     policy = _find(documents, "ValidatingAdmissionPolicy", "exomem-cellctl-scope")
     (image_rule,) = [v for v in policy["spec"]["validations"] if "digest-pinned" in v["message"]]
-    repository = values["cellctl"]["cellImageRepository"]
+    repositories = [source["repository"] for source in values["cellctl"]["cellImageRepositories"]]
+    assert len(repositories) == 2
     expression = image_rule["expression"]
     assert "containers.all(c, c.image.matches(" in expression
     assert "initContainers.all(c, c.image.matches(" in expression
@@ -526,10 +560,42 @@ def test_cloud_workload_images_and_cell_admission_are_digest_pinned() -> None:
     assert len(image_patterns) == 2
     assert image_patterns[0] == image_patterns[1]
     pinned_cell_image = re.compile(json.loads(image_patterns[0]))
-    assert pinned_cell_image.search(f"{repository}@sha256:{'a' * 64}")
-    assert not pinned_cell_image.search(f"{repository}:latest")
-    assert not pinned_cell_image.search(f"{repository}@sha256:{'a' * 63}")
-    assert not pinned_cell_image.search(f"other/{repository}@sha256:{'a' * 64}")
+    # A cell still on a release built before the repository moved stays writable, and
+    # neither repository admits a name that merely starts or ends with it.
+    for repository in repositories:
+        assert pinned_cell_image.search(f"{repository}@sha256:{'a' * 64}")
+        assert not pinned_cell_image.search(f"{repository}:latest")
+        assert not pinned_cell_image.search(f"{repository}@sha256:{'a' * 63}")
+        assert not pinned_cell_image.search(f"other/{repository}@sha256:{'a' * 64}")
+        assert not pinned_cell_image.search(f"{repository}-other@sha256:{'a' * 64}")
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_cell_image_admission_pairs_each_repository_with_the_repository_that_built_it() -> None:
+    # Catches an image from one repository admitted on a signature from the other
+    # builder's release workflow, or a rollback image refused after the move.
+    import re
+
+    values = yaml.safe_load((PLATFORM_CHART / "values.validation.yaml").read_text(encoding="utf-8"))
+    sources = values["cellctl"]["cellImageRepositories"]
+    documents = _helm_template(
+        "--set", "operatorDeploy.enabled=true",
+        "--set-string", "operatorDeploy.sourceRepository=substrate-systems/evermatter",
+        "--set-string", "operatorDeploy.registryReadSecretName=registry-read",
+    )
+    spec = _find(documents, "ImageValidatingPolicy", "exomem-release-image-cloud-cell")["spec"]
+    attestors = {attestor["name"]: attestor for attestor in spec["attestors"]}
+    assert len(attestors) == len(sources) == 2
+    signed = next(v["expression"] for v in spec["validations"] if "verifyAttestationSignatures" in v["expression"])
+    built = next(v["expression"] for v in spec["validations"] if "predicate.source.repository" in v["expression"])
+    for source in sources:
+        prefix = f'image.startsWith("{source["repository"]}@sha256:")'
+        (name,) = re.findall(re.escape(prefix) + r" && verifyAttestationSignatures\(image, attestations\.family, \[attestors\.(\w+)\]\)", signed)
+        (identity,) = attestors[name]["cosign"]["keyless"]["identities"]
+        for other in sources:
+            subject = f"https://github.com/{other['builder']}/.github/workflows/release-please.yml@refs/tags/v1.2.3"
+            assert bool(re.search(identity["subjectRegExp"], subject)) == (other is source), (name, other)
+        assert f'{prefix} && extractPayload(image,attestations.family).predicate.source.repository == "{source["builder"]}"' in built
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -877,9 +943,13 @@ def test_the_cloud_route_objects_render_in_the_edge_namespace() -> None:
     assert external["spec"]["externalName"] == "exomem-cloud-gateway.exomem-cloud.svc.cluster.local"
     route = _find(documents, "IngressRoute", "exomem-cloud-gateway")
     for rule in route["spec"]["routes"]:
-        assert rule["services"] == [{"name": external["metadata"]["name"], "port": 8080}], rule["match"]
+        assert rule["services"] == [CLOUD_GATEWAY_SERVICE], rule["match"]
     # Without this route, clients that show the server's site icon fall back to the parent domain's.
     assert any("Path(`/favicon.ico`)" in rule["match"] and "Method(`HEAD`)" in rule["match"]
+               for rule in route["spec"]["routes"])
+    # Without this route a product's identity read never reaches the gateway, so no service
+    # credential holder can verify its cell.
+    assert any(rule["match"] == "Host(`mcp.example.test`) && Path(`/.well-known/exomem-cell`) && Method(`GET`)"
                for rule in route["spec"]["routes"])
 
     # The edge namespace holds no Secret but the certificate cert-manager
@@ -1092,7 +1162,7 @@ def test_the_edge_api_server_address_is_required_and_a_single_host() -> None:
 
 ARTIFACT_BROKER_ARGS = (
     "--set", "artifactBroker.enabled=true",
-    "--set-string", "artifactBroker.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "artifactBroker.image=ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
     "--set-string", "artifactBroker.endpoint=http://10.43.0.25:8767",
     "--set-json", 'artifactBroker.cellIds=["aaaaaaaaaaaaaaaa"]',
 )
@@ -1325,7 +1395,7 @@ def test_the_upload_route_posts_to_the_gateway_without_buffering_and_traefik_wai
     # The trusted-ingress header only: a buffering middleware would take the whole body
     # onto the edge pod before the gateway checks the handoff.
     assert upload["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
-    assert upload["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert upload["services"] == [CLOUD_GATEWAY_SERVICE]
     assert not [doc for doc in documents if doc.get("kind") == "Middleware" and "buffering" in doc["spec"]]
     traefik_args = _find(documents, "Deployment", TRAEFIK)["spec"]["template"]["spec"]["containers"][0]["args"]
     assert "--entryPoints.websecure.transport.respondingTimeouts.readTimeout=900s" in traefik_args
@@ -1337,7 +1407,52 @@ def test_the_download_route_reaches_the_gateway_for_selected_cells() -> None:
     (download,) = [route for route in routes if "/download" in route["match"]]
     assert download["match"] == "Host(`mcp.example.test`) && Path(`/download`) && Method(`GET`)"
     assert download["middlewares"] == [{"name": "exomem-cloud-trusted-ingress"}]
-    assert download["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert download["services"] == [CLOUD_GATEWAY_SERVICE]
+
+
+# --- Additional hostnames: the gateway serves and accepts a second host while the first keeps working ---
+
+OLD_HOST, NEW_HOST = "mcp.example.test", "mcp.new.example.test"
+# Uploads and the functional health route are optional routes; turn both on so every route renders.
+EVERY_ROUTE_ARGS = (*UPLOAD_ARGS, "--set", "cloudIngress.functionalHealthEnabled=true")
+
+
+def _cloud_route_matches(documents: list[dict[str, Any]]) -> list[str]:
+    routes = _find(documents, "IngressRoute", "exomem-cloud-gateway")["spec"]["routes"]
+    assert len(routes) == 6, "the test must cover every route the chart can render"
+    return [route["match"] for route in routes]
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_without_additional_hostnames_every_route_matches_the_one_hostname_and_no_url_list_is_set() -> None:
+    documents = _helm_template(*EVERY_ROUTE_ARGS)
+    assert all(match.startswith(f"Host(`{OLD_HOST}`) && ") for match in _cloud_route_matches(documents))
+    assert "EXOMEM_CLOUD_MCP_URLS" not in _container_env(documents, "exomem-cloud-gateway")
+    assert _helm_template(*EVERY_ROUTE_ARGS, "--set-json", "cloudGateway.additionalHostnames=[]") == documents
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_an_additional_hostname_is_routed_certified_solved_and_accepted_after_the_primary() -> None:
+    documents = _helm_template(*EVERY_ROUTE_ARGS, "--set-json", f'cloudGateway.additionalHostnames=["{NEW_HOST}"]')
+    # Every route admits both hosts; the path and method conditions that follow are untouched.
+    for match in _cloud_route_matches(documents):
+        assert match.startswith(f"(Host(`{OLD_HOST}`) || Host(`{NEW_HOST}`)) && "), match
+    # The certificate and the DNS-01 solver cover both names, so the new host gets a valid certificate.
+    certificate = _find(documents, "Certificate", "exomem-cloud-gateway")
+    assert certificate["spec"]["dnsNames"] == [OLD_HOST, NEW_HOST]
+    solver = _find(documents, "ClusterIssuer", "exomem-cloud-dns01")["spec"]["acme"]["solvers"][0]
+    assert solver["selector"]["dnsNames"] == [OLD_HOST, NEW_HOST]
+    # The primary stays the one discovery offers; the list accepts both, primary first.
+    env = _container_env(documents, "exomem-cloud-gateway")
+    assert env["EXOMEM_CLOUD_MCP_URL"]["value"] == f"https://{OLD_HOST}/mcp"
+    assert env["EXOMEM_CLOUD_MCP_URLS"]["value"] == f"https://{OLD_HOST}/mcp,https://{NEW_HOST}/mcp"
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_additional_hostnames_refuse_the_primary_hostname() -> None:
+    result = _helm_template_result("--set-json", f'cloudGateway.additionalHostnames=["{OLD_HOST}"]')
+    assert result.returncode != 0
+    assert "cloudGateway.additionalHostnames must not contain cloudGateway.hostname" in result.stderr, result.stderr
 
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
@@ -1597,7 +1712,19 @@ def test_cellctl_reads_the_export_settings_the_chart_sets(monkeypatch: pytest.Mo
 
 @pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
 def test_the_platform_jobs_image_is_required_and_digest_pinned() -> None:
-    result = _helm_render("--set-string", "platformJobs.image=ghcr.io/artexis10/exomem:latest")
+    result = _helm_render("--set-string", "platformJobs.image=ghcr.io/substrate-systems/evermatter:latest")
+    assert result.returncode != 0
+    assert "/platformJobs/image" in result.stderr
+
+
+@pytest.mark.skipif(HELM is None, reason="helm binary not on PATH")
+def test_the_platform_jobs_image_accepts_the_digest_of_either_builder_and_no_other_repository() -> None:
+    # Catches a schema that strands a rollback to a release cut before the repository
+    # moved, or that admits an image from outside the two repositories that built it.
+    digest = "@sha256:" + "a" * 64
+    for repository in ("ghcr.io/substrate-systems/evermatter", "ghcr.io/artexis10/exomem"):
+        assert _helm_render("--set-string", f"platformJobs.image={repository}{digest}").returncode == 0, repository
+    result = _helm_render("--set-string", f"platformJobs.image=ghcr.io/example-owner/evermatter{digest}")
     assert result.returncode != 0
     assert "/platformJobs/image" in result.stderr
 
@@ -1618,7 +1745,7 @@ def test_functional_health_ingress_rewrites_get_only_without_changing_pod_probes
         {"name": "exomem-cloud-functional-health"},
         {"name": "exomem-cloud-trusted-ingress"},
     ]
-    assert health["services"] == [{"name": "exomem-cloud-gateway", "port": 8080}]
+    assert health["services"] == [CLOUD_GATEWAY_SERVICE]
     middleware = _find(documents, "Middleware", "exomem-cloud-functional-health")
     assert middleware["spec"] == {"replacePath": {"path": "/healthz/canary"}}
     assert route["spec"]["tls"]["secretName"] == "exomem-cloud-gateway-tls"
@@ -1835,7 +1962,7 @@ def test_attachable_only_fleet_receives_the_shared_cap(monkeypatch: pytest.Monke
 
 MEDIA_SLOT_ARGS = (
     "--set", "mediaSlotLease.enabled=true",
-    "--set-string", "mediaSlotLease.image=ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+    "--set-string", "mediaSlotLease.image=ghcr.io/substrate-systems/evermatter@sha256:" + "a" * 64,
     "--set-string", "mediaSlotLease.endpoint=http://10.43.0.26:8768",
     "--set-json", 'mediaSlotLease.cellIds=["aaaaaaaaaaaaaaaa"]',
 )

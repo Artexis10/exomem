@@ -54,6 +54,7 @@ from .activation_result import DISABLED, UNAVAILABLE
 from .activation_result import INDEX_WARMING as WARMING
 from .kbdir import managed_split
 from .state_paths import vault_state_dir
+from .vocabulary import registry as vocabulary_registry
 from .working_set_runtime import READY
 
 log = logging.getLogger(__name__)
@@ -82,9 +83,6 @@ ORIGIN_NONE = "none"
 # inline update left it for the background pass.
 PENDING_CHANGED = "changed_during_fold"
 PENDING_DEFERRED = "deferred"
-
-# `Basis.dependency` leads with this word when the status registry could not be read.
-STATUS_UNAVAILABLE = "unavailable"
 
 # `RelationEdgeResult.status` when the graph answered with its authoritative edge set,
 # and when its sidecar is missing or still being built.
@@ -988,7 +986,7 @@ class _Fold:
             return "moved"
         if self.basis.matches(stored):  # type: ignore[arg-type]  # a two-string dependency
             return "holds"
-        return "unclassified" if stored[0] == STATUS_UNAVAILABLE else "moved"
+        return "unclassified" if vocabulary_registry.dependency_unavailable(stored) else "moved"
 
     def _relative(self, path: str | Path) -> str:
         candidate = Path(path)

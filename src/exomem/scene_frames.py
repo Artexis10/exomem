@@ -23,6 +23,7 @@ import math
 import os
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -31,6 +32,7 @@ from .governance import projected_retrieval
 from .preserve import _render_sidecar
 from .vault import (
     MISSING_CONTENT_HASH,
+    DeferredGraphCompletion,
     PathGuard,
     PlannedWrite,
     PreparedBinaryContent,
@@ -367,40 +369,66 @@ def _has_owned_scene_frames(video_path: Path) -> bool:
         return True
 
 
-def write_scene_frames(
+@dataclass
+class PreparedSceneFrames:
+    """Scene frames encoded and rendered with no vault boundary held, waiting for their commit.
+
+    Encoding a frame and rendering its sidecar need no vault state, so they run before any
+    boundary is taken; `commit_scene_frames` then holds the boundary only to publish them. A
+    caller that does not commit must `close()` it to release the spooled JPEG bytes.
+    """
+
+    root: Path
+    video: Path
+    video_rel: str
+    parent_identity_guard: PathGuard
+    parent_content_guard: PathGuard
+    parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None
+    writes: list[PlannedWrite]
+    written: list[tuple[Path, Path]]
+    streams: list[tempfile.SpooledTemporaryFile[bytes]]
+
+    def close(self) -> None:
+        for stream in self.streams:
+            stream.close()
+
+    def drop_reserved(self) -> None:
+        """Drop each frame pair whose sidecar path a moved page still claims; the boundary is held.
+
+        A frame pair that moved away still claims these names, so its old links never reach a
+        re-extracted frame; that one frame is skipped. A move can land after preparation and no
+        commit guard rechecks a reservation, so this reads the newest claims inside the hold.
+        """
+        kept: list[tuple[Path, Path]] = []
+        for jpg, sidecar in self.written:
+            try:
+                prior_claims.require_unreserved(self.root, sidecar.relative_to(self.root).as_posix())
+            except Exception as error:  # noqa: BLE001 - keep per-frame isolation
+                log.warning("scene frame companion failed for %s: %s", jpg.name, error)
+                continue
+            kept.append((jpg, sidecar))
+        if len(kept) == len(self.written):
+            return
+        paths = {path for pair in kept for path in pair}
+        self.writes = [write for write in self.writes if write.path in paths]
+        self.written = kept
+
+
+def prepare_scene_frames(
     vault_root: Path,
     video_path: Path,
     scenes_with_images: list[tuple[embeddings.Scene, object]],
     *,
     parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None,
     today: dt.date | None = None,
-) -> list[tuple[Path, Path]]:
-    """Persist one JPEG + pending sidecar per scene → `[(jpg_path, sidecar_path)]`.
+) -> PreparedSceneFrames | None:
+    """Encode one JPEG and render one pending sidecar per scene, holding no vault boundary.
 
-    Fresh JPEG bytes and their classified sidecars share one held rollback set.
-    When the caller supplies the scene sampler's canonical parent CLIP samples,
-    exact-v4 binds them to the unchanged parent sidecar in that same successor.
-    Open/schema-v3 vaults retain legacy delete-then-insert reprocessing. Exact-v4
-    refuses an existing frame set before deletion until removal publication has
-    its own atomic successor protocol. Encoding failures remain per-frame soft
-    failures; exact-v4 catalog refusal/uncertainty is surfaced to its caller.
+    Returns None when the video cannot be hashed or no frame could be prepared. Encoding failures
+    are per-frame soft failures. The parent video's content hash is taken here; the commit's
+    guards prove the video unchanged when the frames publish, and the commit drops the frames
+    whose names a moved page still claims (`PreparedSceneFrames.drop_reserved`).
     """
-    from .vault_store import media as store_media
-
-    if store_media.off_store_thread(vault_root):
-        # A store-mode vault commits the frames and their sidecars on the store thread, as the
-        # media sidecar commit does, inside the vault boundary that the store thread takes.
-        return store_media.on_store_thread(
-            vault_root,
-            lambda: write_scene_frames(
-                vault_root,
-                video_path,
-                scenes_with_images,
-                parent_clip_samples=parent_clip_samples,
-                today=today,
-            ),
-            operation="background_media_scene_frame_commit",
-        )
     root = Path(os.path.abspath(vault_root))
     try:
         canonical_video = Path(os.path.abspath(video_path))
@@ -410,14 +438,8 @@ def write_scene_frames(
         )
     except (ValueError, OSError) as e:
         log.warning("scene frames skipped for %s: %s", video_path.name, e)
-        return []
-    parent_sidecar_guard: PathGuard | None = None
-    clip_replacements: tuple[catalog_publication.ClipMeasurementReplacement, ...]
-    if parent_clip_samples is None:
-        clip_replacements = ()
-    else:
-        from .governance import catalog_publication
-
+        return None
+    if parent_clip_samples is not None:
         if type(parent_clip_samples) is not tuple or any(
             not isinstance(sample, projected_retrieval.ProjectionClipSample)
             for sample in parent_clip_samples
@@ -431,18 +453,6 @@ def write_scene_frames(
             != expected_timestamps
         ):
             raise ValueError("parent CLIP samples do not match the scene frame set")
-        parent_sidecar_rel = f"{video_rel}.md"
-        parent_source, parent_sidecar_guard = read_guarded_text(
-            root,
-            root / parent_sidecar_rel,
-        )
-        clip_replacements = (
-            catalog_publication.ClipMeasurementReplacement(
-                item_identity=parent_sidecar_rel,
-                content_hash=content_hash(parent_source),
-                samples=parent_clip_samples,
-            ),
-        )
     d = frames_dir_for(canonical_video)
     # Tag context from Knowledge Base/Evidence/<scope>/<category>/… (same derivation
     # as preserve.ensure_media_sidecar).
@@ -465,9 +475,6 @@ def write_scene_frames(
         sidecar = jpg.with_name(name + ".md")
         artifact_rel = jpg.relative_to(root).as_posix()
         try:
-            # A frame pair that moved away still claims these names, so its old links never
-            # reach a re-extracted frame; that one frame is skipped.
-            prior_claims.require_unreserved(root, sidecar.relative_to(root).as_posix())
             md = _render_sidecar(
                 artifact_name=name,
                 scope=scope,
@@ -515,8 +522,55 @@ def write_scene_frames(
         )
         out.append((jpg, sidecar))
     if not writes:
-        return []
+        return None
+    return PreparedSceneFrames(
+        root, canonical_video, video_rel, parent_identity_guard, parent_content_guard,
+        parent_clip_samples, writes, out, streams,
+    )
+
+
+def commit_scene_frames(
+    prepared: PreparedSceneFrames,
+    *,
+    deferred: bool = False,
+    publication_intents_out: list[object] | None = None,
+) -> tuple[list[tuple[Path, Path]], DeferredGraphCompletion | None]:
+    """Publish prepared frames; the caller holds the vault boundary and closes ``prepared``.
+
+    Returns the committed `[(jpg_path, sidecar_path)]` and, when ``deferred``, the handoff whose
+    fan-out the caller completes after releasing the boundary (the commit then fans nothing out
+    and registers its watcher self-writes in ``publication_intents_out``). Fresh JPEG bytes and
+    their sidecars share one held rollback set. When the caller supplied the scene sampler's
+    canonical parent CLIP samples, exact-v4 binds them to the unchanged parent sidecar in that
+    same successor. Open/schema-v3 vaults retain legacy delete-then-insert reprocessing, and the
+    removal of a previous frame set keeps its fan-out inside the hold so that it precedes the new
+    frames' fan-out. Exact-v4 refuses an existing frame set before deletion until removal
+    publication has its own atomic successor protocol. It first drops the frames whose names a
+    moved page claims (`PreparedSceneFrames.drop_reserved`), and commits nothing, clearing no
+    earlier frame set, when none remain. A batch failure soft-fails to `[]`; exact-v4 catalog
+    refusal/uncertainty is surfaced to the caller.
+    """
     from .governance import catalog_publication, graph_producer
+    from .vault_store import mode as store_mode
+
+    root = prepared.root
+    prepared.drop_reserved()
+    if not prepared.writes:
+        return [], None
+    writes = prepared.writes
+    clip_replacements: tuple[catalog_publication.ClipMeasurementReplacement, ...] = ()
+    parent_sidecar_guard: PathGuard | None = None
+    if prepared.parent_clip_samples is not None:
+        # Read with the boundary held, so the binding names the sidecar bytes that publish with it.
+        parent_sidecar_rel = f"{prepared.video_rel}.md"
+        parent_source, parent_sidecar_guard = read_guarded_text(root, root / parent_sidecar_rel)
+        clip_replacements = (
+            catalog_publication.ClipMeasurementReplacement(
+                item_identity=parent_sidecar_rel,
+                content_hash=content_hash(parent_source),
+                samples=prepared.parent_clip_samples,
+            ),
+        )
 
     def graph_replacement_provider():
         return graph_producer.replacements_for_planned_markdown(
@@ -525,6 +579,8 @@ def write_scene_frames(
             writes=tuple(writes),
         )
 
+    handoff: DeferredGraphCompletion | None = None
+    intent_count = len(publication_intents_out) if publication_intents_out is not None else 0
     try:
         try:
             prepared_catalog = catalog_publication.prepare_planned_markdown_batch(
@@ -538,28 +594,50 @@ def write_scene_frames(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 str(error),
             ) from error
-        if prepared_catalog is not None and _has_owned_scene_frames(canonical_video):
+        if prepared_catalog is not None and _has_owned_scene_frames(prepared.video):
             raise catalog_publication.CatalogCommitError(
                 "GOVERNANCE_CATALOG_PUBLICATION_BLOCKED",
                 "exact-v4 scene-frame replacement requires a removal successor",
             )
         if prepared_catalog is None:
-            clear_scene_frames(root, canonical_video)
-        batch_atomic_write(
+            clear_scene_frames(root, prepared.video)
+        batch_kwargs: dict[str, object] = {}
+        if deferred:
+            batch_kwargs["post_commit_fanout"] = False
+            # A store-mode batch commits its graph rows with its pages, so nothing is deferred.
+            if not store_mode.store_mode_active(root):
+                batch_kwargs["defer_graph_completion"] = True
+                batch_kwargs["publication_intents_out"] = publication_intents_out
+        written = batch_atomic_write(
             writes,
             vault_root=root,
             required_guards=(
-                parent_identity_guard,
+                prepared.parent_identity_guard,
                 *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
             ),
             completion_guards=(
-                parent_content_guard,
+                prepared.parent_content_guard,
                 *((parent_sidecar_guard,) if parent_sidecar_guard is not None else ()),
             ),
+            **batch_kwargs,
         )
+        if deferred:
+            handoff = (
+                written
+                if isinstance(written, DeferredGraphCompletion)
+                else DeferredGraphCompletion(tuple(written), None, None)
+            )
         try:
             catalog_publication.publish_markdown_batch(prepared_catalog)
         except catalog_publication.CatalogPublicationError as error:
+            if publication_intents_out is not None and len(publication_intents_out) > intent_count:
+                from . import file_watcher
+
+                # The caller never completes this batch's fan-out, so its self-write suppression ends here.
+                file_watcher.abort_publication_intents(
+                    publication_intents_out[intent_count:],
+                    force_paths=[write.path for write in writes],
+                )
             raise catalog_publication.CatalogCommitError(
                 "GOVERNANCE_CATALOG_PUBLICATION_UNCERTAIN",
                 str(error),
@@ -567,12 +645,55 @@ def write_scene_frames(
     except catalog_publication.CatalogCommitError:
         raise
     except Exception as e:  # noqa: BLE001 — sidecars are the findability layer, not the vectors
-        log.warning("scene frame batch write failed for %s: %s", canonical_video.name, e)
+        log.warning("scene frame batch write failed for %s: %s", prepared.video.name, e)
+        return [], None
+    return prepared.written, handoff
+
+
+def write_scene_frames(
+    vault_root: Path,
+    video_path: Path,
+    scenes_with_images: list[tuple[embeddings.Scene, object]],
+    *,
+    parent_clip_samples: tuple[projected_retrieval.ProjectionClipSample, ...] | None = None,
+    today: dt.date | None = None,
+) -> list[tuple[Path, Path]]:
+    """Persist one JPEG + pending sidecar per scene → `[(jpg_path, sidecar_path)]`.
+
+    The synchronous form: it prepares, commits and fans out in the caller's own boundary
+    context. The media worker prepares before it takes the boundary and completes the fan-out
+    after releasing it (`prepare_scene_frames`, `commit_scene_frames`).
+    """
+    from .vault_store import media as store_media
+
+    if store_media.off_store_thread(vault_root):
+        # A store-mode vault commits the frames and their sidecars on the store thread, as the
+        # media sidecar commit does, inside the vault boundary that the store thread takes.
+        return store_media.on_store_thread(
+            vault_root,
+            lambda: write_scene_frames(
+                vault_root,
+                video_path,
+                scenes_with_images,
+                parent_clip_samples=parent_clip_samples,
+                today=today,
+            ),
+            operation="background_media_scene_frame_commit",
+        )
+    prepared = prepare_scene_frames(
+        vault_root,
+        video_path,
+        scenes_with_images,
+        parent_clip_samples=parent_clip_samples,
+        today=today,
+    )
+    if prepared is None:
         return []
+    try:
+        written, _handoff = commit_scene_frames(prepared)
     finally:
-        for stream in streams:
-            stream.close()
-    return out
+        prepared.close()
+    return written
 
 
 def nearest_frame(vault_root: Path, video_rel: str, ts: float) -> tuple[str, float] | None:

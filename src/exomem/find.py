@@ -41,6 +41,7 @@ from . import (
     foreground_priority,
     freshness,
     lifecycle_statuses,
+    media_types,
     note_types,
     recall_policy,
     recall_space,
@@ -1640,6 +1641,7 @@ def find(
     updated_before: str | None = None,
     recency_days: int | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     widen_outside_kb: bool = False,
@@ -2375,8 +2377,7 @@ def find(
             # another sidecar serving by then refuses it (`require_same_space`).
             index = embeddings.get_embedding_index(vault_root)
             encoded_for = getattr(index, "identity", None)
-            with recall_space.encoding_for(index):
-                query_vector = (encoded_for, embeddings.embed_texts([query], is_query=True)[0])
+            query_vector = (encoded_for, embeddings.encode_query(index, query))
             query_vector_ready = True
         return query_vector
 
@@ -2426,6 +2427,7 @@ def find(
             filter_key,
             _relation_key(relations, relation_of, relation_direction),
             effective_result_level,
+            prefer_source_passages,
             prefer_compiled,
             prefer_active,
             widen_outside_kb,
@@ -2768,6 +2770,10 @@ def find(
     # Only the caller's own filters size the candidate pool. Admission narrows
     # what every lane ranks; it never deepens the pool (`collect_candidates`).
     filtered = eligible_paths is not None
+    # The caller asked for pictures only: its own filters require an image or video kind.
+    media_restricted = filtered and structured_filters.requires_one_of(
+        filter_plan, "page.file_type", media_types.VISUAL_KINDS
+    )
     if admitted_paths is not None:
         eligible_paths = admitted_paths if eligible_paths is None else eligible_paths & admitted_paths
 
@@ -2779,6 +2785,7 @@ def find(
             hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,
@@ -2821,6 +2828,7 @@ def find(
                 temporal=temporal,
                 intent=intent,
                 prefer_compiled=prefer_compiled,
+                prefer_source_passages=prefer_source_passages and mode == "hybrid" and not mixed,
                 prefer_active=prefer_active,
                 status_basis=status_basis,
                 type_basis=type_basis,
@@ -2833,6 +2841,7 @@ def find(
                 failed_out=failed,
                 eligible_paths=eligible_paths,
                 filtered=filtered,
+                media_restricted=media_restricted,
                 admitted_paths=admitted_paths,
                 recall_scope="kb" if scope == "kb-only" else "vault",
                 retrieval_trace=retrieval_trace,
@@ -3933,8 +3942,7 @@ def _vector_unit_candidates(
                     encoded_for, query_vector = query_vector_provider()
                 else:
                     encoded_for = getattr(index, "identity", None)
-                    with recall_space.encoding_for(index):
-                        query_vector = embeddings.embed_texts([query], is_query=True)[0]
+                    query_vector = embeddings.encode_query(index, query)
         recall_space.require_same_space(index, encoded_for, query_vector)
         incomplete: list[str] = []
         hits = index.search_semantic_units(
@@ -6674,6 +6682,7 @@ def _browse_hits(
             excerpt=_make_excerpt(candidate, "") or "",
             media_type=page.media_type,
             media_file=page.media_file,
+            capture_date_source=page.capture_date_source,
             status=page.status,
             superseded_by=page.superseded_by,
             snapshot_hash=page.snapshot_hash,
@@ -6696,6 +6705,33 @@ def _listed_part(vault_root: Path, page: ParsedPage) -> bool:
     from . import extraction_parts
 
     return extraction_parts.listed(vault_root / page.rel_path)
+
+
+def _transcript_match(
+    vault_root: Path, page: ParsedPage, query: str, chunk: str | None,
+    *, type_basis: note_types.Basis,
+):
+    from . import extraction_parts, transcript_passages
+    from .governance import egress
+
+    if not transcript_passages.is_source(page.rel_path) or extraction_parts.count_of(page.frontmatter) > 1:
+        return None
+    if not transcript_passages.allows_window(page.frontmatter.get("type"), type_basis):
+        return None
+    text = transcript_passages.source_text(page.body, media_sidecar=bool(page.frontmatter.get("media_type")))
+    return transcript_passages.match(
+        text, chunk=chunk, title=page.title, query=query,
+        withheld=egress.carrier_spans_for_caller(vault_root, text, owner_path=page.rel_path),
+    )
+
+
+def _cites_source(vault_root: Path, page: ParsedPage, source_path: str) -> bool:
+    from . import epistemic_graph, transcript_passages
+    from .vault import kb_root
+
+    targets = epistemic_graph._frontmatter_links(page.frontmatter.get("sources"))
+    targets.extend(find_results.wikilink_targets(page.search_body))
+    return transcript_passages.cites_path(targets, source_path, kb_name=kb_root(vault_root).name)
 
 
 def _part_match(
@@ -6731,18 +6767,24 @@ def _frame_image_page(frame_image: str) -> str:
 
 def _keyword_hit(
     vault_root: Path, page: ParsedPage, query_norm: str, excerpt: str,
-    *, scene_frame: str | None = None, scene_frame_ts: float | None = None,
+    *, type_basis: note_types.Basis, scene_frame: str | None = None, scene_frame_ts: float | None = None,
     part_match: dict[str, object] | None = None,
 ) -> Hit:
     """The keyword result projection, including its parent-first frame fallback."""
     hit = Hit(
         path=page.rel_path, type=page.page_type, scope=page.scope, title=page.title,
         updated=page.updated, excerpt=excerpt, media_type=page.media_type, media_file=page.media_file,
+        capture_date_source=page.capture_date_source,
         status=page.status, superseded_by=page.superseded_by,
         scene_frame=scene_frame, scene_frame_ts=scene_frame_ts if scene_frame else None,
         snapshot_hash=page.snapshot_hash, **(part_match or {}),
     )
-    hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
+    transcript = _transcript_match(vault_root, page, query_norm, None, type_basis=type_basis)
+    if transcript is not None:
+        hit.passage = transcript.passage()
+        hit.matched_part = 1
+        hit.excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
+    hit.transcript_ts = transcript.timestamp if transcript else _transcript_ts_for_hit(page, None, query_norm)
     # The persisted video handler defines this media family and its frame fallback.
     if (hit.scene_frame is None and page.media_type == "video"
             and page.media_file and hit.transcript_ts is not None):
@@ -6757,7 +6799,7 @@ def _keyword_hit(
 
 
 def _find_managed_keyword(
-    vault_root: Path, *, query_norm: str, scope: str, limit: int,
+    vault_root: Path, *, query_norm: str, scope: str, limit: int, type_basis: note_types.Basis,
     allowed_paths: set[str] | None, freshness_key: tuple | None, pending: Any | None,
     pending_paths: frozenset[str] | None, types: list[str] | None, projects: list[str] | None,
     tags: list[str] | None, speakers: list[str] | None, file_types: list[str] | None,
@@ -6837,6 +6879,7 @@ def _find_managed_keyword(
         child = source.rel_path != page.rel_path
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt,
+            type_basis=type_basis,
             scene_frame=source.media_file if child else None,
             scene_frame_ts=source.frame_ts if child else None,
             part_match=_part_match(vault_root, page, source, query_norm),
@@ -6858,6 +6901,7 @@ def _find_keyword(
     vault_root: Path,
     *,
     query_norm: str,
+    type_basis: note_types.Basis,
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
@@ -6897,6 +6941,7 @@ def _find_keyword(
             _mark_source(timings, "keyword", find_types.SOURCE_INDEX)
             return _find_managed_keyword(
                 vault_root, query_norm=query_norm, scope=scope, limit=limit,
+                type_basis=type_basis,
                 allowed_paths=eligible_paths if eligible_paths is not None else admitted_paths,
                 freshness_key=freshness_key, pending=pending, pending_paths=pending_paths,
                 types=types, projects=projects, tags=tags, speakers=speakers,
@@ -7035,6 +7080,7 @@ def _find_keyword(
             continue
         hit = _keyword_hit(
             vault_root, page, query_norm, excerpt or "",
+            type_basis=type_basis,
             scene_frame=scene_frame, scene_frame_ts=scene_frame_ts,
             part_match=part_match or _part_match(vault_root, page, page, query_norm),
         )
@@ -7068,6 +7114,7 @@ def _find_semantic(
     temporal: bool = True,
     intent: str | None = None,
     prefer_compiled: bool = True,
+    prefer_source_passages: bool = False,
     prefer_active: bool = True,
     prefer_used: bool = False,
     config: RankingConfig = DEFAULT_RANKING,
@@ -7078,6 +7125,7 @@ def _find_semantic(
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
     filtered: bool = False,
+    media_restricted: bool = False,
     admitted_paths: set[str] | None = None,
     recall_scope: str | None = None,
     retrieval_trace: Any | None = None,
@@ -7100,7 +7148,7 @@ def _find_semantic(
     """
     with _span(timings, "semantic.preflight"):
         # Lazy imports — keep keyword-mode users out of the torch import path.
-        from . import access, embeddings, lexstore, readiness, scene_frames
+        from . import access, embeddings, lexstore, readiness, scene_frames, transcript_passages
 
         status_basis = status_basis or lifecycle_statuses.Basis(vault_root)
         type_basis = type_basis or note_types.Basis(vault_root)
@@ -7183,6 +7231,7 @@ def _find_semantic(
             temporal=temporal,
             intent=intent,
             prefer_compiled=prefer_compiled,
+            prefer_source_passages=prefer_source_passages,
             prefer_active=prefer_active,
             status_basis=status_basis,
             type_basis=type_basis,
@@ -7212,6 +7261,7 @@ def _find_semantic(
             lexical_repair=lexical_repair,
             eligible_paths=eligible_paths,
             filtered=filtered,
+            media_restricted=media_restricted,
             admitted_paths=admitted_paths,
             capture_trace=retrieval_trace is not None,
             query_vector_provider=query_vector_provider,
@@ -7247,6 +7297,7 @@ def _find_semantic(
             fallback_hits = _find_keyword(
                 vault_root,
                 query_norm=query_norm,
+                type_basis=type_basis,
                 types=types,
                 projects=projects,
                 tags=tags,
@@ -7413,6 +7464,8 @@ def _find_semantic(
             yield path
 
     paths = ranked_paths()
+    extra_paths: set[str] = set()
+    verified_transcripts: set[str] = set()
     # Collect and rank with the original limit. Only an entirely proved page
     # prefix can join units before hydration; rerank passages retain their path.
     if (
@@ -7450,17 +7503,17 @@ def _find_semantic(
         # report a walk, so it contributes nothing to the walk sentinel, and
         # `WALKER_STAGES` in the gate now says so instead of counting it.
         _mark_source(timings, "filter_hits", find_types.SOURCE_INDEX)
-        for rel_path in paths:
+        def selected_page(rel_path: str) -> tuple[str, ParsedPage, str | None] | None:
             needs_corroboration = _needs_corroboration(rel_path)
             page = _page_of(rel_path)
             if page is None:
-                continue
+                return None
             attr = frame_attribution.get(rel_path)
             if attr is not None and rel_path in bundle.frame_sources:
                 if _page_of(bundle.frame_sources[rel_path]) is None:
-                    continue
+                    return None
             if eligible_paths is not None and rel_path not in eligible_paths:
-                continue
+                return None
             if not _passes_filters(
                 page,
                 vault_root=vault_root,
@@ -7471,7 +7524,7 @@ def _find_semantic(
                 file_types=file_types,
                 exclude_file_types=exclude_file_types,
             ):
-                continue
+                return None
             keyword_excerpt = _make_excerpt(page, query_norm)
             if needs_corroboration and keyword_excerpt is None:
                 # No literal match, not a graph hop, not vector-ranked, not in
@@ -7482,7 +7535,7 @@ def _find_semantic(
                 # BM25's own top-ranked evidence survives interrogative
                 # phrasing without function-word overlap alone retaining junk.
                 if not _supported_stems(page):
-                    continue
+                    return None
                 keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
             elif (
                 rel_path in graph_set or rel_path in clip_set or rel_path in frame_attribution
@@ -7500,9 +7553,23 @@ def _find_semantic(
                 if keyword_excerpt is None:
                     body = page.body_stripped
                     keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
-            selected.append((rel_path, page, keyword_excerpt))
-            if len(selected) >= target_n:
-                break
+            return rel_path, page, keyword_excerpt
+
+        for rel_path in paths:
+            if row := selected_page(rel_path):
+                selected.append(row)
+                if len(selected) >= target_n:
+                    break
+
+        selected_paths = {path for path, _page, _excerpt in selected}
+        for rel_path in bundle.neutral_prefix:
+            if (
+                rel_path not in selected_paths
+                and transcript_passages.is_source(rel_path)
+                and (row := selected_page(rel_path))
+            ):
+                selected.append(row)
+                extra_paths.add(rel_path)
 
         # Freeze the eligible prefix before proof checks. Missing selected text
         # reduces coverage; it must not pull lower fused rows into the answer.
@@ -7563,6 +7630,11 @@ def _find_semantic(
             # that collapsed into this Source, else the Source itself.
             matched_page = (chunk_page if ref is not None else frame_page) or page
             part_match = _part_match(vault_root, page, matched_page, query_norm, chunk=chunk)
+            transcript = _transcript_match(vault_root, page, query, chunk, type_basis=type_basis)
+            if transcript is not None:
+                verified_transcripts.add(page.rel_path)
+                part_match = {"matched_part": 1, "passage": transcript.passage()}
+                excerpt = _collapse(transcript.text)[:EXCERPT_MAX_LEN]
             hit = Hit(
                 path=page.rel_path,
                 type=page.page_type,
@@ -7572,6 +7644,7 @@ def _find_semantic(
                 excerpt=excerpt or "",
                 media_type=page.media_type,
                 media_file=page.media_file,
+                capture_date_source=page.capture_date_source,
                 status=page.status,
                 superseded_by=page.superseded_by,
                 bm25_rank=bm25_rank_by_path.get(rel_path),
@@ -7591,7 +7664,9 @@ def _find_semantic(
                 snapshot_hash=page.snapshot_hash,
                 **(part_match or {}),
             )
-            hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+            hit.transcript_ts = (
+                transcript.timestamp if transcript else _transcript_ts_for_hit(page, chunk, query_norm)
+            )
             if hit.scene_frame is None and page.media_type == "video" and page.media_file:
                 # A localized match on a video — CLIP keyframe first (existing), else a
                 # timed-transcript match — attaches the nearest PERSISTED frame so the
@@ -7820,6 +7895,31 @@ def _find_semantic(
             reason=rerank_outcome["reason"],
         )
 
+        passage_preference = None
+        if bundle.neutral_prefix:
+            passages = {
+                hit.path: hit for hit in hits
+                if hit.path in verified_transcripts and hit.passage is not None and hit.transcript_ts is not None
+            }
+            hits = [hit for hit in hits if hit.path not in extra_paths]
+            for path in bundle.neutral_prefix:
+                candidate = passages.get(path)
+                if candidate is None or not transcript_passages.is_source(path):
+                    continue
+                def cites(other: str, source_path: str = path) -> bool:
+                    summary = _page_of(other)
+                    return (
+                        summary is not None
+                        and type_basis.selects(summary.page_type, note_types.ranks_as_compiled)
+                        and _cites_source(vault_root, summary, source_path)
+                    )
+
+                position = transcript_passages.preferred_position([hit.path for hit in hits], path, cites)
+                if position >= len(hits) or hits[position].path != path:
+                    hits = [hit for hit in hits if hit.path != path]
+                    hits.insert(position, candidate)
+                    passage_preference = path
+                break
         final_hits = hits[:limit]
         if retrieval_trace is not None:
             retrieval_trace.record_page_candidates(
@@ -7831,6 +7931,10 @@ def _find_semantic(
                 scorer_input_count=scorer_input_count,
                 unscored_tail_count=unscored_tail_count,
             )
+            if passage_preference in retrieval_trace.evidence_by_id:
+                retrieval_trace.evidence_by_id[passage_preference]["ordering_path"].append(
+                    {"stage": "source_passage_preference"},
+                )
         return final_hits
 
     return _SelectedHits(hits, finish) if defer_finish else finish()
@@ -8199,6 +8303,7 @@ def _find_outside_kb(
                     excerpt=excerpt or "",
                     media_type=page.media_type,
                     media_file=page.media_file,
+                    capture_date_source=page.capture_date_source,
                     status=page.status,
                     superseded_by=page.superseded_by,
                     outside_kb=True,
@@ -8657,6 +8762,7 @@ _RECALL_RESOLVER_REBUILDS: set[Path] = set()
 _QUERY_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with an inbound-index background build running; same lock as above.
 _INBOUND_INDEX_REBUILDS: set[Path] = set()
+_TOMBSTONE_PROOF_REBUILDS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -8726,7 +8832,7 @@ def _schedule_recall_resolver_rebuild(root: Path) -> None:
     )
 
 
-def _schedule_query_resolver_rebuild(root: Path) -> None:
+def _schedule_query_resolver_rebuild(root: Path, *, require_checkpoint: bool = False) -> None:
     """Start at most one background broad-resolver build per vault.
 
     The owner that restores the resolver a server's context pack borrowed and
@@ -8736,26 +8842,38 @@ def _schedule_query_resolver_rebuild(root: Path) -> None:
     _schedule_resolver_warm(
         root,
         _QUERY_RESOLVER_REBUILDS,
-        _get_query_resolver,
+        lambda root: _get_query_resolver(root, require_checkpoint=require_checkpoint),
         "exomem-query-resolver-warm",
     )
 
 
-def schedule_inbound_rebuild(vault_root: Path) -> None:
-    """Start at most one background inbound-index build per vault.
-
-    The immediate owner for a server's context pack that borrowed the index and
-    found none: the pack must not build it, and the watcher's reconcile pass
-    (minutes away) stays the backstop. `prime_inbound_index` is single-flight per
-    vault, so this thread and that pass never build concurrently.
-    """
+def schedule_inbound_rebuild(vault_root: Path, *, stop: threading.Event | None = None) -> None:
+    """Schedule one background inbound build when the watcher cannot patch the miss."""
+    from . import readiness
     from . import vault as vault_module
 
+    if stop is not None:
+        observed = freshness.preview_reference_generation(vault_root)
+        if readiness.is_warming() or observed is None or observed[1] is None or observed[3] is not None:
+            return
+    # The worker checks patch history. Borrowing this proof in the request can
+    # wait behind a writer computing a new freshness digest.
     _schedule_resolver_warm(
         vault_root,
         _INBOUND_INDEX_REBUILDS,
-        vault_module.prime_inbound_index,
+        lambda root: vault_module.prime_inbound_index(root, defer_to_patch=stop is not None),
         "exomem-inbound-index-warm",
+        stop=stop,
+    )
+
+
+def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) -> None:
+    """Warm the shared exact proof after a managed preview reaches its deadline."""
+    from .governance import lifecycle
+
+    _schedule_resolver_warm(
+        vault_root, _TOMBSTONE_PROOF_REBUILDS, lifecycle.tombstone_snapshot,
+        "exomem-tombstone-proof-warm", stop=stop,
     )
 
 
@@ -8764,6 +8882,8 @@ def _schedule_resolver_warm(
     inflight: set[Path],
     build: Callable[[Path], object],
     thread_name: str,
+    *,
+    stop: threading.Event | None = None,
 ) -> None:
     """Run `build(root)` once on a daemon thread, unless one already runs in `inflight`."""
     if os.environ.get("EXOMEM_DISABLE_RESOLVER_WARM"):
@@ -8776,8 +8896,10 @@ def _schedule_resolver_warm(
 
     def _run() -> None:
         try:
-            with foreground_priority.bulk():
+            with foreground_priority.bulk(stop=stop):
                 build(key)
+        except foreground_priority.BulkCancelled:
+            return
         except Exception as error:  # noqa: BLE001 - a daemon must not escape
             log.warning("background rebuild skipped (%s)", error)
         finally:
@@ -8825,7 +8947,9 @@ def _evict_resolver(root: Path) -> None:
     _RESOLVER_CHECKPOINTS.pop(root, None)
 
 
-def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
+def _get_query_resolver(
+    vault_root: Path, freshness: tuple | None = None, *, require_checkpoint: bool = False,
+):
     """Per-process WikilinkResolver cache, invalidated when the vault changes.
 
     Freshness is the digest-strength `_walk_freshness_key` triple — the old
@@ -8856,12 +8980,17 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         if checkpoint.triple != freshness:
             checkpoint = None
         cached = _RESOLVER_CACHE.get(root)
-        if cached and cached[0] == freshness:
+        if not require_checkpoint and cached and cached[0] == freshness:
             return cached[1]
         with _RESOLVER_LOCK:
             cached = _RESOLVER_CACHE.get(root)
-            if cached and cached[0] == freshness:
+            if require_checkpoint and checkpoint is None:
+                return None
+            if (cached and cached[0] == freshness
+                    and (not require_checkpoint or _RESOLVER_CHECKPOINTS.get(root) == checkpoint)):
                 return cached[1]
+            # A matching disk digest alone cannot certify when the resolver was built.
+            # Rebuild against the observed checkpoint instead of stamping old entries.
             resolver = WikilinkResolver(root)
             _RESOLVER_CACHE[root] = (freshness, resolver)
             if checkpoint is not None:
@@ -8914,6 +9043,29 @@ def borrow_query_resolver(
             return cached[1]
     if schedule_rebuild:
         _schedule_query_resolver_rebuild(root)
+    return None
+
+
+def borrow_preview_resolver(vault_root: Path):
+    """Borrow the current file-mode resolver without hashing or waiting for a build."""
+    root = Path(vault_root)
+    live = freshness.preview_reference_generation(root)
+    if live is None or live[1] is None or live[3] is not None:
+        return None
+    if not _RESOLVER_LOCK.acquire(blocking=False):
+        return None
+    try:
+        cached = _RESOLVER_CACHE.get(root)
+        checkpoint = _RESOLVER_CHECKPOINTS.get(root)
+        if (
+            cached is not None and checkpoint is not None
+            and checkpoint.triple == cached[0]
+            and (checkpoint.instance_id, checkpoint.generation) == live[:2]
+        ):
+            return cached[1]
+    finally:
+        _RESOLVER_LOCK.release()
+    _schedule_query_resolver_rebuild(root, require_checkpoint=True)
     return None
 
 
@@ -9015,7 +9167,11 @@ def recall_resolver_snapshot(
     with _RESOLVER_LOCK:
         generation = _RECALL_RESOLVER_GENERATIONS.setdefault(root, 0)
         cached = _RECALL_RESOLVER_CACHE.get(root)
-        if cached and cached[0] == identity:
+        if (
+            cached and cached[0] == identity and (
+                checkpoint is None or _RECALL_RESOLVER_CHECKPOINTS.get(root) == checkpoint
+            )
+        ):
             # Fixed route counters describe copy attempts; paths sum across copies.
             with call_spans.span(
                 "resolver.fork", {"cache_hits": 1, "paths": len(cached[1].full_paths)}
@@ -9061,7 +9217,11 @@ def recall_resolver_snapshot(
             break
         with _RESOLVER_LOCK:
             cached = _RECALL_RESOLVER_CACHE.get(root)
-            if cached and cached[0] == identity:
+            if (
+                cached and cached[0] == identity and (
+                    checkpoint is None or _RECALL_RESOLVER_CHECKPOINTS.get(root) == checkpoint
+                )
+            ):
                 with call_spans.span(
                     "resolver.fork", {"follower_returns": 1, "paths": len(cached[1].full_paths)}
                 ):
@@ -9119,6 +9279,24 @@ def recall_resolver_snapshot(
             if done is not None:
                 done.set()
     return forked
+
+
+def publish_proved_recall_resolver(
+    vault_root: Path,
+    checkpoint: freshness.RecallFreshnessCheckpoint,
+    resolver: WikilinkResolver,
+) -> None:
+    """Install prepared path/title entries at the exact event checkpoint."""
+    root = Path(vault_root)
+    with _RESOLVER_LOCK:
+        if freshness.recall_generation(root, "vault") != checkpoint.generation:
+            return
+        _RECALL_RESOLVER_GENERATIONS[root] = _RECALL_RESOLVER_GENERATIONS.get(root, 0) + 1
+        resolver.publication = object()
+        _RECALL_RESOLVER_CACHE[root] = (
+            _recall_checkpoint_identity(checkpoint), resolver, resolver.publication,
+        )
+        _RECALL_RESOLVER_CHECKPOINTS[root] = checkpoint
 
 
 def recall_resolver_snapshot_at_checkpoint(
@@ -9307,6 +9485,11 @@ def _writer_resolver_snapshot(
                 if cached and cached[0] == current_freshness:
                     measured["forked"] = 1
                     return cached[1].fork()
+            if find_corpus.store_serves(root):
+                resident = semantic_contract.current_store_writer_resolver(root)
+                if resident is not None:
+                    measured["store_resident"] = 1
+                    return resident
             declined: dict[str, int] = {}
             entries = semantic_contract.current_writer_resolver_entries(
                 root,
@@ -9570,19 +9753,30 @@ def on_store_commit(
     after: tuple[int, int, str],
     entries: Iterable[tuple[str, str | None]],
     deleted: Iterable[str],
+    paths: Iterable[str] = (),
 ) -> None:
-    """Advance the resident recall resolver across one store commit, else leave it for a rebuild.
+    """Advance the resident recall resolver and corpus context across one store commit, else leave
+    each for its next reader.
 
-    ``before`` and ``after`` are the store's vault triples around the commit, and ``entries`` and
-    ``deleted`` the resolver delta that its derivation applied. A store reader builds the resolver
-    from the store's page rows that the live access policy indexes, so a resident resolver at
-    ``before`` with this policy, patched by the indexed part of the delta, holds the maps of a build
-    at ``after``. Any other resident resolver stays as it is, and the next reader rebuilds it.
+    ``before`` and ``after`` are the store's vault triples around the commit, ``entries`` and
+    ``deleted`` the resolver delta that its derivation applied, and ``paths`` every path that the
+    commit names. A store reader builds the resolver from the store's page rows that the live access
+    policy indexes, so a resident resolver at ``before`` with this policy, patched by the indexed
+    part of the delta, holds the maps of a build at ``after``. The corpus context moves the same way,
+    by the pages that the commit names (``semantic_contract.advance_corpus_for_store_commit``). Any
+    other resident state stays as it is, and its next reader rebuilds or reconciles it.
     """
+    root = Path(vault_root)
     try:
-        _advance_recall_resolver(Path(vault_root), before, after, list(entries), list(deleted))
+        _advance_recall_resolver(root, before, after, list(entries), list(deleted))
     except Exception:  # noqa: BLE001 - the commit has landed; a resolver left behind is rebuilt by its next reader.
-        return
+        log.debug("recall resolver left behind by a store commit", exc_info=True)
+    try:
+        from . import semantic_contract
+
+        semantic_contract.advance_corpus_for_store_commit(root, before[1], after[1], list(paths))
+    except Exception:  # noqa: BLE001 - the commit has landed; a context left behind is reconciled by its next reader.
+        log.debug("corpus context left behind by a store commit", exc_info=True)
 
 
 def _advance_recall_resolver(
@@ -9686,10 +9880,15 @@ def unload_ram_caches(
         # correctness eviction cannot make either stale; only a caller handing
         # memory back drops them.
         from . import lexstore
-        from .governance import page_admission
+        from .governance import admission_memo, page_admission
 
         lexstore.release_admitted_recall_rows()
         page_admission.forget_scopes()
+        admission_memo.forget()
+        # The next store commit builds the catalogue resolver again from the rows (about 0.1 s at 20,000 pages).
+        from .vault_store import resident_catalogue
+
+        resident_catalogue.forget()
     if not keep_recall_resolver:
         from . import epistemic_graph, graph_read_publication
 

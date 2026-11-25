@@ -1,7 +1,7 @@
 """Answer each planted-error case with a fresh agent that can only read its Exomem memory.
 
 The agent gets the case's task and Exomem's three read tools (``recall_context``,
-``search_memory``, ``read_memory``) over one arm's built vault, and nothing else:
+``search_memory``, ``read_page``) over one arm's built vault, and nothing else:
 no built-in tools, no other MCP server. The prompt is the same in both arms, so
 the vault's governance is the only difference. Every case answers from a fresh copy
 of the arm's built vault and state (``built``), restored before each attempt, so no
@@ -13,6 +13,7 @@ and strikes it. ``membench outcome run planted`` drives it.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from epistemic.journeys.f27_replay import (
@@ -28,7 +29,7 @@ from ..clbench.run import QuestionLog, single_turn
 from ..isolation import claude_env, copy_state, mcp_server
 from ..workspace import sha256_of
 
-READ_TOOLS = ("recall_context", "search_memory", "read_memory")
+READ_TOOLS = ("recall_context", "search_memory", "read_page")
 TIMEOUT_SECONDS = 300.0
 
 PROMPT = (
@@ -39,11 +40,19 @@ PROMPT = (
 
 
 def answer_actor(
-    arm_dir: Path, model: str, effort: str, envelope: AgentEnvelope
+    arm_dir: Path,
+    model: str,
+    effort: str,
+    envelope: AgentEnvelope,
+    arm_env: Mapping[str, str] | None = None,
 ) -> tuple[list[str], dict[str, str], Path]:
-    """The answering agent's argv, environment and MCP config: read tools over this arm's vault only."""
+    """The answering agent's argv, environment and MCP config: read tools over this arm's vault only.
+
+    ``arm_env`` is the arm's own server settings (store mode's writer lease, the graph switch).
+    """
     mcp_config = arm_dir / "answer-mcp.json"
-    mcp_config.write_text(json.dumps({"mcpServers": {"exomem": mcp_server(arm_dir)}}, indent=2))
+    server = mcp_server(arm_dir, arm_env=arm_env)
+    mcp_config.write_text(json.dumps({"mcpServers": {"exomem": server}}, indent=2))
     arm = Arm(
         arm_id=arm_dir.name,
         prominence="instruction",
@@ -73,7 +82,13 @@ def with_cli(manifest: dict) -> dict:
     return {**manifest, "cli": manifest["actor"]["cli"]}
 
 
-def answer_all(cases: list[dict], arm_dir: Path, model: str, effort: str) -> Path:
+def answer_all(
+    cases: list[dict],
+    arm_dir: Path,
+    model: str,
+    effort: str,
+    arm_env: Mapping[str, str] | None = None,
+) -> Path:
     arm_dir = refuse_unsafe_out_dir(arm_dir)
     built = arm_dir / "built"
     if not built.is_dir():
@@ -81,7 +96,7 @@ def answer_all(cases: list[dict], arm_dir: Path, model: str, effort: str) -> Pat
     out = arm_dir / "answers"
     out.mkdir(exist_ok=True)
     envelope = discover_agent_envelope()
-    argv, env, mcp_config = answer_actor(arm_dir, model, effort, envelope)
+    argv, env, mcp_config = answer_actor(arm_dir, model, effort, envelope, arm_env)
     removed = claude_env()[1]
     mcp_config_sha256 = sha256_of(mcp_config)
     manifest_file = arm_dir / "manifest.json"

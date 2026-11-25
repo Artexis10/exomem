@@ -158,7 +158,8 @@ can pass it.
 `incidents/cases/` holds one incident's cases: a seeded note, one user turn, and the checks that
 pass it. The checks are `seed_corrected` (the seeded note's body changed, or the product reports it
 superseded), `called_any` (an Exomem tool was called) and `judge` (a blind model's schema fields
-match). An arm is a checkout: its `src` serves Exomem, its `plugins/claude-code` supplies the skill
+match). Later checks read the Records collections and rows a session made (`collection_row`, `new_collection`,
+`no_new_collection`). An arm is a checkout: its `src` serves Exomem, its `plugins/claude-code` supplies the skill
 and hooks, and its own docs and code supply the guidance text. Each session gets a fresh vault under
 a neutral unit id, and the arms run interleaved. A unit passes, fails or is unknown: a harness fault,
 a seeding error or a judge error is unknown, never a failure.
@@ -202,6 +203,89 @@ writes:
 - `judge` with `include_rows` shows the judge the rows that the session committed, so that it can tell
   an answer that claims a filing from one that made it.
 
+A case that tests what an agent starts on its own gives its user turns, and may add a second session:
+
+- `turns` (instead of `prompt`) lists several user turns. Both actors play them in order, in one session. The
+  Claude actor resumes one named session for each turn; the OpenAI actor carries the conversation into the next
+  turn. A case with `turns` should use `"transport": "http"`, so that one warm server serves every turn. The `judge`
+  reads the numbered turns and answers. A single `prompt` reads as it always did.
+- `follow_up` is one more user turn. A new session plays it on the same vault after the main session ends:
+  a new Claude session with its own hook home, or a new OpenAI agent on a new stdio server. It needs
+  `follow_up_judge`, which is the `judge` mechanism on the follow-up's answer. Put what is true in the spec's
+  `key` (the judge reads it as "what is true", and the assistant never sees it). `follow_up_judge` takes no
+  `include_rows` or `include_calls`. `called_any` and `write_receipt` read the main session only.
+- `new_collection` passes when exactly `equals` collections (default 1) exist that the seed did not leave. The
+  runner lists every collection through the arm's own discovery before the session and after it, the
+  follow-up included. Each new collection must:
+  - hold every `where` condition on its `title`, `semantic_profile`, `natural_key`, `fields` and
+    `manifest_path` (the `contains`, `not_contains`, `eq` and `ne` comparisons; `natural_key` and `fields` read
+    as comma-separated names);
+  - declare a natural key and have at most `max_fields` fields (required: the case states its bound, which
+    mirrors the product's);
+  - hold at least `min_rows` rows (default 1) that hold every `row_where` condition. A row condition on the
+    field `*` reads all declared field values as one text, because the agent chooses the field names;
+  - have a row of its own for each list in `rows_each`: no row serves two lists, so one row that names two
+    items cannot stand for both;
+  - have no two rows with the same natural key (compared as trimmed text, ignoring case).
+
+  A collection whose rows the arm cannot read makes the check unknown, never failed. The unit records each new
+  collection as `new_collections`, with `automatic_in_receipt` (the `automatic` flag in the create receipt) and
+  `automatic_in_inventory` (the flag in the inventory entry). The check never gates on them: an arm without the
+  flag reads `null` and still compares on the outcome. `judge` with `include_rows` also shows the judge each
+  new collection's natural key, fields and rows.
+- `no_new_collection: true` passes when the seed left every collection that exists. It guards a passing
+  mention and `off`. It can stand beside `collection_row`, which can show that no row reached a decoy.
+- `no_write: true` passes when the main session made no call to a tool that writes, whether the arm accepted the
+  call or refused it. The runner reads the list of writing tools from the arm's own tool surface
+  (`arm_side.py write_tools`), so a tool that the arm adds later counts without a change here. It guards `off`
+  beside `no_new_collection`.
+- `"store": true` (an http case) gives the unit a vault whose collection store is enrolled and served, as the
+  personal service has it. Without a store, a collection that the arm creates is a file collection. The unit runs
+  its own lease coordinator on loopback (`store.py`), puts the lease settings in the environment of every process
+  that serves or reads the vault, and enrols the store with the owner's offline `exomem collections create` under
+  the operator credential, as `tests/test_collection_store_service.py` does. The credential reaches that command
+  alone, and the coordinator stops when the unit ends. The enrolment adds one collection of an unrelated kind, which
+  the seed's collection list holds, so it is never a collection the session made. The case's own
+  `seed_collections` stay file collections, beside the store, as in the product's tests. A refused enrolment makes
+  the unit unknown. The OpenAI actor's stdio server serves the same store once the warm-up wait ends (checked once by hand; no model has played it).
+- `collection_row` takes `seed_row_now`, conditions that a row the seed left must now hold. A corrected
+  value keeps its row id, so it is no new row; use `"equals": 0` with `seed_row_now`. It also takes `rows_each`, a
+  list of condition lists, each naming a field of the seeded collection (not `*`). Every list needs a row of its own
+  among the new rows, so with `equals` each expected row exists exactly once.
+- `"withhold_first_write_ack": true` (an http case, always with `pending_reconciled: true`) interrupts one write
+  at the transport. The unit puts a small proxy between the actor and the unit's server (a loopback HTTP proxy
+  for the Claude actor, a stdio relay in front of the server of the OpenAI actor, both in `withhold.py`). The
+  proxy passes every message on unchanged, except the result of the main session's first write that the arm
+  accepts. That write reaches the arm and commits. The proxy keeps the real result in the unit's `wire.json` and
+  hands the actor the arm's own `MUTATION_ACKNOWLEDGEMENT_PENDING` result instead. `arm_side.py withhold` builds
+  that result with the arm's own error constructor, refusal serializer and MCP conversion, so no wording or shape is
+  copied into the harness. A write that the arm refuses is passed on, because it committed nothing. The follow-up
+  session is not interrupted. The tests drive the HTTP proxy through the Claude actor's turn loop and the relay with
+  an MCP stdio client, both on the arm's real server; no model has played either one.
+- `pending_reconciled: true` passes when, after the pending result, the agent's next call on the same collection
+  (its `collection` argument) was the same write (same tool, arguments and replay identity) or a call to a tool
+  that does not write, such as a query of the collection. A call that sends no replay identity in its metadata, as
+  these clients do, has the identity `null`, so the same arguments are the same write. It reads `wire.json`, so it does not depend on how a
+  client reports its own calls, and it never matches words. The unit records `pending_outcome` (`replayed`,
+  `read`, `other_write`, `none`, `no_collection` or `no_pending`) and `withheld_write`. A withheld write that names
+  no collection makes the check unknown. A session with no accepted write has nothing to recover from and fails.
+- `judge` takes `include_calls`, a list of tool names. The judge then reads the attempted calls of those tools
+  (name, input, and whether the server refused it), so that it can tell a saved decision from a claimed one.
+
+`structured-capture.json` holds the cases for `capture-structured-work-automatically`: recurring evaluation of
+named candidates (with a follow-up), a second domain, reuse of a compatible collection, a corrected stored
+value, an ambiguous identity, a passing mention, capture `off`, a decision agreed in conversation and an
+interrupted write. Their prompts never ask for the saving. The first, the reuse and the interrupted-write cases
+also run as `-store` variants on a store vault, and `capture-off` also checks `no_write`.
+
+The interrupted write is withheld at the transport, because the product has no setting that interrupts one write.
+`EXOMEM_MUTATION_TIMEOUT` never produced the pending code. On a store vault, 18 `add_record` calls with that
+setting at 0.05 s or 0.001 s returned none: a lone write committed in 0.4 to 0.8 s, and concurrent writes either
+committed in 0.6 to 3.5 s or returned `COLLECTION_STORE_BUSY` with nothing saved. The wait for a running write ends
+at `EXOMEM_MCP_REQUEST_BUDGET_SECONDS` less 5 s. With that budget at 5.3 s, two lone writes returned the pending
+code at 0.3 s, and every later concurrent write and read returned busy. That budget bounds every tool call of the
+session, so it would measure a degraded session and not the recovery. The transport leaves the product unchanged.
+
 `--actor openai` plays the session with an OpenAI Agents SDK agent on the same stdio server, with the
 arm's Exomem skill files and server instructions as its instructions, and no hooks. It is the client
 class of a chat client that has the tools and the skill text but no hook surface. The SDK is not a
@@ -235,7 +319,8 @@ For example, the changed checkout with the typed graph off:
 The run prints each case's passed, failed and unknown counts per arm. The run root holds
 `manifest.json` (each arm's commit and dirty state, the CLI version, the models), `results.jsonl`
 (one record per unit, and the only place that maps a unit to its arm) and `units/<id>/` (the stream
-and the judge's verdict). The actor model defaults to the one that the other suites use; pass
+and the judge's verdict; a unit with several turns or a follow-up keeps one stream per turn, `stream-<n>.jsonl`
+and `stream-follow-up.jsonl`, and a second verdict, `verdict.follow-up.json`). The actor model defaults to the one that the other suites use; pass
 `--model` (a full model id) when the incident happened on another. A session costs about $0.2 to $1 of notional
 usage.
 

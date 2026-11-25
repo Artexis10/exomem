@@ -534,6 +534,7 @@ def served_vault(tmp_path: Path, warm_managed_cell, walk_sentinel, monkeypatch):
     # Flushed before warming, which seeds the freshness registry the served reader checks.
     find_module.clear_cache()
     warm_managed_cell(vault)
+    assert epistemic_graph.EpistemicGraphIndex(vault).validate_startup_snapshot() is True
 
     def no_scan(*_args, **_kwargs):
         raise AssertionError("the served reader answered a filter by reading every page")

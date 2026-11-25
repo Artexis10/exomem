@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from exomem import commands, doctor, server_runtime, state_migration, state_path
 from exomem.cli_ops import OpError
 from exomem.collection_store import (
     admission,
+    capability,
     connection,
     export,
     migration,
@@ -36,15 +38,28 @@ def store_mode_vault(vault, monkeypatch):
     """The fixture vault with both store-mode records and its pages in the store, as activation leaves them."""
     for name in LEASE_ENV:
         monkeypatch.delenv(name, raising=False)
+    return _enter_store_mode(vault)
+
+
+def _enter_store_mode(vault, stored_only=None):
+    """Move ``vault`` into store mode; ``stored_only`` maps a page to bytes that only its store copy holds."""
     with connection.open_writer(connection.store_path(vault), lease_check=lambda: True) as handle:
         with handle.transaction() as tx:
             # A store-mode store holds the owners' tables, and every commit derives rows into them.
             migrate.create_owner_schema(tx)
             tx.execute("INSERT INTO store_mode(id, mode, revision, changed_at, release) "
                        "VALUES (1, 'store', 1, ?, 'test')", (AT,))
+            # A release from before the derivation queue derived each page's rows inside the page's
+            # commit. This release's commit queues them, so the queue stands in until they are derived.
+            queueless = tx.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'store_derivation_queue'"
+            ).fetchone() is None
+            if queueless:
+                schema._migrate_to_20(tx)
         # In store mode a page read answers from the store, so the pages must be there.
         pages = tuple(
-            write.PagePut(owned.rel, (vault / owned.rel).read_bytes(), owned.stat.st_mtime_ns)
+            write.PagePut(owned.rel, (stored_only or {}).get(owned.rel, (vault / owned.rel).read_bytes()),
+                          owned.stat.st_mtime_ns)
             for owned in ownership.iter_owned(vault)
             if owned.ownership is ownership.Ownership.PAGE
         )
@@ -52,6 +67,11 @@ def store_mode_vault(vault, monkeypatch):
             CollectionWriter(vault, handle),
             write.StoreChange(write.Origin.MIGRATION, "test fixture", puts=pages),
         )
+        if queueless:
+            # The earlier release left every row derived and no queue behind.
+            with handle.transaction() as tx:
+                assert tx.execute("SELECT COUNT(*) FROM store_derivation_queue").fetchone() == (0,)
+                tx.execute("DROP TABLE store_derivation_queue")
     state_migration.record_vault_store_compatibility(vault, authority_check=lambda: True, active=True)
     return vault
 
@@ -100,9 +120,10 @@ def test_a_store_mode_vault_under_the_default_multi_host_topology_refuses_to_sta
     assert "EXOMEM_WRITER_LEASE_TOPOLOGY=single-host" in refused.value.reason
 
 
-def test_startup_on_a_single_host_store_mode_vault_names_the_rollback(store_mode_vault, monkeypatch):
+def test_startup_on_a_build_with_store_mode_disabled_names_the_rollback(store_mode_vault, monkeypatch):
     """Defect: a build that cannot serve the store's pages starts and answers from stale Markdown."""
-    _coordinator(monkeypatch, "http://127.0.0.1:8765", topology="single-host")
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.VAULT_STORE_V1})
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
     with pytest.raises(CollectionStoreError) as refused:
         server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
     assert refused.value.code == availability.NOT_SERVED
@@ -114,7 +135,8 @@ def test_the_cli_and_the_terminal_ui_refuse_the_vault_that_the_service_refuses(
         store_mode_vault, monkeypatch, capsys, entry):
     """Defect: the service refuses a store-mode vault that this build cannot serve, while a CLI command
     or a terminal UI session starts on the same vault and serves it."""
-    _coordinator(monkeypatch, "http://127.0.0.1:8765", topology="single-host")
+    monkeypatch.setattr(capability, "RELEASED", capability.RELEASED - {capability.VAULT_STORE_V1})
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(store_mode_vault))
     if entry == "cli":
         assert cli.main(["bootstrap", "--json"]) == 1
@@ -129,6 +151,41 @@ def test_the_cli_and_the_terminal_ui_refuse_the_vault_that_the_service_refuses(
     with pytest.raises(CollectionStoreError) as refused:
         backend.start_runtime()
     assert refused.value.code == availability.NOT_SERVED
+
+
+@pytest.mark.parametrize("earlier", [schema.SCHEMA_VERSION - 1, schema.VAULT_STORE_READ_SCHEMA_VERSION],
+                         ids=["previous schema", "oldest schema the page reader admits"])
+def test_a_store_mode_vault_that_an_earlier_store_schema_wrote_starts_and_serves_its_stored_pages(
+        vault, monkeypatch, earlier):
+    """Defect: a release that changes the store schema cannot start on a store-mode vault an earlier release wrote.
+
+    The start reads the schema pages from the store before the writer takes the lease and migrates the store,
+    and the page reader refused every store below the current schema with COLLECTION_STORE_SCHEMA_PENDING.
+    """
+    for name in LEASE_ENV:
+        monkeypatch.delenv(name, raising=False)
+    note = "Knowledge Base/Notes/Patterns/retry-with-fixed-interval.md"
+    stored = b"---\ntitle: Retry\ntype: note\n---\n# Retry\n\nAn edit that only the store holds.\n"
+    with monkeypatch.context() as earlier_release:
+        # The earlier release built its store through the same migrations, up to its own schema.
+        earlier_release.setattr(schema, "SCHEMA_VERSION", earlier)
+        _enter_store_mode(vault, stored_only={note: stored})
+    store = connection.store_path(vault)
+    _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
+
+    started = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert "session" in started.source_schema.source_types
+    assert "An edit that only the store holds." in commands.op_read_memory(vault, path=note)["body"]
+    # Only the writer migrates, under the lease: a start leaves the store for a rollback to the earlier release.
+    with closing(sqlite3.connect(store)) as raw:
+        assert schema.schema_version(raw) == earlier
+    # The store thread opens this writer once it holds the lease; its migration leaves the pages as they read.
+    with connection.open_writer(store, lease_check=lambda: True):
+        pass
+    with closing(sqlite3.connect(store)) as raw:
+        assert schema.schema_version(raw) == schema.SCHEMA_VERSION
+    assert "An edit that only the store holds." in commands.op_read_memory(vault, path=note)["body"]
 
 
 def test_a_file_mode_vault_starts_without_a_lease(vault, monkeypatch):
@@ -349,10 +406,9 @@ CODE_ONLY_ROUTES = frozenset({"cell-import", "cell-export", "cell-init"})
 def test_a_subcommand_that_touches_pages_refuses_a_store_mode_vault_even_where_the_service_serves_it(
         store_mode_vault, monkeypatch, tmp_path, capsys, name):
     """Defect: a CLI subcommand that the dispatcher routes before the registry path reads or rewrites the
-    Markdown, projections or file-mode indexes of a vault whose pages live in the store, once the build can
-    serve store mode (`require_servable` passes, as the rehearsal and the 7.4 switch leave it)."""
+    Markdown, projections or file-mode indexes of a vault whose pages the released build serves."""
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
+    availability.require_servable(store_mode_vault)
     if name == "warm":
         monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)  # `warm` skips the vault it has no model for
     monkeypatch.setenv("EXOMEM_CLOUD_CELL_ID", "cell-check")  # a cell job's pod always sets it
@@ -392,7 +448,7 @@ def test_the_store_route_and_a_fresh_vault_still_run_beside_the_fence(
     _coordinator(monkeypatch, "http://127.0.0.1:8799", topology="single-host")
 
     assert cli._dispatch_main(["store-mode", "status", "--vault", str(store_mode_vault)]) == 0
-    assert availability.NOT_SERVED not in capsys.readouterr().out
+    assert json.loads(capsys.readouterr().out)["mode"] == "store"
 
     created = tmp_path / "created"
     assert cli._dispatch_main(["init", "--vault", str(created)]) == 0

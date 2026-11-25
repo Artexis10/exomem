@@ -91,25 +91,31 @@ def is_container(path: str | Path) -> bool:
 
 
 @contextmanager
-def inspect(stream: BinaryIO) -> Iterator[Inspection]:
+def inspect(stream: BinaryIO, *, vault_root: Path | None = None) -> Iterator[Inspection]:
     """Inspect all members before returning any payload; never interpret signature XML."""
+    from . import media_capacity
+
     position = stream.tell()
     result = Inspection()
+    if vault_root is not None and not media_capacity.managed_allocations(vault_root):
+        vault_root = None
     with ExitStack() as held:
         try:
             with archive_members.open_zip(stream, max_entries=MAX_ENTRIES) as archive:
-                entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES, portable_paths=True)
-                if sum(entry.info.file_size for entry in entries) > MAX_EXPANDED_BYTES:
-                    raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the aggregate byte limit")
+                entries = _container_entries(archive)
                 total = 0
                 mimetype = None
                 for entry in entries:
-                    suffix = PurePosixPath(entry.path).suffix.casefold()
-                    metadata = entry.path == "mimetype" or entry.path.startswith("META-INF/")
-                    supported = not metadata and suffix in _PAYLOAD_SUFFIXES
+                    metadata = _container_metadata(entry.path)
+                    supported = _supported_payload(entry.path)
                     if supported and len(result.members) >= MAX_PAYLOADS:
                         raise archive_members.ArchiveError(archive_members.TOO_LARGE, "the container exceeds the payload count limit")
                     target = held.enter_context(tempfile.TemporaryFile(mode="w+b")) if supported else None
+                    sink = target
+                    if target is not None and vault_root is not None:
+                        sink = media_capacity.MeteredSink(
+                            vault_root, target, device=os.fstat(target.fileno()).st_dev, size=entry.info.file_size,
+                        )
                     digest = hashlib.sha256()
                     size = 0
                     marker = bytearray()
@@ -119,8 +125,8 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
                         if total > MAX_EXPANDED_BYTES:
                             raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the streaming byte limit")
                         digest.update(chunk)
-                        if target is not None:
-                            target.write(chunk)
+                        if sink is not None:
+                            sink.write(chunk)
                         if entry.path == "mimetype" and len(marker) <= len(_MIMETYPE):
                             marker.extend(chunk[:len(_MIMETYPE) + 1])
                     if entry.path == "mimetype":
@@ -150,6 +156,34 @@ def inspect(stream: BinaryIO) -> Iterator[Inspection]:
         if result.state != "inspected":
             held.close()  # Opaque custody must not compete with payload spools after failed or unsupported inspection.
         yield result
+
+
+def _container_metadata(path: str) -> bool:
+    return path == "mimetype" or path.startswith("META-INF/")
+
+
+def _supported_payload(path: str) -> bool:
+    return not _container_metadata(path) and PurePosixPath(path).suffix.casefold() in _PAYLOAD_SUFFIXES
+
+
+def _container_entries(archive):
+    entries = archive_members.central_directory(archive, max_entries=MAX_ENTRIES, portable_paths=True)
+    if sum(entry.info.file_size for entry in entries) > MAX_EXPANDED_BYTES:
+        raise archive_members.ArchiveError(archive_members.TOO_LARGE, "expanded container exceeds the aggregate byte limit")
+    return entries
+
+
+def commit_payload_sizes(stream: BinaryIO) -> tuple[int, ...]:
+    """Read bounded member sizes from the complete container before reserving inspection and publication space."""
+    position = stream.tell()
+    try:
+        with archive_members.open_zip(stream, max_entries=MAX_ENTRIES) as archive:
+            sizes = tuple(entry.info.file_size for entry in _container_entries(archive) if _supported_payload(entry.path))
+        return sizes[:MAX_PAYLOADS]
+    except archive_members.ArchiveError:
+        return ()  # The normal inspection preserves an invalid container without publishing extracted members.
+    finally:
+        stream.seek(position)
 
 
 def in_payload_tree(path: str) -> bool:
@@ -210,7 +244,7 @@ def plan(
     from . import media_types, preserve
     from .governance import raw_protection
 
-    with inspect(stream) as inspection:
+    with inspect(stream, vault_root=vault_root) as inspection:
         result = Plan(inspection, [], [], [])
         tree, scope, category = preserve.artifact_location(parent)
         for member in inspection.members:
@@ -244,7 +278,10 @@ def plan(
                 _require_identity(vault_root, artifact, member.sha256, member.size)
                 result.guards.append(PathGuard.capture(vault_root, artifact, leaf_policy="absent"))
             else:
-                result.writes.append(PlannedWrite(binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256), create_only=True, expected_hash=MISSING_CONTENT_HASH))
+                result.writes.append(PlannedWrite(
+                    binary_path, PreparedBinaryContent(member.stream, member.size, member.sha256),
+                    create_only=True, expected_hash=MISSING_CONTENT_HASH, media_allocation=True,
+                ))
             if existing and page_path.exists():
                 before = reserved_paths.read_generic_bytes(vault_root, page).data.decode("utf-8")
                 fm = parse_frontmatter(before, strict=True)[0]

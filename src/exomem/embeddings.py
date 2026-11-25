@@ -17,6 +17,7 @@ Sidecar lives outside `_Schema/` deliberately:
 from __future__ import annotations
 
 import contextlib
+import functools
 import gc
 import hashlib
 import logging
@@ -49,6 +50,9 @@ from . import (
 from .clip_index import CLIP_DIM, ClipIndex
 from .embedding_index import VECTOR_DIM as VECTOR_DIM  # the legacy width, re-exported
 from .embedding_index import EmbeddingIndex, PageScorer, expected_parent_state
+from .perceptual_hash import average_hash as _avg_hash
+from .perceptual_hash import hamming as _hamming
+from .perceptual_hash import hash_bits as _hash_bits
 from .vector_index_common import vec_gate as _vec_gate
 
 log = logging.getLogger(__name__)
@@ -112,9 +116,17 @@ _INTERACTIVE_GATE_LOCK = threading.Lock()
 #: can encode concurrently, waits only for other such queries (`query_turn`).
 _QUERY_TURN_GATE: runtime_resources.ModelAdmissionGate | None = None
 _QUERY_TURN_GATE_LOCK = threading.Lock()
-_QUERY_TURN: ContextVar[runtime_resources.ModelAdmissionGate | None] = ContextVar(
-    "embedding_query_turn", default=None
-)
+
+
+@dataclass(frozen=True)
+class _QueryLane:
+    """Set by `query_turn`: the lane a search query's batches take, and what ends their wait."""
+
+    gate: runtime_resources.ModelAdmissionGate
+    cancel_event: runtime_resources.StopSignal | None
+
+
+_QUERY_TURN: ContextVar[_QueryLane | None] = ContextVar("embedding_query_turn", default=None)
 #: Tokens of an activation turn that are read, the model's special tokens on
 #: top. A turn's head says what it is about, and the request path has no budget
 #: for reading a pasted page.
@@ -332,29 +344,34 @@ def get_model():
 def get_reranker():
     """Load the configured CrossEncoder backend lazily."""
     global _RERANKER
+    resident = _RERANKER
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        return resident
+    backend = RERANKER_BACKEND
+    if backend not in _RERANKER_BACKENDS:
+        raise ValueError(
+            f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
+            f"valid: {sorted(_RERANKER_BACKENDS)}"
+        )
+    # The tokenizer guard first, before any import a lean install lacks. Both run before the
+    # model slot: a cold import under it held every query encode behind it for tens of seconds.
+    embedding_backend.require_tokenizer(RERANKER_NAME)
+    from sentence_transformers import CrossEncoder
+
     with runtime_resources.model_execution():
         if _RERANKER is not None:
             return _RERANKER
         with _RERANKER_LOCK:
             if _RERANKER is not None:
                 return _RERANKER
-            backend = RERANKER_BACKEND
-            if backend not in _RERANKER_BACKENDS:
-                raise ValueError(
-                    f"unknown {RERANKER_BACKEND_ENV}: {backend!r}; "
-                    f"valid: {sorted(_RERANKER_BACKENDS)}"
-                )
-            # The tokenizer guard first, before any import a lean install lacks.
-            embedding_backend.require_tokenizer(RERANKER_NAME)
             runtime_resources.configure_torch()
-            from sentence_transformers import CrossEncoder
-
             device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
             log.info("loading reranker %s with %s", RERANKER_NAME, backend)
 
             def load_cross_encoder(**kwargs):
                 if backend == "onnx":
-                    # Do not auto-select CUDA: that would bypass Exomem's
+                    # Do not auto-select CUDA: that would bypass Evermatter's
                     # explicit accelerator/headroom policy. ONNX Runtime has
                     # no provider in the lean MPS profile, so MPS uses CPU.
                     provider = (
@@ -476,6 +493,11 @@ def get_clip_model():
 def get_clip_query_model():
     """Lazy multilingual query tower aligned to the existing image vectors."""
     global _CLIP_QUERY_MODEL
+    resident = _CLIP_QUERY_MODEL
+    if resident is not None:
+        # As in `get_model`, the slot serializes a load, not a lookup.
+        CLIP_GUARD.touch()
+        return resident
     with runtime_resources.model_execution():
         with _CLIP_LOCK:
             if _CLIP_QUERY_MODEL is None:
@@ -534,12 +556,14 @@ def embed_image(path: Path) -> np.ndarray:
 
 def embed_clip_text(query: str) -> np.ndarray:
     """Encode a text query into CLIP space → float32 (512,), L2-normalized."""
-    with CLIP_GUARD.active(), runtime_resources.model_execution():
+    with CLIP_GUARD.active():
         try:
             model = get_clip_query_model()
         except (ImportError, embedding_backend.ModelFilesUnavailable) as error:
             raise ClipUnavailable(f"multilingual image query encoder unavailable: {error}") from error
-        vec = model.encode([query])[0]
+        # The process admission bounds every encode, a search query's included; the lane only orders turns.
+        with runtime_resources.model_admission(), _turn_for(model)():
+            vec = model.encode([query])[0]
     return vec.astype(np.float32, copy=False)
 
 
@@ -591,32 +615,6 @@ def _max_video_keyframes() -> int:
     return MAX_VIDEO_KEYFRAMES
 
 
-def _hash_bits(arr: np.ndarray) -> int:
-    """Pack a small grayscale array into an average-hash int: bit per pixel vs mean.
-
-    Shared core between the PIL path (`_avg_hash`) and the ndarray path used by the
-    scene-detection metrics pass, so both produce comparable hashes.
-    """
-    flat = np.asarray(arr, dtype=np.float32).ravel()
-    bits = flat >= flat.mean()
-    val = 0
-    for b in bits:
-        val = (val << 1) | int(b)
-    return val
-
-
-def _avg_hash(img, *, size: int = 8) -> int:
-    """64-bit perceptual average-hash: downscale → grayscale → bit per pixel vs mean.
-
-    Keys on luminance *structure*, so it distinguishes textured frames (faces, slides,
-    whiteboards — what real recordings contain) but is blind to two flat frames of
-    differing uniform colour (both hash to all-ones). Dedup is best-effort; a
-    pathologically flat video simply keeps fewer keyframes.
-    """
-    small = img.convert("L").resize((size, size))
-    return _hash_bits(np.asarray(small, dtype=np.float32))
-
-
 def _pool_gray(arr: np.ndarray, *, size: int = 8) -> np.ndarray:
     """Mean-pool a grayscale array down to size×size (hash input for ndarray frames)."""
     a = np.asarray(arr, dtype=np.float32)
@@ -635,10 +633,6 @@ def _gray_hist(arr: np.ndarray, *, bins: int = 32) -> np.ndarray:
     if not total:
         return np.zeros(bins, dtype=np.float32)
     return (h / total).astype(np.float32)
-
-
-def _hamming(a: int, b: int) -> int:
-    return bin(a ^ b).count("1")
 
 
 def _retain_video_candidate(image, max_edge: int | None, hashes: list[int | None] | None):
@@ -1192,8 +1186,8 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
     timed get SEMANTIC SEGMENT chunks (each starting with its `[timestamp]`
     marker — what `find` surfaces as `transcript_match_at`), with the sections
     before/after `## Extracted text` still paragraph-chunked in document order.
-    Every other page — and the gate-off world — returns `chunk_text` output
-    unchanged (equality-tested).
+    Timestamped text Sources group lines into turns before applying the ordinary
+    chunk cap. Other pages use the paragraph chunker.
 
     Segmenting a timed transcript ENCODES: the segmenter scores every gap
     between timed lines with embeddings of the windows on either side, so one
@@ -1218,7 +1212,14 @@ def _chunks_for_page(vault_root: Path, page, *, allow_encode: bool = True) -> li
         ss.semantic_segments_enabled()
         and getattr(page, "media_type", None) in ("audio", "video")
     ):
-        return chunk_text(page.title, page.search_body)
+        from . import transcript_passages
+
+        body = page.search_body
+        if transcript_passages.is_source(getattr(page, "rel_path", "")):
+            groups = transcript_passages.chunks(body)
+            if groups:
+                return [chunk for group in groups for chunk in chunk_text(page.title, group)]
+        return chunk_text(page.title, body)
     body = page.body or ""
     idx = body.find("## Extracted text")
     if idx == -1:
@@ -1286,7 +1287,7 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
 
 
 def _encode_caller() -> str:
-    """The nearest Exomem module above the encoder, as a span name suffix.
+    """The nearest Evermatter module above the encoder, as a span name suffix.
 
     An `embeddings.encode` of 80 s with 837 texts sat in the ledger for days
     with no way to say who asked for it; the caller was the semantic segmenter
@@ -1375,11 +1376,7 @@ def _embed_texts(
     prefix = query_prefix if is_query else passage_prefix
     if prefix:
         texts = [prefix + t for t in texts]
-    execution = runtime_resources.model_execution
-    lane = _QUERY_TURN.get()
-    if lane is not None and getattr(model, "concurrent_encodes", False):
-        # Inside `query_turn` the query's turn is on its own lane, not the shared slot.
-        execution = lane.execution
+    execution = _turn_for(model)
     with BGE_GUARD.active():
         vectors = _encode_in_turns(
             model,
@@ -1517,32 +1514,45 @@ def _interactive_execution(model, bulk_execution):
 
 @contextlib.contextmanager
 def query_turn(*, cancel_event: runtime_resources.StopSignal | None = None):
-    """The execution turn of one search query that waits for its turn.
+    """Mark the encodes inside as one search query's; hold nothing.
 
-    The caller keeps its own model admission. A resident model that can encode
-    concurrently (an ONNX Runtime session) serves these queries on a lane of
-    their own: a query waits only for other queries, never for the passage
-    inferences that a capture or a drain runs one turn at a time on the shared
-    slot. Any other model takes the shared turn. A set `cancel_event` ends the
-    wait with `ModelBusyError`.
+    Each batch takes its turn inside the encode (`_turn_for`), so the wait is
+    measured as `execution_wait_us` and the turn follows the encoder that
+    actually runs. On an encoder that runs inferences side by side (an ONNX
+    Runtime session) the query waits only for other queries, never for the
+    passage inferences that a capture or a drain runs one turn at a time on the
+    shared slot. Any other encoder takes the shared turn; a previous encoder
+    during a re-embed keeps its own gate. A set `cancel_event` ends the wait
+    with `ModelBusyError`.
     """
     global _QUERY_TURN_GATE
-    if not getattr(_MODEL, "concurrent_encodes", False):
-        with runtime_resources.model_execution(cancel_event=cancel_event):
-            yield
-        return
     with _QUERY_TURN_GATE_LOCK:
         if _QUERY_TURN_GATE is None:
             _QUERY_TURN_GATE = runtime_resources.ModelAdmissionGate(
                 runtime_resources.resolve_policy().model_admission
             )
         gate = _QUERY_TURN_GATE
-    with gate.execution(cancel_event=cancel_event):
-        marker = _QUERY_TURN.set(gate)
-        try:
-            yield
-        finally:
-            _QUERY_TURN.reset(marker)
+    marker = _QUERY_TURN.set(_QueryLane(gate, cancel_event))
+    try:
+        yield
+    finally:
+        _QUERY_TURN.reset(marker)
+
+
+def _turn_for(model):
+    """The execution turn one batch of `model` takes: a search query's lane inside `query_turn` when
+    the model runs inferences side by side, otherwise the shared slot."""
+    lane = _QUERY_TURN.get()
+    if lane is None:
+        return runtime_resources.model_execution
+    turn = lane.gate.execution if getattr(model, "concurrent_encodes", False) else runtime_resources.model_execution
+    return functools.partial(turn, cancel_event=lane.cancel_event)
+
+
+def encode_query(index: Any, query: str, *, cancel_event: runtime_resources.StopSignal | None = None) -> np.ndarray:
+    """One search query's vector, in `index`'s encoder space and in the query's own turn."""
+    with query_turn(cancel_event=cancel_event), recall_space.encoding_for(index):
+        return embed_texts([query], is_query=True)[0]
 
 
 def embed_query_if_loaded(text: str, *, max_tokens: int | None = None) -> np.ndarray | None:
@@ -3038,18 +3048,33 @@ def index_incremental(
     selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
     Returns a small stats dict (also the CLI's machine-readable output).
     """
-    from . import access, semantic_index
+    from . import access, semantic_index, transcript_passages
     from . import find as find_module
 
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
-    row_mtimes = index.file_mtimes()
+    row_states = index.incremental_file_states()
     unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
+    legacy_batch: list[tuple[str, list[str], float]] = []
+    transcript_paths: set[str] = set()
     pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
     unit_seen_on_disk: set[str] = set()
+
+    def queue_legacy_batch() -> None:
+        if not legacy_batch:
+            return
+        matching = index.verify_transcript_layout(
+            {path: chunks for path, chunks, _ in legacy_batch}, remember=not dry_run,
+        )
+        for row in legacy_batch:
+            if row[0] not in matching:
+                pending.append(row)
+                transcript_paths.add(row[0])
+        legacy_batch.clear()
+
     scanned = 0
     for md in index_paths.iter_index_markdown(vault_root):
         if not index_paths.is_embeddable_path(md):
@@ -3073,15 +3098,26 @@ def index_incremental(
             continue
         scanned += 1
         seen_on_disk.add(page.rel_path)
-        prior = row_mtimes.get(page.rel_path)
+        prior, verified_layout = row_states.get(page.rel_path, (None, False))
+        row = (page.rel_path, chunks, page.mtime)
+        timed = transcript_passages.is_source(page.rel_path) and transcript_passages.is_transcript(page.search_body)
         if prior is not None and page.mtime <= prior + 1.0:
-            continue  # sidecar already current for this file
-        pending.append((page.rel_path, chunks, page.mtime))
+            # Same-mtime Sources can still have legacy paragraph chunks.
+            if timed and not verified_layout:
+                legacy_batch.append(row)
+                if len(legacy_batch) == 16:
+                    queue_legacy_batch()
+            continue
+        if timed:
+            transcript_paths.add(page.rel_path)
+        pending.append(row)
+
+    queue_legacy_batch()
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
     stale = sorted(
-        {rp for rp in row_mtimes if rp not in seen_on_disk}
+        {rp for rp in row_states if rp not in seen_on_disk}
         | {rp for rp in unit_parent_states if rp not in unit_seen_on_disk}
     )
 
@@ -3124,7 +3160,7 @@ def index_incremental(
             n = len(chs)
             replacements.append((rp, chs, vectors[offset : offset + n], m))
             offset += n
-        index.upsert_batch(replacements, identity=producer)
+        index.upsert_batch(replacements, identity=producer, transcript_layout=transcript_paths)
         done_files += len(group)
         stats["chunks_embedded"] += len(flat)
         log_fn(

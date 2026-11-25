@@ -17,10 +17,10 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from importlib import metadata
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from .. import state_paths, vault, writer_lease
+from .. import install_info, state_paths, vault, writer_lease
 from .. import structured_collections as collections
 from ..cli_ops import OpError
 from . import admission, authority, connection, inventory, legacy, legacy_import
@@ -38,8 +38,8 @@ UPGRADE_REQUIRED = "COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED"
 
 def _running_release() -> str:
     try:
-        return metadata.version("exomem")
-    except metadata.PackageNotFoundError:
+        return install_info.installed_version()
+    except PackageNotFoundError:
         return "the release running here (its installed version is unrecorded)"
 
 
@@ -65,7 +65,7 @@ def coordinator_capability(fence_client=None) -> dict:
         raise connection.CollectionStoreError(
             UPGRADE_REQUIRED,
             f"the writer-lease coordinator does not serve the {writer_lease.COLLECTION_STORE_CAPABILITY} "
-            f"store fence; upgrade it to Exomem {_running_release()}, the release running here") from error
+            f"store fence; upgrade it to Evermatter {_running_release()}, the release running here") from error
     return {"status": "supported", "capability": fence.capability, "enrolled": fence.enrolled}
 
 

@@ -12,7 +12,7 @@ Read `CONTRIBUTING.md` before committing: use the pinned project-local uv writer
 
 ## CI load: the PR tier is the merge evidence
 
-`ci.yml` runs one fast tier per pull request — including a py3.13 changed-tests job — and the Full tier on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs ~800 runner-minutes across 147 jobs. Do not dispatch `ci.yml` on a feature branch to pre-verify a merge. The exception is proving a fix to a check that exists only in Full; then dispatch once, on the final head, not per push. A Full-only failure that reaches `main` is fixed forward there.
+`ci.yml` runs one fast tier per pull request: the integration jobs plus the pull request's own changed test modules and the repository-wide guard modules in `tests/pr_guard_modules.txt` (core on py3.11 and py3.13, harness on py3.11), without the core and harness shards. Every push to `main` runs all those shards on py3.11, and the Full tier runs on `main`, on schedule, for release evidence and on manual dispatch. Hosted runners are a shared finite pool and the queue is saturated; one Full run costs an estimated 490 runner-minutes across about 92 jobs (815 across 148 before the latency suites moved, measured 2026-11-15 to 2026-11-22). Latency measurements run nightly in `latency-measurements.yml` and do not gate releases. `ci.yml` refuses a Full dispatch on a feature branch. To prove a fix to a check that exists only in Full, fix forward on `main` and dispatch Full there. A failure that only the shards on `main` or the Full tier catch is fixed forward on `main`.
 
 ## Delegated worker tasks
 
@@ -27,7 +27,7 @@ When using `scripts/codex_task.sh`, or receiving a `.task/TASK.md` worker brief,
 
 ## Make correct agent behaviour the default
 
-When an agent misuses Exomem output or tells the user too much, fix Exomem first. Do not close the defect as agent error alone.
+When an agent misuses Evermatter output or tells the user too much, fix Evermatter first. Do not close the defect as agent error alone.
 
 - Lead every tool result with a short outcome that the agent can repeat to the user as is.
 - Put error codes, request ids, fingerprints, retry history and indexing state in a clearly marked diagnostics part.
@@ -51,7 +51,7 @@ to an allowlist.
 **Pin every install line.** Public-skill reviewers reject instructions that
 install or run code from a mutable source. A shipped doc that shows an install
 or run command for the package writes `<exomem-release>` where the version goes
-(`pip install exomem==<exomem-release>`, `uvx exomem@<exomem-release>`); every
+(`pip install evermatter==<exomem-release>`, `uvx evermatter@<exomem-release>`); every
 packaging and install path fills it with the release it ships, from
 `package_skills.release_version()`. Never write `exomem@latest`, an unversioned
 `uvx exomem`, or `pip install exomem` without that placeholder — the OpenAI
@@ -69,7 +69,11 @@ its non-optional tasks are complete, synchronize its delta into the current
 canonical specs and archive it with `openspec archive` in the same delivery.
 Never archive by moving the directory. Preserve requirements and scenarios added
 by later work when refreshing a stale `MODIFIED` block, and run
-`openspec validate --all --strict` before and after the archive. A task-complete
+the strict gate (`source infra/tool-versions.env` then
+`node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --`,
+which fails only on warnings missing from `openspec/strict-baseline.json`;
+regenerate that baseline only to shrink it or to carry a renamed requirement)
+before and after the archive. A task-complete
 active change is archive debt and CI rejects it.
 
 ## OpenSpec is the sole specification system

@@ -870,7 +870,7 @@ _BOOTSTRAP_HEADER = f"""\
 #
 # Two independent axes: `{_KIND_SECTION}` is what an artifact IS, `{_DOMAIN_SECTION}`
 # is what it is ABOUT. Both are OPEN — any slug-shaped key is accepted and
-# auto-registers here on first use. Exomem ships useful defaults in code; this
+# auto-registers here on first use. Evermatter ships useful defaults in code; this
 # file records what your vault added, and lets you override how any key is
 # displayed or where it is filed.
 #

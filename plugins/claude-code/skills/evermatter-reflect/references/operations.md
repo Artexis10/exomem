@@ -1,0 +1,1137 @@
+# Operations
+
+Detailed specs for the Knowledge Base operations. Read on first use of an operation.
+
+## Plain-language routing
+
+Agents should hear user intent first and choose the product command second.
+Canonical tools remain the exact implementation leaves underneath product
+commands.
+
+| Simple action | User intent | Product route |
+|---|---|---|
+| `ask` | Ask what Evermatter knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
+| `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
+| `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |
+| `record` | Capture, correct, inspect, or query a durable observed event or current state | `query_records` or `add_record` for a configured Record collection |
+| `review` | Review stale, contradictory, or unprocessed knowledge | `list_review_items` and `decide_review_item` |
+| `connect` | Suggest links or return graph, evidence, provenance, and history context | `inspect_memory` and `manage_memory`; use `operation="context"` for the unified read-only view |
+| `adopt` | Assess or import an existing vault safely | `inspect_memory(operation="imports.scan")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | Check or repair vault health | Remote tools audit and preview. A remote `fix`, `backfill-ids`, `capture-metadata`, `reconcile` or `convert-originals` runs as a job: preview (itself a job; its receipt holds the `plan_id`), start with that `plan_id` and a `why`, follow with `maintenance-job`, cancel with `maintenance-job-cancel`, and read the receipt ([vault care](vault-care.md)). Structured-file, tag-variant and curation writes run in one call |
+| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `inspect_memory` and `manage_memory`; inference is proposal-only and saving is explicit |
+
+Do not ask users to choose internal folders, graph sidecars, or page types unless
+the distinction changes the write. Translate back to simple language when
+reporting results.
+
+## Durable personal baseline routing
+
+A stable preference, recurring routine, historical baseline, or durable affiliation
+is eligible only when both stability or recurrence and reusable comparison,
+interpretation, or decision value are clear. Attach a facet or affiliation to a
+uniquely resolved Entity; otherwise preserve one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Do not create an Entity, collection, or
+schema from eligibility alone: concise observations and narrow additive facts obey
+`proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
+accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
+confirmed `restructure_execution`.
+
+For a resolved Entity, add the facet as one compact unit line under `## Observations`
+with `edit_note(action="replace_section", heading="Observations", create_missing=true,
+new_text="<unit line>", position="append", why=...)`; `add_observation`
+does not write an Entity. A facet field that the entity type declares goes through `patch_frontmatter`.
+
+## Planning
+
+`query_plan_items`, `add_plan_item` and `edit_plan_item` are the public tools for human-owned
+intended future state: read items, add one, and change one. The `plans` operations of
+`inspect_memory` (`plans.inspect`, `plans.validate`, `plans.history`) and `manage_memory`
+(`plans.create`, `plans.revise`, `plans.rebaseline`) cover a collection's contract. Each tool takes its
+own fields; `read_instructions(topic=<tool>)` shows them.
+Use `query_plan_items()` without `collection` to discover Planning
+collections. Copy a returned `manifest_path` to inspect one collection.
+Canonical Planning is one ordinary Markdown item file per plan under
+`Knowledge Base/Planning/`; the authored horizon is never auto-rebucketed.
+Outcomes, initiatives, and work items may form an explicit hierarchy; areas are
+separate membership. Records evidence and external execution pointers remain
+opaque. Review, dashboards, and UI workflows are separate product work.
+
+The plan UUID is durable identity. A manifest may render a human filename from
+stable descriptive fields and a readable managed body from canonical
+frontmatter. Keep status, priority, horizon, and other mutable state out of the
+filename. Existing UUID-named collections move only through
+`inspect_memory(operation="maintenance.structured_files", arguments={'collection': ...})`: inspect the
+read-only preview, resolve every collision or immutable/withheld inbound-link
+blocker, then apply the exact `plan_id` and `source_snapshot` with a reason.
+
+## Governed curation
+
+MCP and REST expose curation `work-item`, `preview`, and `status` through
+`inspect_memory`, and proposals, apply, resume and compensation through
+`manage_memory`. The CLI `manage_memory` command with `mode="curation"` runs
+the same actions. Retain the grouped `curation_action` selector and the returned
+identifiers on either route.
+
+Use `inspect_memory(operation="curation.work_item")` when one reviewed structural improvement
+spans multiple compiled notes or combines typed creation, relation acceptance,
+edit, supersession, or move. The active agent remains the
+semantic author: `curation_action="work-item"` assembles only explicit refs and
+paths, and `curation_action="propose"` validates the agent-authored typed plan.
+`read_instructions(topic="curation.propose")` returns worked split, move and
+rehome plans.
+
+A `move` step records the old path in the page's `moved_from`, so old links
+keep resolving. Its optional `fields` patch sets pointer fields only. The
+`repoint-links` steps, last in the plan, rewrite every link to the plan's
+moved pages. One step rewrites every referrer in one batch. Several steps
+each name their `referrers`, and no page is named by two steps. In a Source
+or Evidence page a step changes only the link span. Preview lists one outcome
+per referrer. Curation refuses `delete` and `recover`.
+
+Call `curation_action="preview"` once for the immutable plan and show its exact
+actions, blockers, fingerprint, and compensation classes. That review is
+advisory. Execution is confirm-required: obtain one explicit confirmation bound
+to the returned plan id and fingerprint, then call `curation_action="apply"`.
+Each apply or `curation_action="resume"` request runs the steps its time
+allows. Follow `next_action`: continue resume automatically while it is
+`resume`, and otherwise stop and report `partial` or `blocked` truth.
+
+Compensation is a separate history-preserving plan. Derive it with
+`curation_action="propose-compensation"`, preview it, and obtain a fresh exact
+confirmation before `curation_action="apply-compensation"`. Never treat
+compensation as rollback, reuse a forward approval, grant standing approval, or
+route Planning, Records, Sources, Evidence, workflow contracts, schema/admin
+paths, or trash internals through curation page steps. The two fold steps in
+[vault-care](vault-care.md#curation) are the only steps that retire a
+duplicate Source or Evidence page, or an episode's old recap files.
+`repoint-links` and an `edit` with `patch_frontmatter` of a registered pointer
+field change only the pointers of a Source or Evidence page, never its content.
+
+## Records
+
+`query_records`, `add_record` and `edit_record` are the public product tools for human-owned
+observed state: `query` reads a collection, `append` adds an event, `update` changes one item. The
+`records` operations of `inspect_memory` (`records.describe`, `records.validate`, `records.inspect`,
+`records.history`) and `manage_memory` (`records.create`, `records.revise`, `records.rebaseline`) cover a
+collection's contract. Do not replace them with storage-specific tools. `describe` returns the complete contract;
+`validate` is read-only preflight; `inspect` is report-only; `query` returns a
+bounded current view; `create` explicitly creates a reviewed collection contract;
+`append` adds a new event; `update` changes one item with current stale-write
+guards and a concise reason; `revise` changes a validated manifest under its
+current guards; and `rebaseline` explicitly records a valid direct-edit audit
+gap. Remote callers preview generic derived-index repair with
+`inspect_memory(operation="maintenance.reconcile", arguments={'dry_run': true})` and run it as a
+maintenance job with the preview's `plan_id` and a `why` (see vault care).
+
+Route durable observed events, current state and recurring structured work here without
+waiting for a magic verb. When exactly one compatible existing collection accepts a
+sufficiently identified observation, the active engagement policy may append or update it
+and the agent reports the mutation. If collections compete or identity, date, provenance,
+or ownership is unclear, ask one focused question. If no collection fits and the work's
+identity, type and scope are clear, create a minimal collection under the served
+`proactive_capture` disposition: when it is `silent`, `add_record` with `new_collection`
+creates it from the first row in one call; when it is `advisory`, propose it and create it
+with `create` after one inline confirmation of your named proposal. When a bound of the
+minimal collection does not hold, the server refuses `AUTOMATIC_CREATION_REFUSED`, names the
+bound, creates nothing and returns the create call to make after the user confirms. A later
+fact that needs its own field is added with `new_fields` on `add_record` or `edit_record`
+under the same disposition, never put into another field.
+[Records and Planning](planning-records.md) has the whole procedure. For a collection you
+design yourself use `describe -> validate -> create -> inspect -> append`; for maintenance
+use `validate -> revise` or `inspect -> rebaseline`.
+
+Records stay hand-editable. Canonical data remains ordinary files:
+an append-heavy chronological Markdown log, one Markdown file per item, or a
+CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
+is no hidden database, and indexes and generated views are rebuildable from the
+canonical files. Datasets are query-only in this delivery. A migration between
+shapes is explicit and provenance-preserving; a derived view never becomes
+canonical merely because it was generated.
+
+### Retiring a hand-kept back-link field
+
+A collection that kept a manual list of "which rows link to me" can retire it
+once a declared forward reference answers the same question:
+
+1. Declare the forward `references:` entry on the source collection and revise it.
+2. Call `read_records(operation={"kind": "inspect", "collection": <target>})` and confirm the bounded `inbound.declarations` list names the declaration with `state: ready`; when the report truncates, `truncated` and `total` say so.
+3. Query the target with `related: [{inverse: {collection: <source id>, field: <dotted name>}}]` and compare its `items` against the back-link field's contents.
+4. Remove the field from the target manifest with a `revise` under current guards.
+
+Expected result: the back-link field is gone; inverse expansion answers the same
+question and stays current as source rows change.
+
+Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
+The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
+their normal **Templates → Insert template** workflow. Evermatter does not require
+Obsidian or a plugin and does not edit `.obsidian`; editing a template never
+rewrites historical records.
+
+For Markdown-item collections, UUIDs remain durable identity while a validated
+`item_filename` recipe controls the human file label. `item_presentation` and
+the compatible Records presentation recipe own only their marked generated
+block; frontmatter remains canonical and authored Markdown outside the markers
+is preserved byte-for-byte. Use a descriptive field such as title for a
+filename, not event status or another frequently changing value. Migrate a whole
+existing collection through the same preview/apply `structured-files` mode used
+by Planning; do not rename item files by hand because inbound Obsidian links and
+graph edges must move in the same guarded batch.
+
+An existing `type: tracker` without an adjacent reviewed collection manifest is
+inspectable only at collection level. Do not guess its item grammar or rewrite
+it. Adding an adjacent manifest opts into query and mutation while preserving the
+tracker, archive, notation, and templates; new agent-authored log items receive
+prospective stable markers, while old items remain as they are. Removing the
+manifest leaves the tracker manually usable. Fresh queries see direct editor
+changes; `inspect` reports drift and audit gaps without repairing canonical
+files. Agent history is bounded and may be incomplete after manual change.
+
+Structured reads and reductions pass Records governance before rows or
+aggregates are disclosed. A sensitive aggregate cannot reveal filtered data.
+High-volume raw items stay out of ordinary semantic recall; find the collection
+or compiled Note, then use a bounded Records query. Planning links are opaque
+references plus query descriptors only: no inferred progress, success, health
+judgment, or automatic Planning mutation.
+
+## Index and log discipline (applies to every write)
+Every confirmed write that creates, moves, or supersedes a page performs two
+bookkeeping updates:
+
+1. **`index.md` updates** — the top-level catalog and the affected subfolder
+   catalog. Catalog format only: header, page list, one-line descriptions. No
+   prose orientation.
+2. **`log.md` append** — one entry appended to the top-level `log.md`:
+
+   ```
+   ## [YYYY-MM-DD] <op> | <title>
+   <one-line description in present tense>
+   ```
+
+   `<op>` is one of: `add`, `note`, `link`, `preserve`, `replace`, `edit`,
+   `audit`. (`find` doesn't append because it's read-only.)
+
+These two updates are non-negotiable for every write operation below. Read-only
+operations such as `read_instructions`, `find`, `get`, `suggest_links`, `graph_context`, `suggest_relations`, `overview`,
+`inspect_memory`, `query_data`, `provenance_report`, and `download` do not
+update indexes or logs. The per-operation specs note their primary writes; the
+index + log update is implicit.
+
+## Stable identity and references
+
+Every new governed page and evidence Markdown sidecar receives an immutable
+`exomem_id` UUID. Writers return both its current vault-relative `path` and a
+canonical `exomem://memory/<uuid>` reference. Commands that accept a governed
+page identifier accept either form. In normal user-facing prose, show the note
+title by default and do not expose the raw canonical ref by default. Add the
+current vault-relative path for clarity or disambiguation; if the title is
+missing or unusable, use the path or file name as the visible fallback.
+
+Keep the canonical ref for tool arguments, durable machine state, and
+machine-readable automation so identity survives moves and renames. Show the
+raw ref only when the user explicitly asks for it or the identifier itself is
+being inspected or debugged. Do not embed the canonical ref as a Markdown link
+target when a client could expose its UUID; use a plain title-first citation.
+
+Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
+`inspect_memory(operation="maintenance.backfill_ids")` is requested. That mode is a dry run by
+default. It writes only with `dry_run=false`; a remote client runs it as a maintenance job
+with the preview's `plan_id` and a `why`. Duplicate and malformed IDs are
+reported by audit and make canonical resolution fail rather than selecting an
+arbitrary page.
+
+## Mutation terminal and edit compatibility
+
+Product mutations default to a compact committed terminal containing `ok`,
+`status`, `mutated`, `path` or `paths`, `request_id`, `receipt_id`, and
+`warnings_count`; a supported caller-supplied idempotency key is echoed as
+`idempotency_key`. A write that warned also returns `warnings`, bounded to 8
+entries of 300 characters each; `warnings_count` stays authoritative, so a
+shorter list means the remainder was trimmed. Upload receipts carry their
+warnings as per-file rows under `files`, and a terminal rebuilt from a portable
+receipt reports only the count, since that receipt retains no leaf content.
+Corpus write advisories include a review ref and complete 24-character signal
+fingerprint in their warning text. `decide_review_item(review_item=<that ref>,
+decision="dismiss", why=...)` binds the fingerprint the server last showed (dismiss
+requires a reason); the advisory re-emits when the counterpart changes or the
+written page changes the detected signal class.
+
+A compiled-note write may additionally return `structure_suggestion` with `kind`
+`note_cohesion` while the written page has reached a size step and that step is
+unanswered. It carries `units`, `step_units`, `next_step_units`, the review item's
+`ref` and `fingerprint`, and one `question`. Every value is derived from the page
+named in the same response; it never reports a path, title, or count belonging to
+another page. It is advisory only: it is absent when no step is open, it never
+changes `status`, `mutated`, `warnings_count`, mutation identity, or replay, and a
+failure to compute it omits the field rather than affecting the write. The runtime
+never creates, moves, renames, or deletes anything as a result.
+
+The same field has kind `ownership` while the written page is asked whether it belongs
+in its project and that question is unanswered. It carries the review item's `ref`,
+`fingerprint` and `id`, and one `question`. The question holds the ownership test and the
+call that keeps the page where it is; it never reports a path, title, or count belonging
+to another page. It has the same advisory limits, and a response carries at most one
+`structure_suggestion`, with the rename one first, then the ownership one. The `structural_suggestions`
+delegation class and the `ownership_review` family disposition both withhold it.
+
+`detail="full"` adds the existing leaf result under
+`diagnostics`, or under `diagnostics.leaf_result` when the reply also lists
+`diagnostics.derived_components`. The detail choice
+is removed before mutation identity is calculated, so it cannot create a second
+write or change which stored terminal a replay receives.
+
+Warming, busy, acknowledgement-pending, and committed-acknowledgement-uncertain outcomes
+remain structured errors. (A file of a committed batch that failed with `MUTATION_BUSY`
+is not such an error; see `mutation-results.md`.) Retrying must retain the same identity and payload:
+wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pending payload; and after
+`MUTATION_COMMITTED_ACKNOWLEDGEMENT_UNCERTAIN`, reconcile and retry only with the
+same identity rather than creating a new write.
+
+`MUTATION_WARMING` means the restart-time semantic corpus is still being built.
+It never holds the mutation boundary and never means the Evermatter tool is disabled;
+retry the unchanged call after `retry_after_ms`.
+
+`edit_note` is one tool. A call supplies `note` (a title), `why` and one `action`; each
+action takes its own fields, and `read_instructions(topic="edit_note")` shows them:
+
+- `replace_body`: `body`, with the page `id` as `note` to guard against a concurrent
+  edit; optional `tags`.
+- `set_tags`: `tags`.
+- `replace_text`: `old_text`, `new_text`; optional `replace_all`, or `edits` for several
+  changes in one commit.
+- `replace_section`: `heading`, `new_text`; optional `position` and `create_missing`.
+- `set_fields`: `fields`, one field and its value per call.
+- `fill_row`: `row`, `take`; optional `overwrite`.
+- `edit_observation` and `remove_observation`: `observation`, the unit id from
+  `read_page(part="units")`.
+- `supersede_observation`: `unit` (the unit id or `anchor` from
+  `read_page(part="units")`) or `span` (a list item's exact text); `text`,
+  `category`, `why`; optional `kind`, `as_of`, `tags`, `context`, `links`.
+- `assess_observation`: `unit`, `verdict`; optional `check_by`, `links`.
+- `link_observation`: `unit`, `links`; adds typed relations to the claim.
+
+Every action also takes `preview`, `detail` and, for a note that links nothing,
+`unlinked_reason`. The server reads the page again under the writer lease, so no call
+carries a content hash.
+
+---
+
+## read_instructions
+
+**Goal:** Return a portable, versioned operating contract so generic MCP clients
+can use Evermatter without relying on a client-specific skill.
+
+### Triggers
+- A new MCP session in ChatGPT, Cursor, Codex, Gemini, Windsurf, or another
+  client that only receives tool schemas.
+- The agent needs to understand preferred workflows, defaults, retrieval modes,
+  upload semantics, or performance diagnostics.
+- A skill-aware client is diagnosing retrieval speed or comparing CPU/GPU/low
+  power behaviour.
+
+### Profiles
+- `profile="compact"` — terse operation map and defaults. Use for normal startup.
+- `profile="full"` — startup contract plus workflow guidance and examples.
+- `profile="diagnostics"` — includes timing/performance guidance, search profile,
+  compute mode, backend/cache hints, rerank state, and recommended debug knobs.
+
+### Procedure
+1. Call once at the beginning of a generic MCP-client session.
+2. Treat the returned contract as behavioural guidance for tool choice: search
+   before absence claims, use compiled notes for durable conclusions, preserve raw
+   evidence separately, and prefer supersession over deletion.
+3. Use diagnostics output when interpreting search latency. Do not label Evermatter
+   slow from a single CPU rerank measurement; identify whether rerank, embedding
+   backend, compute mode, cache state, or cold start dominated the run.
+4. Read `active_capabilities.available_product_tools` as the commands exported
+   by this adapter and do not recommend absent tools. Its
+   `active_capability_sha256` identifies that filtered surface. The canonical
+   MCP fingerprint separately identifies packaged full MCP discovery; it is not
+   proof that every adapter exposes every packaged command.
+
+### Writes performed
+None.
+
+---
+
+## add
+
+**Goal:** Capture raw input as an immutable source.
+
+### Triggers
+- "save this," "log this," "capture this"
+- "add this to my KB / vault / notes"
+- "I want to remember this" (oblique — confirm before proceeding if context is thin)
+
+### Inputs to gather
+- The raw content (pasted text, URL, file reference, conversation excerpt)
+- **Source kind** (`source_kind`, also accepted as `source_type`) — what the
+  artifact *is*, usually inferable: pasted transcript → `session`; URL or article
+  body → `article`; book excerpt → `book`; academic paper → `paper`; video
+  transcript → `video` with `url` set; a compiled investigation → `research-report`;
+  a bill or order confirmation → `invoice-receipt`; an authority's published
+  guidance → `official-guidance`; a data dump → `dataset-export`. The vocabulary
+  is **open**: if the right label is not listed, use it anyway — Evermatter registers
+  it. Ask only if genuinely ambiguous.
+- **Domain** (`domain`, optional) — what the artifact is *about*, on an axis
+  independent of kind: `travel`, `health`, `finance`, `equipment`, `software`, or
+  anything else the user's world actually contains. Equally open.
+- **Projects** (`projects`, optional) — the work this source serves. A source may
+  serve several, and this never changes where it is filed.
+- Display title, plus an optional explicit lowercase ASCII `slug` when the
+  caller wants to control the portable filename
+- Optional: tags, why-captured one-liner. Tags are secondary labels — do not use
+  them to carry kind, domain, or project, which have their own arguments.
+
+### Procedure
+1. Classify the kind and, when it is clear, the domain. The destination follows
+   deterministically as `Sources/<Kind>/[<Domain>/]` — do not choose a folder
+   directly. There is no fallback kind: when no known kind fits, name a new
+   slug (see `frontmatter.md` § source).
+2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
+   lowercase ASCII, ≤ 100 chars, unless the vault sets the `title` filename
+   style. An explicit `slug` controls only the filename; the Unicode display
+   title is stored unchanged.
+3. Write file with full frontmatter per `frontmatter.md` § source. `ingested_into: []`.
+4. Body: `# <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
+5. Update `Sources/index.md` with a new line.
+6. Report path written and offer: "Compile a note from this?"
+7. If the result carries a `structure_suggestion` of kind
+   `source_classification_debt`, the vault holds sources nobody has given a
+   kind, counted with their folders. Offer once per conversation to classify
+   them: read each, choose its kind, and reclassify it.
+
+### Edge cases
+- **Same text again.** A text capture whose text a readable Source already holds is not stored again. The result carries `capture_outcome: "reused"`, `duplicate_of` naming the existing Source, and `fields_not_applied`: one row (`field`, `provided`, `kept`) for each field you passed whose value differs from the existing Source's, such as a title or a tag. Nothing is written or merged, so tell the person what the existing Source did not take. A capture that carries its own identity (adoption, correction or episode fields) always writes.
+- **Same URL, other text.** The capture writes a new Source and returns a `same_url` advisory: `count` and up to five earlier Sources (`ref`, `path`, `title`, `captured`). Surface it when the person may want the earlier capture linked or superseded, and keep going otherwise.
+- **`duplicate_check_unavailable`.** The check could not run, so the capture was stored as new. The audit finds any duplicate later ([audit-checks](audit-checks.md#duplicate-content-and-source-urls)).
+- **Very long content.** > ~50KB raw text: capture an excerpt (first ~5KB + "..." + last ~2KB), put full URL in frontmatter, note in body that it's an excerpt.
+- **Sensitive content.** If the source contains anything that looks like credentials, API keys, or unrelated PII: refuse capture, surface the issue, ask for a cleaned re-paste.
+
+### Writes performed
+- One new file in `Sources/<Kind>/[<Domain>/]`
+- One updated `Sources/index.md`
+- `_Schema/source-taxonomy.yaml` and `_Schema/project-keys.yaml` gain an entry
+  when the capture introduced a new kind, domain, or project key
+
+---
+
+## note
+
+**Goal:** Compile a structured note from raw input or accumulated thinking. Routes
+to one of six compiled-page types: `research-note`, `insight`, `failure`,
+`pattern`, `experiment`, `production-log`.
+
+### Triggers
+- "compile this into a note," "make a note on this," "write this up," "distill this"
+- "log this experiment," "I'm starting a 30-day X protocol"
+- "log this batch," "add this episode," "record this launch"
+- Often follows immediately after an `add`.
+
+### Inputs to gather
+- Governed Source/Evidence paths to compile from. Capture external originals
+  first. URLs, connector IDs, remote file IDs, scripts, excerpts, and derivative
+  summaries remain provenance or working material; they cannot directly satisfy
+  `sources:`. In-conversation or experiential thinking with no external source
+  uses an honest empty list.
+- Note type. Ask if ambiguous. Key distinctions:
+  - **Research vs experiment:** synthesizing secondary sources (research) vs running a protocol with primary data (experiment).
+  - **Research vs production-log:** secondary synthesis (research) vs documenting the making of a primary creative artifact (production-log).
+  - **Experiment vs production-log:** hypothesis → finding (experiment) vs artifact → engagement metrics (production-log).
+- For research notes: scope (a registered project key — see SKILL.md § Research scope keys). Resolve it from source, context and registry; ask only if a material ambiguity remains.
+- For experiments: domain. Plus hypothesis, protocol summary, duration, started date.
+- For production-logs: medium. Plus projects, host, editor (if known), recording / publish status.
+- Human-facing title (Unicode is fine), plus an optional explicit lowercase
+  ASCII filename `slug` that overrides the derived name; propose the slug
+  separately only when the name must be something other than the title.
+
+### Procedure
+1. Determine note type and target folder:
+   - `research-note` → `Notes/Research/<scope>/`
+   - `insight` → `Notes/Insights/`
+   - `failure` → `Notes/Failures/`
+   - `pattern` → `Notes/Patterns/`
+   - `experiment` → `Notes/Experiments/<domain>/`
+   - `production-log` → `Notes/Productions/<medium>/`
+2. Generate filename. Unless the vault sets the `slug` filename style, the name is
+   the title with only filesystem- and link-unsafe characters removed or replaced
+   (`#`, `[`, `]`, `^`, `|`, `/` and a leading dot), cut at 100 characters:
+   - Research / insight / failure / pattern: `<Title>.md` (no date prefix).
+   - Experiment / production-log: `YYYY-MM-<Title>.md` (start month prefix).
+   A reply warning `FILENAME_ADJUSTED` names the file name when it differs from
+   the title; link to the note by that name. A reply warning
+   `title_check_unavailable` means no title index could answer, so the name came
+   from its folder alone. Another page with the same title may exist, and a bare
+   link to that title then reaches this note. Link to this note by its file name.
+   A reply warning `FILENAME_STYLE_UNPARSEABLE` means `_Schema/project-keys.yaml`
+   could not be parsed, so the page took the default style. Tell the person to
+   fix that file.
+   Under the `slug` style the name is a lowercase ASCII slug that may use
+   language-blind transliteration; for a non-Latin title, prefer an explicit
+   meaningful ASCII slug. The real title is always stored in frontmatter and the H1.
+3. Resolve every non-empty `sources:` entry to an authorized captured Source or
+   Evidence page. If an external original is missing, capture it explicitly and
+   then cite the returned governed path or stable ref. If the original cannot be
+   recovered, remove the unsupported claim; never reconstruct it from the draft.
+4. Draft frontmatter, page-type sections and reviewed connections; the candidate is ready for the governed writer.
+   Reuse established context. Use `suggest_links` only for missing candidates and
+   `suggest_relations` when directional meaning remains unresolved. Put accepted
+   note-level edges under `## Relations` as `- relation_type [[Target]]`; keep
+   claim-specific edges in semantic-block `relations:` metadata.
+5. Check the [write authority procedure](writing.md#when-to-ask-vs-when-to-proceed); present content and obtain confirmation only when required.
+6. When authorized, commit through `create_note`; the note and source back-references publish in one guarded batch.
+   An unresolved citation or concurrent source change refuses the whole write.
+   The writer updates the relevant subfolder `index.md`.
+7. Report paths written and any body wikilinks that target nonexistent pages
+   (offer to create stubs via `link`).
+
+Upgrades and reconciliation never rename existing pages. Filename migration is
+an explicit reviewed operation because paths are graph addresses.
+
+### Edge cases
+- **No external source.** Original, experiential, or in-conversation thinking
+  may compile with `sources: []`. Do not create a performative source merely to
+  avoid an empty list, and never invoke capture as a hidden side effect.
+- **Spans multiple projects (research-note).** If a research note touches multiple projects, that's a sign it might be an insight or pattern instead. Surface the option.
+- **Topic already covered.** Use `find` first; if a similar note exists, ask whether to extend it (in-place edit) or supersede it.
+- **New scope not in the project list.** Project keys are an open set — they auto-register on first use. Just pass the new slug-shaped key; the writer appends it to `_Schema/project-keys.yaml` and creates the matching `Notes/Research/<Folder>/`. A typo guard rejects near-misses. Pass `project_category` to bucket the new key.
+- **New experiment domain or production medium.** If you name a domain/medium that isn't yet a subfolder, propose creating it; don't auto-create.
+- **Experiment ongoing / production mid-lifecycle.** When logged at start (vs written up after conclusion), later sections will be sparse and that's expected. Don't insist on filling them.
+
+### Writes performed
+- One new file in `Notes/<type>/...`
+- Updated `ingested_into` on each cited source
+- Updated subfolder `index.md`
+
+---
+
+## recurring entity lifecycle
+
+At balanced or maximal prominence, spend one ordinary recurrence read once per session,
+on the first turn after `read_instructions`, after primary work and before the final response:
+`list_review_items(queue='due', categories=['entity_recurrence'], limit=3)`.
+Do not repeat it on later ordinary prompts. The response is deterministic
+evidence for the active agent, not an Entity decision. It returns at most three
+candidates and eight contexts each; absence from default attention or due-state
+does not mean the explicit category is clean.
+
+For a candidate, resolve exact and alias matches, stop on ambiguity, hydrate a
+single match before considering a duplicate, and promote only a stable reusable
+no-match. Open the exact review ref with
+`inspect_memory(operation="curation.work_item", arguments={'curation_action': 'work-item', 'review_ref': ...})`; the returned signal, context batch, target, grammar, and
+registry bindings must round-trip unchanged into the agent-authored plan.
+Register an unknown durable kind separately through guarded
+`manage_memory(operation="schema.save_entity_types")`, then refresh; curation never
+edits `_Schema`.
+
+After one separately confirmed hydration batch reaches a terminal receipt, one
+same-identity curation `work-item` with that `review_ref` and the next
+`hydration_recheck` ordinal may expose the next batch, which needs a fresh plan
+and confirmation. Cap one session at eight hydration mutations and eight rechecks;
+the eighth recheck is closure-only and any ninth batch waits for the next
+session. One unrelated Entity, accepted-relation, or registry mutation permits
+one general recheck. Stop on refusal, ambiguity, target/registry change,
+non-terminal outcome, closure, or user exit. Off/light are explicit-only. If the
+explicit category route is unavailable, skip it—never substitute a local scan,
+model, embedding, or due-state claim.
+
+## create entity
+
+**Goal:** Create a registered typed entity without duplicating an existing identity.
+
+### Triggers
+- "create an entity for X," "add a concept page for Y"
+- "this references [[X]]" where X doesn't exist yet (offered as a side-effect of `note`)
+- "create a durable page for this recurring organization"
+
+### Inputs to gather
+- Entity name (becomes filename — see `page-types.md` § entity naming)
+- Entity type — a stable ID from the active entity registry returned by `read_instructions`.
+- For new entities: a one-paragraph summary; relevant frontmatter fields.
+- For updates: the field or section to change.
+
+### Procedure
+1. Read the active entity registry and selected knowledge-pack priorities.
+2. Call `inspect_memory(operation="connections.resolve_entity", arguments={'name': ...})`. If one active entity matches, use a guarded
+   `edit_note` correction or the canonical relation workflow instead of create.
+3. If no entity matches and the identity is stable, and central or recurring,
+   and useful beyond this source, call `manage_memory(operation="connections.create_entity")`.
+4. Draft the page using `page-types.md` and write under the served promotion class and current write scope.
+5. For an existing entity, show a guarded diff and update through `edit_note`.
+6. Refresh the entity index and top-level counts through the governed writer.
+
+### Edge cases
+- **Name collision / disambiguation.** Disambiguate in the filename: `John Smith (advisor).md`, `Agentic RAG (architecture).md`. Don't silently merge.
+- **Person → also a public figure.** Add `relationship: public-figure` and keep the summary factual.
+- **Decision entity.** These are essentially lightweight ADRs. Ensure `decided` date and `decision_status` are set.
+
+### Writes performed
+- One new or updated file in `Entities/<type>/`
+- Updated subfolder and top-level `index.md`
+
+---
+
+## preserve
+
+**Goal:** Capture a factual artifact in the evidence layer for long-term
+preservation.
+
+### Triggers
+- "preserve this evidence," "file this artifact," "keep this for the record"
+- Receiving a file (`.eml`, `.pdf`, `.png`, `.csv`) that needs to survive an account change, a contract dispute, or any situation where the as-received original matters.
+
+### Inputs to gather
+- The artifact (text to inline, or a binary delivered out-of-band — see below)
+- Scope — the top-level subfolder under `Evidence/` (e.g., a contract name, an incident name). Reuse the spelling of an existing folder; `food` and `Food` are one folder, and the vault re-spells to the existing one.
+- Category — a subfolder under the scope (e.g., `01 - Initial Letter 2026-05-15`). Use existing categories where they fit, spelled as they exist.
+- Optional: a descriptive filename if the original is generic.
+
+### Delivering the bytes — direct handles first, never inline through the model
+
+Binaries are never inline as a tool argument (`save_evidence` takes text
+only). Two questions, in this order.
+
+**First, which lane?** That is decided by what the artifact is *for*, never by
+what the client can carry. A transcript, article, recording, or screenshot kept
+as material to reason from is a Source. A receipt, letter, or record kept
+because it proves something is Evidence. A Source can be promoted to Evidence
+later, with a stated reason, when it turns out to be proof-bearing; the reverse
+is refused, so routing to Evidence "just in case" is the one mistake that
+cannot be undone.
+
+**Then, which channel?** Pick by client capability:
+
+- **When the client can provide file handles:** call
+  **`save_source(title="...", source_kind="...", files=[{"download_url": "...", "file_id": "..."}])`**
+  for raw material, or
+  **`save_evidence(scope="...", category="...", files=[...])`** for
+  proof-bearing artifacts. Same handle shape either way. Use one call for the
+  whole batch. A successful response contains the stored path, `size`, and
+  `hash`; never treat an upload token as proof that bytes landed.
+  When you keep a handed file only for safekeeping and nothing in it warrants a
+  note, pass `options.custody_only: true`; the reply says so, and a later note
+  that cites it takes it off the custody list.
+
+- **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
+  `operation-routing.md` ("A shared file that is evidence"). It needs no user token
+  and works on Evermatter Cloud, which accepts no other upload, and on a personal server.
+
+- **Without file handles, on a personal server:** request
+  `upload_files(lane="source")` for raw material, or
+  `lane="evidence"` for proof. The short-lived token fixes that lane.
+  Only where the runtime holding the file can reach `upload_url`, multipart-POST
+  each attached file there with `Authorization: Bearer <token>`.
+  For Source, send `file`, `source_kind`, and a clear `domain` when known;
+  `title` and `filename` are optional. Omitting `source_kind` leaves the capture
+  unclassified. For Evidence, send `file`, `scope`, and `category`, with optional
+  `filename`, `description`, and **`text`**.
+  **Searchability is automatic** — the server
+  transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
+  (PDFium), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
+  txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
+  frames for visual search. It fills an embedded sidecar so the binary becomes
+  findable by content. You *may* still pass a `text` field to supply your own
+  extraction; it wins and skips the server pass. Upload responses return concrete
+  metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`,
+  `content_type`) so agents can report exactly what landed. No inline bytes, no
+  pasted secret. Files must be
+  **attached** (inline-pasted images never land on the sandbox disk), and the host
+  must be in the sandbox's egress allowlist (Settings → network; one-time). If the
+  sandbox can't reach the returned URL, report that transport limitation and use
+  a supported attachment channel. Never guess an upload endpoint or read a
+  credential from the user's environment or machine.
+- **Phone / curl / a shortcut (personal server only; a Cloud cell accepts only the held
+  upload above):** multipart-POST to the exact `upload_url`
+  returned by `upload_files`
+  (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
+  `Authorization: Bearer <returned short-lived token>` (the token is **always** required).
+  Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
+- **Claude Code / desk-side:** the file is already on local disk — write it
+  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync). Copy the spelling of the folders already there.
+- **`preserve`** is text-only; binaries always go via the channels above. Every
+  write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
+
+### Cancel waiting uploads
+
+`cancel_uploads(uploads=["exomem-held:..."])` releases waiting bytes that this
+authenticated session owns. Supply the `download_url` from each held upload.
+The operation accepts the existing held-upload batch limit and returns one
+outcome per reference, in input order. It does not cancel a stored filing.
+
+A confirmed `cancelled` outcome reports released bytes. An `unavailable`
+outcome gives no ownership or expiry detail. A failed outcome names the repair
+or retry action and claims no released capacity. Retry the same references
+after a busy or incomplete result. A lost acknowledgement can make a later
+retry return `unavailable`.
+
+The local CLI uses the same transfer operation through the local listener.
+It needs the token file and port of the holding client. Another client's
+token, a static REST key, or a fresh CLI owner cannot resume that identity.
+An authorization session must also use its existing protected descriptor.
+
+### Generated artifact adoption
+
+When to adopt is the rule in [engagement](engagement.md): every generated file
+you hand the user, not a file you write in the user's own workspace. This
+section is the envelope.
+
+Choose the lane by role before transport. Material retained for later reasoning
+is a Source; a deliverable or proof-bearing output is Evidence. MIME never
+chooses. With a direct handle, pass the closed envelope on the normal command:
+
+```text
+save_source(..., files=[...],
+  options={"adoption": {"key": "...", "trigger": "handed_over", "selected_file_id": "..."}})
+save_evidence(..., files=[...],
+  options={"adoption": {"key": "...", "trigger": "handed_over", "selected_file_id": "..."}})
+```
+
+`key` is one per hand-over, such as the file name plus a version.
+`selected_file_id` names the handle you hand over; any other supplied handle
+reports `unselected` and creates no artifact. Identical bytes already stored
+report `already_stored` and are not stored again (an Evidence hand-over into another family only adds that family to the existing page). Without a usable direct handle, use
+the ordinary upload handoff and report `handoff_required` or `handoff_prepared`
+as non-committing. A token, description, or reconstructed text is not a saved
+artifact.
+
+Delivery is ordered after local Evidence adoption. If one existing compatible
+Records collection has a declared link field, append the caller-authored item
+with the optional validation envelope:
+
+```text
+add_record(collection="...", item={...}, why="...", delivery={
+    "evidence_page": "Knowledge Base/Evidence/.../<artifact>.md",
+    "link_field": "<declared-link-field>",
+    "reported_remote_ref": "<reported-platform-reference>",
+    "reported_remote_field": "<declared-string-field>",
+    "verified_remote_field": "<declared-boolean-field>"
+  })
+```
+
+The envelope validates those mapped item values; it does not set them or create
+schema. A verified remote identity additionally requires
+`platform_reference_field` plus a closed `platform_proof` containing
+`algorithm: "sha256"`, the matching local receipt `digest`, and the platform
+`reference`. Without proof, the mapped verified field must be `false`; never
+infer remote byte equality. A Source receipt cannot authorize delivery. Missing
+collection or fields is created only under the bounded collection-creation rule; a
+change to an existing collection's fields needs confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+
+### Procedure
+1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.
+2. Generate a filename if renaming: ISO date prefix where temporal anchoring matters + descriptive slug. Preserve the file's extension as-is.
+3. Drop the binary into `Evidence/<scope>/<category>/<filename>`. No frontmatter is added (binaries don't carry it).
+4. Update `Evidence/<scope>/index.md` if it tracks per-category file lists.
+5. Surface any compiled note that should now reference this artifact. Offer to add a cross-reference line.
+
+### Edge cases
+- **Sensitive content.** If the file contains credentials, API keys, or third-party PII unrelated to the evidence purpose: surface it before writing. Your own PII in your own evidence is fine — it's your data, your vault.
+- **Duplicate filename.** Surface it. Append-only means no overwrite; either rename with a `-v2` suffix or confirm it's the same file already preserved.
+- **Same bytes again.** Identical bytes are stored once in the vault. A hand-over of bytes that an Evidence page already holds, under another scope or category, adds that family to the existing page and stores nothing new: the row answers `already_stored` naming the existing page, with `families` (every family the page now lists, its first folder first) and `family_added: true`. A filename or description you passed that the page does not carry is named in `fields_not_applied` (`{field, provided, kept}`) and is not applied. The same family again answers `already_stored` with `family_added: false` and writes nothing. The page stays in its first folder, so browse a family by its tag filter or the page's `families` list, not by folder. Raw-protected bytes are the exception: each family keeps its own copy.
+- **Wrong scope/category.** If a named scope/category doesn't match the existing structure, surface the existing options and ask before creating new ones.
+
+### Writes performed
+- One new file in `Evidence/<scope>/<category>/`, or nothing new when the bytes are already stored (an existing page may gain a family)
+- Optionally a sidecar `<filename>.md` (when `description` and/or `text` is supplied) — embedded on write
+- Optionally updated `Evidence/<scope>/index.md`
+- Optionally a cross-reference line in a relevant `Sources/` or `Entities/` note (with confirmation)
+
+---
+
+## download
+
+**Goal:** Recover the exact stored original after its external source disappears.
+Notes and exports use their separate read and export paths. To look at a stored
+image, use `inspect_memory` kind `image`; it needs no download.
+
+### Procedure
+1. Call `download_files(pages=["<title of the stored artifact or custody page>"])` to receive the available delivery paths.
+2. Give the person `deliveries.https.url`; it is a short link that downloads the original in any browser.
+3. If the client supports MCP blobs, `deliveries.native_resource.uri` returns the bounded original to the agent instead.
+4. Check the recovered SHA-256 and size against `artifact` to confirm the version.
+5. Preserve a derivative through the existing writer with provenance to the original to retain its source.
+
+Name a page by its title, or by its id for one version. A prepared handoff
+proves no consumption. The link delegates only the named artifact version until
+expiry; current session and disclosure checks still apply. A changed or withheld
+original requires a fresh authorized handoff. Large payloads use HTTPS before
+base64 encoding. Desktop/personal endpoints serve recovery. On Cloud the result carries no link or
+blob; run its `next_step`, `exomem cloud download -- '<path>'`, which fetches the exact
+original over the owner's sign-in and keeps it only if its size and SHA-256 match. Native attachment rendering in other clients remains unverified.
+
+Legacy automation can still omit `path` and use the returned token in an
+Authorization header with `download_url?path=...`. Broad legacy tokens remain
+header-only and cannot become clickable grants.
+
+---
+
+## find
+
+**Goal:** Type-aware search across the Knowledge Base. Read-only. See SKILL.md §
+Search for modes, scope, and ranking knobs.
+
+### Triggers
+- "what do I have on X," "find my notes on Y"
+- "have I covered Z," "show me everything tagged W"
+- "list all my failure modes on <project>"
+
+### Diagnostics and performance
+- Normal lookup: `detail="compact"`, `rerank=false`.
+- Reasoning context: `pack=true` when you need a compact evidence bundle for
+  downstream reasoning. Add `graph_enrich=true` only when the caller explicitly
+  wants typed graph neighborhoods included beside the normal pack output.
+- Diagnostics: `include_timings=true`; add `rerank=true` only when you are
+  intentionally measuring reranking or spending latency for precision. Leaving
+  `rerank` unset is mode-aware auto: CPU steady-state modes keep it off;
+  accelerated/performance mode may auto-rerank when lanes strongly disagree or
+  the query is long. Timing output should be interpreted with the returned
+  compute mode, embedding backend, cache state, rerank flag, and search profile
+  when present.
+- Optional `rerank_max_candidates` bounds the fused prefix passed to an active
+  reranker. It must be an integer from the effective normalized `limit` through
+  300. Inspect `candidate_limit_requested`, `candidate_limit_effective`,
+  `scorer_input_count`, and `unscored_tail_count` in retrieval telemetry. The
+  tail preserves fused order. This count is not a hard time budget: cold models,
+  hardware, and passage length still matter.
+- If one search misses, try synonyms and adjacent domain terms before concluding
+  the KB lacks coverage. Example: `wood`, `woods`, `smoke`, `smoking`, `kamado`,
+  `grill`, `apple`, `oak`, `hickory`.
+
+### Edge cases
+- **No filesystem MCP available.** This skill cannot run without a connected KB server. Surface this and stop — don't fake search.
+- **Very large vault.** Hybrid search is indexed; the first query after a cold start may pay a one-time build cost.
+- **Result carries a `warming` key.** The server just started and is still loading its
+  semantic models in the background; the hits are keyword/BM25-only ranking. Usable as-is
+  for exact-term lookups; if semantic recall matters for the query, retry once `warming`
+  stops appearing (typically well under a minute).
+
+### Writes performed
+None.
+
+---
+
+## context / graph_context
+
+**Goal:** Return one bounded, read-only context envelope containing stored page
+bodies and semantic blocks, typed graph edges, provenance, evidence,
+supersession history, unresolved targets, warnings, and explicit truncation.
+Call `inspect_memory(operation="connections.context")`; `graph-context` remains a
+compatibility alias with the same response.
+
+### Triggers
+- "what does this connect to in the graph"
+- "show typed relations for this page"
+- needing graph context around a search result without changing the page
+
+### Procedure
+1. Provide `path`, canonical reference, or `query`. Use a known identifier when
+   you have one; use `query` to retrieve seed pages before graph assembly.
+2. Keep `depth` small unless the caller asks for a wider neighborhood. Use
+   `traversal_profile` for an `epistemic`, `provenance`, `causal`, `decision`,
+   or broad `all` lens. Runtime `relation_types` / `node_types` only narrow it.
+3. Inspect the returned truncation fields before claiming the context is
+   exhaustive. Inspect the active profile, registry metadata, excluded counts,
+   and warnings. Unregistered typed observations are warned but are not traversed
+   or promoted to a portable relation family.
+4. Treat unavailable derived graph data as a soft fallback. Stored page content,
+   search, and provenance remain useful when a sidecar must be rebuilt.
+
+### Writes performed
+None. The graph sidecar is derived state only; this operation never mutates
+Markdown.
+
+---
+
+## inspect_memory and manage_memory
+
+**Goal:** Govern optional corpus contracts, relation extensions, and traversal
+profiles through one proposal-first surface.
+
+### Procedure
+1. Run `operation="infer"` with a contract `name` and optional `project` or
+   `page_type` scope. Fewer than five pages remain advisory; required elements
+   are proposed only when present in every page of a sufficiently large sample.
+2. Review frequencies and the proposed contract. Persist only when explicitly
+   requested with `save=true`.
+3. Overwriting a saved contract requires its current `expected_hash`; never
+   bypass a mismatch. Contracts live under `_Schema/contracts/`.
+4. Use `operation="validate"` for read-only findings. `strict=true` changes the
+   CLI/CI outcome but does not block normal writes.
+5. Use `operation="diff"` to compare a saved contract with current corpus
+   reality or another named contract.
+6. Before authoring a typed edge, call
+   `inspect_memory(operation="connections.resolve_relation")`; reuse a specific truthful
+   registered meaning. A write that adds the generic relation is refused
+   with a ranked list of specific relations; when none fits, propose a new relation type,
+   or write a plain link as the last resort (see [mutation-results](mutation-results.md)).
+   Prefer no edge to an invented label.
+7. For a durable recurring distinction, call
+   `inspect_memory(operation="schema.propose_relation", arguments={'subject': 'relations'})` with a
+   reviewed parent, description, and direction. Review its full duplicate
+   evidence and delta, then call `operation="save-relations"` with that delta,
+   its `expected_hash`, and `why`. The hash is mandatory. Add aliases rather
+   than removing them; correct meaning through a new canonical key and deprecate
+   the old key with a valid replacement. Explicit `infer` remains the bounded
+   operator census for core, extension, deprecated, scoped, and unregistered
+   observations; it never supplies missing semantics or saves automatically.
+8. Use `subject="traversal-profiles"` for custom read-only graph lenses. A custom
+   profile must extend a built-in and may only narrow its bounds. Profiles change
+   context selection, never Markdown, graph truth, confidence, or search ranking.
+
+### Writes performed
+Only an explicitly saved contract, relation registry, or traversal-profile
+proposal. Inference, validation, diff, and model suggestions never mutate the
+vault or assign truth.
+
+---
+
+## backfill_ids
+
+**Goal:** Add stable IDs to legacy governed Markdown without an automatic
+migration.
+
+### Procedure
+1. Call `inspect_memory(operation="maintenance.backfill_ids")`; the default `dry_run=true`
+   reports affected pages and identity problems without writing. A remote owner gets a
+   `run_id`: follow it with `maintenance-job`; the receipt holds the `plan_id` and lists
+   the affected pages page by page.
+2. Review the complete proposal and resolve duplicate or malformed IDs first.
+3. After explicit confirmation, repeat with `dry_run=false`. A remote client sends the
+   preview's `plan_id` and a `why` with `manage_memory`, follows the returned `run_id` with
+   `maintenance-job`, and reads the minted IDs page by page through the receipt's `next_cursor`. The write preserves all
+   existing valid IDs; a page that changed after the preview is skipped and reported.
+
+### Writes performed
+Missing frontmatter IDs only, and only in explicit write mode.
+
+---
+
+## suggest_relations
+
+**Goal:** Propose candidate typed graph relations for a page or draft. Suggestions
+are review-only and never write to the vault.
+
+### Triggers
+- "suggest relations for this note"
+- "what should this support, contradict, or supersede"
+- densifying a draft before calling `note` or `edit`
+
+### Procedure
+1. Pass a `path` for an existing page, or `draft_title` / `draft_body` for an
+   unwritten draft.
+2. Review deterministic candidates. Structural ones come first: a relation kind
+   you already typed on one of the page's own semantic units and have not yet
+   promoted to a page-level relation, pages carrying the same open question, and
+   pages whose units answer or resolve the same target. Then wikilinks,
+   frontmatter sources, shared sources/entities, supersession, and optional
+   embedding proximity.
+3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
+   response-only, and soft-fail with warnings when optional extras are absent.
+4. Persist accepted relations through the normal Markdown write path (`note` or
+   `edit`); do not treat suggestions as an automatic write. A candidate that the
+   relation queue holds open carries `review` (`ref`, `fingerprint`,
+   `source_content_hash`): pass those to
+   `decide_review_item(decision='accept')` as `ref`,
+   `expected_fingerprint` and `expected_hash`, with a `why`. When the candidate has
+   `options`, set `requested_relation` to one option's `key`.
+
+### Writes performed
+None.
+
+---
+## audit
+
+**Goal:** Surface drift and propose fixes. Read-mostly. See
+`references/audit-checks.md` for the full per-check detail.
+
+### Triggers
+- "audit the KB," "lint the vault," "check for orphans"
+- "clean up my notes," "what's broken"
+
+### Procedure
+1. Run all checks. Audit is read-only in every detail mode.
+2. Default to `detail="actionable"`: current blockers first, then malformed or
+   unregistered relation work, then ordinary findings. Grandfathered relation-
+   disposition debt is grouped as one `legacy_backlog` with exact upstream and
+   observed counts plus deterministic bounded samples.
+3. Use `detail="full"` only when raw finding enumeration is explicitly needed.
+   `legacy_sample_limit` must be an integer from 0 through 50 and affects only
+   the grouped actionable presentation.
+4. Generate the report (per issue: path, problem, proposed fix; summary first).
+5. Show the report. **Do not auto-fix anything.**
+6. Offer: "Apply all proposed fixes?" / "Apply by check?" / "Apply per-issue?"
+7. On per-issue or per-check confirmation, apply that fix and write any modified files.
+
+### Writes performed
+- None on audit alone.
+- On per-fix confirmation: writes per the specific fix.
+
+---
+
+## replace
+
+**Goal:** Supersession — author a new version, mark the old one superseded.
+
+### Triggers
+- "this supersedes the old note on X"
+- "replace the old version of Y"
+- "rewrite this from scratch — make a v2"
+
+### Procedure
+See `supersession.md`. Summary:
+1. Confirm the old page's path.
+2. Author the new page (filename with `-v2` or descriptive variant).
+3. Set new page's `supersedes` to old page's wikilink.
+4. Update old page: `status: superseded`, `superseded_by: <new>`, `updated: today`.
+5. Insert a supersession banner at the top of the old page's body.
+6. Update both `index.md` entries.
+7. Cascade-flag downstream pages that cite the old page; surface them, do not auto-update.
+
+### Writes performed
+- One new file
+- One updated old file (frontmatter + banner)
+- Updated subfolder and top-level `index.md`
+- Updated `ingested_into` fields on cited sources for the new page
+
+---
+
+## query_data
+
+Structured query over a CSV/JSON **data file** under the vault — the retrieval
+half of the data-search pattern. `search_memory` surfaces a dataset's markdown card;
+`read_page` reads the raw file the card's `data_file:` points at and returns
+exact rows or an aggregate. Read-only. Raw CSV/JSON are not `find`-searchable;
+this is how you query their values.
+
+### Triggers
+- "what was my X over time," "filter the CSV," "rows where Y > Z," "sum/avg/latest/distinct of a column," "how many entries in <dataset>."
+
+### Inputs to gather
+- `path` — vault-relative `.csv`/`.tsv`/`.json` (usually a card's `data_file:` entry).
+- For nested JSON: `record_path` (dotted) — omit for a top-level array or the common keys result/results/data/rows/items/entries.
+- The query: `filters` (`[{column, op, value}]`; op ∈ eq/ne/gt/gte/lt/lte/contains/icontains/startswith/in/nin/exists/missing), `columns` (projection; dotted ok), `sort_by`+`descending`, `limit`/`offset`, OR `aggregate` (`count` | `min|max|sum|avg|latest|distinct:column`), OR `date_from`/`date_to`(/`date_column`).
+
+### Procedure
+1. Resolve + read the file (path-escape-guarded; 25 MB cap; CSV/TSV by header, JSON array or via `record_path`).
+2. Apply filters (+ any date range). Numeric compares coerce tolerantly.
+3. If `aggregate`: compute over matched rows and return it. Else: sort → paginate → project columns.
+
+### Output format
+`{path, format, total_rows, total_matched, returned, columns, rows, aggregate, truncated, warnings}`.
+
+### Edge cases
+- Dotted columns reach nested JSON fields in filters/columns/sort/aggregate. Deeply irregular JSON may need a one-time flatten-to-CSV first; flat tables are the sweet spot.
+- `limit` hard-capped at 1000 (default 100); `truncated: true` signals more rows matched than returned.
+
+### Writes performed
+- None (read-only).
+
+## save_episode and inspect_memory
+
+Use only when explicitly requested or the live `proactive_capture` disposition from `read_instructions` permits it. Records what a conversation worked on, decided and left open, so the next session on any client can continue. Record once at a decision or stopping point; skip when nothing durable happened. Items are one line each, never a transcript. The recap is a bounded Source under `Sources/Episodes/`; the newest recap per conversation leads the `recent_context` block from `recall_context`. An episode keeps one page. Recording again under the same `episode` with changed content rewrites that page in place and keeps the previous text, without limit, in the page's history; read it with `read_page` and `part="history"` ([supersession](supersession.md)). An identical retry writes nothing.
+
+### Preserved materials
+
+`manage_memory(operation="episodes.input")` binds already-preserved material to an existing episode; it creates no Source or destination effect.
+Supply the current `input_revision` and `journal_digest` from `inspect_memory(operation="episodes.candidates")`.
+Supply `materials: {version: 1, items: [...]}` within 16 KiB, with at most eight uniquely keyed items.
+Each item has `key` (160 characters), `original_reference`, `reading_reference`, or both (canonical references, 2048 characters each).
+An original reference names its whole companion page; a reading reference may select an exact semantic unit.
+Optional `producer` (256 characters) and `producer_version` (160 characters) are authored attribution, never authenticated extractor identity.
+Optional `locator: {kind: "dataset_rows", record_path: null, row_indices: [0]}` selects one to 32 unique zero-based records.
+`record_path` may name a nested JSON array and is at most 2048 characters; the existing dataset parser verifies the selection.
+Other locator kinds and unknown fields are refused.
+
+Empty `items` explicitly clears bindings.
+Later recaps inherit the latest explicit envelope without copying it or refreshing its versions.
+The write returns the existing terminal mutation receipt.
+Read `candidates` after the write for stable handles with the original binding `input_revision` and `material_key`.
+A byte-equivalent replacement under current guards adds no revision.
+After a lost reply, inspect public state before another mutation; stale guards refuse without writing or transparently resealing a retry.
+
+`inspect_memory(operation="episodes.material")` with `episode`, binding `input_revision` and `material_key` reads one material.
+It reports original and reading states independently: `available`, `stale` or content-free `unavailable`.
+Original availability requires current authorized bytes; a readable companion or an old preservation receipt is insufficient.
+A changed reading is stale and never silently rebound; an unavailable original does not suppress a usable reading.
+The read returns at most 8192 bytes of exact reading text, with no binary bytes or download capability.
+Unchecked handles in inspection do not prove byte availability.
+Pairing and producer attribution remain caller-authored; they establish neither equivalent content, independent origins nor compilation coverage.
+
+Journals with material bindings require a reader-capable release, including on rollback.
+Older strict readers refuse those journals before changing them; no migration rewrites legacy journals.
+Source, Evidence and Planning effects use their native writers through sealed episode leaves.
+The ordinary mixed-media journey still needs separate acceptance evidence.
+
+### Candidate workflow (`resume` refuses with `episode_workflow_disabled` unless the service enables it)
+- `prepare` one candidate's destination, set its `disposition` (routed, no_capture, uncertain, rejected, deferred, awaiting_authority), then `resume` to execute routed leaves.
+- A leaf is one typed step for an existing writer: `create-note`, `create-entity`, `accept-relation`, `edit`, `supersede`, or `append-record` (`{collection, item, item_key?, body?, why, expected_container_hash}`). Native episode kinds also include `capture-source`, `preserve-evidence`, `add-plan`, `update-plan` and `triage-plan`.
+- `proposal`: `{route, target?, title?, alternatives, evidence, reason, leaves: [{leaf_key, effect_revision, kind, args, support?, source_intent?}]}`. `alternatives` lists up to 8 inspected pages as possible homes, each `{target, scope, version}`; an open page has no priority. A changed effect needs the next `effect_revision`; an attempted leaf keeps its exact effect and associations.
+- `resume` needs `journal_digest` from your last candidates/prepare/disposition result (a stale one is refused with `EPISODE_REVISION_CONFLICT`) and `input_revision` (the revision your coverage review covered); `order` and `max_leaves` (1 to 16, default 8) bound the pass.
+- Finish with one `coverage` pass: compare the input it names with each receipt and readback, prepare anything omitted or misrouted, then attest with `resume` and `postcommit`. A committed note is not coverage.
+
+Native binary leaves require `args.original: {representation: "original", reference, version, size}`.
+Use a whole canonical original reference, its exact SHA-256 and byte size.
+Temporary paths, upload handles and readable extraction text cannot substitute for original custody.
+Use the native writer's other arguments for the selected Source or Evidence destination.
+Preparation verifies the complete native write without publishing; execution retains its sealed core allocation and checks current authority again.
+Known prior preservation refuses before sealing; it does not count as an executed leaf.
+
+Planning leaves use the native add, update or triage arguments, including current guards and an attributable reason.
+Optional leaf `source_intent` uses the existing origin-input grammar and retains the input that expresses the intended work.
+Optional `support: {binding_input_revision, material_key, representation, reviewed_input_revision}` identifies reviewed material without changing the mutation effect.
+These associations prove neither expressed intent nor completeness; the active agent makes those judgments.
+An origin carrier may also use `{representation: "original", reference, version, size}` for a retained original input.
+That proof authenticates current bytes and access; it does not replace exact reading-text proof.
+Original and reading inputs may share one source without proving independent origins or equivalent content.
+
+Ordinary curation apply and resume also record the episode invocation before dispatch.
+After a lost reply, inspect and reconcile the same operation before retrying.
+Only an exact typed no-effect terminal permits a same-operation retry: the native one, or curation's recovery proof that a stopped attempt published nothing.
+A generic error remains uncertain.
+Historical commitment can recover after input loss, while current coverage still requires authorized output and exact original bytes.
+New episode-bound plans require a reader that understands their invocation marker, including after rollback.
+Older strict readers refuse those plans before applying them; legacy unmarked plans keep their identities.
+
+### Result shapes
+- record: `{episode, revision, source: {ref, path, title}, idempotent, recovery, ledger, about_skipped, compile?}`. `compile` is `{outcome, cite, decided, open}`: the recap's ref, its Decided item count, and how many lines no cited recap holds (`unchecked` when not checked). Compile or explicitly dismiss every Decided item before citing the recap from updated compiled notes. A citation holds every line in that revision; it does not prove semantic coverage. The conditional `next_step` appears only when live policy permits capture; the block is absent when the recap decides nothing.
+- inspect: `{episode, revisions: [{revision, recovery}], latest_source_ref, coverage_current}`.
+- candidates/prepare/disposition: `{episode, input_revision, candidates: [{candidate_key, route, disposition, pending, leaves: [{leaf_id, kind, outcome, ...}]}], complete, execution, coverage: {attempted, pending, covered_through_input_revision, next}}`.
+- resume adds `{status, executed, replayed, stale, diverged, reconciled, blocked, deferred, publication}`; coverage adds `{input: {input_revision, ref, recovery}, receipts: [{candidate_key, leaf_id, operation_id, receipt_digest, path, readback}]}`.
+- Newlines, credential-shaped text and anything over a cap are refused with nothing written. `about` refs you cannot see are dropped and counted in `about_skipped`; recording marks the rest as the conversation's latest work.
+
+## Collection adoption
+
+A durable, resumable session that turns an existing collection of notes, documents, images, audio and video into governed knowledge. It never rewrites, moves or deletes originals. Preview-exact contract: `plan` shows the precise imports, and `apply` commits exactly that plan or refuses (`PLAN_STALE` on a stale `plan_id` or changed selection). `inspect_memory` carries `status` and `work-item`. `manage_memory` carries the other operations, including `plan` and `finish`. `start` is guarded (`initialize_kb` bootstraps a missing Knowledge Base, otherwise `KB_NOT_INITIALIZED`).
+
+Every selected file is imported or refused with a per-path code; none is dropped silently. A UTF-8 text file becomes a Source that holds the exact text in a verbatim fence, with its links, embeds, tags and aliases kept outside the fence as graph structure. Any other file, and a text file that is not valid UTF-8, becomes a Source that keeps the original bytes as its artifact; media extraction then runs through the media job path.
+
+### One call: `file`
+`file` imports a staged folder: `{path: "_Imports/<id>", collection?, continuation?}`, or an uploaded archive: `{upload: "<token>", collection?, continuation?}` with the token of `upload_files(lane="import")` in place of `path` (see [importing](importing.md)); the reply then also names the `path`. It runs `start`, `select`, `plan`, `apply` and `finish` for you, page after page, and files Sources only (own-note rules and `include_hidden` stay on the step path below: a hidden file in the stage stays staged and shows in the residual). Repeat the call with the `continuation` it returns until `filing` is `done` or `stopped`. Each call ends after one `apply` or `finish`, so an agent never threads a `run_id`, a `plan_id` or `next_after`.
+- Reply: `{run_id, collection, filing: working|stopped|done, continuation?, progress: {filed, skipped_duplicates, failed, remaining, pages_done, page: {number, phase, planned}}, summary, stop?: {code, reason}, person: [{need, text}], filed?}`. `need` is one of `free_space`, `review_residual`, `discard`, `report_to_operator`. `progress` and `summary` count the whole import. `skipped_duplicates` counts the files that were not stored again because the vault already held their bytes; they are handled, not failed or left. `filed` appears at `done` with the stage's `residual` and `last_finished_page`: the last `finish` report (`coverage`, `first_question` or `indexing`) about that one page only.
+- A page whose files fail retries them once, then finishes, or closes when every file failed; filing goes on to the next page, and the failed files stay in `progress.failed` and the residual.
+- A call with only `path` carries on the newest import of that path, and answers `done` again once it is done. A file that enters the stage later, such as one that a rerun of `exomem import` copies, makes it scan and file again. A `collection` other than the import's own is refused with `IMPORT_REQUEST_INVALID`, which names the import's collection. An error after committed work returns `filing: "stopped"` with its `code`, and the counts keep that work.
+- `remaining` counts the files left on the current page plus the files beyond it that the scan has not listed yet; it can fall when a later page lists a file that cannot import. `summary` counts what the outcomes record and claims nothing else.
+- `file` does not discard. The person agrees to a discard, through the existing calls.
+
+### Lifecycle
+1. `start` scans a subtree read-only and snapshots a candidate inventory (`path`, `include_hidden`). The path is vault-relative: stage a folder outside the vault first with `exomem import <folder>` and start on the path it prints. Pass `collection` to name the collection; a re-staged copy of the same collection under a new path then imports nothing twice. A large folder starts page by page: while a reply carries `next_after`, call `start` again with it as `after` and no `path` or `collection`. `consume=false` keeps staged copies after filing. The whole flow is in [importing](importing.md).
+2. `select` materializes a folder-rule selection server-side (`include`, `exclude`, `overrides`, `include_junk`). An `include` entry is a folder path, or a rule object. `{path, source_kind, domain}` files that folder's items under a registered Source kind and domain. `{path, adopt_as: "note", note_type, project?, domain?}` also makes each Markdown file there a draft note of that registered compiled type (`project` or `domain` where the note leaf needs one for that type; the leaf picks the folder). An unregistered kind or note type, or a type the leaf cannot place, is refused with the selection unchanged.
+3. `plan` previews exact targets, titles, hashes, frontmatter and resolved or unresolved links. It reports `existing_ref` for an item whose bytes a Source already holds, and plans that item as `already-imported`: no second Source or artifact is written. A repeat of one file inside the plan is a `duplicate-of` item that plans no write. An own-note item also shows its note target, title, front matter and links, `existing_note` when an earlier run made the note, and `previous_note` when the original changed (the new Source then stands alone).
+4. `apply` copies the validated subset into governed Sources with provenance (`plan_id`; `retry_failed` and `only_paths` narrow a retry). An item whose bytes a Source already holds is `already-applied`: the existing Source records the new path in `also_imported_from` (`mapped: true`, counted in the reply's `duplicates.mapped`), and a re-run writes nothing. When the Source the plan named for those bytes is missing or changed at apply time, and no other Source holds them, the item stores its own copy instead and its outcome carries `stored_own_copy`. `duplicates.check_unavailable` counts items stored as new because the check could not run. Apply then creates each own-note item's draft note. An own-note item is complete only when its Source and its note exist; `source-applied` marks one whose note is still owed. A note target taken by another page fails the item with `TARGET_OCCUPIED`. A draft note leaves its Source in the review backlog until the note is promoted to live.
+5. `cancel` closes a pre-apply run (`why` records the reason); `finish` proves recall, reports `coverage` (imported, refused, pending extraction, unresolved links, hidden folders counted, notes created, found and failed) and optionally writes a run manifest under `Knowledge Base/_Adoption/` (`write_manifest`, default true). For a staged import it also reports `residual`, the files still staged by reason, and the discard route once the last page is done.
+
+`plan` and `apply` stop inside the request budget. While a result carries `continuation`, call the same action again with that `continuation` and the unchanged other arguments. The run is done when no `continuation` returns and `phase` is `applied`; a stopped call leaves the remaining work in `status`.
+
+Per-run `status` defaults to a compact summary. Detail views (`inventory`, `selection`, `plan`, `outcomes`, `stale`) accept `offset`, `limit` (1 to 100) and `revision`. Carry the returned revision across pages and restart from the summary on `IMPORT_STATUS_CHANGED`. A row too large for a page appears in `omitted`; explicit `view="full"` remains unbounded. [Interrupted apply](importing.md#interrupted-apply) explains exact-identity recovery and unresolved legacy states.
+
+### Agent actions after apply
+- `work-item` returns bounded read-only context (`sources`, `max_sources` default 5, `max_chars_per_source` default 2000).
+- `propose` submits structured `proposals`.
+- `apply-proposal` approves one through an existing governed leaf: `ref` (`exomem://review/adoption/<id>`), `why` required, `expected_fingerprint` must still match, and `expected_hash` guards relation and reconciliation-relate targets.
+
+## One-shot adoption
+
+One-shot adoption preserves originals. Use `inspect_memory(operation="imports.scan")` to inspect first. Use `manage_memory` with `operation` set to `imports.save_manifest`, `imports.copy_as_sources` or `imports.compile_selected` to write under the governed Knowledge Base, with original path/hash provenance. `selected_paths` names explicit legacy files for copy/compile. `imports.copy_as_sources` skips a file whose bytes the vault already stores (`ALREADY_IMPORTED`, with the existing Source's ref) or an earlier selected file holds (`DUPLICATE_IN_SELECTION`), and records no import mapping. Tuning: `max_depth`, `include_hidden`, `samples` (filenames per folder), `pack_limit` (suggested packs), `manifest_path`, and the semantic census caps `semantic_max_files`, `semantic_max_bytes` and `semantic_example_limit`.

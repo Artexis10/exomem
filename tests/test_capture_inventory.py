@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import PurePosixPath
 from uuid import uuid4
 
@@ -34,6 +35,36 @@ def captured_bytes(record="record", revision="one"):
               "source_identity": {"system": "archive", "record_id": record, "revision": revision},
               "capture_input_digest": "a" * 64}
     return ("---\n" + yaml.safe_dump(fields) + "---\n\n# Stored record\n\nOriginal body.\n").encode()
+
+
+def test_a_raw_input_that_a_commit_replaced_during_its_read_is_read_again(vault, monkeypatch):
+    # The inventory measures a raw input, then reads it. A commit that installed a new file with
+    # os.replace in between failed the read as a changed guard instead of reading the new file.
+    path = "Knowledge Base/Sources/Books/2026-05-03-elimination-diet.md"
+    target = vault / path
+    measured = target.lstat()
+    newer = target.read_text(encoding="utf-8") + "\nA line a later commit added.\n"
+    real_snapshot = vault_module._read_bounded_guarded_snapshot_tolerating_transient_sharing
+    replaced: list[bool] = []
+
+    def a_commit_replaces_the_file_after_the_snapshot(root, rel, limit):
+        snapshot = real_snapshot(root, rel, limit)
+        if not replaced:
+            replaced.append(True)
+            staged = target.with_name("staged.tmp")
+            staged.write_text(newer, encoding="utf-8")
+            os.replace(staged, target)
+        return snapshot
+
+    monkeypatch.setattr(
+        vault_module, "_read_bounded_guarded_snapshot_tolerating_transient_sharing",
+        a_commit_replaces_the_file_after_the_snapshot,
+    )
+    read = capture_inventory.read_input(vault, path, measured)
+
+    assert replaced, "the replace never ran, so this read proves nothing"
+    assert read.signature == capture_inventory.file_signature(target.lstat())
+    assert read.signature != capture_inventory.file_signature(measured)
 
 
 def test_excluded_bound_original_cannot_forge_identity_and_owner_deletion_reclassifies(vault, monkeypatch):

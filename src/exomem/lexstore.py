@@ -57,6 +57,7 @@ Availability is a ladder, decided per process (the `vecstore` idiom):
 from __future__ import annotations
 
 import ast
+import bisect
 import contextlib
 import copy
 import enum
@@ -65,6 +66,7 @@ import hashlib
 import itertools
 import json
 import logging
+import operator
 import os
 import sqlite3
 import sys
@@ -273,6 +275,9 @@ def stopping_at_budget() -> Iterator[BudgetStop]:
     client has gone, however its code between queries read the empty answer. Opt-in, because only a
     caller with a way to give up (the activation carry) may be handed no answer; with no budget
     bound the scope changes nothing.
+
+    The guard applies once the query has an admitted reader. Opening and pinning file or store
+    snapshots and proving readiness retain their own lock waits and can finish after the deadline.
     """
     stop = BudgetStop()
     token = _STOP_AT_BUDGET.set(stop)
@@ -282,11 +287,26 @@ def stopping_at_budget() -> Iterator[BudgetStop]:
         _STOP_AT_BUDGET.reset(token)
 
 
+class _CatalogueDeadline(Exception):
+    """Unwind a stopped query before returning its typed result."""
+
+    def __init__(self, scope: BudgetStop) -> None:
+        scope.hit = True
+
+
+_CATALOGUE_PROGRESS: ContextVar[
+    tuple[tuple[sqlite3.Connection, Callable[[], int]], ...]
+] = ContextVar("catalogue_progress", default=())
+
+
 @contextlib.contextmanager
-def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[Callable[[], bool]]:
-    """Interrupt the statement `conn` runs once the request budget is spent; yields whether it did."""
+def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[None]:
+    """Check SQLite's VM deadline on a connection the caller has admitted."""
     scope = _STOP_AT_BUDGET.get()
-    budget = request_budget.current() if scope is not None else None
+    if scope is None or (budget := request_budget.current()) is None:
+        yield
+        return
+
     interrupted = False
 
     def check() -> int:
@@ -296,13 +316,43 @@ def _interrupt_at_budget(conn: sqlite3.Connection) -> Iterator[Callable[[], bool
         interrupted = scope.hit = True
         return 1
 
-    if budget is not None:
-        conn.set_progress_handler(check, _BUDGET_CHECK_INSTRUCTIONS)
+    def require_time() -> None:
+        if interrupted or budget.remaining() <= 0:
+            raise _CatalogueDeadline(scope)
+
+    require_time()
+    active = _CATALOGUE_PROGRESS.get()
+    previous = next((handler for reader, handler in reversed(active) if reader is conn), None)
+    original_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    token = _CATALOGUE_PROGRESS.set((*active, (conn, check)))
     try:
-        yield lambda: interrupted
+        # SQLite starts a fresh busy timeout on every lock wait and does not
+        # call the VM handler while waiting. Fail immediately on contention.
+        if original_ms:
+            conn.execute("PRAGMA busy_timeout=0")
+        conn.set_progress_handler(check, _BUDGET_CHECK_INSTRUCTIONS)
+        try:
+            require_time()
+            yield
+        except sqlite3.Error as error:
+            code = getattr(error, "sqlite_errorcode", 0) & 0xFF
+            if interrupted and code == sqlite3.SQLITE_INTERRUPT:
+                raise _CatalogueDeadline(scope) from error
+            if code == sqlite3.SQLITE_BUSY and budget.remaining() <= 0:
+                raise _CatalogueDeadline(scope) from error
+            raise
+        # A short statement can finish between checks, or the caller can
+        # swallow an interrupt and return rows for only part of the query.
+        require_time()
     finally:
-        if budget is not None:
-            conn.set_progress_handler(None, 0)
+        conn.set_progress_handler(None, 0)
+        try:
+            if original_ms:
+                conn.execute(f"PRAGMA busy_timeout={original_ms}")
+        finally:
+            _CATALOGUE_PROGRESS.reset(token)
+            if previous is not None:
+                conn.set_progress_handler(previous, _BUDGET_CHECK_INSTRUCTIONS)
 
 
 def _admitted_catalog_checkpoint(vault_root: Path, scope: str) -> object | None:
@@ -418,6 +468,10 @@ _ELIGIBILITY_COLUMNS: tuple[str, ...] = (
     "capture_date_json",
     "capture_lat",
     "capture_lon",
+    # How the capture day was found: a `capture-date-sources` key, which a media sidecar without an
+    # evidence date takes from its fallback entry.
+    "capture_date_source",
+    "capture_date_source_json",
 )
 _EMPTY_ELIGIBILITY: tuple[None, ...] = (None,) * len(_ELIGIBILITY_COLUMNS)
 
@@ -437,6 +491,7 @@ _PAGE_AXIS_COLUMNS: dict[str, tuple[str | None, str]] = {
     "page.capture_date": ("capture_day", "capture_date_json"),
     "page.capture_lat": ("capture_lat", None),
     "page.capture_lon": ("capture_lon", None),
+    "page.capture_date_source": ("capture_date_source", "capture_date_source_json"),
 }
 #: The same, over `semantic_units`. The five governed scalar axes are
 #: single-valued by construction (the parser produces one string or None), so
@@ -567,6 +622,9 @@ def _eligibility_columns(page: object) -> tuple[str | float | None, ...]:
     # Already settled to a stated position by `page_view`; a page that states none stores NULL.
     row.append(view.get("capture_lat"))
     row.append(view.get("capture_lon"))
+    source = view.get("capture_date_source")
+    row.append(_canonical_scalar("page.capture_date_source", source))
+    row.append(_canonical_members("page.capture_date_source", source, present="capture_date_source" in view))
     return tuple(row)
 
 
@@ -978,8 +1036,11 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
 #: 18: `pages.capture_day`, `capture_date_json`, `capture_lat` and `capture_lon` hold the capture date and
 #: position a media sidecar records, so a search filters on them from the index. A v17 catalogue is
 #: rebuilt from canonical pages, which also indexes every sidecar that already records them.
-#: 19: `unit_row_keys` projects authored governed key presence; `title_fts` indexes title contact without BM25 statistics.
-SCHEMA_VERSION = 19
+#: 19: `pages.capture_date_source` and `capture_date_source_json` hold how the capture day was found, and
+#: `capture_day` now holds the source-date fallback of a media sidecar that records no evidence date. A v18
+#: catalogue is rebuilt from canonical pages, which also derives both for every sidecar that exists.
+#: 20: `unit_row_keys` projects authored governed key presence; `title_fts` indexes title contact without BM25 statistics.
+SCHEMA_VERSION = 20
 
 #: FTS5 tokenizer for every pre-stemmed full-text column. Tokens arrive
 #: already NFKC-casefolded and stemmed; unicode61 must store each one verbatim:
@@ -1115,7 +1176,7 @@ _FULL_REBUILDS_IN_FLIGHT: set[Path] = set()
 #: Full-repair observations made while the full pass is active, tagged with the
 #: exact live recall generation pair the caller observed. They are acknowledged
 #: only when the pass's promotion proof covers that pair. The sentinel is used
-#: by the explicit event-index rollback, where no live generation exists.
+#: when the caller has no live generation or defers sampling it to the worker.
 #: Each observation also keeps whether every request that made it was lag-only.
 _UNKNOWN_REPAIR_GENERATION = object()
 _FULL_REBUILD_REOBSERVED: dict[Path, dict[object, bool]] = {}
@@ -1186,6 +1247,7 @@ class RepairCause(enum.StrEnum):
     # registry, or a bounded apply met a source that moved before its commit.
     CATALOGUE_LAG = "catalogue_lag"
     SOURCE_MOVED = "source_moved"
+    PUBLISHED_CATALOGUE_UNUSABLE = "published_catalogue_unusable"
     # A strict recall resolver refused: no admitted checkpoint names its
     # request, or the catalogue holds no rows for the checkpoint it names.
     RESOLVER_CHECKPOINT_ABSENT = "resolver_checkpoint_absent"
@@ -1690,6 +1752,7 @@ class CatalogReadiness:
     ``status`` is one of ``available`` (this exact projection is present),
     ``stale`` (well-formed but not yet at the requested freshness, or missing),
     ``unsupported`` (the ``python`` kill switch retired the catalog),
+    ``overflow`` (current evidence exceeds the caller's candidate allowance),
     ``transient_failure`` (a passing lock/interrupt), ``deadline`` (the request budget
     stopped the query, see ``stopping_at_budget``), ``definitions_unavailable``
     (an admitted page's selected definitions are missing, so dependent unit
@@ -2394,8 +2457,8 @@ def _repair_generation_covers(
     if covered is None:
         return False
     if observed is _UNKNOWN_REPAIR_GENERATION:
-        # Rollback mode has no event generation to compare. A successful exact
-        # catalogue proof is the strongest available acknowledgement.
+        # No event generation was supplied. A successful exact catalogue proof
+        # is the strongest available acknowledgement.
         return True
     if not isinstance(observed, tuple) or len(covered) != len(observed):
         return False
@@ -2802,6 +2865,7 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     if catch_up is None:
         return False
     try:
+        _heal_adopted_catalog_before_catch_up(vault_root, store)
         if not catch_up():
             # A round that writes outran still advanced the stored checkpoint,
             # which is progress and not a decline: queue a lag-only catch-up for
@@ -2814,6 +2878,25 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
             return False
         if _admit_if_current(vault_root):
             return True
+        # A write that landed between the catch-up's last read and the proof
+        # leaves the catalogue lagging again, not wrong: queue another lag-only
+        # catch-up, as above. Only a catalogue that no lag explains costs a full
+        # pass. Each re-queue needs a write after a catch-up that found no lag,
+        # so the chain ends when writes stop.
+        lagging_again = getattr(store, "_lagging_catch_up_paths", lambda: set())()
+        if lagging_again:
+            store._last_catch_up_advanced = True
+            log.info(
+                "lexical catch-up advanced (outrun before admission) paths=%d;"
+                " queueing a lag-only catch-up",
+                len(lagging_again),
+            )
+            _schedule_runtime_catalog_repair(
+                vault_root, lag_only=True, cause=RepairCause.CATALOGUE_LAG
+            )
+            return True
+        if lagging_again is None:
+            return False  # the refusal that keeps the full pass is already logged
         return _log_catch_up_decline(store, CatchUpDecline.NOT_CURRENT)
     except Exception as error:  # noqa: BLE001 - a failed catch-up must still rebuild
         if _is_repair_contention(error):
@@ -2821,6 +2904,27 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         # The traceback stays local: a hosted cell strips exc_info.
         log.debug("lexical catch-up raised", exc_info=True)
         return _log_catch_up_decline(store, CatchUpDecline.ERROR, error=type(error).__name__)
+
+
+def _heal_adopted_catalog_before_catch_up(vault_root: Path, store) -> None:
+    """Give an adopted standby catalogue this registry's lineage before a catch-up reads it.
+
+    A detached build stamps a lineage no registry bridges, so the catch-up
+    declines it for its instance and the worker pays a whole pass. The warm's
+    handoff heal is the designed owner, but a lag repair can reach the catalogue
+    first, and the warm skips the heal while a whole pass runs. With both
+    scopes live the same single-use heal blesses the live checkpoints; the
+    catch-up then replays any write since and admits.
+    """
+    from . import freshness as freshness_module
+
+    if getattr(store, "_adopted_rows", None) is None:
+        return
+    if not all(
+        freshness_module.recall_is_live(vault_root, scope) for scope in freshness_module.SCOPES
+    ):
+        return
+    log.info("adopted lexical catalogue heal before catch-up healed=%s", store.heal_adopted_catalog())
 
 
 def _log_catch_up_decline(store, reason: CatchUpDecline, **detail: int | str) -> bool:
@@ -2846,6 +2950,7 @@ def _schedule_repair(
     pending_only: bool = False,
     lag_only: bool = False,
     cause: RepairCause | None = None,
+    defer_generation: bool = False,
 ) -> bool:
     """Start at most one best-effort lexical repair per vault.
 
@@ -2871,6 +2976,9 @@ def _schedule_repair(
     `cause` names why the caller asked; the worker logs it with the pass it
     starts, so a whole-corpus pass is attributable.
 
+    `defer_generation` admits a proven failure without sampling the foreground
+    recall generation. Queue admission stays within the caller's read budget.
+
     Every other caller passes nothing and still gets the rebuild, so this can
     only ever do LESS work than before, never less repair: a targeted retry that
     fails escalates, and a rebuild request queued while a targeted retry is
@@ -2888,12 +2996,12 @@ def _schedule_repair(
     # inspect only process-local claims, without even resolving a path again.
     key = vault_root if pending_only else vault_root.resolve()
     observation: object = _UNKNOWN_REPAIR_GENERATION
-    if not pending_only and not deferred_paths:
+    if not pending_only and not deferred_paths and not defer_generation:
         try:
             observation = _live_repair_generation(vault_root) or observation
         except Exception:  # noqa: BLE001 - scheduling must remain best-effort
             pass
-    with _REPAIRS_LOCK:
+    with request_budget.locked(_REPAIRS_LOCK) if defer_generation else _REPAIRS_LOCK:
         if cause is not None:
             _REPAIR_CAUSES.setdefault(key, set()).add(cause)
         if pending_only:
@@ -3411,16 +3519,25 @@ class _AdmittedStatisticsEntry:
     postings: Any = None
 
 
-#: Unique-term references that one scope's admitted-corpus base may keep: 8 bytes for the term and 1 for its
-#: count (2 or 4 on a page where a word recurs over 255 or 65,535 times), so about 35 MiB, which holds about
-#: 10,000 pages of 400 distinct words, the bound the base had before it kept page terms. A corpus past it keeps
-#: no base, and its next build counts every page.
-_ADMITTED_BASE_TERMS_MAX = 4_000_000
+#: Unique-term references that one scope's admitted-corpus base may keep. A corpus past it keeps no base, so every
+#: build after a write tokenizes and counts every page again: about 1.7 s more CPU a recall on a synthetic
+#: 15,600-page corpus of 4.5 million references (2026-11-24). On synthetic Zipf corpora a base holds about 88 MiB
+#: at 3.4 million references and 218,000 words, and about 196 MiB at 10.6 million references and 465,000 words.
+#: Under both bounds the worst case, a uniform vocabulary of a million words, holds about 290 MiB for one base and
+#: its statistics entry, and about 540 MiB for four bases of one scope, which share page entries. A 17,000-page live
+#: vault held 3.7 million references.
+_ADMITTED_BASE_TERMS_MAX = 12_000_000
+#: Words a kept base may count. Its introducer maps (`_DocumentFrequency`) grow with the vocabulary, not with the
+#: references, so a corpus whose text is mostly unique tokens, such as hashes or identifiers, keeps no base.
+#: The 17,000-page live vault's KB scope held 244,000 distinct stemmed words at its 3.7 million references
+#: (2026-11-24).
+_ADMITTED_BASE_WORDS_MAX = 1_000_000
 #: Admitted-corpus bases retained per store, one per admitted page set, as `_ADMITTED_STATISTICS_MAX` keeps their
 #: figures. One base per scope made two admitted sets that alternate (the carry's and the task lane's) rebuild from
 #: each other's pages: each build subtracted the other set's terms and re-read its own texts, about 2.5 s of CPU a
 #: recall on a 13,000-page vault (measured 2026-11-08). A base built from another shares that base's page entries
-#: and its frequency mapping is its statistics entry's own, so an extra base costs about a dictionary slot a page.
+#: and its frequency mapping is its statistics entry's own, so an extra base costs about a dictionary slot a page and
+#: its own introducer mapping.
 _ADMITTED_BASES_MAX = 4
 
 
@@ -3443,7 +3560,8 @@ class _AdmittedBase:
     """
 
     pages: Mapping[str, _PageTerms]
-    frequency: Mapping[str, int]
+    #: The document counts over `pages`, with the introducer of each word that keeps their order.
+    counted: _DocumentFrequency
 
 
 #: Bytes that one scope's unit base may keep, by the estimate below: a unit costs about 370 bytes (its tuples,
@@ -3453,6 +3571,11 @@ class _AdmittedBase:
 _UNIT_BASE_BYTES_MAX = 64 << 20
 _UNIT_BYTES = 370
 _TOKEN_BYTES = 8
+#: A counted unit corpus (`_UnitCorpus`) adds about this much per ref (a slot in its token, term, introduced and
+#: ordered-count mappings, and a distinct-term tuple for a unit that repeats a token) and per word of its
+#: vocabulary (a slot in its frequency and introducer mappings and in an introduced and an ordered-count tuple).
+_REF_BYTES = 160
+_WORD_BYTES = 128
 
 
 def _keeps_interpretation(view: Any, path: str) -> bool:
@@ -3481,10 +3604,37 @@ class _UnitContribution(NamedTuple):
 
 
 class _ParentUnits(NamedTuple):
-    """One parent's units as one revision of the parent held them."""
+    """One parent's units as one revision of the parent held them, and their `_units_bytes`."""
 
     revision: str
     units: tuple[_UnitContribution, ...]
+    size: int
+
+
+def _parent_units(revision: str, units: tuple[_UnitContribution, ...]) -> _ParentUnits:
+    return _ParentUnits(revision, units, _units_bytes(units))
+
+
+@dataclass(frozen=True, slots=True)
+class _UnitMerge:
+    """What one build merged its parents into, so the next build of the same admitted set merges only the parents
+    that moved: the inputs it read (`digest` of the admitted set, the interpretations' `dependency`, each parent's
+    revision and units), and each ref's winning tokens, first occurrence and every occurrence.
+
+    `corpus`, `representatives` and `occurrences` are that build's own, which its statistics entry also holds while
+    `_admitted_statistics` keeps it. `revisions` is the merge's alone, and after a stopped or owner-only build the
+    merge also keeps the parents it read. At 62,400 units over 15,600 parents, `revisions`, `representatives` and
+    `occurrences` held about 12.5 MiB on synthetic data (2026-11-24). `_UNIT_BASE_BYTES_MAX` does not count it; one
+    merge per scope bounds it.
+    """
+
+    digest: str
+    dependency: Any
+    revisions: Mapping[str, str]
+    parents: Mapping[str, _ParentUnits]
+    corpus: Mapping[str, tuple[str, ...]]
+    representatives: Mapping[int, str]
+    occurrences: Mapping[str, tuple[tuple[int, str, str], ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -3499,6 +3649,117 @@ class _UnitBase:
 
     key: tuple
     parents: Mapping[str, _ParentUnits]
+    #: The unit corpus of the scope's last build whose parents all entered `parents`, so the next build counts
+    #: only the refs whose winning tokens moved. A build that read an owner-only parent keeps the earlier one.
+    counted: _UnitCorpus | None = None
+    #: The same build's merge, kept and dropped with `counted`.
+    merged: _UnitMerge | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _UnitCorpus:
+    """A unit corpus as `CorpusStatistics.of` counts it: each ref's winning tokens, their distinct terms, and the
+    document counts over those terms."""
+
+    tokens: Mapping[str, tuple[str, ...]]
+    terms: Mapping[str, tuple[str, ...]]
+    counted: _DocumentFrequency
+
+
+def _distinct(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """A unit's distinct tokens in first-seen order, as `CorpusStatistics.of` counts them; most units repeat no
+    token, and then the tuple is the unit's own."""
+    terms = tuple(dict.fromkeys(tokens))
+    return tokens if len(terms) == len(tokens) else terms
+
+
+def _unit_corpus_statistics(
+    corpus: Mapping[str, tuple[str, ...]], base: _UnitCorpus | None, changed: Set[str] | None = None,
+) -> tuple[Any, _UnitCorpus]:
+    """`CorpusStatistics.of(corpus)` (ref -> winning tokens), counting only the refs whose tokens differ from the base's.
+
+    `changed`, when given, holds every ref whose tokens may differ from the base's, so no other ref is compared.
+    """
+    from . import bm25 as bm25_module
+
+    if base is None:
+        terms = {ref: _distinct(tokens) for ref, tokens in corpus.items()}
+        counted = _document_frequency(terms, None, {}, ())
+    else:
+        terms = dict(base.terms)
+        if changed is None:
+            gone: Iterable[str] = base.tokens.keys() - corpus.keys()
+            compared: Iterable[tuple[str, tuple[str, ...]]] = corpus.items()
+        else:
+            gone = [ref for ref in changed if ref not in corpus and ref in base.tokens]
+            compared = [(ref, corpus[ref]) for ref in changed if ref in corpus]
+        left = {ref: terms.pop(ref) for ref in gone}
+        entered = []
+        for ref, tokens in compared:
+            if base.tokens.get(ref) != tokens:
+                if ref in terms:
+                    left[ref] = terms[ref]
+                terms[ref] = _distinct(tokens)
+                entered.append(ref)
+        counted = _document_frequency(terms, base.counted, left, entered)
+    statistics = bm25_module.CorpusStatistics.from_counts(
+        len(corpus), sum(map(len, corpus.values())), counted.frequency, counted.terms_sum
+    )
+    return statistics, _UnitCorpus(corpus, terms, counted)
+
+
+def _patched_merge(
+    merged: _UnitMerge, revisions: Mapping[str, str], held: Mapping[str, _ParentUnits],
+    fresh: Mapping[str, tuple[_UnitContribution, ...]], reread: Set[str],
+) -> tuple[dict[str, tuple[str, ...]], dict[int, str], dict[str, tuple[tuple[int, str, str], ...]], set[str]]:
+    """The merge of `revisions`' parents, from an earlier merge of the same admitted set that differs only in the
+    parents whose revision moved: each ref's winning tokens, first occurrences, every occurrence, and the refs whose
+    occurrences moved. It equals a merge of every parent in `(parent path, unit order)`."""
+
+    def units_now(path: str) -> tuple[_UnitContribution, ...]:
+        return fresh.get(path, ()) if path in reread else held[path].units
+
+    tokens_of: dict[str, dict[int, tuple[str, ...]]] = {}
+
+    moved = {path for path, _revision in revisions.items() ^ merged.revisions.items()}
+    corpus = dict(merged.corpus)
+    representatives = dict(merged.representatives)
+    occurrences = dict(merged.occurrences)
+    entering: dict[str, list[tuple[int, str, str]]] = {}
+    changed: set[str] = set()
+    for path in moved:
+        # A parent the merge read but did not keep, an owner-only one that emitted no unit, added no unit.
+        if (parent := merged.parents.get(path)) is not None and path in merged.revisions:
+            changed.update(unit.ref for unit in parent.units)
+        if path in revisions:
+            for unit in units_now(path):
+                changed.add(unit.ref)
+                entering.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+    for ref in changed:
+        earlier = merged.occurrences.get(ref, ())
+        if earlier and representatives.get(earlier[0][0]) == ref:
+            del representatives[earlier[0][0]]
+        # Occurrences run in parent path order, each parent's in its own unit order: a stable sort by path keeps it.
+        combined = [entry for entry in earlier if entry[1] not in moved] + entering.get(ref, [])
+        combined.sort(key=operator.itemgetter(1))
+        if not combined:
+            corpus.pop(ref, None)
+            occurrences.pop(ref, None)
+            continue
+        occurrences[ref] = tuple(combined)
+        rowid, path, _key = combined[0]
+        representatives[rowid] = ref
+        if (tokens := tokens_of.get(path)) is None:
+            tokens = tokens_of[path] = {unit.rowid: unit.tokens for unit in units_now(path)}
+        corpus[ref] = tokens[rowid]
+    return corpus, representatives, occurrences, changed
+
+
+def _unit_corpus_bytes(counted: _UnitCorpus | None) -> int:
+    """The estimated bytes of a unit corpus beyond its parents' units, whose token tuples it shares."""
+    if counted is None:
+        return 0
+    return _REF_BYTES * len(counted.tokens) + _WORD_BYTES * len(counted.counted.frequency)
 
 
 def _text_digest(text: str) -> bytes:
@@ -3528,14 +3789,173 @@ def _page_terms(stemmed: str) -> tuple[int, tuple[str, ...], Sequence[int]]:
     return len(words), tuple(map(sys.intern, counted)), array(width, counted.values())
 
 
+@dataclass(frozen=True, slots=True)
+class _DocumentFrequency:
+    """A corpus's document frequencies, the order `CorpusStatistics.of` meets its words in, and their idf sum.
+
+    The first document, in sorted key order, that holds a word introduces it, and `of` meets the words in the
+    order of their introducers, each introducer's words in its own term order. So `introduced` (key -> the words
+    that document introduces) read in key order is the order the idf floor sums in, and a change places again
+    only the words that the changed documents hold or introduced. `frequency` is for lookup: its own order is
+    not that order once a change moved a word.
+    """
+
+    frequency: dict[str, int]
+    introducer: Mapping[str, str]
+    introduced: Mapping[str, tuple[str, ...]]
+    #: Each introducer's counts aligned with its `introduced` words, so the counts read in key order without a
+    #: lookup a word, and the `bm25.idf_sum` of their terms in that order: `CorpusStatistics.from_counts`'s
+    #: `terms_sum`.
+    ordered: Mapping[str, tuple[int, ...]]
+    terms_sum: float
+
+
+def _first_seen(documents: Mapping[str, Sequence[str]], keys: Iterable[str]) -> tuple[Counter, dict]:
+    """The document counts of `documents[key]` (distinct terms) over `keys` in order, and the words each key brings first."""
+    counts: Counter[str] = Counter()
+    introduced: dict[str, tuple[str, ...]] = {}
+    for key in keys:
+        before = len(counts)
+        counts.update(documents[key])
+        if fresh := len(counts) - before:
+            # A counter keeps insertion order, so the words that this document brought first are its last ones.
+            introduced[key] = tuple(itertools.islice(reversed(counts), fresh))[::-1]
+    return counts, introduced
+
+
+def _document_frequency(
+    documents: Mapping[str, Sequence[str]],
+    base: _DocumentFrequency | None,
+    left: Mapping[str, Sequence[str]],
+    entered: Iterable[str],
+) -> _DocumentFrequency:
+    """The document counts of `documents` (key -> distinct terms), and the order `CorpusStatistics.of` meets them in.
+
+    With no base, every document is counted. With a base, `left` maps each document the base counted that is now
+    gone or changed to the terms the base counted for it, and `entered` names each new or changed document; every
+    other document is the base's. Then only the words those documents hold or introduced find their introducer
+    again. Usually the cost follows the change and the vocabulary; a word whose introducer left or dropped it
+    sends one forward scan over the documents after that introducer, which can walk most of the corpus.
+    """
+    pages = len(documents)
+    if base is None:
+        counts, introduced = _first_seen(documents, sorted(documents))
+        introducer = {word: key for key, words in introduced.items() for word in words}
+        return _in_order(dict(counts), introducer, introduced, pages, None, ())
+    entered = sorted(entered)
+    # Copied, not rebuilt: a copy of a vocabulary-sized mapping costs a fraction of inserting every word again.
+    counts = dict(base.frequency)
+    for word in itertools.chain.from_iterable(left.values()):
+        counts[word] -= 1
+    for word in itertools.chain.from_iterable(documents[key] for key in entered):
+        counts[word] = counts.get(word, 0) + 1
+    _entered_counts, first_entered = _first_seen(documents, entered)
+    candidates = {word: key for key, words in first_entered.items() for word in words}
+    introducer = dict(base.introducer)
+    # Documents whose introduced words change, besides the entered ones.
+    losing: set[str] = set()
+    gaining: set[str] = set()
+    dropped = {word: key for key in left for word in base.introduced.get(key, ())}
+    for word, key in candidates.items():
+        # A word whose introducer is unchanged moves only to an entered document before it.
+        if word not in dropped and ((held := base.introducer.get(word)) is None or key < held):
+            introducer[word] = key
+            if held is not None:
+                losing.add(held)
+    lost: dict[str, str] = {}
+    for word, key in dropped.items():
+        # Every remaining holder of a word that `key` introduced is an entered document or comes after `key`.
+        candidate = candidates.get(word)
+        if candidate is not None and candidate <= key:
+            introducer[word] = candidate
+        elif counts[word] > 0:
+            lost[word] = key
+        else:
+            del introducer[word]
+    if lost:
+        # The first holder after a lost word's old introducer: one forward pass finds them all.
+        ordered = sorted(documents)
+        remaining = set(lost)
+        for key in itertools.islice(ordered, bisect.bisect_left(ordered, min(lost.values())), None):
+            if found := remaining.intersection(documents[key]):
+                for word in found:
+                    introducer[word] = key
+                gaining.add(key)
+                remaining -= found
+                if not remaining:
+                    break
+    introduced = dict(base.introduced)
+    for key in left:
+        introduced.pop(key, None)
+    for key in losing | gaining | set(entered):
+        if key not in documents:
+            continue
+        # An entered document introduces only words it holds first among the entered, and one that only
+        # loses words introduces some of its old ones.
+        source = (
+            documents[key] if key in gaining
+            else base.introduced.get(key, ()) if key in losing
+            else first_entered.get(key, ())
+        )
+        if words := tuple(word for word in source if introducer.get(word) == key):
+            introduced[key] = words
+        else:
+            introduced.pop(key, None)
+    touched = set(itertools.chain.from_iterable(left.values()))
+    touched.update(itertools.chain.from_iterable(documents[key] for key in entered))
+    for word in touched:
+        # A word no document holds any more leaves the counts; its introducer left with it.
+        if not counts[word]:
+            del counts[word]
+    moved = losing | gaining | set(entered) | left.keys()
+    changed = (word for word in touched if counts.get(word) != base.frequency.get(word) and word in counts)
+    return _in_order(counts, introducer, introduced, pages, (base, moved), changed)
+
+
+def _in_order(
+    frequency: dict[str, int], introducer: Mapping[str, str], introduced: Mapping[str, tuple[str, ...]],
+    pages: int, earlier: tuple[_DocumentFrequency, set[str]] | None, changed: Iterable[str],
+) -> _DocumentFrequency:
+    """The counts with their order kept per introducer, and their idf sum. `earlier` is a base and the keys whose
+    introduced words moved since it; then only those keys and the `changed` words' counts are read again."""
+    from . import bm25 as bm25_module
+
+    if earlier is None:
+        ordered = {key: tuple(map(frequency.__getitem__, words)) for key, words in introduced.items()}
+    else:
+        base, moved = earlier
+        ordered = dict(base.ordered)
+        for key in moved:
+            if words := introduced.get(key):
+                ordered[key] = tuple(map(frequency.__getitem__, words))
+            else:
+                ordered.pop(key, None)
+        patched: dict[str, tuple[list[int], dict[str, int]]] = {}
+        for word in changed:
+            key = introducer[word]
+            if key in moved:
+                continue
+            if (found := patched.get(key)) is None:
+                found = patched[key] = (list(ordered[key]), {word: index for index, word in enumerate(introduced[key])})
+            block, place = found
+            block[place[word]] = frequency[word]
+        for key, (block, _place) in patched.items():
+            ordered[key] = tuple(block)
+    counts = itertools.chain.from_iterable(map(ordered.__getitem__, sorted(ordered)))
+    return _DocumentFrequency(
+        frequency, introducer, introduced, ordered, bm25_module.idf_sum(bm25_module.idf_terms(pages, counts))
+    )
+
+
 def _admitted_corpus(
     rows: Mapping[str, str], digests: Mapping[str, bytes], base: _AdmittedBase | None
 ) -> tuple[Any, Any, _AdmittedBase | None]:
     """The Okapi figures, postings and base of the corpus `rows` (page -> stemmed text), which `digests` fingerprints.
 
     A page whose digest equals the base's keeps the base's entry; only a new or changed page is tokenized,
-    and the word counts move by exactly the terms that left or entered. `rows` need hold only those pages.
-    The result equals `CorpusStatistics.of` over the same texts, including the order of `document_frequency`.
+    and the word counts and their order move by exactly the pages that left or entered (`_document_frequency`).
+    `rows` need hold only those pages.
+    The result equals `CorpusStatistics.of` over the same texts: the same counts and the same idf floor, to the last bit.
     """
     from . import bm25 as bm25_module
 
@@ -3549,27 +3969,25 @@ def _admitted_corpus(
             length, terms, counts = _page_terms(rows[path])
             pages[path] = _PageTerms(digest, length, terms, counts)
             call_spans.measure(call_spans.PAGES_TOKENIZED)
-    # `CorpusStatistics.of` visits the pages sorted by path and counts a page's terms in its own order.
-    ordered = sorted(pages)
-    if base is None:
-        # Counting in that order leaves the counts in the order `of` gives.
-        frequency = dict(Counter(itertools.chain.from_iterable(pages[path].terms for path in ordered)))
-    else:
-        counts = Counter(base.frequency)
-        counts.subtract(itertools.chain.from_iterable(
-            kept.terms for path, kept in held.items() if pages.get(path) is not kept
-        ))
-        counts.update(itertools.chain.from_iterable(
-            page.terms for path, page in pages.items() if held.get(path) is not page
-        ))
-        # The base's order is stale: an edit can bring a word forward, a delete can end one.
-        first_seen = dict.fromkeys(itertools.chain.from_iterable(pages[path].terms for path in ordered))
-        frequency = {term: counts[term] for term in first_seen}
-    statistics = bm25_module.CorpusStatistics.from_counts(
-        len(pages), sum(page.length for page in pages.values()), frequency
-    )
     kept_terms = sum(len(page.terms) for page in pages.values())
-    retained = _AdmittedBase(pages, statistics.document_frequency) if kept_terms <= _ADMITTED_BASE_TERMS_MAX else None
+    if kept_terms <= _ADMITTED_BASE_TERMS_MAX:
+        counted = _document_frequency(
+            {path: page.terms for path, page in pages.items()},
+            base.counted if base is not None else None,
+            {path: kept.terms for path, kept in held.items() if pages.get(path) is not kept},
+            [path for path, page in pages.items() if held.get(path) is not page],
+        )
+        frequency, terms_sum = counted.frequency, counted.terms_sum
+        # The word maps grow with the vocabulary, so a corpus past the word bound keeps no base either.
+        retained = _AdmittedBase(pages, counted) if len(frequency) <= _ADMITTED_BASE_WORDS_MAX else None
+    else:
+        # No base is kept, so its introducers would be thrown away: count every page in first-seen order only.
+        counts, _introduced = _first_seen({path: page.terms for path, page in pages.items()}, sorted(pages))
+        frequency, terms_sum = dict(counts), None
+        retained = None
+    statistics = bm25_module.CorpusStatistics.from_counts(
+        len(pages), sum(page.length for page in pages.values()), frequency, terms_sum
+    )
     # The postings count a new word from the pages' terms only where the base keeps them: the same bound.
     postings = bm25_module.CorpusPostings(
         {path: page.length for path, page in pages.items()},
@@ -4191,6 +4609,46 @@ def search_substrings_result(
     if answer.value is None:
         return answer
     return CatalogQueryResult({**empty, **answer.value}, answer.readiness)
+
+
+def search_current_published_substrings(
+    vault_root: Path, queries: Sequence[str], *, candidate_limit: int | None = None,
+) -> CatalogQueryResult[dict[str, list[str]]]:
+    """Search one already-published file catalogue against a live KB checkpoint."""
+    from . import freshness, state_migration
+
+    if not _usable():
+        return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
+    check = request_budget.current_checkpoint()
+    budget = request_budget.current()
+    if check is not None and (budget is None or check.budget.deadline < budget.deadline):
+        budget = check.budget
+    elif budget is not None and (check is None or check.budget is not budget):
+        check = request_budget.ReadCheckpoint(budget)
+    token = request_budget.set_current(budget)
+    try:
+        with request_budget.checking(check), stopping_at_budget() as stop:
+            result = get_store(vault_root)._search_current_published_substrings(
+                queries, stop, candidate_limit=candidate_limit,
+            )
+            # These catalogue verdicts prove a replacement is needed. The
+            # transaction has closed before the worker can take publication.
+            if result.readiness.status in ("missing", "incompatible", "fatal_failure"):
+                with contextlib.suppress(OSError, state_migration.StateMigrationManifestError):
+                    if (
+                        not state_migration.vault_store_recorded(vault_root)
+                        and freshness.cached_live_recall_checkpoint(vault_root, "kb") is not None
+                    ):
+                        _schedule_repair(
+                            vault_root,
+                            cause=RepairCause.PUBLISHED_CATALOGUE_UNUSABLE,
+                            defer_generation=True,
+                        )
+            return result
+    except request_budget.ReadBudgetExhausted:
+        return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend()))
+    finally:
+        request_budget.reset_current(token)
 
 
 def search_keyword_groups_result(
@@ -5789,27 +6247,29 @@ def _insert_row(conn: sqlite3.Connection, table: str, columns: Mapping[str, Any]
     return cur.lastrowid
 
 
-#: The columns that schemas 17 and 18 added to `pages`; a store that the released code created before them
+#: The columns that schemas 17, 18 and 19 added to `pages`; a store that the released code created before them
 #: lacks them.
 _SCHEMA_17_PAGE_COLUMNS = ("payload_hash", "source_url")
 #: The type of each column that schema 18 added: the capture day and its typed value are text, the position is real.
 _SCHEMA_18_COLUMN_TYPES = {"capture_day": "TEXT", "capture_date_json": "TEXT", "capture_lat": "REAL", "capture_lon": "REAL"}  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
-_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + tuple(_SCHEMA_18_COLUMN_TYPES)
+#: The two text columns that schema 19 added: how the capture day was found, and its members array.
+_SCHEMA_19_COLUMN_TYPES = {"capture_date_source": "TEXT", "capture_date_source_json": "TEXT"}  # nosemgrep: ep-word-set -- the column names of this schema version, not a vocabulary
+_LATER_PAGE_COLUMNS = _SCHEMA_17_PAGE_COLUMNS + tuple(_SCHEMA_18_COLUMN_TYPES) + tuple(_SCHEMA_19_COLUMN_TYPES)
 
 
 def _add_later_page_columns(conn: sqlite3.Connection) -> None:
-    """Add the schema 17 and 18 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
+    """Add the schema 17, 18 and 19 columns to a `pages` table that lacks them: `CREATE TABLE IF NOT EXISTS` leaves it alone."""
     present = {row[1] for row in conn.execute("PRAGMA table_info(pages)")}
     for name in _SCHEMA_17_PAGE_COLUMNS:
         if name not in present:
             conn.execute(f"ALTER TABLE pages ADD COLUMN {name} TEXT")
-    for name, kind in _SCHEMA_18_COLUMN_TYPES.items():
+    for name, kind in (*_SCHEMA_18_COLUMN_TYPES.items(), *_SCHEMA_19_COLUMN_TYPES.items()):
         if name not in present:
             conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {kind}")
 
 
 def _page_columns_of_table(conn: sqlite3.Connection, columns: Mapping[str, Any]) -> Mapping[str, Any]:
-    """`columns` without the schema 17 and 18 columns that this connection's `pages` table does not have yet.
+    """`columns` without the schema 17, 18 and 19 columns that this connection's `pages` table does not have yet.
 
     A page written to an older store without these values misleads no door, because `catalogue_schema_current`
     reads that store as not current until `create_catalogue_schema` adds the columns (`_add_later_page_columns`).
@@ -6068,7 +6528,7 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
-    def _view_readiness(
+    def _catalogue_view_status(
         self, view: _CatalogReadView, scope: str, checkpoint: object | None = None
     ) -> CatalogReadiness:
         """Validate interpretation while ordinary publication may advance."""
@@ -7128,6 +7588,8 @@ class LexicalStore:
             " capture_date_json TEXT,"
             " capture_lat REAL,"
             " capture_lon REAL,"
+            " capture_date_source TEXT,"
+            " capture_date_source_json TEXT,"
             " eligibility_view_json TEXT,"
             " content_hash TEXT, structure_json TEXT, ranking_json TEXT,"
             # The duplicate-handling index: derived from the page's bytes, never authority.
@@ -9889,6 +10351,29 @@ class LexicalStore:
             if conn is not None:
                 conn.close()
 
+    def _connect_published_catalog(self, *, deadline: float | None = None) -> sqlite3.Connection:
+        """Open the existing owner-bound sidecar with normal SQLite WAL locking."""
+        conn: sqlite3.Connection | None = None
+        try:
+            with (
+                reserved_paths._subsystem_authority_scope("lexstore"),
+                reserved_paths._identity_coordination_scope(
+                    self.vault_root,
+                    descriptor_ids=("lexical-store",),
+                    identity_may_change=False,
+                    deadline=deadline,
+                ),
+                reserved_paths._sqlite_owner_target_scope(
+                    self.vault_root, self.path, "lexical-store", create=False
+                ) as retained_path,
+            ):
+                conn = _sqlite_connect_owned(f"{retained_path.as_uri()}?mode=ro", uri=True, timeout=0)
+            return conn
+        except BaseException:
+            if conn is not None:
+                conn.close()
+            raise
+
     def assess_live_catalog(
         self, *, require_live_projection: bool = True
     ) -> CatalogAssessment:
@@ -9919,21 +10404,7 @@ class LexicalStore:
         }
         conn: sqlite3.Connection | None = None
         try:
-            with reserved_paths._subsystem_authority_scope("lexstore"):
-                with reserved_paths._identity_coordination_scope(
-                    self.vault_root,
-                    descriptor_ids=("lexical-store",),
-                    identity_may_change=False,
-                ):
-                    with reserved_paths._sqlite_owner_target_scope(
-                        self.vault_root, self.path, "lexical-store", create=False
-                    ) as retained_path:
-                        # Read the live WAL with normal locking; immutable is unsafe
-                        # for a changing database.
-                        conn = _sqlite_connect_owned(
-                            f"{retained_path.as_uri()}?mode=ro", uri=True
-                        )
-            conn.execute("PRAGMA busy_timeout=0")
+            conn = self._connect_published_catalog()
             conn.execute("BEGIN")
             if not self._schema_is_current(conn, raise_errors=True):
                 assessment = CatalogAssessment("incompatible")
@@ -10931,7 +11402,7 @@ class LexicalStore:
                     return query_fn(conn)
         view = _admitted_catalog_view(self.vault_root)
         if view is not None and view.store is self:
-            ready = self._view_readiness(view, scope)
+            ready = self._catalogue_view_status(view, scope)
             if not ready.complete:
                 _schedule_repair(self.vault_root)
                 return None
@@ -11492,11 +11963,13 @@ class LexicalStore:
         """The stemmed text of each of `paths` in the scope."""
         if not paths:
             return {}
-        # The pages lead the join: `_FTS_PAGES` leads with the full-text table, which a MATCH needs, but here it
-        # would read every full-text row to keep a few.
+        # The wanted paths lead the join, each found by its key. Led by the full-text table (`_FTS_PAGES`, which
+        # a MATCH needs), or by `pages`, SQLite read every row of the scope to keep a few: 19 ms for one page of
+        # a 15,600-page catalogue (2026-11-24).
         return dict(conn.execute(
-            f"SELECT p.path, fts.stemmed FROM pages p CROSS JOIN fts ON fts.rowid = p.rowid "
-            f"WHERE p.{col} = 1 AND p.path IN (SELECT value FROM json_each(?))",
+            "SELECT p.path, fts.stemmed FROM json_each(?) AS wanted "
+            "CROSS JOIN pages p ON p.path = wanted.value CROSS JOIN fts ON fts.rowid = p.rowid "
+            f"WHERE p.{col} = 1",
             (json.dumps(sorted(paths), ensure_ascii=False),),
         ))
 
@@ -11596,10 +12069,9 @@ class LexicalStore:
         interpretation's inputs are unchanged. Otherwise a parent is interpreted again only
         if it moved or the public-instance base lacks it, and every parent's units are then
         merged in `(parent path, rowid)` order, which gives the figures of a build from nothing.
+        The figures count again only the refs whose winning tokens differ from the base's corpus.
         A build that the request budget stops keeps no figures, but keeps the parents it finished.
         """
-        from . import bm25 as bm25_module
-
         admitted = {path for path in parents if view.parents.allowed(path)}
         digest = hashlib.blake2b(
             "\0".join(sorted(admitted)).encode("utf-8", "surrogatepass"), digest_size=16,
@@ -11646,60 +12118,96 @@ class LexicalStore:
             base_key = (identity, view.interpretations.public_dependency())
             with self._term_frequency_cache_lock:
                 base = self._unit_bases.get(scope)
-            held = base.parents if base is not None and base.key == base_key else {}
+            same_key = base is not None and base.key == base_key
+            held = base.parents if same_key else {}
             finished: dict[str, tuple[_UnitContribution, ...]] = {}
+            reread = [
+                path for path, revision in revisions.items()
+                if (kept := held.get(path)) is None or kept.revision != revision
+            ]
             try:
-                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", [
-                    path for path, revision in revisions.items()
-                    if (kept := held.get(path)) is None or kept.revision != revision
-                ], finished)
+                fresh, interpreted = view.contributions("in_vault" if scope == "vault" else "in_kb", reread, finished)
             except sqlite3.Error:
                 # The read stopped, as the request budget does (`stopping_at_budget`). Statistics over a part of the
                 # corpus would be wrong, so none are kept; the parents it finished are, so the next build resumes.
                 self._keep_unit_parents(scope, base_key, view, revisions, finished)
                 raise
             view.require_complete()
-            corpus: dict[str, tuple[str, ...]] = {}
-            representatives: dict[int, str] = {}
-            occurrences: dict[str, list[tuple[int, str, str]]] = {}
-            kept_parents: dict[str, _ParentUnits] = {}
-            kept_bytes = 0
-            for path, revision in revisions.items():
-                parent = held.get(path)
-                if parent is None or parent.revision != revision:
-                    units = fresh.get(path, ())
-                    # A parent of an owner-only instance is interpreted by its caller alone, on every request,
-                    # even when its interpretation emitted no unit: another caller may be refused that instance.
-                    # Only a parent with no stored row holds no interpretation at all.
-                    parent = (
-                        _ParentUnits(revision, units)
-                        if path not in interpreted or _keeps_interpretation(view, path) else None
-                    )
-                else:
-                    units = parent.units
-                for unit in units:
-                    if unit.ref not in corpus:
-                        corpus[unit.ref] = unit.tokens
-                        representatives[unit.rowid] = unit.ref
-                    # Retain identities without text; ambiguous hit precedence still
-                    # belongs to the original candidate SQL traversal.
-                    occurrences.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
-                if parent is not None:
-                    kept_parents[path] = parent
-                    kept_bytes += _units_bytes(units)
-            # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
-            # parents this build did not read. Each is used again only at its own revision; a deleted or
-            # renamed page's entry stays until the byte bound drops the base.
-            for path, parent in held.items():
-                if path not in revisions:
-                    kept_parents[path] = parent
-                    kept_bytes += _units_bytes(parent.units)
+            merged = base.merged if same_key else None
+            changed: set[str] | None = None
+            if (
+                merged is not None and merged.digest == digest and merged.dependency == dependency
+                # A parent that the view interprets for its caller alone and that emits a unit sends the build
+                # through every parent; one that emits none adds nothing and is never kept.
+                and all(
+                    path not in interpreted or _keeps_interpretation(view, path) or not fresh.get(path)
+                    for path in reread
+                )
+            ):
+                corpus, representatives, occurrences, changed = _patched_merge(
+                    merged, revisions, held, fresh, set(reread)
+                )
+                kept_parents = dict(held)
+                kept_parents.update(
+                    (path, _parent_units(revisions[path], fresh.get(path, ()))) for path in reread
+                    if path not in interpreted or _keeps_interpretation(view, path)
+                )
+                private = False
+            else:
+                corpus: dict[str, tuple[str, ...]] = {}
+                representatives: dict[int, str] = {}
+                listed: dict[str, list[tuple[int, str, str]]] = {}
+                kept_parents: dict[str, _ParentUnits] = {}
+                private = False
+                for path, revision in revisions.items():
+                    parent = held.get(path)
+                    if parent is None or parent.revision != revision:
+                        units = fresh.get(path, ())
+                        # A parent of an owner-only instance is interpreted by its caller alone, on every request,
+                        # even when its interpretation emitted no unit: another caller may be refused that instance.
+                        # Only a parent with no stored row holds no interpretation at all.
+                        parent = (
+                            _parent_units(revision, units)
+                            if path not in interpreted or _keeps_interpretation(view, path) else None
+                        )
+                    else:
+                        units = parent.units
+                    for unit in units:
+                        if unit.ref not in corpus:
+                            corpus[unit.ref] = unit.tokens
+                            representatives[unit.rowid] = unit.ref
+                        # Retain identities without text; ambiguous hit precedence still
+                        # belongs to the original candidate SQL traversal.
+                        listed.setdefault(unit.ref, []).append((unit.rowid, path, unit.key))
+                    if parent is not None:
+                        kept_parents[path] = parent
+                    elif units:
+                        # An owner-only parent that emitted no unit leaves nothing of its own in the corpus.
+                        private = True
+                # A narrower admitted set must not cost the next wider one its parents, so the base keeps the
+                # parents this build did not read. Each is used again only at its own revision; a deleted or
+                # renamed page's entry stays until the byte bound drops the base.
+                for path, parent in held.items():
+                    if path not in revisions:
+                        kept_parents[path] = parent
+                occurrences = {ref: tuple(rows) for ref, rows in listed.items()}
+            kept_bytes = sum(parent.size for parent in kept_parents.values())
+            earlier = base.counted if same_key else None
+            # A patched merge names every ref whose tokens can differ from the corpus it started from.
+            same_corpus = earlier is not None and merged is not None and earlier.tokens is merged.corpus
+            statistics, counted = _unit_corpus_statistics(corpus, earlier, changed if same_corpus else None)
             entry = _AdmittedStatisticsEntry(
-                current_fingerprint, bm25_module.CorpusStatistics.of(corpus), MappingProxyType(representatives),
-                MappingProxyType({ref: tuple(rows) for ref, rows in occurrences.items()}),
+                current_fingerprint, statistics, MappingProxyType(representatives), MappingProxyType(occurrences),
+            )
+            merge = None if private else _UnitMerge(
+                digest, dependency, revisions, kept_parents, corpus, representatives, occurrences,
             )
             with self._term_frequency_cache_lock:
-                self._store_unit_base(scope, base_key, kept_parents, kept_bytes)
+                # An owner-only parent's units never enter the shared base, so neither does a corpus holding them.
+                self._store_unit_base(
+                    scope, base_key, kept_parents, kept_bytes, earlier if private else counted,
+                    (base.merged if same_key else None) if private else merge,
+                )
         with self._term_frequency_cache_lock:
             # Equivalent snapshot aliases must not evict another admitted corpus.
             for retained_key, other in tuple(self._admitted_statistics.items()):
@@ -11722,7 +12230,7 @@ class LexicalStore:
         """
         # A finished parent was resolved by the read, so `instance` answers from the view's memory.
         kept = {
-            path: _ParentUnits(revisions[path], units) for path, units in finished.items()
+            path: _parent_units(revisions[path], units) for path, units in finished.items()
             if path not in view.parents.unavailable and _keeps_interpretation(view, path)
         }
         if not kept:
@@ -11730,18 +12238,27 @@ class LexicalStore:
         # One critical section: a build that stored in between would otherwise lose its parents.
         with self._term_frequency_cache_lock:
             base = self._unit_bases.get(scope)
-            merged = dict(base.parents) if base is not None and base.key == base_key else {}
+            same_key = base is not None and base.key == base_key
+            merged = dict(base.parents) if same_key else {}
             merged.update(kept)
             self._store_unit_base(
-                scope, base_key, merged, sum(_units_bytes(parent.units) for parent in merged.values())
+                scope, base_key, merged, sum(parent.size for parent in merged.values()),
+                base.counted if same_key else None, base.merged if same_key else None,
             )
 
     def _store_unit_base(
-        self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int
+        self, scope: str, base_key: tuple, parents: dict[str, _ParentUnits], kept_bytes: int,
+        counted: _UnitCorpus | None, merged: _UnitMerge | None,
     ) -> None:
-        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock."""
+        """Install the scope's unit base, or drop it past the byte bound. Called under the frequency lock.
+
+        `merged` is the build that `counted` came from; it is kept only with `counted`."""
         if kept_bytes <= _UNIT_BASE_BYTES_MAX:
-            self._unit_bases[scope] = _UnitBase(base_key, parents)
+            # The counted corpus fits in what the parents leave, or the next build counts every ref.
+            fits = counted is not None and kept_bytes + _unit_corpus_bytes(counted) <= _UNIT_BASE_BYTES_MAX
+            self._unit_bases[scope] = _UnitBase(
+                base_key, parents, counted if fits else None, merged if fits else None
+            )
         else:
             self._unit_bases.pop(scope, None)
 
@@ -12107,7 +12624,7 @@ class LexicalStore:
             from .vocabulary.registry import RegistryError
 
             try:
-                return self._view_readiness(view, scope)
+                return self._catalogue_view_status(view, scope)
             except RegistryError:
                 return CatalogReadiness("definitions_unavailable", False, backend_name)
             except sqlite3.Error as error:
@@ -12683,7 +13200,7 @@ class LexicalStore:
             checkpoint is not None and view is not None
             and view.store is self and view.connection is conn
         ):
-            return self._view_readiness(view, scope, checkpoint).complete
+            return self._catalogue_view_status(view, scope, checkpoint).complete
         with call_spans.span("lexical.proof"):
             if not conn.in_transaction:
                 conn.execute("BEGIN")
@@ -13115,7 +13632,7 @@ class LexicalStore:
         if view is not None:
             try:
                 with call_spans.span("lexical.readiness"):
-                    readiness = self._view_readiness(view, scope, recall_checkpoint)
+                    readiness = self._catalogue_view_status(view, scope, recall_checkpoint)
                 if not readiness.complete:
                     # Only metadata disagrees (view, checkpoint, policy, schema or
                     # identity); the worker's catch-up must prove the catalogue
@@ -13200,16 +13717,12 @@ class LexicalStore:
         A stopped query's value is dropped even when `query_fn` swallowed the interrupt: it may be
         a partial answer.
         """
-        with call_spans.span("lexical.query"), _interrupt_at_budget(conn) as stopped:
-            try:
+        try:
+            with call_spans.span("lexical.query"), _interrupt_at_budget(conn):
                 value = query_fn(conn)
-            except sqlite3.Error:
-                if not stopped():
-                    raise
-            else:
-                if not stopped():
-                    return CatalogQueryResult(value, readiness)
-        return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, readiness.backend))
+        except _CatalogueDeadline:
+            return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, readiness.backend))
+        return CatalogQueryResult(value, readiness)
 
     def _serve_from_ready_catalog(self, scope, freshness, query_fn, failure_message):
         """Compatibility wrapper retaining the historical list-or-None contract."""
@@ -13863,6 +14376,91 @@ class LexicalStore:
             "lexical sidecar substring query failed (%s)",
         )
 
+    def _search_current_published_substrings(
+        self, queries: Sequence[str], stop: BudgetStop, *, candidate_limit: int | None = None,
+    ) -> CatalogQueryResult[dict[str, list[str]]]:
+        from . import freshness, state_migration
+        from .cli_ops import OpError
+        from .vocabulary.registry import RegistryError
+
+        backend_name = backend()
+        stale = CatalogQueryResult(None, CatalogReadiness("stale", False, backend_name))
+        incompatible = CatalogQueryResult(None, CatalogReadiness("incompatible", False, backend_name))
+        unsupported = CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend_name))
+        budget = request_budget.current()
+        try:
+            if budget is not None and budget.remaining() <= 0:
+                raise _CatalogueDeadline(stop)
+            # A store record also covers interrupted transitions; neither case
+            # can prove a current file catalogue without opening the store.
+            if state_migration.vault_store_recorded(self.vault_root):
+                return unsupported
+            target = freshness.cached_live_recall_checkpoint(self.vault_root, "kb")
+            if target is None:
+                return stale
+            if self._failed:
+                return CatalogQueryResult(None, CatalogReadiness("fatal_failure", False, backend_name))
+            try:
+                conn = self._connect_published_catalog(
+                    deadline=budget.deadline if budget is not None else None
+                )
+            except FileNotFoundError:
+                return CatalogQueryResult(None, CatalogReadiness("missing", False, backend_name))
+            except (OSError, RuntimeError):
+                return stale
+            with contextlib.closing(conn), _interrupt_at_budget(conn):
+                with call_spans.span("lexical.proof"):
+                    conn.execute("BEGIN")
+                    if (
+                        not self._schema_is_current(conn, raise_errors=True)
+                        or self._meta_catalog_identity(conn) != catalog_semantic_identity(self.vault_root)
+                    ):
+                        return incompatible
+                    stored = checkpoint_state(self._meta_checkpoint(conn, "kb"))
+                    if stored is None:
+                        return incompatible
+                    if stored != checkpoint_state(target):
+                        return stale
+                with call_spans.span("lexical.query"):
+                    tokens = {query: query.split() for query in queries}
+                    # One extra row establishes overflow. All terms share
+                    # the allowance, including pages that match several terms.
+                    remaining = None if candidate_limit is None else max(0, candidate_limit) + 1
+                    value: dict[str, list[str]] = {}
+                    for query, words in tokens.items():
+                        matches = (
+                            self._matched_substring_paths(conn, words, "kb", limit=remaining)
+                            if words else []
+                        )
+                        value[query] = matches
+                        if remaining is not None:
+                            remaining -= len(matches)
+                            if remaining == 0:
+                                break
+                if state_migration.vault_store_recorded(self.vault_root):
+                    return unsupported
+                if freshness.cached_live_recall_checkpoint(self.vault_root, "kb") != target:
+                    return stale
+            if remaining == 0:
+                return CatalogQueryResult(None, CatalogReadiness("overflow", False, backend_name))
+            return CatalogQueryResult(value, CatalogReadiness("available", True, backend_name))
+        except (_CatalogueDeadline, request_budget.ReadBudgetExhausted):
+            return CatalogQueryResult(None, CatalogReadiness(DEADLINE_STATUS, False, backend_name))
+        except RegistryError:
+            return CatalogQueryResult(None, CatalogReadiness("definitions_unavailable", False, backend_name))
+        except sqlite3.Error as error:
+            if classify_sqlite_error(error) == "rebuildable":
+                return incompatible
+            return CatalogQueryResult(
+                None, self._catalog_readiness_error(error, backend_name, schedule_repair=False)
+            )
+        except (OSError, state_migration.StateMigrationManifestError):
+            return stale
+        except OpError as error:
+            if not _is_repair_contention(error):
+                raise
+            return CatalogQueryResult(None, CatalogReadiness("transient_failure", False, backend_name))
+
     @staticmethod
     def _substring_predicate(
         tokens: list[str], scope: str,
@@ -13882,18 +14480,25 @@ class LexicalStore:
         return clauses, params
 
     def _matched_substring_paths(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str, allowed_paths: Set[str],
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str,
+        allowed_paths: Set[str] | None = None, *, limit: int | None = None,
     ) -> list[str]:
-        """Intersect exact matches without enumerating the allowed corpus or sorting hidden rows."""
+        """Read exact matches in batches without a SQLite sort."""
         clauses, params = self._substring_predicate(tokens, scope)
-        rows = conn.execute(
-            "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
-            + " AND ".join(clauses), params,
-        )
+        sql = "SELECT p.path FROM tri CROSS JOIN pages p ON p.rowid = tri.rowid WHERE "
+        sql += " AND ".join(clauses)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = conn.execute(sql, params)
+        matches: list[str] = []
         try:
-            return [path for (path,) in rows if path in allowed_paths]
+            while batch := rows.fetchmany(request_budget.CHECKPOINT_EVERY):
+                request_budget.checkpoint()
+                matches.extend(path for (path,) in batch if allowed_paths is None or path in allowed_paths)
         finally:
             rows.close()
+        return matches
 
     def _substring_query(
         self, conn: sqlite3.Connection, tokens: list[str], scope: str, k: int | None = None,

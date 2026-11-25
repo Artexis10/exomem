@@ -1157,10 +1157,10 @@ def test_stable_candidate_keeps_current_activation_data_and_stem_precedence(
     assert changed.as_dict() == expected.as_dict()
     assert changed.activation_census == expected.activation_census
     current = changed.activation_census.by_path[path]
-    assert current.source_hash == after.source_hash
+    assert current.source_hash == after.baseline_hash
     assert current.status == " Archived "
     assert changed.activation_census.unique_path_for_id(_ID_A) is None
-    assert corpus.activation_census.by_path[path].source_hash == before.source_hash
+    assert corpus.activation_census.by_path[path].source_hash == before.baseline_hash
     assert corpus.activation_census.by_path[path].status == "active"
     assert changed.outbound[path][0].logical_target_path == stem_target.path
     assert changed.outbound[path][0].target_status == "resolved"

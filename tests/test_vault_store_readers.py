@@ -30,6 +30,7 @@ from test_vault_store_migration import (
 )
 from test_vault_store_read_write import EDITED, NEW, put, stored, writer  # noqa: F401
 from test_vault_store_rederive import POLICY, PROFILES, commit_policy, project, settle_to_the_end
+from test_vault_store_served import call
 from test_vault_store_write_path import served  # noqa: F401
 
 from exomem import __main__ as cli
@@ -63,7 +64,7 @@ from exomem.find_types import FindTimings, Hit
 from exomem.governance import egress
 from exomem.governance.principal import RequestPrincipal, owner_principal, request_scope
 from exomem.kbdir import managed_join
-from exomem.vault_store import availability, importer, ownership, read, write
+from exomem.vault_store import importer, ownership, read, write
 from exomem.vault_store import mode as vault_store_mode
 from exomem.vocabulary import registry
 
@@ -575,9 +576,11 @@ IDENTITY = "0f5c3a52-7d1e-4b8a-9c1f-2a6e4d8b0c11"
 #: When set, the index test writes each statement's ``EXPLAIN QUERY PLAN`` to this file: the plans
 #: that tasks.md 3.2 records, run with ``EXOMEM_READERS_DRILL_PAGES`` at scale.
 PLAN_REPORT = os.environ.get("EXOMEM_READERS_PLAN_REPORT")
-#: The store's settings tables hold one row per setting, never one per page, so reading all of
-#: them costs the same at any vault size.
-SETTINGS_TABLES = {"meta", "store_meta", "store_mode"}
+#: The tables whose rows do not grow with the vault. The settings tables hold one row per setting,
+#: never one per page, so reading all of them costs the same at any vault size. The derivation
+#: queue holds only the intents that still lag, which the store thread drains before each request:
+#: its rows follow the lag, not the vault.
+UNSCALED_TABLES = {"meta", "store_meta", "store_mode", "store_derivation_queue"}
 
 
 def full_reads(reader, sql):
@@ -599,7 +602,7 @@ def full_reads(reader, sql):
         opened[cursor]
         for _addr, op, cursor, *_rest in code
         if op in ("Rewind", "Last") and cursor in opened
-    } - SETTINGS_TABLES
+    } - UNSCALED_TABLES
 
 
 @pytest.mark.timeout(1800)
@@ -683,7 +686,7 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
         monkeypatch.setattr(
             lexstore, seam, lambda *args, _seam=seam, **kwargs: repairs.append(_seam)
         )
-    write.commit(writer, put(PROFILES, b"profiles: {}\n"))
+    overlay = write.commit(writer, put(PROFILES, b"profiles: {}\n"))
     find_module.clear_cache()
 
     found = commands.op_find(stored, query="lighthouse", limit=15, graph=False, rerank=False)
@@ -692,7 +695,8 @@ def test_a_reader_serves_and_says_so_while_a_schema_change_is_applied_to_the_sto
     assert found["hits"] and asked["hits"]
     assert "warming" not in found and "warming" not in asked
     assert found["lag"]["registry"] == "rebuilding"
-    assert found["lag"]["revision"] < found["lag"]["target"] == read.current_revision(stored)
+    # The target is the overlay's commit; the derivation of its page moved the revision after it.
+    assert found["lag"]["revision"] < found["lag"]["target"] == overlay.revision
     assert found["notice"] in asked["notice"]
     assert (find_lighthouse(stored), find_lighthouse(stored)) == (False, True)
     assert repairs == []
@@ -1196,6 +1200,25 @@ PUBLIC_SHAPE = capabilities.ActiveSurfaceDescriptor(
 )
 
 
+def test_read_page_does_not_scan_its_parent_to_resolve_the_version_id(stored, monkeypatch):  # noqa: F811
+    parent = (stored / ALPHA).parent
+    scanned = []
+    scandir = os.scandir
+
+    def record(path):
+        if path == parent:
+            scanned.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(os, "scandir", record)
+    with capabilities.active_surface(PUBLIC_SHAPE):
+        result = call(stored, "read_memory", path=ALPHA)
+
+    assert result["path"] == ALPHA
+    assert result["id"]
+    assert scanned == []
+
+
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("resolver", ["evicted", "resident"])
 def test_read_memory_shows_a_link_as_file_mode_shows_it_whether_or_not_a_resolver_is_resident(
@@ -1503,8 +1526,6 @@ def test_the_terminal_ui_counts_the_stored_notes_and_starts_no_file_warm_up(
 
     started = []
     monkeypatch.setattr(warmup, "start_background", lambda root: started.append(root))
-    # The session past the rollout fence, which refuses a store-mode vault on this build.
-    monkeypatch.setattr(availability, "require_servable", lambda _root: None)
     # The lean fallback sets process-wide environment variables, which this test must not leak.
     monkeypatch.setattr(ExomemBackend, "_apply_lean_fallback", staticmethod(lambda: None))
     backend = ExomemBackend(str(stored))

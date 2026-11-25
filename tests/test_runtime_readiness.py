@@ -35,7 +35,7 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
 
     assert snapshot == {
         "status": "ready",
-        "service": "exomem",
+        "service": "evermatter",
         "release": "1.2.3",
         "runtime_contract": RUNTIME_CONTRACT,
         "transport": HTTP_TRANSPORT,
@@ -537,7 +537,7 @@ def test_standalone_readiness_survives_a_blocked_coordination_probe(
 ) -> None:
     """Standalone stays ready when the coordination probe times out.
 
-    "Standalone Exomem SHALL remain ready without multi-host coordination" —
+    "Standalone Evermatter SHALL remain ready without multi-host coordination" —
     with no coordinator configured there is no lease to confirm, so a diagnostic
     probe that misses its deadline has nothing to report about admission.  The
     timeout stays visible in the payload for operators; it just no longer pins a

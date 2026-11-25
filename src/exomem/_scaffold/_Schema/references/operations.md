@@ -10,7 +10,7 @@ commands.
 
 | Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
+| `ask` | Ask what Evermatter knows, find a prior conclusion, gather context | `search_memory`, then `read_page`; use `search_memory(deep=true)` for synthesis, or `read_page(part="brief")` for the whole compiled body of one subject ([recall](recall.md)) |
 | `create_note` | Remember a durable conclusion, decision, solved problem, or pattern | `create_note`; use `supersede_note` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | Lane first, transport second. Raw material -> `save_source` (`content` for text, `files` for attachments). Proof-bearing -> `save_evidence` for text, `save_evidence` for attachments, `upload_files` when the client has no file handles |
 | `plan` | Capture, inspect, query, update, or triage intended future state | `query_plan_items` or `add_plan_item` for a configured Planning collection |
@@ -30,10 +30,11 @@ reporting results.
 A stable preference, recurring routine, historical baseline, or durable affiliation
 is eligible only when both stability or recurrence and reusable comparison,
 interpretation, or decision value are clear. Attach a facet or affiliation to a
-uniquely resolved Entity; otherwise preserve one concise compiled observation. Use
-Records only for an observed measurement accepted by a compatible existing
-collection. Fleeting preferences, one-off activity, incidental associations, trivial
-metrics, and tentative events get no note. Do not create an Entity, collection, or
+uniquely resolved Entity; otherwise preserve one concise compiled observation. A
+recurring named item or measurement goes to Records: reuse a matching collection by
+natural key, else create a minimal one under `proactive_capture`. Fleeting preferences, one-off activity, incidental associations, and trivial
+metrics get no note. A tentative or unresolved claim never becomes a baseline; when later
+work could use it, save it as tentative, attributed, with its uncertainty. Do not create an Entity, collection, or
 schema from eligibility alone: concise observations and narrow additive facts obey
 `proactive_capture`, a new Entity or your own affiliation edge follows `proactive_capture`,
 accepting a queued relation requires `link_acceptance`; merge or substantial curation requires
@@ -84,19 +85,20 @@ paths, and `curation_action="propose"` validates the agent-authored typed plan.
 rehome plans.
 
 A `move` step records the old path in the page's `moved_from`, so old links
-keep resolving. Its optional `fields` patch sets pointer fields only. One
-`repoint-links` step, last in the plan, rewrites every link to the plan's
-moved pages in one batch. In a Source or Evidence page it changes only the
-link span. Preview lists one outcome per referrer. Curation refuses `delete`
-and `recover`.
+keep resolving. Its optional `fields` patch sets pointer fields only. The
+`repoint-links` steps, last in the plan, rewrite every link to the plan's
+moved pages. One step rewrites every referrer in one batch. Several steps
+each name their `referrers`, and no page is named by two steps. In a Source
+or Evidence page a step changes only the link span. Preview lists one outcome
+per referrer. Curation refuses `delete` and `recover`.
 
 Call `curation_action="preview"` once for the immutable plan and show its exact
 actions, blockers, fingerprint, and compensation classes. That review is
 advisory. Execution is confirm-required: obtain one explicit confirmation bound
 to the returned plan id and fingerprint, then call `curation_action="apply"`.
-Each apply or `curation_action="resume"` request executes at most one content
-step. Continue resume automatically only while the durable phase is executing;
-stop and report `partial` or `blocked` truth.
+Each apply or `curation_action="resume"` request runs the steps its time
+allows. Follow `next_action`: continue resume automatically while it is
+`resume`, and otherwise stop and report `partial` or `blocked` truth.
 
 Compensation is a separate history-preserving plan. Derive it with
 `curation_action="propose-compensation"`, preview it, and obtain a fresh exact
@@ -125,17 +127,24 @@ gap. Remote callers preview generic derived-index repair with
 `inspect_memory(operation="maintenance.reconcile", arguments={'dry_run': true})` and run it as a
 maintenance job with the preview's `plan_id` and a `why` (see vault care).
 
-Route durable observed events or current state here without waiting for a magic
-verb. When exactly one compatible existing collection accepts a sufficiently
-identified observation, the active engagement policy may append or update it and
-the agent reports the mutation. If collections compete or identity, date,
-provenance, or ownership is unclear, ask one focused question. If no collection
-fits, start with `describe`, then propose a concise collection and validate it;
-the agent must not silently create a long-lived schema. For a new collection use
-`describe -> validate -> create -> inspect -> append`; for maintenance use
-`validate -> revise` or `inspect -> rebaseline`.
+Route durable observed events, current state and recurring structured work here without
+waiting for a magic verb. When exactly one compatible existing collection accepts a
+sufficiently identified observation, the active engagement policy may append or update it
+and the agent reports the mutation. If collections compete or identity, date, provenance,
+or ownership is unclear, ask one focused question. If no collection fits and the work's
+identity, type and scope are clear, create a minimal collection under the served
+`proactive_capture` disposition: when it is `silent`, `add_record` with `new_collection`
+creates it from the first row in one call; when it is `advisory`, propose it and create it
+with `create` after one inline confirmation of your named proposal. When a bound of the
+minimal collection does not hold, the server refuses `AUTOMATIC_CREATION_REFUSED`, names the
+bound, creates nothing and returns the create call to make after the user confirms. A later
+fact that needs its own field is added with `new_fields` on `add_record` or `edit_record`
+under the same disposition, never put into another field.
+[Records and Planning](planning-records.md) has the whole procedure. For a collection you
+design yourself use `describe -> validate -> create -> inspect -> append`; for maintenance
+use `validate -> revise` or `inspect -> rebaseline`.
 
-Records are intentionally manual-first. Canonical data remains ordinary files:
+Records stay hand-editable. Canonical data remains ordinary files:
 an append-heavy chronological Markdown log, one Markdown file per item, or a
 CSV/TSV/JSON dataset. Storage is declared or inferred by the collection; there
 is no hidden database, and indexes and generated views are rebuildable from the
@@ -158,7 +167,7 @@ question and stays current as source rows change.
 
 Templates are optional, ordinary editable Markdown scaffolds, not schema truth.
 The intended Obsidian template root is `Knowledge Base/Templates/`: users keep
-their normal **Templates → Insert template** workflow. Exomem does not require
+their normal **Templates → Insert template** workflow. Evermatter does not require
 Obsidian or a plugin and does not edit `.obsidian`; editing a template never
 rewrites historical records.
 
@@ -265,11 +274,12 @@ in its project and that question is unanswered. It carries the review item's `re
 `fingerprint` and `id`, and one `question`. The question holds the ownership test and the
 call that keeps the page where it is; it never reports a path, title, or count belonging
 to another page. It has the same advisory limits, and a response carries at most one
-`structure_suggestion`, with the ownership one first. The `structural_suggestions`
+`structure_suggestion`, with the rename one first, then the ownership one. The `structural_suggestions`
 delegation class and the `ownership_review` family disposition both withhold it.
 
 `detail="full"` adds the existing leaf result under
-`diagnostics`. The detail choice
+`diagnostics`, or under `diagnostics.leaf_result` when the reply also lists
+`diagnostics.derived_components`. The detail choice
 is removed before mutation identity is calculated, so it cannot create a second
 write or change which stored terminal a replay receives.
 
@@ -281,7 +291,7 @@ wait before retrying `MUTATION_WARMING` or `MUTATION_BUSY`; never revise a pendi
 same identity rather than creating a new write.
 
 `MUTATION_WARMING` means the restart-time semantic corpus is still being built.
-It never holds the mutation boundary and never means the Exomem tool is disabled;
+It never holds the mutation boundary and never means the Evermatter tool is disabled;
 retry the unchanged call after `retry_after_ms`.
 
 `edit_note` is one tool. A call supplies `note` (a title), `why` and one `action`; each
@@ -297,6 +307,11 @@ action takes its own fields, and `read_instructions(topic="edit_note")` shows th
 - `fill_row`: `row`, `take`; optional `overwrite`.
 - `edit_observation` and `remove_observation`: `observation`, the unit id from
   `read_page(part="units")`.
+- `supersede_observation`: `unit` (the unit id or `anchor` from
+  `read_page(part="units")`) or `span` (a list item's exact text); `text`,
+  `category`, `why`; optional `kind`, `as_of`, `tags`, `context`, `links`.
+- `assess_observation`: `unit`, `verdict`; optional `check_by`, `links`.
+- `link_observation`: `unit`, `links`; adds typed relations to the claim.
 
 Every action also takes `preview`, `detail` and, for a note that links nothing,
 `unlinked_reason`. The server reads the page again under the writer lease, so no call
@@ -307,7 +322,7 @@ carries a content hash.
 ## read_instructions
 
 **Goal:** Return a portable, versioned operating contract so generic MCP clients
-can use Exomem without relying on a client-specific skill.
+can use Evermatter without relying on a client-specific skill.
 
 ### Triggers
 - A new MCP session in ChatGPT, Cursor, Codex, Gemini, Windsurf, or another
@@ -328,7 +343,7 @@ can use Exomem without relying on a client-specific skill.
 2. Treat the returned contract as behavioural guidance for tool choice: search
    before absence claims, use compiled notes for durable conclusions, preserve raw
    evidence separately, and prefer supersession over deletion.
-3. Use diagnostics output when interpreting search latency. Do not label Exomem
+3. Use diagnostics output when interpreting search latency. Do not label Evermatter
    slow from a single CPU rerank measurement; identify whether rerank, embedding
    backend, compute mode, cache state, or cold start dominated the run.
 4. Read `active_capabilities.available_product_tools` as the commands exported
@@ -359,7 +374,7 @@ None.
   transcript → `video` with `url` set; a compiled investigation → `research-report`;
   a bill or order confirmation → `invoice-receipt`; an authority's published
   guidance → `official-guidance`; a data dump → `dataset-export`. The vocabulary
-  is **open**: if the right label is not listed, use it anyway — Exomem registers
+  is **open**: if the right label is not listed, use it anyway — Evermatter registers
   it. Ask only if genuinely ambiguous.
 - **Domain** (`domain`, optional) — what the artifact is *about*, on an axis
   independent of kind: `travel`, `health`, `finance`, `equipment`, `software`, or
@@ -602,7 +617,7 @@ cannot be undone.
 
 - **Sandbox clients (claude.ai, Claude desktop chat, Cowork):** use the held upload in
   `operation-routing.md` ("A shared file that is evidence"). It needs no user token
-  and works on Exomem Cloud, which accepts no other upload, and on a personal server.
+  and works on Evermatter Cloud, which accepts no other upload, and on a personal server.
 
 - **Without file handles, on a personal server:** request
   `upload_files(lane="source")` for raw material, or
@@ -615,7 +630,7 @@ cannot be undone.
   `filename`, `description`, and **`text`**.
   **Searchability is automatic** — the server
   transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
-  (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
+  (PDFium), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
   txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
   frames for visual search. It fills an embedded sidecar so the binary becomes
   findable by content. You *may* still pass a `text` field to supply your own
@@ -702,8 +717,8 @@ schema. A verified remote identity additionally requires
 `algorithm: "sha256"`, the matching local receipt `digest`, and the platform
 `reference`. Without proof, the mapped verified field must be `false`; never
 infer remote byte equality. A Source receipt cannot authorize delivery. Missing
-collection or fields permits only `structural_suggestions`; collection changes
-need confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
+collection or fields is created only under the bounded collection-creation rule; a
+change to an existing collection's fields needs confirmed `restructure_execution`. An independently authored edge follows the served promotion class; a queued acceptance remains `link_acceptance`.
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm a new scope/category first — don't silently invent.

@@ -7,6 +7,7 @@ in file mode. Each test names the failure it catches.
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from contextlib import closing
 from pathlib import Path
@@ -197,13 +198,15 @@ def test_two_moved_pages_that_link_to_each_other_propose_and_land_both_rewrites(
 
 
 def test_a_referrer_changed_after_approval_stops_the_rewrite_and_writes_nothing(
-    vault: Path,
+    vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A rewrite computed from the live page instead of the reviewed bytes, which would land a
     change nobody approved, or a partial rewrite that leaves some referrers changed."""
     referrer = _append(vault, NOTES[1], f"Rolled out with {_link(NOTES[0])}.")
     other = _append(vault, NOTES[2], f"Fused with {_link(NOTES[0])}.")
     proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
+    # A budget too short for a second step, so the referrer changes between the move and the rewrite.
+    monkeypatch.setenv("EXOMEM_MCP_REQUEST_BUDGET_SECONDS", "1")
     curation.apply(
         vault,
         run_id=proposed["run_id"],
@@ -237,9 +240,11 @@ def test_a_source_repoint_the_approved_preview_did_not_list_refuses_and_changes_
         preview.setattr(pointer_write, "preview_digest", lambda moves, _writes: listed(moves, []))
         proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
 
-    with pytest.raises(curation.CurationError, match="POINTER_PREVIEW_REQUIRED"):
-        _run(vault, proposed)
+    stopped = _run(vault, proposed)
 
+    # The move committed in the same call, so the refusal is reported beside it, not raised.
+    assert stopped["stopped"]["code"] == "POINTER_PREVIEW_REQUIRED"
+    assert stopped["phase"] != "completed"
     assert source.read_text(encoding="utf-8") == captured
 
 
@@ -492,3 +497,93 @@ def test_a_rename_that_raised_in_this_process_is_retried_by_the_resume(
     assert result["phase"] == "completed"
     assert calls == 2
     assert _lineage(vault, _moved(NOTES[0])) == [NOTES[0]]
+
+
+def test_a_link_rewrite_commits_under_the_vault_boundary(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A link rewrite takes no guard of its own. Curation must hold the vault boundary across its
+    batch itself, whichever dispatcher called it, or the rewrite races other writers."""
+    _with_identity(vault, NOTES[0])
+    _append(vault, SOURCE, f"See {_link(NOTES[0])} for tuning.")
+    proposed = _propose(vault, _move_step(NOTES[0]), REPOINT)
+    held_in_batch: dict[str, bool] = {}
+    real_finalize = curation._finalize_witness_batch
+
+    def observe_the_batch(vault_root, step, binding, writes, content):  # noqa: ANN001, ANN202
+        held_in_batch[step["kind"]] = writer_lease.active_manager().holds_mutation_boundary(vault_root)
+        return real_finalize(vault_root, step, binding, writes, content)
+
+    monkeypatch.setattr(curation, "_finalize_witness_batch", observe_the_batch)
+
+    assert _run(vault, proposed)["phase"] == "completed"
+    assert held_in_batch == {"move": True, "repoint-links": True}
+
+
+def test_a_move_with_a_fields_patch_keeps_another_writers_change_to_that_field(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A move's fields patch sets its field whatever the page holds. When another writer changed only
+    that field after the seal, the moved bytes still matched the seal and the other write was lost."""
+    _with_identity(vault, NOTES[0])
+    page = vault / NOTES[0]
+    page.write_text(
+        page.read_text(encoding="utf-8").replace("---\n", "---\nproject: project-gamma\n", 1), encoding="utf-8"
+    )
+    proposed = _propose(vault, _move_step(NOTES[0], project="project-alpha"))
+    real_dispatch = curation._dispatch_step
+
+    def another_writer_sets_the_field_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        def write() -> None:
+            with writer_lease.active_manager().mutation_guard(vault, operation="project_write"):
+                text = page.read_text(encoding="utf-8")
+                page.write_text(text.replace("project: project-gamma", "project: project-beta"), encoding="utf-8")
+
+        writer = threading.Thread(target=write, name="project-writer")
+        writer.start()
+        writer.join(timeout=30.0)
+        return real_dispatch(*args, **kwargs)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_writer_sets_the_field_first)
+
+    with pytest.raises(curation.CurationError, match="SOURCE_CHANGED"):
+        _run(vault, proposed)
+    assert "project: project-beta" in page.read_text(encoding="utf-8")
+    assert not (vault / _moved(NOTES[0])).exists()
+
+
+def test_a_move_refused_elsewhere_that_renamed_before_its_batch_is_adopted_by_the_next_resume(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another process can refuse a move for good while its leaf runs, and the call can stop between
+    its rename and its batch. Every resume then repeated the refusal with the page at its new path,
+    and the undo left the move out."""
+    _with_identity(vault, NOTES[0])
+    proposed = _propose(vault, _move_step(NOTES[0]))
+    sealed = _hash(vault, NOTES[0])
+    real_dispatch = curation._dispatch_step
+
+    def another_process_refuses_the_step_first(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        curation._record_failed_attempt(
+            curation.CurationStore(vault), proposed["run_id"], ordinal=0, step_id=args[1]["step_id"],
+            operation_identity=kwargs["run"]["operation"], code="CURATION_BINDING_STALE", retryable=False,
+        )
+        return real_dispatch(*args, **kwargs)
+
+    def cut(name: str) -> None:
+        if name == "move-after-rename":
+            raise _ProcessCut(name)
+
+    monkeypatch.setattr(curation, "_dispatch_step", another_process_refuses_the_step_first)
+    monkeypatch.setattr(curation, "_fault_barrier", cut)
+    with pytest.raises(_ProcessCut):
+        _run(vault, proposed)
+    monkeypatch.setattr(curation, "_fault_barrier", lambda _name: None)
+    assert _hash(vault, _moved(NOTES[0])) == sealed
+
+    result = curation.resume(vault, run_id=proposed["run_id"], plan_id=proposed["plan_id"])
+
+    assert result["phase"] == "completed"
+    assert not (vault / NOTES[0]).exists()
+    assert _lineage(vault, _moved(NOTES[0])) == [NOTES[0]]
+    receipts = curation.CurationStore(vault)._receipt_records(proposed["run_id"])
+    # The undo derives the steps to reverse from these receipts.
+    assert [receipt["outcome"] for receipt in receipts] == ["failed", "recovered-committed"]

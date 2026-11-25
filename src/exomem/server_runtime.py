@@ -1,4 +1,4 @@
-"""Server startup wiring for Exomem.
+"""Server startup wiring for Evermatter.
 
 This module owns process-local runtime setup: environment loading, vault
 resolution, warmup/model policy, media extraction, and file watching. It is kept
@@ -23,6 +23,7 @@ import anyio
 from . import (
     env_compat,
     foreground_priority,
+    media_engines,
     media_jobs,
     media_processing,
     metrics,
@@ -41,6 +42,8 @@ log = logging.getLogger(__name__)
 # Give it substantial headroom, but never let one blocked watcher prevent the
 # background catalogue warm/repair path from starting indefinitely.
 RECALL_SEED_WAIT_SECONDS = 120.0
+# How soon a seed that outlasted that wait notices a shutdown while it keeps waiting.
+RECALL_SEED_FOLLOW_POLL_SECONDS = 1.0
 
 # Failed catalogue publication can require another whole-vault build. Back off
 # to limit repeated I/O under persistent failure, with a cap for quiet recovery.
@@ -132,6 +135,7 @@ class LocalRuntimeActivation:
         # admission nor arms the liveness fallback that would start schedulers
         # beside the worker still serving (`seamless-managed-worker-handoff` D7).
         self._deferred = deferred
+        self._needs_cold_graph_proof = not deferred
         if warmup.warmup_enabled() and not deferred:
             readiness.manage_runtime()
         self.vault_root = vault_root
@@ -145,6 +149,7 @@ class LocalRuntimeActivation:
         self.file_watcher: Any | None = None
         self.vault_projector: Any | None = None
         self.derived_drain: Any | None = None
+        self.write_intake: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
         self.catalogue_recovery: threading.Thread | None = None
@@ -154,6 +159,7 @@ class LocalRuntimeActivation:
         self._vocabulary_stop = foreground_priority.StopEvent()
         self.recall_reembed: Any | None = None
         self.retrieval_warmup: threading.Thread | None = None
+        self.recall_seed_follower: threading.Thread | None = None
         self.matrix_warmup: threading.Thread | None = None
         self.dreamer: Any | None = None
         self.graph_drain: threading.Thread | None = None
@@ -161,6 +167,7 @@ class LocalRuntimeActivation:
         self.media_replicas: threading.Thread | None = None
         self.review_pass: threading.Thread | None = None
         self.vault_backup: threading.Thread | None = None
+        self.upload_session_sweeper: threading.Thread | None = None
         self.graph_cleanup_attempted = False
         # Set when this process builds an HTTP app, the only thing that serves
         # `/upload/sessions`; a stdio server never resumes their commits.
@@ -168,6 +175,14 @@ class LocalRuntimeActivation:
         if not deferred:
             self._bind_graph_rebuild_lifetime()
             self._commit_recall_reembed()
+
+    def _fence_cold_graph_origin(self) -> None:
+        if self._needs_cold_graph_proof:
+            from . import epistemic_graph
+
+            if epistemic_graph.sidecar_path(self.vault_root).exists():
+                epistemic_graph.require_startup_source_proof(self.vault_root)
+            self._needs_cold_graph_proof = False
 
     def _bind_graph_rebuild_lifetime(self) -> None:
         from . import graph_sync, working_set_runtime
@@ -196,6 +211,7 @@ class LocalRuntimeActivation:
         with self._lock:
             if self._started or self._shutdown.is_set() or self._deferred:
                 return
+            self._fence_cold_graph_origin()
             self._started = True
             timer = self._timer
             thread = threading.Thread(
@@ -217,6 +233,9 @@ class LocalRuntimeActivation:
             from .catalogue_prewarm import adopt_at_boot
 
             self._start_component("staged catalogue", adopt_at_boot)
+        # Before the waits below: HTTP serves saves before activation ends, and these waits can
+        # last minutes after an upgrade. A busy save is queued only while the drainer runs.
+        self._start_component("write intake", self._start_write_intake)
         self._start_component("derived drain", self._start_derived_drain)
         if self._shutdown.is_set():
             self._stop_background_workers()
@@ -316,8 +335,10 @@ class LocalRuntimeActivation:
             if self._shutdown.is_set():
                 break
             self._start_component(label, starter)
-        if not self._shutdown.is_set() and self.file_watcher is not None:
-            self.file_watcher.arm_optional_recovery()
+        # Read once: a slow seed's follower can retire the watcher from its own thread.
+        watcher = self.file_watcher
+        if not self._shutdown.is_set() and watcher is not None:
+            watcher.arm_optional_recovery()
         if self._shutdown.is_set():
             self._stop_background_workers()
 
@@ -334,10 +355,62 @@ class LocalRuntimeActivation:
             # process, and readers answer from the store whether or not it has seeded.
             return
         try:
-            seeded = watcher.wait_until_seeded(timeout=RECALL_SEED_WAIT_SECONDS)
+            # A False wait also answers a seed that is still running; only a finished one downgrades.
+            seeded = watcher.wait_until_seeded(
+                timeout=RECALL_SEED_WAIT_SECONDS
+            ) or watcher.seed_outcome(timeout=0)
         except Exception:  # noqa: BLE001 - retrieval fallback stays background-only
             log.warning("file watcher seed wait failed", exc_info=True)
             self._downgrade_recall_runtime()
+            return
+        if seeded is None:
+            self._follow_recall_seed(watcher)
+        elif not seeded:
+            log.warning(
+                "file watcher did not establish both recall projections; "
+                "switching this process to exact walk-backed recall"
+            )
+            self._downgrade_recall_runtime()
+
+    def _follow_recall_seed(self, watcher: Any) -> None:
+        """Serve walk-backed recall while a slow seed finishes, keeping its watcher and registry.
+
+        The seed's catch-up flush can queue behind the catalogue barrier past
+        the wait. Retiring the registry then would leave every repair a walk
+        that a write refuses or that cannot prove itself live, for the life of
+        the process. Activation continues unmanaged meanwhile, and admission
+        returns through the warm's proof and heal once the seed finishes.
+        """
+        from . import readiness
+
+        log.warning(
+            "file watcher seed still running after %.0f s; serving exact walk-backed "
+            "recall until it finishes",
+            RECALL_SEED_WAIT_SECONDS,
+        )
+        managed = readiness.runtime_managed()
+        readiness.unmanage_runtime()
+        thread = threading.Thread(
+            target=self._await_recall_seed,
+            args=(watcher, managed),
+            name="exomem-recall-seed-follower",
+            daemon=True,
+        )
+        self.recall_seed_follower = thread
+        thread.start()
+
+    def _await_recall_seed(self, watcher: Any, managed: bool) -> None:
+        from . import readiness, warmup
+
+        seeded: bool | None = None
+        try:
+            while seeded is None and not self._shutdown.is_set():
+                seeded = watcher.seed_outcome(timeout=RECALL_SEED_FOLLOW_POLL_SECONDS)
+        except Exception:  # noqa: BLE001 - a wait that cannot answer is a failed seed
+            log.warning("file watcher seed wait failed", exc_info=True)
+            seeded = False
+        # A shutdown stops the watcher, which ends its seed unsuccessfully; that is not a downgrade.
+        if self._shutdown.is_set() or self.file_watcher is not watcher:
             return
         if not seeded:
             log.warning(
@@ -345,6 +418,16 @@ class LocalRuntimeActivation:
                 "switching this process to exact walk-backed recall"
             )
             self._downgrade_recall_runtime()
+            return
+        if not managed:
+            return
+        readiness.manage_runtime()
+        try:
+            admitted = warmup.warm_retrieval_catalog(self.vault_root)
+        except Exception:  # noqa: BLE001 - the catalogue repair still owns admission
+            log.warning("retrieval catalogue verification after the seed failed", exc_info=True)
+            return
+        log.info("file watcher seed finished; retrieval admitted=%s", admitted)
 
     def _downgrade_recall_runtime(self) -> None:
         """Revoke an unavailable watcher generation and retain exact fallback."""
@@ -389,8 +472,11 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import maintenance_jobs, working_set_runtime
+        from . import maintenance_jobs, working_set_runtime, write_intake
 
+        # First, so no queued save starts a replay while the workers below stop; a replay in
+        # flight is claimed by this process and re-claimed after the restart.
+        write_intake.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -452,6 +538,9 @@ class LocalRuntimeActivation:
         self._join_vocabulary_recovery()
         if self.graph_drain is not None and self.graph_drain.is_alive():
             raise RuntimeError("graph drain is still running during shutdown")
+        if self.write_intake is not None and self.write_intake.alive:
+            # A replay still running may commit, so the lease stays with this process.
+            raise RuntimeError("write intake is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
@@ -484,7 +573,10 @@ class LocalRuntimeActivation:
         """Finish owned native work after activation can no longer assign workers."""
         from . import working_set_runtime
 
-        for thread in (self.retrieval_warmup, self.matrix_warmup, self.recall_reembed):
+        for thread in (
+            self.retrieval_warmup, self.recall_seed_follower, self.matrix_warmup, self.recall_reembed,
+            self.upload_session_sweeper,
+        ):
             if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
                 thread.join()
         working_set_runtime.join_builds(self.vault_root)
@@ -530,12 +622,31 @@ class LocalRuntimeActivation:
         self.review_pass = review_pass.start(vault_root)
 
     def _resume_upload_sessions(self, vault_root: Path) -> None:
-        """Sweep upload sessions and resume interrupted commits, in the serving HTTP runtime only."""
+        """Resume interrupted uploads and own their expiry while serving HTTP."""
         if not self.serves_upload_sessions:
             return
         from .server_transfer import resume_upload_sessions
+        from .upload_sessions import run_expiry_sweep
 
+        sweeper = threading.Thread(
+            target=run_expiry_sweep, args=(vault_root, self._shutdown),
+            name="upload-session-expiry", daemon=True,
+        )
+        sweeper.start()
+        self.upload_session_sweeper = sweeper
         resume_upload_sessions(vault_root)
+
+    def _start_write_intake(self, vault_root: Path) -> None:
+        """Apply queued saves, in the serving HTTP runtime only.
+
+        Acceptance needs this drainer, so a stdio server or the CLI keeps the busy refusal: a
+        process that may exit with the client must not take custody of a save.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import write_intake
+
+        self.write_intake = write_intake.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""
@@ -619,8 +730,25 @@ class LocalRuntimeActivation:
 
         self.recall_reembed = recall_migration.start(vault_root, self._shutdown)
 
+    def arm_promotion_observation(self, *, deadline: float) -> Any | None:
+        """Arm this activation's own observer before standby proof replay."""
+        with self._lock:
+            if self._shutdown.is_set() or not self._deferred or self._started:
+                return None
+            if self.file_watcher is None:
+                self.file_watcher = _create_file_watcher(self.vault_root)
+            watcher = self.file_watcher
+        if watcher is None or not watcher.arm_promotion_observation(deadline=deadline):
+            return None
+        return watcher
+
     def _start_file_watcher(self, vault_root: Path) -> None:
-        self.file_watcher = _start_file_watcher(vault_root)
+        watcher = self.file_watcher
+        if watcher is None:
+            self.file_watcher = _start_file_watcher(vault_root)
+        elif not watcher.start():
+            watcher.stop()
+            self.file_watcher = None
 
     def _start_vault_projector(self, vault_root: Path) -> None:
         self.vault_projector = _start_vault_projector(vault_root)
@@ -649,11 +777,30 @@ class LocalRuntimeActivation:
     def _start_dreamer(self, vault_root: Path) -> None:
         self.dreamer = _start_dreamer(vault_root)
 
-    def _finish_file_watcher_startup(self, _vault_root: Path) -> None:
+    def _finish_file_watcher_startup(self, vault_root: Path) -> None:
         watcher = self.file_watcher
         finish = getattr(watcher, "finish_startup_recovery", None)
         if callable(finish):
             finish()
+            return
+
+        from . import epistemic_graph
+
+        if not epistemic_graph.graph_enabled() or not epistemic_graph.startup_source_proof_pending(vault_root):
+            return
+        graph = epistemic_graph.EpistemicGraphIndex(vault_root)
+        try:
+            with foreground_priority.bulk(stop=self._shutdown):
+                while True:
+                    foreground_priority.check_cancelled()
+                    admission = graph.validate_startup_snapshot()
+                    if admission is not None:
+                        graph.recover_startup_graph(admission)
+                        return
+                    foreground_priority.wait_for_retry(0.25)
+        except foreground_priority.BulkCancelled:
+            # The shutdown's stop, as the watcher's own recovery handles it.
+            log.info("startup graph recovery cancelled")
 
     async def _finish_shutdown(self) -> None:
         """Finish the tracked shutdown before process teardown."""
@@ -728,6 +875,8 @@ class LocalRuntimeActivation:
             timer.daemon = True
             with self._lock:
                 if not self._started and not self._deferred:
+                    # HTTP can serve before the liveness endpoint starts workers.
+                    self._fence_cold_graph_origin()
                     self._timer = timer
                     timer.start()
             try:
@@ -875,14 +1024,15 @@ def _warm_embedding_matrix(vault_root: Path) -> None:
     try:
         from . import cloud_cell
 
-        # Optional passage residency applies only after published metadata identifies passages.
+        # Passage preparation applies only after published metadata identifies passages:
+        # the lexical terms always, and the resident matrix when its budget allows one.
         if cloud_cell.resource_policy() == "service-v1":
-            from . import embeddings, passage_evidence, passage_matrix, semantic_contract
+            from . import embeddings, passage_evidence, semantic_contract
 
-            if passage_matrix.ceiling():
-                publication = semantic_contract.borrow_published_corpus(vault_root)
-                if publication is not None and passage_evidence.declared_sources(vault_root, publication):
-                    loading = embeddings.get_embedding_index(vault_root).prepare_passage_matrix()
+            publication = semantic_contract.borrow_published_corpus(vault_root)
+            if publication is not None and passage_evidence.declared_sources(vault_root, publication):
+                index = embeddings.get_embedding_index(vault_root)
+                for loading in (index.prepare_passage_terms(), index.prepare_passage_matrix()):
                     if loading is not None:
                         loading.join()
             return
@@ -1100,9 +1250,9 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     unavailable_reason: str | None = None
     unavailable_action: str | None = None
     if worker is None:
-        if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+        if os.environ.get(media_engines.RUNTIME_DISABLE_ENV):
             unavailable_reason, unavailable_action = media_jobs.runtime_block(
-                media_jobs.EXTRACTION_DISABLED_CODE, "EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+                media_jobs.EXTRACTION_DISABLED_CODE, f"{media_engines.RUNTIME_DISABLE_ENV} is set"
             )
         else:
             unavailable_reason, unavailable_action = media_jobs.runtime_block(
@@ -1149,6 +1299,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 binary,
                 explicit=False,
                 commit_guard=reconcile_commit_guard,
+                enqueue_preview=False,
             ),
         )
         if unavailable_reason is not None and unavailable_action is not None:
@@ -1189,7 +1340,7 @@ def _start_media_worker(vault_root: Path) -> Any | None:
 
 def _create_media_worker(vault_root: Path) -> Any | None:
     """Construct a media worker without starting background execution."""
-    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+    if os.environ.get(media_engines.RUNTIME_DISABLE_ENV):
         return None
 
     from . import media_worker as media_worker_module

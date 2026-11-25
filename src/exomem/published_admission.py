@@ -34,19 +34,25 @@ class Admission:
     `decide_many(paths, publish)` returns the same pairs by path. A supplied
     set rule can reuse byte-bound facts; otherwise it calls `decide` for each
     path. Single-page release consumers keep calling the scalar predicate.
+
+    `decide_kept(paths)` returns only `allowed` by path. A supplied rule may
+    answer from verdicts that the predicate keeps from one request to the next
+    where it proves them current; otherwise `decide_many` answers.
     """
 
-    __slots__ = ("decide", "identity", "_many")
+    __slots__ = ("decide", "identity", "_many", "_kept")
 
     def __init__(
         self,
         identity: Callable[[], Hashable | None],
         decide: Callable[[str, bool], tuple[bool, bool]],
         decide_many: Callable[[list[str], bool], dict[str, tuple[bool, bool]]] | None = None,
+        decide_kept: Callable[[list[str]], dict[str, bool]] | None = None,
     ) -> None:
         self.identity = identity
         self.decide = decide
         self._many = decide_many
+        self._kept = decide_kept
 
     def decide_many(self, paths: Iterable[str], publish: bool = False) -> dict[str, tuple[bool, bool]]:
         """Decide a candidate set; predicates without a set rule retain the scalar chain."""
@@ -54,6 +60,13 @@ class Admission:
         if self._many is None:
             return {path: self.decide(path, publish) for path in wanted}
         return self._many(wanted, publish)
+
+    def decide_kept(self, paths: Iterable[str]) -> dict[str, bool]:
+        """Whether each path is admitted, from kept verdicts where the predicate keeps them."""
+        wanted = list(dict.fromkeys(paths))
+        if self._kept is None:
+            return {path: verdict[0] for path, verdict in self.decide_many(wanted).items()}
+        return self._kept(wanted)
 
 
 class AdmittedPredicate:

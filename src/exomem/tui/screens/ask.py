@@ -1,6 +1,6 @@
 """Ask: measured recall, with evidence — never generated prose.
 
-Exomem is a pure substrate: the server measures, the model reasons. So this
+Evermatter is a pure substrate: the server measures, the model reasons. So this
 screen never writes an answer. It shows what was retrieved, how long it took,
 which lanes were actually running, and a bounded read of the file behind each
 hit. `y` hands the assembled context to a reasoning model elsewhere; that is
@@ -119,7 +119,7 @@ def render_preview(
 
 def pack_to_text(pack: dict) -> str:
     """Flatten a deep-context pack into a paste-ready plain-text packet."""
-    lines: list[str] = ["# Exomem context packet"]
+    lines: list[str] = ["# Evermatter context packet"]
     for key, value in pack.items():
         lines.append("")
         lines.append(f"## {key}")
@@ -555,7 +555,7 @@ class AskScreen(ExomemScreen):
         if self._outcome.pack:
             packet = pack_to_text(self._outcome.pack)
         else:
-            lines = ["# Exomem recall", f"query: {self._last_query}"]
+            lines = ["# Evermatter recall", f"query: {self._last_query}"]
             lines += [f"- {hit.get('title')}  ({hit.get('path')})" for hit in self._outcome.hits]
             packet = "\n".join(lines)
         self.app.copy_to_clipboard(packet)

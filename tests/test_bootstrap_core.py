@@ -57,7 +57,7 @@ SECTION_BYTE_CEILINGS = {
     "diagnostics_reading": 2_200,
 }
 
-#: `cloud` is the reduced surface an Exomem Cloud cell serves: the product surface
+#: `cloud` is the reduced surface an Evermatter Cloud cell serves: the product surface
 #: minus `CLOUD_SURFACE_EXCLUSIONS` plus the Cloud-only commands, so a rule naming an
 #: excluded command vanishes there.
 SURFACES = (None, "claude-code", "cloud")
@@ -150,6 +150,16 @@ CORE_RULES: dict[str, tuple[tuple[str, ...], Callable[[dict], bool]]] = {
         CARRYING,
         lambda core: "Route stated intent to Planning and observed outcome to Records"
         in core["engagement"]["contract"]["capture"],
+    ),
+    # A standing rule agreed in conversation reached only a harness-local file, and failed advice stayed
+    # stored (2026-11-22, 2026-11-09): one sentence makes each durable under the owner's capture setting.
+    "agreed-decisions-and-corrections-are-durable": (
+        CARRYING,
+        lambda core: prominence._CORRECTION_CAPTURE in core["engagement"]["contract"]["capture"]
+        and all(
+            part in prominence._CORRECTION_CAPTURE
+            for part in ("stored advice", "corrected claim", "decision", "standing rule", "proactive_capture")
+        ),
     ),
     # The next three each prevent a failure the blind acceptance run of 2026-11-07 showed. The same
     # sentences ride the activation `capture_policy` block, so bootstrap and the block cannot differ.
@@ -480,8 +490,8 @@ def test_the_bootstrap_names_the_store_it_reaches(monkeypatch):
         return session["store"], commands.op_bootstrap(_root(), section="all")["store"]
 
     monkeypatch.delenv("EXOMEM_CLOUD_CELL", raising=False)
-    personal = {"kind": "personal", "name": "personal Exomem"}
+    personal = {"kind": "personal", "name": "personal Evermatter"}
     assert served() == (personal, personal)
     monkeypatch.setenv("EXOMEM_CLOUD_CELL", "1")
-    cloud = {"kind": "cloud", "name": "Exomem Cloud"}
+    cloud = {"kind": "cloud", "name": "Evermatter Cloud"}
     assert served() == (cloud, cloud)

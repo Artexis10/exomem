@@ -1,6 +1,6 @@
 """The update probe must survive a provider that renders what it stored.
 
-Exact equality assumed a provider echoes stored content verbatim. Exomem
+Exact equality assumed a provider echoes stored content verbatim. Evermatter
 returns a rendered note — YAML frontmatter and all — so the marker is present
 but never equal, and the probe scored `unresolvable` on a store that had in
 fact superseded correctly. That invalidated every direct run before a single

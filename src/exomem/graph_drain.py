@@ -113,8 +113,23 @@ _PER_PATH_LOCK = threading.Lock()
 #: commits won the race for it: a commit landed after the drain sampled its
 #: checkpoint, or the mutation boundary stayed busy behind one. Not a fault of
 #: the queue, so it neither ages out into a whole-vault pass nor counts as a
-#: stall. Held beside `_per_path_blocked` and with the same key and lock.
-_per_path_raced: set[Path] = set()
+#: stall. None records contention with an observation set too large to prove.
+_per_path_raced: dict[Path, bool | None] = {}
+
+#: When this process first saw receipts queued for each vault, on the clock that
+#: ages them (`deferred_index.time`); dropped when it sees the queue empty. A
+#: receipt older than that was queued before this process looked at it, so its
+#: wall-clock age says nothing about a stall. Scheduling state only, like
+#: `_per_path_blocked`.
+_receipts_first_seen: dict[Path, float] = {}
+
+#: Threads whose watcher batch holds a vault's read barrier as its fence, from
+#: the withdrawal until the batch's graph fan-out has queued its repair. The
+#: barrier is theirs to hand to the queue, so recovery must not rebuild it. Keyed
+#: by thread so concurrent batches release only their own entry, and a release
+#: that registered nothing is a no-op. Scheduling state only, like
+#: `_per_path_blocked`.
+_acknowledging: dict[Path, set[int]] = {}
 
 #: The external change the availability arm last saw standing, per vault, as
 #: (latest pending epoch, monotonic time first seen). Scheduling state only.
@@ -169,9 +184,30 @@ def note_graph_progress(vault_root: Path) -> None:
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
         _per_path_blocked.discard(key)
-        _per_path_raced.discard(key)
+        _per_path_raced.pop(key, None)
     _PROGRESS.set()
     _DEBT.set()
+
+
+def observed_receipt_age(vault_root: Path, oldest_age: float | None) -> float | None:
+    """The oldest queued receipt's age, counted from when this process first saw receipts queued.
+
+    The stall escalation's clock: a receipt queued before this process looked
+    at the queue is the queue's until the process has watched it for
+    `stall_seconds`, however long it sat in the durable queue before, and
+    whichever pass drains or fails meanwhile. `oldest_age` is the queue's own
+    reading, None for an empty queue, which restarts the count.
+    """
+    from . import deferred_index
+
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        if oldest_age is None:
+            _receipts_first_seen.pop(key, None)
+            return None
+        now = deferred_index.time.time()
+        first = _receipts_first_seen.setdefault(key, now)
+    return min(oldest_age, max(0.0, now - first))
 
 
 def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
@@ -184,14 +220,44 @@ def note_per_path_repair(vault_root: Path, *, admissible: bool) -> None:
             _per_path_blocked.add(key)
 
 
-def note_per_path_race(vault_root: Path, *, raced: bool) -> None:
-    """Record whether this vault's latest per-path drain only lost races to commits."""
+def note_covered_contention(vault_root: Path) -> bool | None:
+    """Prove a busy pass has durable scoped work, or defer an oversized scope."""
+    from . import deferred_index, freshness
+
+    stamp = freshness.external_pending_epoch(vault_root)
+    unscoped = freshness.external_pending_unscoped(vault_root)
+    observed = freshness.bounded_external_pending_paths(vault_root, limit=DRAIN_LIMIT)
+    paths: list[str] = []
+    invalid_path = False
+    for path in observed or ():
+        rel = freshness.registry_rel(vault_root, path)
+        if rel is None:
+            invalid_path = True
+            break
+        paths.append(rel)
+    covered = (
+        not unscoped and not invalid_path
+        and deferred_index.graph_receipts_cover(vault_root, paths)
+    )
+    unscoped_after = freshness.external_pending_unscoped(vault_root)
+    if freshness.external_pending_epoch(vault_root) != stamp:
+        return None  # A moving observation does not disprove scoped ownership.
+    if unscoped or unscoped_after or invalid_path or not covered:
+        return False
+    if observed is None:
+        return None
+    note_per_path_repair(vault_root, admissible=True)
+    return True
+
+
+def note_per_path_race(vault_root: Path, *, raced: bool | None) -> None:
+    """Record proved or inconclusive contention on the latest per-path drain."""
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        if raced:
-            _per_path_raced.add(key)
+        if raced is False:
+            _per_path_raced.pop(key, None)
         else:
-            _per_path_raced.discard(key)
+            _per_path_raced[key] = raced
 
 
 def per_path_repair_raced(vault_root: Path) -> bool:
@@ -203,7 +269,14 @@ def per_path_repair_raced(vault_root: Path) -> bool:
     """
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
-        return key in _per_path_raced
+        return _per_path_raced.get(key, False) is True
+
+
+def per_path_repair_race_uncertain(vault_root: Path) -> bool:
+    """Whether contention exceeded the latest pass's proof budget."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        return _per_path_raced.get(key, False) is None
 
 
 def per_path_repair_blocked(vault_root: Path) -> bool:
@@ -215,6 +288,31 @@ def per_path_repair_blocked(vault_root: Path) -> bool:
     key = state_paths.resolved_vault_path(vault_root)
     with _PER_PATH_LOCK:
         return key in _per_path_blocked
+
+
+def note_acknowledgement_started(vault_root: Path) -> None:
+    """Record that this thread's watcher batch is about to raise the read barrier as its fence."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        _acknowledging.setdefault(key, set()).add(threading.get_ident())
+
+
+def note_acknowledgement_finished(vault_root: Path) -> None:
+    """Release this thread's entry once its batch has queued its repair or ended. Idempotent."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        threads = _acknowledging.get(key)
+        if threads is not None:
+            threads.discard(threading.get_ident())
+            if not threads:
+                del _acknowledging[key]
+
+
+def acknowledgement_in_flight(vault_root: Path) -> bool:
+    """Whether a watcher batch holds this vault's read barrier as its fence right now."""
+    key = state_paths.resolved_vault_path(vault_root)
+    with _PER_PATH_LOCK:
+        return key in _acknowledging
 
 
 def disabled() -> bool:
@@ -342,11 +440,9 @@ def _queue_pending(vault_root: Path) -> bool:
     from . import deferred_index
 
     try:
-        if deferred_index.graph_full_rebuild_pending(vault_root) is not None:
-            return True
-        return int(deferred_index.graph_status(vault_root).get("count") or 0) > 0
+        return deferred_index.graph_queue_pending(vault_root)
     except Exception:  # noqa: BLE001 - an unreadable queue must not kill the worker
-        log.debug("graph drain: queue depth unreadable", exc_info=True)
+        log.debug("graph drain: queue unreadable", exc_info=True)
         return False
 
 
@@ -474,8 +570,8 @@ def _external_change_stood(vault_root: Path) -> bool:
     The watcher repairs an external change and clears its mark, which ends the
     wait. A mark that outlives the whole backoff ladder with no newer one and no
     clear means the watcher is dead or exhausted, and only then is the graph's
-    availability debt the drain's to rebuild. "The same change" is the latest
-    pending epoch: a newer mark is a live watcher's input and restarts the wait.
+    availability debt the drain's to rebuild. A new observation restarts the
+    wait. Partial retirement keeps the same pending interval.
     """
     from . import freshness
 
@@ -493,22 +589,7 @@ def _external_change_stood(vault_root: Path) -> bool:
 
 
 def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
-    """Drain the committed checkpoint as one batch, once. Never raises.
-
-    A drain acknowledges only a batch that held the committed checkpoint's
-    whole path set. A truncated batch and the single-receipt replays after it
-    each publish their proven rows and retire their receipts without that
-    claim, so the queue can empty while the acknowledgement stays behind and
-    no reader can open the graph. Queueing the checkpoint again and draining
-    exactly its paths lets the existing acknowledgement rule decide.
-
-    Declines, leaving the whole-vault route to the caller, unless the
-    checkpoint is path-scoped, ahead of the acknowledgement, fits one drain,
-    no external change is pending, and this process has not already queued a
-    cover for this generation. True once the checkpoint is queued, whatever
-    its drain did: queued receipts are the ordinary drain's, and a cover that
-    did not acknowledge is escalated on the next pass, not retried.
-    """
+    """Spend one bounded cover per checkpoint generation before whole-vault recovery."""
     from . import deferred_index, epistemic_graph, freshness, graph_sync, index_sync
 
     key = str(vault_root)
@@ -523,12 +604,26 @@ def _cover_unacknowledged_checkpoint(vault_root: Path) -> bool:
             return False
         rels = {rel for rel, _content_hash in checkpoint.paths}
         rels.update(checkpoint.created_paths)
-        if len(rels) > DRAIN_LIMIT or freshness.external_pending(vault_root):
+        if not freshness.external_pending_only_for(vault_root, rels):
             return False
         if _covered_generation.get(key) == generation:
             return False
+        held = deferred_index.held_graph_proofs(
+            vault_root, digest=checkpoint.checkpoint_sha256, paths=rels,
+        )
+        if held:
+            index = epistemic_graph.EpistemicGraphIndex(vault_root)
+            verdict = index.drain_paths([])
+            if verdict.get("published") or verdict.get("commit_race"):
+                return True
+            rels.difference_update(verdict.get("held_paths", ()))
         before = _acknowledged_label(vault_root)
-        deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
+        if held:
+            if rels:
+                # The proved held paths already own their disposition at this generation.
+                deferred_index.add_graph(vault_root, sorted(rels), generation=generation)
+        else:
+            deferred_index.enqueue_graph_checkpoint(vault_root, checkpoint)
         # Spent once queued: from here the queue owns the repair. A cover
         # that raised before this stays eligible for the next pass.
         _covered_generation[key] = generation
@@ -596,33 +691,48 @@ def _work_once(vault_root: Path) -> int:
     for it (`per_path_repair_raced`): a whole-vault pass would lose to the same
     commits.
     """
-    from . import epistemic_graph
+    from . import deferred_index, epistemic_graph, freshness
 
     processed = 0
     attempted = False
-    if _queue_pending(vault_root):
+    queued_before = _queue_pending(vault_root)
+    if queued_before:
         with epistemic_graph.observe_full_marker_dispatches() as dispatches:
             processed = _drain_once(vault_root)
         attempted = any(result.whole_vault_attempted for result in dispatches)
     if attempted:
         return processed
+    queued_after = _queue_pending(vault_root)
     if _barrier_pending(vault_root):
+        if not queued_after and _cover_unacknowledged_checkpoint(vault_root):
+            return processed + 1
         if _recover_once(vault_root):
-            processed += 1
+            return processed + 1
+        try:
+            decline = epistemic_graph.recovery_decline_reason(vault_root)
+        except deferred_index.GraphFullRebuildStateUnavailable:
+            return processed
         # A barrier with an unpublished external epoch and no queued receipt
         # has no bounded coverage to recover from. The ordinary recovery
         # refuses it correctly; route that unknown scope through the existing
         # guarded full-marker convergence instead of leaving the barrier to
         # retry a refusal forever. A recent publication refusal keeps its
-        # established backoff rather than spending another rebuild.
-        elif (
-            epistemic_graph.recovery_decline_reason(vault_root)
-            == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
+        # established backoff rather than spending another rebuild. A watcher
+        # batch holding the barrier as its fence reads as its own decline, not
+        # this one, so the barrier is left to the repair that batch queues.
+        if (
+            decline == epistemic_graph.RECOVERY_DECLINE_EXTERNAL_PENDING
             and not epistemic_graph.publication_refusal_active(vault_root)
+            # A busy pass with more scoped observations than it can check leaves
+            # the queue eligible for ordinary stall recovery.
+            and not (
+                queued_before and queued_after and per_path_repair_race_uncertain(vault_root)
+                and not freshness.external_pending_unscoped(vault_root)
+            )
             and _request_full_rebuild(vault_root, cause="barrier_external_epoch")
         ):
             processed += 1
-    elif not _queue_pending(vault_root) and _availability_pending(vault_root):
+    elif not queued_after and _availability_pending(vault_root):
         # Only where there is no barrier: with one standing, repair is the
         # cheaper and more specific answer, and it is the one that knows how to
         # decline. Only with an empty queue: receipts still queued mean the
@@ -839,7 +949,12 @@ def _run_owned(vault_root: Path) -> None:
             elif stalled_since is None:
                 stalled_since = now
             elif now - stalled_since >= stall_seconds():
-                _request_full_rebuild(vault_root, cause="queue_stalled")
+                from . import deferred_index, epistemic_graph
+
+                if not deferred_index.graph_receipts_in_read_grace(
+                    vault_root, seconds=epistemic_graph.GRAPH_POISON_MIN_AGE_SECONDS,
+                ):
+                    _request_full_rebuild(vault_root, cause="queue_stalled")
 
 
 def start(vault_root: Path) -> threading.Thread | None:

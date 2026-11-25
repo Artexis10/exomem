@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import install_skill, package_skills
+from exomem import install_skill, package_skills, workflow_skills
 from exomem.public_artifact_privacy import (
     BinaryProvenance,
     PublicArtifactPrivacyError,
@@ -924,10 +924,10 @@ def test_explicit_personalized_output_stays_outside_public_release_roots(tmp_pat
         assert relative.parts[0].startswith(".pytest-") or relative.parts[0] == (
             ".exomem-private"
         )
-    with zipfile.ZipFile(output / "exomem.zip") as archive:
+    with zipfile.ZipFile(output / f"{workflow_skills.CORE_SKILL_NAME}.zip") as archive:
         assert b"synthetic-private" in archive.read("project-keys.yaml")
         assert package_skills.PRIVATE_OUTPUT_MARKER in archive.namelist()
-    findings = scan_artifact(output / "exomem.zip", label="dist/copied-personalized.zip")
+    findings = scan_artifact(output / f"{workflow_skills.CORE_SKILL_NAME}.zip", label="dist/copied-personalized.zip")
     assert [item.rule for item in findings] == [
         "personalized_artifact_in_public_build"
     ]
@@ -1006,5 +1006,5 @@ def test_default_package_does_not_implicitly_use_vault_environment(
 
     assert main(["package-skills", "--out", str(output)]) == 0
     capsys.readouterr()
-    with zipfile.ZipFile(output / "exomem.zip") as archive:
+    with zipfile.ZipFile(output / f"{workflow_skills.CORE_SKILL_NAME}.zip") as archive:
         assert b"must-not-ship" not in archive.read("project-keys.yaml")

@@ -152,7 +152,7 @@ def test_a_turn_about_the_person_without_contact_intent_gets_no_contact_units(
     # The person is still served (their own lede); only the contact units are not.
     assert any("teaches the weaving class" in text for text in texts), texts
     assert not any("555-0142" in text or "Example Lane" in text for text in texts), texts
-    assert "contact" not in {role["id"] for role in packet["roles"]}
+    assert "contact" not in {role["id"] for role in packet.get("roles", ())}
 
 
 @pytest.mark.parametrize(
@@ -170,7 +170,7 @@ def test_the_reviews_probe_turns_get_no_contact_units_end_to_end(vault: Path, tu
 
     packet = commands.op_activate_context(vault, turn=turn)
 
-    assert "contact" not in {role["id"] for role in packet["roles"]}
+    assert "contact" not in {role["id"] for role in packet.get("roles", ())}
     assert not any("555-0142" in t or "Example Lane" in t for t in _unit_texts(packet))
 
 

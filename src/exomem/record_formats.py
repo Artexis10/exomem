@@ -14,6 +14,7 @@ import re
 import stat
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -1384,12 +1385,19 @@ def presentation_relationship_resolver(
     observe_read: Callable[[vault.PathGuard], None] | None = None,
     wikilink_resolver: Callable[[], vault.WikilinkResolver] | None = None,
     targeted_namespace_contains: Callable[[str], bool] | None = None,
+    resolve_identifier: Callable[[str], str] | None = None,
 ) -> Callable[[str, str], tuple[str, str] | None] | None:
-    """Resolve selected canonical relationships without disclosing withheld targets."""
+    """Resolve selected canonical relationships without disclosing withheld targets.
+
+    ``resolve_identifier`` turns a relationship value into a vault path or link target, as
+    `memory_refs.resolve_identifier_read_only` does by default.
+    """
     recipe = manifest.item_presentation
     if recipe is None or not recipe.relationships:
         return None
     root = Path(vault_root)
+    if resolve_identifier is None:
+        resolve_identifier = partial(memory_refs.resolve_identifier_read_only, root)
     if lookup_path is None or wikilink_resolver is None:
         from .collection_store import preview
 
@@ -1443,13 +1451,13 @@ def presentation_relationship_resolver(
             readable_relative = current_item_paths.get(parsed[1])
         if relative is None:
             try:
-                target = memory_refs.resolve_identifier_read_only(root, raw)
+                link_target = resolve_identifier(raw)
                 # The reader's filter runs before candidates are counted, so a page it may not
                 # see never makes a name ambiguous or takes a path another page left. Counting
                 # releases nothing, so it records no receipt; the target's own check below does.
                 with egress.decide_without_receipt():
                     canonical, _warning = vault.normalize_wikilink(
-                        target,
+                        link_target,
                         root,
                         resolver_factory=get_wikilinks,
                         targeted_namespace_contains=targeted_namespace_contains,
@@ -2813,8 +2821,15 @@ def query_collection(
     project_child_value: Callable[[Any, collections.RecordPresentationColumn], Any] | None = None,
     late_link_projection: bool = False,
     stage_store_projection: bool = False,
+    readable: collections.CollectionManifest | None = None,
 ) -> RecordQueryResult:
     """Query a fresh canonical adapter snapshot with a snapshot-bound cursor.
+
+    `readable` is `manifest` after the caller's field plan. A query that names a column or a
+    child table may name only one of `readable`, so a withheld one refuses as an undeclared
+    one does. A saved view's names are the manifest author's, not the caller's, so they are
+    checked against `manifest`. Rows carry only what the caller may read, so `readable` also
+    shapes their child tables.
 
     `late_link_projection` is an internal-only opt-in from a trusted caller
     (never a value a public tool's request parameters can reach -- no tool
@@ -2865,9 +2880,10 @@ def query_collection(
             "definition": saved_view.definition,
             "identity": saved_view.identity,
         }
-    selected_child = _resolve_child_selector(manifest, expand_children, expand_child)
+    checked = readable if readable is not None and view is None else manifest
+    selected_child = _resolve_child_selector(checked, expand_children, expand_child)
     _validate_query_projection_fields(
-        manifest,
+        checked,
         selected_child=selected_child,
         filters=filters,
         columns=columns,
@@ -2950,7 +2966,9 @@ def query_collection(
             records=tuple(
                 replace(
                     record,
-                    values=_safe_presentation_values(record.values, manifest, project_child_value),
+                    values=_safe_presentation_values(
+                        record.values, manifest if readable is None else readable, project_child_value
+                    ),
                 )
                 for record in parsed.records
             ),
@@ -3638,6 +3656,7 @@ def _resolve_child_selector(
             if (
                 isinstance(descriptor, Mapping)
                 and descriptor.get("container_field") == expand_child
+                and expand_child in manifest.schema.fields
             ):
                 return expand_child
         raise collections.CollectionError(
@@ -3660,10 +3679,28 @@ def _resolve_child_selector(
         return tables[0].field
     if manifest.storage.strategy == "markdown-log":
         descriptor = manifest.storage.descriptor.get("child_rows")
-        if isinstance(descriptor, Mapping) and type(descriptor.get("container_field")) is str:
-            return descriptor["container_field"]
+        container = descriptor.get("container_field") if isinstance(descriptor, Mapping) else None
+        # The container is a schema field, so a field plan that withholds it leaves no eligible child.
+        if type(container) is str and container in manifest.schema.fields:
+            return container
     raise collections.CollectionError(
         "INVALID_RECORD_QUERY", "expand_children has no eligible child field"
+    )
+
+
+def query_columns(manifest: collections.CollectionManifest) -> list[str]:
+    """The top-level columns a query on this manifest may name: its fields and system columns."""
+    profile = profile_for(manifest.semantic_profile)
+    return sorted(
+        set(manifest.schema.fields)
+        | {
+            "collection_id",
+            profile.item_id_property,
+            "item_version",
+            "inferred",
+            "ambiguous",
+            "parent_record_id",
+        }
     )
 
 
@@ -3678,17 +3715,8 @@ def _validate_query_projection_fields(
     date_column: str | None,
 ) -> None:
     """Refuse undeclared fields before canonical rows enter query machinery."""
-    profile = profile_for(manifest.semantic_profile)
     allowed = collections._saved_view_selected_fields(
-        set(manifest.schema.fields)
-        | {
-            "collection_id",
-            profile.item_id_property,
-            "item_version",
-            "inferred",
-            "ambiguous",
-            "parent_record_id",
-        },
+        set(query_columns(manifest)),
         collections._saved_view_child_shapes(manifest.storage, manifest.child_tables),
         selected_child,
     )
@@ -3707,8 +3735,10 @@ def _validate_query_projection_fields(
         if raw is None:
             continue
         if type(raw) is not str or not raw or raw.split(".", 1)[0] not in allowed:
+            shown = raw if type(raw) is str else type(raw).__name__
             raise collections.CollectionError(
-                "INVALID_RECORD_QUERY_FIELD", "query field is not available in the safe projection"
+                "INVALID_RECORD_QUERY_FIELD",
+                f"query field {shown[:64]!r} is not available in the safe projection",
             )
 
 

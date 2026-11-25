@@ -544,7 +544,7 @@ def test_model_busy_is_a_retryable_public_refusal() -> None:
 def test_media_child_defers_model_busy_without_publishing_a_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    job = types.SimpleNamespace(id=7, binary_path=tmp_path / "recording.mp3")
+    job = media_worker.media_jobs.MediaJob(tmp_path / "recording.mp3", tmp_path / "recording.md", "audio", id=7)
     events: list[tuple[str, object]] = []
 
     class Store:
@@ -566,8 +566,8 @@ def test_media_child_defers_model_busy_without_publishing_a_failure(
         def claim_next(self, admit=None, *, skip_media_types=()):
             return job
 
-        def defer(self, job_id: int) -> None:
-            events.append(("defer", job_id))
+        def defer(self, deferred: media_worker.media_jobs.MediaJob) -> None:
+            events.append(("defer", deferred))
 
         def clear_worker(self, _pid: int) -> None:
             events.append(("clear", None))

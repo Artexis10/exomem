@@ -1,4 +1,4 @@
-# The epistemic dimensions Exomem ships. A dimension groups words by the question they answer.
+# The epistemic dimensions Evermatter ships. A dimension groups words by the question they answer.
 # Its members are relation families, unit kinds and governed unit-metadata keys, and a word may
 # belong to several dimensions. A unit belongs to a dimension when its kind is a member, when it
 # carries a member key, or when it is an endpoint of an edge whose relation family is a member.

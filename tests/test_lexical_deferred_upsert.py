@@ -318,6 +318,94 @@ def test_a_page_saved_during_catch_up_converges_without_a_whole_corpus_pass(
     assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb") == []
 
 
+def test_a_page_saved_between_a_catch_up_and_its_admission_proof_costs_no_whole_corpus_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """A catch-up that reached the registry and then lost the proof to a save is lag.
+
+    The catch-up stamps the registry checkpoint, then a request write lands
+    before the worker proves the catalogue current. The proof fails because
+    the projection moved, not because the catalogue is wrong. Another lag-only
+    catch-up replays the save; a whole-corpus pass would hold readiness at
+    lagging for up to half an hour.
+    """
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    raced = changed.parent / "raced.md"
+    real_admit = lexstore._admit_if_current
+    real_catch_up = store.catch_up_lagging_delta
+    real_rebuild = store.rebuild_atomic
+    catch_ups = []
+    rebuilds = []
+
+    def admit_after_a_save_lands(root):
+        if not raced.exists():
+            raced.write_text("# Raced\n\nracedsave\n", encoding="utf-8")
+            freshness.on_files_changed(tmp_path, changed=[raced])
+        return real_admit(root)
+
+    def catch_up():
+        catch_ups.append(True)
+        return real_catch_up()
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(lexstore, "_admit_if_current", admit_after_a_save_lands)
+    monkeypatch.setattr(store, "catch_up_lagging_delta", catch_up)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    lexstore.request_lag_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    assert rebuilds == [], "a save during the admission proof rebuilt the entire catalogue"
+    assert lexstore.runtime_retrieval_catalog_proof(
+        tmp_path, require_live_projection=True, schedule_repair=False
+    ) is not None
+    assert lexstore.search_bm25(tmp_path, "racedsave", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
+
+
+def test_a_caught_up_catalogue_that_still_fails_its_proof_without_lag_is_rebuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
+) -> None:
+    """Only lag earns another catch-up; a proof that fails at the live checkpoint rebuilds.
+
+    The catch-up reaches the registry and no write follows, yet the proof
+    refuses. Nothing lags, so another catch-up would replay nothing and fail
+    the same way. The worker must fall back to the whole-corpus pass.
+    """
+    store, changed, _removed = live_catalogue
+    changed.write_text("# After\n\nfirstsave\n", encoding="utf-8")
+    freshness.on_files_changed(tmp_path, changed=[changed])
+    real_admit = lexstore._admit_if_current
+    real_rebuild = store.rebuild_atomic
+    refusals = []
+    rebuilds = []
+
+    def refuse_once(root):
+        if not refusals:
+            refusals.append(True)
+            return False
+        return real_admit(root)
+
+    def rebuild():
+        rebuilds.append(True)
+        return real_rebuild()
+
+    monkeypatch.setattr(lexstore, "_admit_if_current", refuse_once)
+    monkeypatch.setattr(store, "rebuild_atomic", rebuild)
+
+    lexstore.request_lag_repair(tmp_path)
+    assert _wait_for_flight_end(tmp_path)
+
+    assert refusals == [True]
+    assert rebuilds == [True], "a proof that no lag explains was answered with another catch-up"
+    assert lexstore.search_bm25(tmp_path, "firstsave", k=3, scope="kb")
+
+
 def test_a_page_deleted_during_a_deferred_retry_keeps_its_claim_without_rebuilding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_catalogue
 ) -> None:

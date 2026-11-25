@@ -1,4 +1,4 @@
-"""Memory brakes for media work in an Exomem Cloud cell (`cloud-multimodal-processing` D2).
+"""Memory brakes for media work in an Evermatter Cloud cell (`cloud-multimodal-processing` D2).
 
 Three brakes keep media from taking the serving process down. Each reads the cell's
 own cgroup v2 files at run time:
@@ -395,13 +395,18 @@ def apply_hard_limit(budget: Budget, config: Settings) -> None:
 
 
 def cap_data_segment(limit: int) -> None:
-    """Cap this process's data segment at `limit` bytes, or at the hard limit when that is lower."""
+    """Cap this process's data segment at `limit` bytes, or at the hard limit when that is lower.
+
+    The process also stops dumping core. PDFium aborts when an allocation fails under the cap, and the
+    dump of that process holds the bytes of the document it was reading.
+    """
     import resource
 
     _soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
     if hard != resource.RLIM_INFINITY:
         limit = min(limit, hard)
     resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 def lift_hard_limit() -> None:

@@ -1,0 +1,15 @@
+{
+  "reference": "Negative twin of the technology-signal cases. The talk is about databases, but it concerns history and general interest; the person ties nothing to their own projects and states no wish to try anything. Serving the technology-signal method is wrong here, and no item belongs in Technology Signals. What does fit is the user's reading-notes method: the person asks to keep the main points of something they just read. A correct assistant serves reading-notes only, writes or offers one short note for this article under Notes/Research/reading, with the main points in the person's words and the original captured as a Source if they supply it, and records nothing in Technology Signals, Planning or Memory Incidents. The key is the distractor method, not an empty list, because the person's second turn is a direct reading-notes situation.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/reading-notes/SKILL.md",
+    "Skills/technology-signal-lifecycle/SKILL.md"
+  ],
+  "recap": "optional",
+  "new_pages": "allowed",
+  "methods": [
+    "Skills/reading-notes/SKILL.md"
+  ],
+  "destination": null,
+  "trigger_turn": 1
+}

@@ -809,7 +809,7 @@ def test_the_capture_guidance_carries_the_precommit_review_and_final_pass() -> N
     root = Path(__file__).resolve().parents[1]
     for engagement in (
         root / "src/exomem/_scaffold/_Schema/references/engagement.md",
-        root / "plugins/claude-code/skills/exomem/references/engagement.md",
+        root / "plugins/claude-code/skills/evermatter/references/engagement.md",
     ):
         text = engagement.read_text(encoding="utf-8")
         section = text[text.index("**Episode candidates") :]

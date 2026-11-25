@@ -7,7 +7,7 @@ Release reviewed source with reusable test evidence and independently qualified 
 
 ### Requirement: Pull requests run the partial tier and Full evidence comes from main
 
-CI SHALL run the partial tier for each pull request, draft or ready, on the supported floor Python (`requires-python`). Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
+CI SHALL run the partial tier for each pull request, draft or ready, on the supported floor Python (`requires-python`). Full coverage, with both supported Python runtimes and the specialized Full jobs, SHALL run on schedule and manual dispatch (main, or a source branch on request) and SHALL supply release evidence. Docs-only narrowing SHALL apply to every non-release pull request. The release PR SHALL retain targeted metadata and integration checks backed by source evidence. A reconciliation PR, which the cut controller opens from the same repository against `main`, SHALL run no test job only while merging it onto its base gives exactly the controller's projection of the accepted release origin for its source; code from the base SHALL check this, and any other content SHALL fail the required gate. Advisory measurements SHALL run outside the workflow whose completion release evidence requires.
 
 #### Scenario: A pull request is opened or updated
 - **WHEN** a source PR, draft or ready, is opened, reopened or updated
@@ -38,6 +38,15 @@ CI SHALL run the partial tier for each pull request, draft or ready, on the supp
 - **WHEN** an advisory measurement, such as the MCP read latency comparison, is scheduled or dispatched
 - **THEN** it runs in its own workflow, nightly and on request
 - **AND** the Full run completes, and its receipt is issued, without waiting for it
+
+#### Scenario: A reconciliation PR carries only the controller's projection
+- **WHEN** a reconciliation PR opens against `main`, including a repair that adds no origin or a branch updated from `main`
+- **THEN** merging its head onto the base gives the tree the controller projects for that source's accepted origin
+- **AND** its test jobs do not run, while metadata, package and integration checks do
+
+#### Scenario: A reconciliation-named PR carries other content
+- **WHEN** a PR on a reconciliation branch changes anything the controller's projection does not produce
+- **THEN** the release evidence check fails the required gate and the change must land through an ordinary PR
 
 ### Requirement: Reuse complete evidence for the actual tested tree
 
@@ -185,3 +194,41 @@ Temporarily unavailable state SHALL remain visibly pending during bounded observ
 #### Scenario: Temporary Actions evidence expires
 - **WHEN** an accepted release needs artifact recovery after its original temporary evidence expires
 - **THEN** recovery retains the accepted main record and verifies the immutable source and original artifact evidence
+
+### Requirement: The release command selects the newest fully tested source
+
+The supported release command SHALL select, by default, the newest commit on main's first-parent history since the preceding release reconciliation that has successful, authentic Full evidence the cut can reuse. When no such commit exists, it SHALL select main's tip, and the cut SHALL run its Full fallback. The selection SHALL report the reused evidence run, or report that none exists. The cut controller SHALL apply its own source and evidence checks to the selected source.
+
+#### Scenario: A tested commit exists since the last release
+- **WHEN** main's tip has no Full evidence and an earlier commit since the preceding reconciliation has a successful Full run whose receipt matches its tree
+- **THEN** the release command selects that earlier commit and names its evidence run
+- **AND** commits after it wait for the next release
+
+#### Scenario: No tested commit exists since the last release
+- **WHEN** no commit since the preceding reconciliation has reusable Full evidence, including when the only green Full run predates that reconciliation
+- **THEN** the release command selects main's tip and reports no evidence run
+- **AND** the cut dispatches its Full fallback as before
+
+### Requirement: Main keeps recent Full evidence for release cuts
+
+After each landing on main, CI SHALL dispatch one Full run on main when no Full run on main or on a release cut is queued or running, none has tested main's current commit, no run of the release-evidence workflow (such as an open cut's controller) is in progress, and no Full run on main started within a configurable window since the newest release reconciliation. A window of 0 SHALL disable the dispatch.
+
+#### Scenario: Old evidence and a moved main
+- **WHEN** no Full run on main started within the window since the newest reconciliation, no Full run is running, no release-evidence run is in progress, and no Full run has tested main's current commit
+- **THEN** CI dispatches one Full run on main
+
+#### Scenario: Recent, running or unchanged evidence
+- **WHEN** a Full run on main or on a release cut is running, main's newest Full run started within the window, or a Full run tested main's current commit
+- **THEN** CI dispatches nothing
+
+#### Scenario: A cut is open
+- **WHEN** a release cut's controller run is in progress (a resume run that only waits in its queue does not count)
+- **THEN** CI dispatches nothing, because a Full run before the cut's reconciliation cannot serve the next release
+
+#### Scenario: A recent Full run on main from before the newest reconciliation
+- **WHEN** main's newest Full run started within the window but before the newest release reconciliation
+- **THEN** it does not hold off the dispatch, because no cut can reuse it
+
+#### Scenario: A cut's Full run on an older commit
+- **WHEN** a cut's Full run on a commit before its reconciliation finished within the window and main's own newest Full run is older than the window
+- **THEN** the cut's run does not hold off the dispatch

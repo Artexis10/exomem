@@ -1,4 +1,4 @@
-"""Build and check the public Exomem Cloud provider packages."""
+"""Build and check the public Evermatter Cloud provider packages."""
 
 from __future__ import annotations
 
@@ -32,12 +32,14 @@ _CLAUDE_DIRECTORY_SUFFIXES = frozenset(
     (".md", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 )
 _CLAUDE_DIRECTORY_NAMES = frozenset(("LICENSE", ".gitignore"))
-# An installer prefix immediately naming the package unpinned (`uvx exomem`,
-# `pip install exomem`) or a floating tag resolves a mutable source at run time;
+# An installer prefix immediately naming the package unpinned (`uvx evermatter`,
+# `pip install evermatter`) or a floating tag resolves a mutable source at run time;
 # the reviewer's "untrusted or mutable" finding covers both. Only the pinned
-# spellings `exomem@<release>` and `exomem==<release>` admit the suffix.
+# spellings `evermatter@<release>` and `evermatter==<release>` admit the suffix,
+# and the old `exomem` spellings stay under the same rule during the
+# compatibility window.
 _MUTABLE_EXOMEM_INSTALL = re.compile(
-    r"exomem@latest|(?:uvx?|pipx?|pip3?)\s+(?:(?:tool\s+)?install\s+)?[\"']?exomem\b(?![\w=@-])"
+    r"(?:evermatter|exomem)@latest|(?:uvx?|pipx?|pip3?)\s+(?:(?:tool\s+)?install\s+)?[\"']?(?:evermatter|exomem)\b(?![\w=@-])"
 )  # nosemgrep: ep-word-search, ep-lexical-intent -- closed set of pip/uv installer names for a submission lint, not a vocabulary.
 
 
@@ -173,7 +175,7 @@ def _claude_hooks(root: Path, target: Path) -> None:
     (hooks / "hooks.json").write_bytes(
         _json_bytes(
             {
-                "description": "Canonical Exomem MCP activation, governed capture and local continuation.",
+                "description": "Canonical Evermatter MCP activation, governed capture and local continuation.",
                 "hooks": registrations,
             }
         )
@@ -196,7 +198,10 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             shutil.rmtree(target)
         target.mkdir()
         skills = target / "skills"
-        for name in ("exomem", *(str(item["name"]) for item in workflow_skills.list_skills())):
+        for name in (
+            workflow_skills.CORE_SKILL_NAME,
+            *(str(item["name"]) for item in workflow_skills.list_skills()),
+        ):
             for relative, content in package_skills.skill_payload(name).items():
                 path = skills / name / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -209,20 +214,20 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             f"# {definition['display_name']}\n\n"
             f"{definition['description']}\n\n"
             "## Getting started\n\n"
-            "Install the plugin and connect your Exomem account. Check the account "
+            "Install the plugin and connect your Evermatter account. Check the account "
             "shown on the sign-in page before approving access. Then chat normally. "
-            "When something is worth keeping, ask Exomem to remember it; in a new chat, "
+            "When something is worth keeping, ask Evermatter to remember it; in a new chat, "
             "ask about what you saved or where you left off.\n\n"
             "For example:\n\n"
             + "".join(f'- "{prompt}"\n' for prompt in definition["default_prompts"])
             + "\nGive the assistant the information to save or name the project you mean. "
-            "Exomem can also help during ordinary work according to your chosen settings. "
+            "Evermatter can also help during ordinary work according to your chosen settings. "
             "It does not automatically import every old conversation.\n\n"
             "## Data handling\n\n"
             "MCP tool arguments, including user turns sent to `recall_context`, reach "
-            "the authenticated Exomem service. Reads return authorized account "
+            "the authenticated Evermatter service. Reads return authorized account "
             "content; successful writes persist governed memory in that account. OAuth "
-            "selects the account, and this package reaches Exomem only through that "
+            "selects the account, and this package reaches Evermatter only through that "
             "admitted MCP connection. It does not import a local vault or share "
             "authorization between accounts. Your AI provider also processes the "
             "conversation and tool results under its policies.\n\n"
@@ -237,7 +242,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 "connection, without lifecycle hooks.\n\n"
             )
             + (
-                "Lifecycle hooks are available in the full Exomem plugin. They add "
+                "Lifecycle hooks are available in the full Evermatter plugin. They add "
                 "automatic recall, capture checks and continuation on Claude Code and "
                 f"Cowork. To use it in Claude Code, run `{full_install}` instead of "
                 "installing this edition.\n\n"
@@ -291,6 +296,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path = target / ".claude-plugin/plugin.json"
             path.parent.mkdir()
             path.write_bytes(_json_bytes(manifest))
+            # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
+            # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).
             (target / ".mcp.json").write_bytes(
                 _json_bytes(
                     {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
@@ -346,6 +353,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 },
             }
             (target / "plugin.json").write_bytes(_json_bytes(manifest))
+            # Same as the Claude edition above: the server key stays `exomem` until the operator
+            # decides how the Cloud plugin's sign-in moves.
             (target / "mcp.json").write_bytes(
                 _json_bytes(
                     {

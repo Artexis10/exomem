@@ -1,6 +1,6 @@
 # Camera raw decoder distribution notices
 
-Exomem's `image-codecs` extra installs `rawpy==0.28.*` on every platform except Intel macOS.
+Evermatter's `image-codecs` extra installs `rawpy==0.28.*` on every platform except Intel macOS.
 The Python wrapper uses the MIT licence.
 The adjacent `LICENSE.txt` and `LICENSE.LibRaw.txt` preserve the upstream wheel notices unchanged.
 
@@ -17,6 +17,6 @@ The released wheels bundle these native libraries:
 The wheel records only LibRaw's and libgomp's versions; the other three are named by the shared-object version in `rawpy.libs`, not by release.
 
 LibRaw itself is offered under the LGPL-2.1 or the CDDL-1.0; the wheel ships the LGPL-2.1 text.
-Exomem uses AGPL-3.0-or-later.
+Evermatter uses FSL-1.1-ALv2 and loads LibRaw as a separate, replaceable shared object.
 
 The Python source and release files are available from https://github.com/letmaik/rawpy and https://pypi.org/project/rawpy/0.28.0/.

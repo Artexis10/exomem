@@ -58,7 +58,7 @@ or generic connection as authority to create an entity, type, or edge.
 
 ## Agent write loop
 
-Use this loop whenever a durable conclusion should enter Exomem:
+Use this loop whenever a durable conclusion should enter Evermatter:
 
 1. Partition durable candidates by retrieval question, subject/domain, episode,
    and epistemic role before choosing destinations. Reuse current relevant
@@ -87,7 +87,9 @@ Use this loop whenever a durable conclusion should enter Exomem:
    `warnings` (when the write warned) and an optional `structure_suggestion`.
    The fuller structural checklist — `write_feedback` with `sources.cited`,
    `links.body_wikilinks`, and `relations.relation_debt` — lives under
-   `diagnostics` and needs `detail="full"`. Ask for it when provenance
+   `diagnostics` and needs `detail="full"`. When the reply also lists
+   `diagnostics.derived_components`, it lives under `diagnostics.leaf_result`
+   instead. Ask for it when provenance
    or connectivity is in doubt; if all three counts are zero and that is not
    honest, fix it before reporting. Corpus-aware `suggestions` are **off by
    default** because they cost a whole retrieval pass on the write path; pass
@@ -171,6 +173,21 @@ do not change the page when you answer.
 Answer once and carry on with the task. Do not recite the field names to the user.
 A page that is asked and also at a size step carries the ownership question first.
 
+**When a write returns a rename.** A write that changed a page's title may return
+`structure_suggestion` of kind `rename`. The new title no longer matches the file name,
+and the suggestion holds the name that the title now gives, plus the spelled-out
+`curation_action='relocate'` call for that one page. The user's own retitle is the
+approval: do not ask again. Run the call as a preview, tell the user the new name in one
+line, and apply it. A rename keeps links working. When the suggestion is absent, the
+name still follows the title or the title did not change.
+
+**When many pages carry stale names.** Pages made before titles named files, or retitled
+since, keep a name that no longer follows their title. The review queue holds one item for
+the whole vault (`name_drift`), and `inspect_name_drift` lists the pages with the name each
+would get. Never rename a page that has no usable title; the list marks those. Propose the
+next batch to the user as one preview with the call the item carries, and apply it only
+on their yes. Repeat per batch until the item closes.
+
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
 *expression* — distillation, signal-density, no redundancy — never of *coverage*.
@@ -207,9 +224,11 @@ restatement of what specs/commits already capture.
 
 These rules are non-negotiable.
 
-1. **Read-only paths.** Never write to anything outside `Knowledge Base/`. Any
+1. **Read-only paths.** Never write vault content outside `Knowledge Base/`. Any
    sibling folders in the vault are inputs only. Compiled notes may **link to**
-   them but never modify them.
+   them but never modify them. Ordinary workspace files (the user's code,
+   documents and project files) are not the vault: write them with your own file
+   tools when asked.
 
 2. **Sources and Evidence are append-only.** Once a file lands in `Sources/` or
    `Evidence/`, never edit its *content*. Corrections happen by adding a new
@@ -326,7 +345,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    artifact **is** (`article`, `session`, `research-report`, `invoice-receipt`,
    `field-notebook`, …) and `domain` is what it is **about** (`travel`, `health`,
    `software`, …). Both are **open vocabularies** — name the label you actually
-   mean even when Exomem has not seen it, and it registers itself. Add `projects`
+   mean even when Evermatter has not seen it, and it registers itself. Add `projects`
    for the work the source serves; a source may serve several, and projects never
    change where it is filed.
    The path is a projection of that metadata, `Sources/<Kind>/[<Domain>/]` —
@@ -443,7 +462,7 @@ Registered relations become traversable edges while clean aliases remain authori
 labels. A registry-marked generic relation that an older page already holds establishes connectivity,
 not typed specificity; an all-generic advisory asks for meaning review without forcing an edge.
 
-**The writer normalizes on your behalf.** Exomem's writers run every wikilink
+**The writer normalizes on your behalf.** Evermatter's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.
@@ -551,9 +570,9 @@ A surface without the required edit owner reports that limit; it does not invent
 
 ### Updating one unit with `edit_note`
 
-An update rebuilds the whole unit. `verdict`, `check_by` and the unit id persist
-(`edit_note` carries none of them), and metadata rows the tool does not own are
-carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
+An update rebuilds the whole unit. `verdict`, `check_by` and `as_of` persist
+when you omit them, and an empty string clears one; the unit id always persists,
+and metadata rows the tool does not own are carried through. `tags`, `context` and `links` are replace-on-omit: omitting one
 clears it, so resend what should stay. A link in a body or in a unit reads and writes as
 `[[Title]]`; the vault stores the page's path form. `verdict` is a categorical epistemic outcome,
 a judgment in words and never a confidence score;

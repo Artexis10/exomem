@@ -306,7 +306,7 @@ def nine(rig: Rig) -> None:
     rig.files(**{f"a{n:02}__bin": 800 for n in range(1, 10)})
 
 
-NOT_IN_EXOMEM = "not in Exomem"
+NOT_IN_EXOMEM = "not in Evermatter"
 
 
 # -- Windows and the budget
@@ -465,7 +465,7 @@ def test_allowance_exhausted_and_media_usage_unknown_stop_and_report(rig, state,
 
 @pytest.mark.parametrize("stop", ["band", "allowance", "usage", "storage"])
 def test_every_stop_says_the_members_not_yet_sent_are_not_in_exomem_and_must_be_kept(rig, stop):
-    """Catches a stop that leaves the person thinking the unsent members are safe in Exomem."""
+    """Catches a stop that leaves the person thinking the unsent members are safe in Evermatter."""
     rig.files(a01__bin=800, a02__bin=800)
     rig.cell.budget = rig.cell.reachable = 1200
     if stop == "band":
@@ -657,7 +657,7 @@ def test_the_cli_tells_the_person_to_keep_the_source_while_a_window_has_an_unfil
 
 
 def test_the_cli_stops_telling_the_person_to_keep_the_source_once_nothing_is_unfiled_or_residual(rig):
-    """Catches a warning that never ends, so the person keeps a folder that Exomem no longer needs."""
+    """Catches a warning that never ends, so the person keeps a folder that Evermatter no longer needs."""
     rig.files(a01__bin=800)
     rig.run()
     for import_id in list(rig.cell.windows):
@@ -799,7 +799,7 @@ def test_a_resume_on_a_cell_that_reports_no_window_budget_stops_instead_of_sendi
 
 
 def test_a_failed_status_call_after_a_window_landed_stops_with_the_notice(rig):
-    """Catches a mid-series error that says nothing about the members that are not in Exomem."""
+    """Catches a mid-series error that says nothing about the members that are not in Evermatter."""
     from fastmcp.exceptions import ToolError
 
     rig.files(a1__bin=800, a2__bin=800)
@@ -818,7 +818,7 @@ def test_a_failed_status_call_after_a_window_landed_stops_with_the_notice(rig):
 
 
 def test_a_failed_acknowledge_call_in_a_resend_stops_with_the_notice(rig):
-    """Catches a failed clearing call that says nothing about the members that are not in Exomem."""
+    """Catches a failed clearing call that says nothing about the members that are not in Evermatter."""
     from fastmcp.exceptions import ToolError
 
     _series_with_a_residual(rig)

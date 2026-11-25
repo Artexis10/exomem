@@ -1,6 +1,6 @@
 """Existing-vault adoption report.
 
-``adopt`` is the product-facing companion to ``overview``: it says what Exomem
+``adopt`` is the product-facing companion to ``overview``: it says what Evermatter
 found, what remains untouched, which packs look relevant, and which safe next
 actions are available. The default mode is read-only and must work before
 ``Knowledge Base/`` exists. Write modes are explicit and only write under the
@@ -180,7 +180,7 @@ def _governance(scan: dict) -> dict:
         "governed_path": kb.get("path") if present else None,
         "read_only_input": (
             "All existing files outside the governed Knowledge Base are searchable "
-            "read-only input. Exomem does not rewrite, move, delete, or add "
+            "read-only input. Evermatter does not rewrite, move, delete, or add "
             "frontmatter to them by default."
         ),
     }
@@ -313,9 +313,10 @@ def _add_manifest_index_writes(
     kb = kb_root(root)
     rel_no_ext = rel_path[:-3] if rel_path.endswith(".md") else rel_path
     top_index = kb / "index.md"
-    if top_index.exists():
+    if store_read.holds_file(root, relative_posix(top_index, root)):
+        top_current, top_guard = indexes.read_guarded_universal_text(root, top_index)
         top_text, _trim = indexes._prepend_recent_activity(
-            top_index.read_text(encoding="utf-8"),
+            top_current,
             date_iso=today.isoformat(),
             summary=f"`{managed_relative(rel_no_ext)}` (adoption manifest) — saved scan-first existing-vault report",
         )
@@ -323,7 +324,7 @@ def _add_manifest_index_writes(
             root,
             top_index_text=top_text,
         )
-        writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
+        writes.append(PlannedWrite(path=top_index, content=top_text or top_current, guard=top_guard))
         writes.extend(sub_writes)
     else:
         warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
@@ -455,7 +456,7 @@ def render_text_source(
         "",
         f"# {title}",
         "",
-        f"> Copied from `{_clean_inline(rel_original)}` by Exomem adoption. The original remains unchanged.",
+        f"> Copied from `{_clean_inline(rel_original)}` by Evermatter adoption. The original remains unchanged.",
         "",
         "## Original Metadata",
         "",
@@ -492,7 +493,7 @@ def render_artifact_source(
         url=None,
         tags=["imported"],
         why_captured=(
-            f"Copied from `{_clean_inline(planned['original_path'])}` by Exomem adoption. "
+            f"Copied from `{_clean_inline(planned['original_path'])}` by Evermatter adoption. "
             "The original remains unchanged."
         ),
         content=add_module._describe_artifact(
@@ -994,9 +995,11 @@ def commit_import_items(
             if folder not in folders:
                 folders.append(folder)
 
+        from .vault_store import read as store_read
+
         sources_index = sources_dir / "index.md"
         warnings: list[str] = []
-        if sources_index.exists():
+        if store_read.holds_file(root, relative_posix(sources_index, root)):
             sources_current, sources_guard = indexes.read_guarded_universal_text(root, sources_index)
             sources_text = indexes._replace_by_type_section(
                 sources_current,
@@ -1015,7 +1018,7 @@ def commit_import_items(
 
         where = ", ".join(f"Sources/{folder}/" for folder in folders)
         top_index = kb / "index.md"
-        if top_index.exists():
+        if store_read.holds_file(root, relative_posix(top_index, root)):
             # The gate does not classify this bound index, and folder labels are registry data: keep them inert.
             summary = escape_wikilinks_for_log(
                 f"{where} (imported sources) - copied "
@@ -1435,7 +1438,7 @@ def adopt(
         "scope_note": overview_module.SCOPE_NOTE,
         "write_contract": (
             "Default adoption is read-only. Originals stay where they are. "
-            "Governed Exomem writes happen only under Knowledge Base/ after an "
+            "Governed Evermatter writes happen only under Knowledge Base/ after an "
             "explicit save/copy/compile action."
         ),
         "governance": governance,

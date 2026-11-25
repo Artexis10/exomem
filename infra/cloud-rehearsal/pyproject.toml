@@ -1,7 +1,7 @@
 [project]
 name = "exomem-cloud-rehearsal"
 version = "0.1.0"
-description = "P3: the Exomem Cloud local end-to-end rehearsal on disposable K3s"
+description = "P3: the Evermatter Cloud local end-to-end rehearsal on disposable K3s"
 requires-python = ">=3.11"
 dependencies = [
     "asyncpg>=0.30,<1",
@@ -9,6 +9,7 @@ dependencies = [
     "exomem-cellctl",
     "httpx>=0.28,<1",
     "kubernetes>=35.0,<36",
+    "markdown-it-py==4.2.0",
     "mcp>=1.20,<2",
     "pyyaml>=6,<7",
 ]

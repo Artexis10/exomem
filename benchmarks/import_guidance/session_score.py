@@ -11,6 +11,10 @@ Refuses to score while any selected case has no key. An independent writer suppl
       "new_pages":        "none" (no page besides the recap) or "allowed"
     }
 
+A case that hands the agent a file, as an image in a turn, adds one optional field: `"evidence": "keep"` (the file is
+proof the agent keeps as Evidence in that turn) or `"withhold"` (the file shows a card number or a code the agent never
+keeps). `evidence_custody_outcomes` checks it against the call log.
+
 The recap is cited, not linked: a Source that a live compiled page names in `sources:` counts as compiled. The check
 `recap_cited` needs no key field, because it reads the pages the run changed.
 
@@ -40,6 +44,7 @@ from .report import read_rows
 from .session_close import (
     DEFAULT_CLIENT_MODE,
     DEFAULT_HOOK_INJECT,
+    HOOKLESS_MODES,
     Case,
     client_mode_error,
     load_cases,
@@ -47,6 +52,12 @@ from .session_close import (
 from .store_report import paired_interval
 
 KEY_FIELDS = {"reference", "must_change", "must_not_change", "recap", "new_pages"}
+#: Fields a method-activation key adds: the skill pages the trigger turn should be served, where the durable outcome
+#: belongs and which turn triggers it. The model-free method check reads them; this scorer only checks their shape.
+METHOD_KEY_FIELDS = {"methods", "destination", "trigger_turn"}
+#: The optional field of a key for a case that hands the agent a file, and the check each of its values reports.
+CUSTODY_KEY_FIELDS = {"evidence"}
+EVIDENCE_CHECKS = {"keep": "custody_attempted_same_turn", "withhold": "card_not_kept"}
 RECAP_RULES = ("required", "forbidden", "optional")
 NEW_PAGE_RULES = ("none", "allowed")
 #: The criterion IDs and key rules are the fixed scoring contract, not vault vocabulary.
@@ -103,8 +114,19 @@ def refuse_unkeyed(cases: Sequence[Case]) -> dict[str, dict]:
 
 def key_problems(case: Case, key: object) -> list[str]:
     problems = []
-    if not isinstance(key, dict) or set(key) != KEY_FIELDS:
-        return [f"fields must be exactly {sorted(KEY_FIELDS)}"]
+    if not isinstance(key, dict) or not KEY_FIELDS <= set(key) <= KEY_FIELDS | METHOD_KEY_FIELDS | CUSTODY_KEY_FIELDS:
+        return [f"fields must be exactly {sorted(KEY_FIELDS)}, optionally with {sorted(METHOD_KEY_FIELDS)} or {sorted(CUSTODY_KEY_FIELDS)}"]
+    if "evidence" in key and key["evidence"] not in EVIDENCE_CHECKS:
+        problems.append(f"evidence must be one of {sorted(EVIDENCE_CHECKS)}")
+    elif key.get("evidence") == "keep" and not case.turn_images:
+        problems.append("evidence 'keep' needs a turn that carries an image")
+    if set(key) & METHOD_KEY_FIELDS:
+        if set(key) & METHOD_KEY_FIELDS != METHOD_KEY_FIELDS:
+            problems.append(f"a method key carries all of {sorted(METHOD_KEY_FIELDS)}")
+        elif not (isinstance(key["methods"], list) and all(isinstance(path, str) for path in key["methods"])):
+            problems.append("methods must be a list of page paths")
+        elif not (isinstance(key["trigger_turn"], int) and 0 <= key["trigger_turn"] < len(case.turns)):
+            problems.append("trigger_turn must index one of the case's turns")
     if not isinstance(key["reference"], str) or not key["reference"].strip():
         problems.append("reference must be a non-empty string")
     if key["recap"] not in RECAP_RULES:
@@ -148,7 +170,99 @@ def check_row(key: dict, row: dict) -> list[checks.Outcome]:
             key["new_pages"] == "allowed" or not other_pages,
             f"pages besides the recap: {other_pages}" if other_pages else "none besides the recap",
         ),
+        *(evidence_custody_outcomes(key["evidence"], row) if "evidence" in key else []),
     ]
+
+
+def tool_of(call: dict) -> str:
+    return str(call.get("name")).removeprefix(f"mcp__{checks.SERVER}__")
+
+
+def arguments_of(call: dict) -> dict:
+    return call["input"] if isinstance(call.get("input"), dict) else {}
+
+
+def evidence_custody_outcomes(rule: str, row: dict) -> list[checks.Outcome]:
+    """Call-log checks of what the agent does with a file the person shares. They replay the 24 Nov 2026 incident: a
+    person shared a photo of a product box label to register a warranty, and the agent wrote a text transcription and
+    never kept the image as Evidence.
+
+    `keep` reports two checks. `custody_attempted_same_turn` reads the agent's choice: every turn that carried an
+    image holds a `save_evidence` call with `files`, or an Evidence-lane `upload_files` call with a scope and a
+    category. `custody_completed_same_turn` reads that call's reply: it passes only on a stored row, and is unknown
+    when the reply is an issued handoff or says this transport cannot hand off an upload, as the suite's stdio
+    server always does. `withhold` reports `card_not_kept`: the run holds no `save_evidence` or
+    `save_source` call and no Evidence- or Source-lane `upload_files`."""
+    calls = row.get("calls") or []
+
+    def evidence_upload(call: dict) -> bool:
+        # The tool names and the upload lane are fixed wire tokens of the product's public tools.
+        return tool_of(call) == "upload_files" and arguments_of(call).get("lane") == "evidence"
+
+    if rule == "withhold":
+        # A Source keep stores the card as surely as an Evidence keep does.
+        kept = [c for c in calls if tool_of(c) in ("save_evidence", "save_source") or tool_of(c) == "upload_files"
+                and arguments_of(c).get("lane") in ("evidence", "source")]
+        return [checks.Outcome("card_not_kept", checks.FAIL if kept else checks.PASS, f"{len(kept)} keeping call(s) in the run")]
+
+    def keeps_proof(call: dict) -> bool:
+        args = arguments_of(call)
+        return (tool_of(call) == "save_evidence" and bool(args.get("files"))) or (
+            evidence_upload(call) and bool(args.get("scope")) and bool(args.get("category"))
+        )
+
+    image_turns = [n for n, names in enumerate(row.get("turn_images") or []) if names]
+    attempts = {n: [c for c in calls if c.get("turn") == n and keeps_proof(c)] for n in image_turns}
+    unkept = [n + 1 for n in image_turns if not attempts[n]]
+    if not image_turns:
+        return [checks.Outcome("custody_attempted_same_turn", checks.UNKNOWN, "the run records no turn that carried an image")]
+    if unkept:
+        return [checks.Outcome("custody_attempted_same_turn", checks.FAIL, f"no keeping call in turn(s) {unkept}"),
+                checks.Outcome("custody_completed_same_turn", checks.FAIL, f"nothing kept in turn(s) {unkept}")]
+    attempted = checks.Outcome("custody_attempted_same_turn", checks.PASS, f"a keeping call in turn(s) {[n + 1 for n in image_turns]}")
+    replies = [reply_of(c) for n in image_turns for c in attempts[n]]
+    if any(kept_reply(reply) for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.PASS, "a keeping call returned a stored file")
+    elif any(reply.get("handoff_status") == "handoff_prepared" for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.UNKNOWN,
+                                   "a handoff was issued; the file is kept only when the person sends it")
+    elif replies and all(error_code(reply) == UPLOAD_UNAVAILABLE for reply in replies):
+        completed = checks.Outcome("custody_completed_same_turn", checks.UNKNOWN,
+                                   "every upload was refused because this transport has no HTTP upload session")
+    else:
+        completed = checks.Outcome("custody_completed_same_turn", checks.FAIL, "every keeping call was refused")
+    return [attempted, completed]
+
+
+#: The product's refusal code when a transport cannot hand off an upload (`upload_handoff`); a wire token, not prose.
+UPLOAD_UNAVAILABLE = "UPLOAD_HANDOFF_UNAVAILABLE"
+
+
+def reply_of(call: dict) -> dict:
+    """A call's reply as JSON, read from its first text block; an unreadable reply is an empty object."""
+    content = call.get("result")
+    blocks = content if isinstance(content, list) else [content]
+    for block in blocks:
+        text = block.get("text") if isinstance(block, dict) else block
+        try:
+            parsed = json.loads(text) if isinstance(text, str) else None
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def error_code(reply: dict) -> str | None:
+    error = reply.get("error")
+    return error.get("code") if isinstance(error, dict) else None
+
+
+def kept_reply(reply: dict) -> bool:
+    """A save with at least one stored or already stored file row."""
+    if error_code(reply) is not None:
+        return False
+    return any(isinstance(row, dict) and row.get("state") in ("stored", "already_stored") for row in reply.get("files") or [])
 
 
 def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str, str]:
@@ -163,7 +277,11 @@ def cited_verdict(recaps: dict, compiled: dict, uncited: list[str]) -> tuple[str
 def judge_view(case: Case, key: dict, row: dict) -> str:
     """The same view for every arm: the person's turns, the reference, and what happened to the pages."""
     seen = row["observed"]
-    turns = "\n".join(f"{n}. {t}" for n, t in enumerate(case.turns, start=1))
+    shared = [[p.name for p in paths] for paths in case.turn_images] or [[]] * len(case.turns)
+    turns = "\n".join(
+        f"{n}. {t}" + (f" [the person attached: {', '.join(names)}]" if names else "")
+        for n, (t, names) in enumerate(zip(case.turns, shared, strict=True), start=1)
+    )
     changes = [f"### Changed: {p}\n{diff}" for p, diff in seen["changed"].items()]
     changes += [f"### Removed: {p}" for p in seen["removed"]]
     changes += [
@@ -342,7 +460,7 @@ def recall_evidence(row: dict, key: dict | None = None) -> tuple[str, list[dict]
 
     fresh = row.get("fresh")
     mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
-    if mode == "tool-only" and (client_mode_error(mode, row) or not fresh or fresh.get("client_mode", DEFAULT_CLIENT_MODE) != mode or client_mode_error(mode, fresh)):
+    if mode in HOOKLESS_MODES and (client_mode_error(mode, row) or not fresh or fresh.get("client_mode", DEFAULT_CLIENT_MODE) != mode or client_mode_error(mode, fresh)):
         return checks.UNKNOWN, []
     if not fresh or fresh.get("error") or (fresh.get("server_connected") or {}).get(checks.SERVER) != "connected":
         return checks.UNKNOWN, []
@@ -519,7 +637,7 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
             mode = row.get("client_mode", DEFAULT_CLIENT_MODE)
             capture_error = client_mode_error(mode, row)
             recall_error = (row.get("fresh") or {}).get("error")
-            if mode == "tool-only" and row.get("recall_enabled"):
+            if mode in HOOKLESS_MODES and row.get("recall_enabled"):
                 recall_error = capture_error or client_mode_error(mode, row.get("fresh") or {})
             answers = native_answers(case, key, row, mapping, imported) if not automatic_judge else None
             result = score_row(case, key, row, judge_model=judge_model, executable=executable, scratch=scratch, answers=answers, automatic_judge=automatic_judge)
@@ -537,6 +655,7 @@ def score_all(runs: Sequence[Path], *, out: Path, judge_model: str = "opus", jud
                 "order": (row.get("observed") or {}).get("order"),
                 "restraint_case": not key["must_change"],
                 "recap_rule": key["recap"],
+                "evidence_rule": key.get("evidence"),
                 "recap_produced": bool((row.get("observed") or {}).get("recaps")) if capture_error is None else None,
                 "recall_enabled": row.get("recall_enabled", False),
                 "recall_error": recall_error,
@@ -563,6 +682,9 @@ def measures(row: dict) -> dict[str, str]:
         "restraint": joined(("must_not_change", "new_pages", "J2")) if row["restraint_case"] else checks.NOT_APPLICABLE,
         "citation adherence": outcomes["recap_cited"].verdict if "recap_cited" in outcomes else checks.UNKNOWN,
         "fresh recall": row["recall"]["verdict"],
+        "evidence custody": (
+            checks.NOT_APPLICABLE if row.get("evidence_rule") is None else joined((EVIDENCE_CHECKS[row["evidence_rule"]],))
+        ),
     }
     for rule in RECAP_RULES:
         result[f"recap production ({rule})"] = (

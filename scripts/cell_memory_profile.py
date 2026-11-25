@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Profile an Exomem Cloud cell's resident memory at fixed points (bound-cell-memory D1).
+"""Profile an Evermatter Cloud cell's resident memory at fixed points (bound-cell-memory D1).
 
 Every later memory change is judged against this report, so it measures one real
 cell rather than an estimate from code. Each stage runs in its own fresh process,

@@ -101,7 +101,7 @@ variable "server_type" {
   validation {
     # Hetzner names its Arm64 (Ampere) family CAX, so the prefix is the
     # architecture check; the CAX size stays the capacity decision above.
-    # Exomem Cloud images run on both architectures, one per cluster.
+    # Evermatter Cloud images run on both architectures, one per cluster.
     condition     = var.server_type == "cx33" || startswith(var.server_type, "cax")
     error_message = "The fleet server is cx33 (x86) or a Hetzner CAX (Arm64) type."
   }
@@ -155,7 +155,7 @@ variable "private_node_ip" {
 }
 
 variable "shared_control" {
-  description = "Required non-secret dependency published by substrate-infra. Exomem never reads shared Terraform state."
+  description = "Required non-secret dependency published by substrate-infra. Evermatter never reads shared Terraform state."
   nullable    = false
   type = object({
     schema_version = number

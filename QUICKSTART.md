@@ -1,4 +1,4 @@
-# exomem — local setup (Claude Code, no cloud)
+# Evermatter (formerly Exomem) — local setup (Claude Code, no cloud)
 
 `exomem setup --vault "/path/to/your/Obsidian"` does steps 1–6 below for you in
 one command — see [Set it up in 5 minutes](README.md#set-it-up-in-5-minutes) in
@@ -6,7 +6,7 @@ the main README. This document is the full-control manual path: each step run
 by hand, plus GPU/media extras, for anyone who wants to see or customize what's
 happening under the hood.
 
-This is the **local-first** path: run exomem as a **local MCP server inside
+This is the **local-first** path: run Evermatter as a **local MCP server inside
 Claude Code**, pointed at your own Obsidian vault. No OAuth, no Tailscale, no
 Windows service — none of the remote/mobile machinery in the main
 [README](README.md). Everything stays on your machine; the only thing that ever
@@ -22,20 +22,20 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > hooks):
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
+> curl -fsSL https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.sh | sh
 > ```
 > ```powershell
-> irm https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.ps1 | iex
+> irm https://raw.githubusercontent.com/substrate-systems/evermatter/main/scripts/install.ps1 | iex
 > ```
 >
-> Claude Code alone? `/plugin marketplace add Artexis10/exomem` then
+> Claude Code alone? `/plugin marketplace add substrate-systems/evermatter` then
 > `/plugin install exomem@exomem` installs the skills and hooks. Finish the MCP
 > route with `exomem setup --stdio`, or point setup at your existing service.
 >
 > The manual walkthrough below exists so you can see what those do, and for when
 > you want to run the steps yourself.
 
-> **For Claude Code, exomem is two parts and you want both.** The **MCP server**
+> **For Claude Code, Evermatter is two parts and you want both.** The **MCP server**
 > (steps 1-5) is the *hands* — product commands such as `search_memory`,
 > `create_note`, `capture_source`, `preserve_evidence`, and `review_memory`. The
 > **skill** (step 6) is the *brain* — it tells Claude *when* to save, how to keep
@@ -56,13 +56,13 @@ uv run python -m exomem setup
 ```
 
 It prompts for your vault, **scans it and shows what's already there** —
-existing notes are never touched; exomem writes only under `Knowledge Base/` —
+existing notes are never touched; Evermatter writes only under `Knowledge Base/` —
 then initializes the KB, picks lean vs hybrid, runs `doctor`, registers the
 server with Claude Code (or prints the `.mcp.json` snippet if the `claude` CLI
 isn't on PATH), installs the skill, and offers the optional hooks. Last, it
-shows Exomem's learning instruction and asks before it adds that text to your
+shows Evermatter's learning instruction and asks before it adds that text to your
 Claude Code `CLAUDE.md` and Codex `AGENTS.md`. The text asks the agent to recall
-Exomem before a task and save what it learns. Re-running is safe: completed
+Evermatter before a task and save what it learns. Re-running is safe: completed
 steps report `[skipped]`.
 
 Setup prefers one already-running authenticated service when `--mcp-url` or
@@ -79,15 +79,15 @@ learning instruction too.
 
 ## Not CLI-comfortable? Ask an assistant to drive
 
-You do not need to understand Exomem internals to get started. Give Claude Code,
+You do not need to understand Evermatter internals to get started. Give Claude Code,
 Codex, or another terminal-capable assistant this prompt from the cloned repo:
 
 ```text
-Set up Exomem for my local markdown or Obsidian vault. Use the recommended lean
+Set up Evermatter for my local markdown or Obsidian vault. Use the recommended lean
 path unless I explicitly ask for embeddings. Run the setup wizard, explain each
 prompt in plain language before I answer it, and do not move or rewrite my
 existing vault files. After setup, verify with doctor, call
-bootstrap(profile="compact") if you are not using the Exomem skill, ask one
+bootstrap(profile="compact") if you are not using the Evermatter skill, ask one
 known vault question with `search_memory`, and
 save one harmless test conclusion so I can see where it lands.
 ```
@@ -96,12 +96,12 @@ The expected first-run verification is concrete:
 
 1. `exomem doctor` passes for the selected vault.
 2. The connected assistant can call `bootstrap(profile="compact")`, unless it has
-   already loaded the Exomem skill.
+   already loaded the Evermatter skill.
 3. A known question about your vault triggers `search_memory` before the answer.
 4. A safe test such as "remember that setup succeeded today" writes a compiled
    note and reports `Saved -> <title>`.
 
-Existing vault material remains read-only input. Exomem writes governed knowledge
+Existing vault material remains read-only input. Evermatter writes governed knowledge
 under `Knowledge Base/` unless you deliberately configure a different governed
 folder.
 
@@ -111,7 +111,7 @@ canonical operation first:
 ```bash
 exomem ask "what do I know about this project?"
 exomem ask "what supports this decision?" --deep --graph-enrich --json
-exomem create_note "# Setup succeeded\n\n## Claim\n\nExomem setup completed today." --title "Setup succeeded today" --json
+exomem create_note "# Setup succeeded\n\n## Claim\n\nEvermatter setup completed today." --title "Setup succeeded today" --json
 exomem capture "raw source text" --title "Source title" --source-type other --json
 exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
 exomem review --json
@@ -160,7 +160,7 @@ That's the normal case, and it's safe:
   actions — one call, not one read per file.
 - **Daily-notes vaults** (a `Daily/` or `Journal/` tree of dated logs): leave
   them exactly as they are. The Knowledge Base is a *compiled* layer beside
-  your log, not a migration target — exomem never requires frontmatter, links,
+  your log, not a migration target — Evermatter never requires frontmatter, links,
   or restructuring from existing notes. Good first prompts after setup:
   *"what does this vault look like?"* — Claude answers with `overview`; or
   *"adopt this vault safely"* — Claude answers with `adopt`, preserving originals
@@ -215,8 +215,8 @@ and [docs/knowledge-packs.md](docs/knowledge-packs.md) for the pack schema.
 ## 1. Install
 
 ```bash
-git clone <repo-url> exomem
-cd exomem
+git clone <repo-url> evermatter
+cd evermatter
 uv sync                         # lean: keyword/BM25 search, no heavy deps
 # for hybrid semantic search, add the extra (~1-2 GB torch + sentence-transformers):
 # uv sync --extra embeddings
@@ -290,7 +290,7 @@ export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
   Quick check that semantic is live: ask for something using words that *don't*
   appear in the note — if it still surfaces, embeddings are on.
 
-**Apple Silicon (Mac) — full GPU acceleration.** On an M-series Mac exomem uses
+**Apple Silicon (Mac) — full GPU acceleration.** On an M-series Mac Evermatter uses
 the **Metal GPU automatically** — no config. bge/CLIP embeddings run on MPS (in
 fp16), and audio/video transcription runs on Metal via `mlx-whisper` once you add
 its extra:
@@ -356,7 +356,7 @@ uv run python -m exomem mode performance
 
 ## 5. Add it to Claude Code
 
-If an Exomem HTTP service already runs on this machine or behind your tunnel,
+If an Evermatter HTTP service already runs on this machine or behind your tunnel,
 reuse it instead of starting one model-capable process per Claude session:
 
 ```bash
@@ -370,7 +370,7 @@ installation, setup can create the stdio route for you with `--stdio`. The
 manual equivalent is:
 
 ```bash
-claude mcp add exomem \
+claude mcp add evermatter \
   --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
   --env EXOMEM_DISABLE_EMBEDDINGS=1 \
   -- uv --directory "$PWD" run python -m exomem --transport stdio
@@ -388,9 +388,9 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```json
 {
   "mcpServers": {
-    "exomem": {
+    "evermatter": {
       "command": "uv",
-      "args": ["--directory", "/path/to/exomem", "run", "python", "-m", "exomem", "--transport", "stdio"],
+      "args": ["--directory", "/path/to/evermatter", "run", "python", "-m", "exomem", "--transport", "stdio"],
       "env": {
         "EXOMEM_VAULT_PATH": "/path/to/your/Obsidian",
         "EXOMEM_DISABLE_EMBEDDINGS": "1"
@@ -400,7 +400,8 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 }
 ```
 
-Restart Claude Code; you should see the product `exomem` tools (`bootstrap`,
+Restart Claude Code; you should see the Evermatter tools, named `mcp__evermatter__<tool>` in permission
+rules (`bootstrap`,
 `search_memory`, `read_memory`, `create_note`, `capture_source`, `review_memory`,
 `maintain_memory`, …). Quick test before wiring: `uv run python -m exomem
 --transport stdio` should start and wait on stdin without error.
@@ -409,7 +410,7 @@ Restart Claude Code; you should see the product `exomem` tools (`bootstrap`,
 
 ## 6. Install the skill (Claude Code best UX)
 
-The server gives Claude the tools; **the Exomem Knowledge Base skill is what
+The server gives Claude the tools; **the Evermatter Knowledge Base skill is what
 makes Claude Code use them well** — capture at natural stopping points, file
 sources to the right folder, and compile notes under the schema. One command
 installs it straight from the repo into Claude Code's skills folder (no vault
@@ -419,16 +420,16 @@ path needed — it ships in the package):
 uv run python -m exomem install-skill
 ```
 
-That writes the core skill to `~/.claude/skills/exomem/` and installs the named
-workflow skills beside it, such as `exomem-continue`, `exomem-capture`,
-`exomem-research`, `exomem-review`, and `exomem-media`. The workflow skills are
-short operating loops for common user intents; the core `exomem` skill remains
+That writes the core skill to `~/.claude/skills/evermatter/` and installs the named
+workflow skills beside it, such as `evermatter-continue`, `evermatter-capture`,
+`evermatter-research`, `evermatter-review`, and `evermatter-media`. The workflow skills are
+short operating loops for common user intents; the core `evermatter` skill remains
 the contract that preserves Sources, Evidence, compiled notes, review, and
 supersession. See [docs/workflow-skills.md](docs/workflow-skills.md).
 
-The core skill uses the same name as the Exomem connector and tools, so it all
+The core skill uses the same name as the Evermatter connector and tools, so it all
 reads as one product. (If you installed before the rename, this also retires the
-old `knowledge-base` skill folder.) **Restart Claude Code** so it loads. Useful flags: `--link`
+old `knowledge-base`, `exomem` and `exomem-*` skill folders that Evermatter wrote.) **Restart Claude Code** so it loads. Useful flags: `--link`
 symlinks instead of copying so it
 tracks repo updates as you `git pull` (falls back to a copy if your OS refuses
 the symlink); `--force` overwrites an existing install; `--target` picks a
@@ -448,17 +449,19 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > A stable preference, recurring routine, historical baseline, or durable
 > affiliation is eligible only when stability or recurrence and reusable
 > comparison, interpretation, or decision value are clear. A uniquely resolved
-> Entity receives its facet; otherwise capture one concise compiled observation;
-> an observed measurement uses only compatible existing Records. Fleeting
-> preferences, one-off activity, incidental associations, trivial metrics, and
-> tentative events get no note. A concise observation or narrow Entity facet follows
+> Entity receives its facet; otherwise capture one concise compiled observation.
+> A recurring named item or measurement goes to a Records row: a matching
+> collection by natural key, else a minimal new one. Fleeting
+> preferences, one-off activity, incidental associations, and trivial metrics
+> get no note. A concise observation, narrow Entity facet or minimal Records
+> collection follows
 > `proactive_capture`; a new Entity or your own affiliation edge follows `proactive_capture`;
 > accepting a queued relation requires `link_acceptance`; merge or substantial curation
 > requires confirmed `restructure_execution`.
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
-> Exomem's search/save/upload defaults, the compiled-note write loop, and
+> Evermatter's search/save/upload defaults, the compiled-note write loop, and
 > performance guidance in a structured MCP response. The copyable standing instruction lives in
 > [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 
@@ -477,7 +480,7 @@ continuation checkpoint for compaction and resume:
 uv run python -m exomem install-hook
 ```
 
-Codex CLI can use the same bundled Exomem hook scripts:
+Codex CLI can use the same bundled Evermatter hook scripts:
 
 ```bash
 uv run python -m exomem install-hook --client codex
@@ -495,7 +498,7 @@ variant too, for example `--settings ~/.claude/settings.json##os.Msys`.
   Codex adapters. It records bounded structural evidence before compaction and
   reinjects it after compact/resume, even when MCP is disconnected, OAuth needs
   repair, or no vault is configured. It never calls a model, MCP, REST, or the
-  Exomem CLI on the compaction path.
+  Evermatter CLI on the compaction path.
 
 | Lifecycle event | Claude Code | Codex CLI 0.144.3 |
 | --- | --- | --- |
@@ -509,7 +512,7 @@ checkbox counts/line numbers, plus a bound hash of a transcript byte slice. It
 does **not** parse or store conversation messages, tool/system output,
 compaction summaries, secrets, or artifact/task text. Reinjected context points
 the agent at files to reopen and advises it to capture durable conclusions later;
-it never writes checkpoint or transcript data into Exomem automatically.
+it never writes checkpoint or transcript data into Evermatter automatically.
 
 The two nudge hooks are cheap: gated so they stay quiet on ordinary turns/prompts, plus a
 per-session cooldown. The read hook is still language-agnostic for substantive
@@ -525,7 +528,7 @@ log under `~/.codex/`. Prefer to wire it by hand?
 the snippet to paste.
 
 The read hook is a nudge, not a forced retrieval policy. The agent should still
-skip Exomem for unrelated chat, tiny control prompts, or follow-ups where the
+skip Evermatter for unrelated chat, tiny control prompts, or follow-ups where the
 current conversation already contains the needed KB evidence.
 
 To verify the deployed hooks without changing anything:
@@ -595,6 +598,11 @@ Lower the `MIN_CHARS` values — those scripts pack more meaning per character, 
 the defaults (tuned for English) can under-fire. (These tunables were renamed from
 `KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
+By default the capture reminder blocks the stop, which costs one extra model turn. To
+deliver it on the session's next prompt instead, set `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn`
+or add `"capture_nudge_delivery": "next-turn"` to `~/.exomem/config.json`. The episode ask
+still blocks the stop, and any other value means `stop`.
+
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `search_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
@@ -650,7 +658,7 @@ kb"* or *"check the kb."*)
 ## You're up
 
 Try it in Claude Code: *"capture this source and compile an insight from it,"*
-or *"ask Exomem what I know about X,"* or *"review the KB."* Then run
+or *"ask Evermatter what I know about X,"* or *"review the KB."* Then run
 **`exomem maintain --reconcile`** once to sync index counts after manual edits.
 
 ## Optional: mobile / claude.ai-web access
@@ -698,14 +706,14 @@ block per level for both claude.ai and ChatGPT. Set it on a local install with
 `exomem prominence <level>`; on web, paste the block. Tune *down* if it is too
 chatty — you should never have to tune up to get it working.
 
-This vault is served by Exomem, an MCP server (formerly kb-mcp). Once added as a
+This vault is served by Evermatter, an MCP server (formerly kb-mcp). Once added as a
 connector, its tools appear under whatever name you assign it (e.g. "Knowledge
-Base"). The Exomem block below is the **balanced** wording, kept here as the
+Base"). The Evermatter block below is the **balanced** wording, kept here as the
 inline example; paste it into the Claude app at **Settings → Profile → "What
 personal preferences should Claude consider in responses?"**:
 
 ```
-I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Exomem prominence: BALANCED. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation; an observed measurement uses only compatible existing Records. Fleeting preferences, one-off activity, incidental associations, trivial metrics, and tentative events get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Evermatter MCP. If no Evermatter skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Evermatter prominence: BALANCED. Use Evermatter proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, recognized pattern, or stable preference, recurring routine, historical baseline, or durable affiliation when stability or recurrence and reusable comparison, interpretation, or decision value are clear. Route a uniquely resolved Entity facet there; otherwise write one concise compiled observation. Items compared or tracked: Records rows, not a note. Fleeting preferences, one-off activity, incidental associations, and trivial metrics get no note. A concise observation, narrow Entity facet, new Entity or own edge follows `proactive_capture`; a queued relation requires `link_acceptance`; merge or structural change requires confirmed `restructure_execution`. Save a short compiled note, not a transcript, then report one line: "Saved -> <title>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 Optionally paste this separate response-style block too (or trim it to taste):
@@ -714,7 +722,7 @@ Optionally paste this separate response-style block too (or trim it to taste):
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 ```
 
-Account-level custom instructions are always in context, so the Exomem block makes
+Account-level custom instructions are always in context, so the Evermatter block makes
 Claude reach for the connected KB on its own — the app-side equivalent of the
 Claude Code hooks. The "do not search" line keeps it from firing on unrelated or
 already answered turns.

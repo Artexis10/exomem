@@ -106,7 +106,7 @@ def test_a_prior_stem_resolves_only_when_no_live_page_has_the_name(moved: Path) 
 
 
 def test_a_page_without_frontmatter_moves_without_lineage(vault: Path) -> None:
-    """A move that invents a frontmatter block in a page Exomem does not otherwise own."""
+    """A move that invents a frontmatter block in a page Evermatter does not otherwise own."""
     plain = "Knowledge Base/Notes/plain.md"
     _write(vault, plain, "Only prose here.\n")
 

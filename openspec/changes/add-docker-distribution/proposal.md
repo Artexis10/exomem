@@ -32,7 +32,7 @@ deferred list as its own capability.
   `ENTRYPOINT ["exomem"]`, `CMD ["--transport","http","--port","8765"]` — the existing
   actionable `RuntimeError` for missing OAuth env fires unchanged, so a misconfigured
   container fails fast instead of silently serving unauthenticated. OCI labels
-  (`org.opencontainers.image.source`, `.licenses=AGPL-3.0-or-later`, `.description`) plus
+  (`org.opencontainers.image.source`, `.licenses` per product-licensing, `.description`) plus
   `COPY LICENSE /LICENSE`. Multi-arch `linux/amd64` + `linux/arm64` at publish time via
   buildx; PR builds stay single-arch (`linux/amd64`) for CI speed.
 - **New required code change: `EXOMEM_LOG_DIR` env override for the log directory.**

@@ -24,6 +24,21 @@ def whole_value(selection):
         isinstance(selection, tuple) and whole_value(selection[0]))
 
 
+def admits_member(fields, names):
+    """Whether `fields` admits every value at a declared path, an array being walked through member by member."""
+    chosen = fields
+    for name in names:
+        # An array's selection wraps its members', so a whole array is a tuple around WHOLE_SUBTREE.
+        while isinstance(chosen, tuple):
+            chosen = chosen[0]
+        if chosen is WHOLE_SUBTREE:
+            return True
+        chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
+        if chosen is None:
+            return False
+    return whole_value(chosen)
+
+
 def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -240,6 +255,10 @@ class FieldPlan:
     def whole_fields(self):
         return frozenset(name for name, selection in self.fields.items() if whole_value(selection))
 
+    def holds_every_field(self, manifest):
+        """Whether the caller reads every field of `manifest`, the full stored manifest, whole."""
+        return self.owner or self.whole_fields == set(manifest.schema.fields)
+
     def admits_path(self, path):
         chosen = self.fields
         for name in path.split("."):
@@ -258,17 +277,7 @@ class FieldPlan:
         return True
 
     def admits_member_path(self, names):
-        """Whether every value at a declared path is admitted, an array being walked through member by member."""
-        chosen = self.fields
-        for name in names:
-            if chosen is WHOLE_SUBTREE:
-                return True
-            while isinstance(chosen, tuple):
-                chosen = chosen[0]
-            chosen = chosen.get(name) if isinstance(chosen, Mapping) else None
-            if chosen is None:
-                return False
-        return whole_value(chosen)
+        return admits_member(self.fields, names)
 
     def binding(self, paths):
         requested = [(path,) if path in self.fields else tuple(path.split(".")) for path in paths]
@@ -326,9 +335,15 @@ def resolve(operation, manifest):
 
     selected = {name: value for name, spec in manifest.schema.fields.items()
                 if (value := select(spec, (name,), _dependency(manifest, mapped, inferred, name))) is not None}
+    # A child table is named by its field, so a withheld field takes its table with it,
+    # and a column is a member path of that field, so a withheld member leaves the table's columns.
+    tables = tuple(replace(table, columns=tuple(column for column in table.columns
+                                                if admits_member(selected, (table.field, column.field))))
+                   for table in manifest.child_tables if table.field in selected)
     visible = replace(manifest, schema=replace(manifest.schema,
                       fields=MappingProxyType({name: spec for name, spec in manifest.schema.fields.items() if name in selected}),
-                      natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)))
+                      natural_key=tuple(name for name in manifest.schema.natural_key if name in selected)),
+                      child_tables=tables)
     # A false refusal hides the unresolved field from recipients; accepting could disclose a private subtree.
     # The store records the scheme; a manifest parsed from its text carries the default.
     scheme = operation.conn.execute("SELECT item_key_scheme FROM collections WHERE collection_id=?",

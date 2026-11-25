@@ -2,10 +2,10 @@
 
 # Epistemic Review Studio
 
-The Review Studio is Exomem's browser control plane for the daily epistemic
+The Review Studio is Evermatter's browser control plane for the daily epistemic
 loop: inspect the ranked Inbox, opt into corpus activation, understand why a
 signal surfaced, and make an explicit governed decision. It is packaged inside
-the Python distribution and served by the existing Exomem process. There is no
+the Python distribution and served by the existing Evermatter process. There is no
 CDN, Node runtime, frontend daemon, or separate database.
 
 ## Quickstart
@@ -123,6 +123,6 @@ MCP, REST, CLI, favicon, retrieval, and service startup remain independent.
 This is not a generic notes editor or Basic Memory clone. The first release has
 no rich Markdown editor, file manager, canvas, cloud sync, multi-user workspace,
 CRDT collaboration, billing, public sharing, background agent, or automatic
-cleanup. Its job is narrower and more valuable: make Exomem's governed review,
+cleanup. Its job is narrower and more valuable: make Evermatter's governed review,
 provenance, activation, explicit decisions, and recorded belief evolution
 legible as one end-to-end product loop.

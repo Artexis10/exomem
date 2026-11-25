@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from . import capabilities, guards
+from . import capabilities, guards, media_capacity
 
 if TYPE_CHECKING:
     from .commands import Param
@@ -39,7 +39,7 @@ INVALID_OPERATION_ARGUMENTS = "INVALID_OPERATION_ARGUMENTS"
 
 def _listed_tool(command: str, effect: Effect | None = None) -> str:
     """The tool the serving surface lists for a command, or the command when it lists none."""
-    return capabilities.active_tools_text(command, effect) or command
+    return "/".join(capabilities.active_tools(command, effect)) or command
 
 
 def backfill_ids_route() -> tuple[str, str]:
@@ -203,11 +203,14 @@ _SERVICE_UNAVAILABLE_CODES = frozenset(
         "MUTATION_LOCK_UNAVAILABLE",
         "RECORD_RECOVERY_REQUIRED",
         "MODEL_BUSY",
+        media_capacity.UPLOAD_SPACE_BUSY,
         # Retrieval-index-reliability (restore-indexed-category-recall): a safe
         # exact category/kind plan whose maintained semantic catalog cannot yet
         # prove completeness — retryable with bounded `retry_after_ms`, never a
         # client-fault 400.
         "RETRIEVAL_INDEX_WARMING",
+        "RECLASSIFICATION_PREVIEW_WARMING",
+        "RECLASSIFICATION_PREVIEW_UNAVAILABLE",
         # A name-linked retained input the lookup could not yet check; the refusal
         # schedules the build that settles it, so the same write succeeds on retry.
         "ORIGIN_INPUT_LOOKUP_STALE",
@@ -248,6 +251,7 @@ _CONFLICT_CODES = frozenset(
         # A maintenance job holds the one slot, or its plan changed since the preview.
         "MAINTENANCE_JOB_ACTIVE",
         "STALE_MAINTENANCE_PLAN",
+        "RECLASSIFICATION_PREVIEW_STALE",
         # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
         # proposal whose bound content changed since review is a conflict, not a
         # plain bad-request — the client's honest recourse is to re-scan/re-read,
@@ -345,6 +349,25 @@ def action_argument_contract(
     names = ", ".join(sorted(allowed)) or "none"
     needs = ", ".join(sorted(required))
     return f"{action} allowed: {names}" + (f"; {action} requires: {needs}" if needs else "")
+
+
+def argument_misfit_text(
+    action: str,
+    unexpected: Iterable[str],
+    missing: Iterable[str],
+    allowed: Iterable[str],
+    required: Iterable[str],
+) -> str:
+    """The one refusal text for an action's wrong arguments: what the caller sent, then what it accepts."""
+    unexpected, missing = sorted(unexpected), sorted(missing)
+    return "; ".join(
+        [
+            *([f"unexpected for {action}: {', '.join(unexpected)}"] if unexpected else []),
+            *([f"{action} requires {', '.join(missing)}"] if missing else []),
+            # What is missing is already named, so the contract adds only what the action allows.
+            action_argument_contract(action, allowed, () if missing else required),
+        ]
+    )
 
 
 def semantic_validation_error_dict(exc: Exception) -> dict[str, Any] | None:

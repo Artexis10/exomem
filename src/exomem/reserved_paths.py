@@ -1,4 +1,4 @@
-"""Closed name and placement authority for Exomem's internal state families.
+"""Closed name and placement authority for Evermatter's internal state families.
 
 Logical classification is deliberately pure and existence-independent.  Physical
 classification is a second, conservative acquisition-time check; it is not a
@@ -19,7 +19,7 @@ import time
 import unicodedata
 from collections import ChainMap
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, fields
 from dataclasses import replace as dataclass_replace
@@ -44,6 +44,10 @@ REGISTRY_VERSION = 1
 ORIGINAL_POOL_DIRNAME = "_Originals"
 ORIGINAL_POOL_DESCRIPTOR_ID = "original-pool"
 ORIGINAL_POOL_OWNER = "original_pool"
+# An upload's bytes wait here, on the vault's own filesystem, between their one copy and the commit that renames them in.
+UPLOAD_STAGE_DIRNAME = "_UploadStage"
+UPLOAD_STAGE_DESCRIPTOR_ID = "upload-stage"
+MEDIA_PREVIEWS_DIRNAME = ".media-previews"
 # Closed portable security artifact; its contents carry no connector authority.
 CONNECTOR_BOUNDARY_DESCRIPTOR_ID = "connector-boundary"
 CONNECTOR_BOUNDARY_REQUIREMENT_NAME = ".connector-boundary.json"
@@ -245,6 +249,7 @@ class GenericBinarySource:
     version: held_fs.FileVersion
     _check: Callable[[], None]
     _probe: Callable[[], held_fs.FileVersion]
+    _reopen: Callable[[], AbstractContextManager[GenericBinarySource]] | None = None
 
     def require_current(self) -> None:
         self._check()
@@ -480,6 +485,16 @@ _REGISTRY = (
         trees=("_sources/corrections",),
     ),
     InternalStateDescriptor(
+        "source-imports", "source_imports", StatePlacement.VAULT_CANONICAL,
+        vault_store=True,
+        trees=("_sources/imports",),
+    ),
+    InternalStateDescriptor(
+        "source-import-intents", "source_imports", StatePlacement.EXTERNAL_STATE,
+        rebuildable=False,
+        trees=("source-import-intents",),
+    ),
+    InternalStateDescriptor(
         "source-custody", "source_custody", StatePlacement.VAULT_CANONICAL,
         vault_store=True,
         trees=("_sources/custody",),
@@ -523,7 +538,10 @@ _REGISTRY = (
         "governance-store",
         "governance.store",
         StatePlacement.EXTERNAL_STATE,
-        rebuildable=True,
+        # Only the compiled policy rebuilds from `_Governance`. The file also keeps state that nothing else records:
+        # the receipt chain head and its key, withhold tokens and their signing key, grants, proposals and journals
+        # (schema v3), and authorization sessions (schema v4).
+        rebuildable=False,
         exact=_sqlite_family(".governance.sqlite"),
         migrates_from_vault=True,
     ),
@@ -620,11 +638,26 @@ _REGISTRY = (
         rebuildable=False,
     ),
     InternalStateDescriptor(
+        "media-previews",
+        "media_previews",
+        StatePlacement.EXTERNAL_STATE,
+        rebuildable=True,
+        trees=(MEDIA_PREVIEWS_DIRNAME,),
+    ),
+    InternalStateDescriptor(
         "maintenance-jobs-store",
         "maintenance_jobs",
         StatePlacement.EXTERNAL_STATE,
         rebuildable=True,
         exact=_sqlite_family(".maintenance-jobs.sqlite"),
+    ),
+    InternalStateDescriptor(
+        "write-intake-store",
+        "write_intake",
+        StatePlacement.EXTERNAL_STATE,
+        # Queued saves are not derived: losing the store loses saves the caller was told are held.
+        rebuildable=False,
+        exact=_sqlite_family(".write-intake.sqlite"),
     ),
     InternalStateDescriptor(
         "idempotency-store",
@@ -819,6 +852,14 @@ _REGISTRY = (
         # install and follow that note (atomic same-volume rename), so the
         # placement suite exempts it from the constructor walk.
         component_tree_patterns=(_BATCH_WORKSPACE_RE,),
+    ),
+    InternalStateDescriptor(
+        UPLOAD_STAGE_DESCRIPTOR_ID,
+        "upload_stage",
+        StatePlacement.TARGET_ADJACENT,
+        # Machine-local scratch that must share the vault's volume: the commit renames a stage into its
+        # batch workspace and the destination, so it follows the content and never the external root.
+        trees=(UPLOAD_STAGE_DIRNAME.casefold(),),
     ),
     InternalStateDescriptor(
         "held-publication",
@@ -1594,6 +1635,7 @@ def read_generic_bytes(
     *,
     identities: IdentityCatalogue | None = None,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
     """Read one ordinary file through the retained no-follow leaf.
 
@@ -1614,12 +1656,14 @@ def read_generic_bytes(
 
     stored = _read_stored_generic(vault_root, value, physical=physical)
     if stored is not None:
+        if max_bytes is not None and len(stored.data) > max_bytes:
+            raise ReservedPathLeafError("INPUT_TOO_LARGE")
         return stored
     with _generic_identity_catalogue_scope(
         vault_root, value, identities=identities
     ) as current:
         return _read_generic_bytes_held(
-            vault_root, value, identities=current, physical=physical
+            vault_root, value, identities=current, physical=physical, max_bytes=max_bytes,
         )
 
 
@@ -1648,6 +1692,7 @@ def _read_generic_bytes_held(
     *,
     identities: IdentityCatalogue,
     physical: bool = False,
+    max_bytes: int | None = None,
 ) -> GenericFileSnapshot:
 
     parent_path, leaf = _leaf_spelling(value, physical=physical)
@@ -1670,7 +1715,7 @@ def _read_generic_bytes_held(
                 descriptor_id = identities.descriptor_for(file.identity) if identities else None
                 if descriptor_id is not None or file.identity.link_count != 1:
                     raise ReservedPathLeafError("RESERVED_PATH")
-                read_result = filesystem.read(file)
+                read_result = filesystem.read(file, max_bytes=max_bytes)
                 if not read_result.ok:
                     code = read_result.error.code if read_result.error is not None else "IO_REFUSED"
                     raise ReservedPathLeafError(code)
@@ -1772,7 +1817,10 @@ def open_generic_binary(vault_root: Path, value: object, *, physical: bool = Fal
 
             require_current()
             with os.fdopen(os.dup(file.descriptor), "rb") as stream:
-                yield GenericBinarySource(stream, version, require_current, file.version)
+                yield GenericBinarySource(
+                    stream, version, require_current, file.version,
+                    functools.partial(open_generic_binary, vault_root, value, physical=physical),
+                )
                 require_current()
     except held_fs.HeldFsError as error:
         raise ReservedPathLeafError(error.code) from error
@@ -1824,46 +1872,54 @@ def copy_generic_file(vault_root: Path, value: object, private_path: Path, *,
 
 def hold_generic_file(vault_root: Path, value: object, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Retain one ordinary file for checked delivery, reusing a proven digest when available."""
     return _hold_binary_file(vault_root, value, open_generic_binary(vault_root, value),
-                             recorded_sha256=recorded_sha256, deadline=deadline)
+                             recorded_sha256=recorded_sha256, deadline=deadline, strict_exit=strict_exit)
 
 
 @contextmanager
 def _hold_binary_file(vault_root: Path, value: object, open_source, *,
                       recorded_sha256: Callable[[held_fs.FileVersion], str | None],
-                      deadline: float | None = None):
+                      deadline: float | None = None, strict_exit: bool = False):
     """Hold the canonical source open and prove its bytes with no private copy.
 
     `recorded_sha256` gives the digest that a record proves for the file at the held
     version, or None. A recorded digest reads no byte. Otherwise one pass through the
     handle hashes the file. The caller then reads bytes with `read_held`.
+    Use `strict_exit` when the caller waits for teardown before returning any bytes.
     """
     _copy_deadline(deadline)
     finished = False
     try:
         with open_source as source:
-            try:
-                version = source.version
-                descriptor = source.stream.fileno()
-                digest = recorded_sha256(version)
-                if digest is None:
-                    digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
-                    if size != version.size or source.current_version() != version:
-                        raise ReservedPathLeafError("IO_REFUSED")
-                held = GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
-                                       digest, version.size, None, version, deadline, None, source)
-            except (OSError, held_fs.HeldFsError) as error:
-                raise ReservedPathLeafError("IO_REFUSED") from error
+            held = prove_held_binary(vault_root, value, source, recorded_sha256=recorded_sha256, deadline=deadline)
             yield held
             finished = True
     except ReservedPathLeafError:
         # Only the name check that `open_generic_binary` runs at exit can raise here once the caller finished
         # cleanly. `read_held` already proved each byte sent against the held version, so a rename after the
         # last byte changes nothing that was delivered and must not fail a complete response.
-        if not finished:
+        if strict_exit or not finished:
             raise
+
+
+def prove_held_binary(vault_root: Path, value: object, source: GenericBinarySource, *,
+                      recorded_sha256: Callable[[held_fs.FileVersion], str | None],
+                      deadline: float | None = None) -> GenericFileCopy:
+    """Prove bytes through an original handle the caller already holds."""
+    try:
+        version = source.version
+        descriptor = source.stream.fileno()
+        digest = recorded_sha256(version)
+        if digest is None:
+            digest, size = _digest_fd(descriptor, deadline=deadline, max_bytes=None)
+            if size != version.size or source.current_version() != version:
+                raise ReservedPathLeafError("IO_REFUSED")
+        return GenericFileCopy(None, Path(vault_root), str(value), version.identity, os.fstat(descriptor),
+                               digest, version.size, None, version, deadline, None, source)
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
 
 
 def read_held(held: GenericFileCopy, offset: int, length: int) -> bytes:
@@ -1937,6 +1993,21 @@ def require_generic_copy_source_version(copied: GenericFileCopy) -> held_fs.File
             if current != copied.source_version:
                 raise ReservedPathLeafError("IO_REFUSED")
             return current
+    except (OSError, held_fs.HeldFsError) as error:
+        raise ReservedPathLeafError("IO_REFUSED") from error
+
+
+@contextmanager
+def revalidate_held_binary(copied: GenericFileCopy) -> Iterator[GenericFileCopy]:
+    """Reacquire the source after teardown and reuse its digest only at the same exact version."""
+    _copy_deadline(copied.deadline)
+    if copied.held is None or copied.held._reopen is None:
+        raise ReservedPathLeafError("IO_REFUSED")
+    try:
+        with copied.held._reopen() as source:
+            if source.version != copied.source_version:
+                raise ReservedPathLeafError("IDENTITY_CHANGED")
+            yield dataclass_replace(copied, held=source)
     except (OSError, held_fs.HeldFsError) as error:
         raise ReservedPathLeafError("IO_REFUSED") from error
 
@@ -4377,6 +4448,7 @@ def _read_owner_bytes(
     descriptor_id: str,
     *,
     limit: int,
+    deadline: float | None = None,
 ) -> bytes:
     """Read one exact private owner file through a retained no-follow handle."""
 
@@ -4408,6 +4480,7 @@ def _read_owner_bytes(
         root,
         descriptor_ids=(descriptor_id,),
         identity_may_change=False,
+        deadline=deadline,
     ):
         acquired = held_fs.acquire(route.trust_root)
         if not acquired.ok:
@@ -4578,6 +4651,7 @@ def _stage_owner_chunks(
     vault_root: Path, path: Path, descriptor_id: str, data: held_fs.Chunks,
     *, expected_sha256: str, expected_size: int, temporary_name: str | None = None,
     on_created: Callable[[held_fs.StableIdentity], None] | None = None,
+    meter_allocation: bool = False,
 ) -> Iterator[StagedOwnerFile]:
     """Copy and hash all supplied bytes outside identity coordination, including on a pool hit."""
     root = Path(os.path.abspath(vault_root))
@@ -4621,7 +4695,17 @@ def _stage_owner_chunks(
                     digest.update(part)
                     yield part
 
-            filesystem.write(writable, held_fs.Chunks(chunks)).require()
+            parts = chunks()
+            if meter_allocation:
+                from . import media_capacity
+
+                parts = media_capacity.metered_chunks(
+                    root, os.fstat(writable.descriptor).st_dev, parts, upload_size=expected_size,
+                )
+            try:
+                filesystem.write(writable, held_fs.Chunks(lambda: parts)).require()
+            finally:
+                parts.close()
             if size != expected_size or digest.hexdigest() != expected_sha256:
                 raise ValueError("private original differs from its declared bytes")
             version = writable.version()
@@ -4990,6 +5074,7 @@ def _remove_owner_file(
     missing_ok: bool = False,
     expected_version: held_fs.FileVersion | None = None,
     expected_identity: held_fs.StableIdentity | None = None,
+    before_unlink: Callable[[], None] | None = None,
 ) -> bool:
     """Unlink one exact private file through its retained owner-bound handle."""
 
@@ -5063,6 +5148,11 @@ def _remove_owner_file(
                             raise OSError("private remove target changed")
                     if not _owner_directory_is_current(filesystem, parent):
                         raise OSError("private remove parent changed")
+                    if before_unlink is not None:
+                        before_unlink()
+                        if expected_version is not None and file.version() != expected_version:
+                            raise OSError("private remove target changed")
+                        _require_owner_parent(filesystem, route, parent)
                     removed = filesystem.unlink(file)
                     if not removed.ok:
                         raise OSError("private remove was refused")

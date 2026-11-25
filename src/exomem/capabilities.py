@@ -1,4 +1,4 @@
-"""Immutable, context-local descriptions of Exomem's active command surface."""
+"""Immutable, context-local descriptions of Evermatter's active command surface."""
 
 from __future__ import annotations
 
@@ -168,9 +168,19 @@ def active_call_route(command: str, arguments: Mapping[str, Any]) -> dict[str, A
     return operation_entries.call_route(command, arguments, current_tool_shape())
 
 
+#: What prose names when the serving surface lists no tool for a command. A tool the caller cannot
+#: call would invite a call that fails, so the text says that this surface has none.
+NO_LISTED_TOOL = "a tool this surface does not list"
+
+
 def active_tools_text(command: str, effect: operation_entries.Effect | None = None) -> str:
-    """The tools the serving surface lists for a grouped command, for one line of prose."""
-    return "/".join(active_tools(command, effect))
+    """The tools the serving surface lists for a grouped command, for one line of prose.
+
+    A surface can list none (a bound typed surface that omits the tool), and prose built around an
+    empty name reads broken, so the answer then is `NO_LISTED_TOOL`. Code that needs to know whether a
+    tool is listed asks `active_tools`.
+    """
+    return "/".join(active_tools(command, effect)) or NO_LISTED_TOOL
 
 
 def project_call_routes(value: Any, *, strict: bool = True) -> Any:

@@ -223,7 +223,7 @@ Never clear the backup record to get past this refusal: the cell would then serv
 
 ## Change the CPU architecture
 
-Newly built Exomem Cloud cell and cellctl release images support
+Newly built Evermatter Cloud cell and cellctl release images support
 `linux/amd64` and `linux/arm64` under one index digest. One cluster runs one
 architecture: the fleet server and every agent are all x86, or all Arm64 (a
 Hetzner CAX server). Agent types are x86 only, so Terraform refuses agents

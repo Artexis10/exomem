@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import builtins
+import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 from exomem import (
     corpus_aware,
+    deferred_index,
     epistemic_graph,
     markdown_relations,
     semantic_blocks,
@@ -301,6 +304,30 @@ def test_sidecar_can_be_deleted_and_rebuilt_equivalently(tmp_path: Path) -> None
 
     assert second["available"] is True
     assert first == second
+
+
+def test_a_rebuild_waits_out_a_brief_lock_on_the_deferred_index(tmp_path: Path) -> None:
+    """A whole-vault rebuild does not stop on a lock that another connection holds briefly.
+
+    The last connection to close the deferred index checkpoints and removes its
+    WAL under an exclusive file lock. A writer that runs after a commit does this
+    while the rebuild reads its marker, and the rebuild stopped on the first
+    `database is locked`.
+    """
+    vault = _seed_graph_vault(tmp_path)
+    deferred_index.mark_graph_full_rebuild(vault, generation=1)
+    closing_writer = sqlite3.connect(deferred_index.store_path(vault), check_same_thread=False)
+    closing_writer.execute("PRAGMA locking_mode=EXCLUSIVE")
+    closing_writer.execute("BEGIN EXCLUSIVE")
+    release = threading.Timer(0.3, closing_writer.close)
+    release.start()
+    try:
+        report = epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    finally:
+        release.join()
+
+    assert report["indexed_files"] >= 5
+    assert deferred_index.graph_full_rebuild_details(vault) is None
 
 
 def test_edge_provenance_and_unsupported_relation_labels(tmp_path: Path) -> None:

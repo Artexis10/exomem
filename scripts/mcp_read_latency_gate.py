@@ -34,6 +34,7 @@ from typing import Any
 from release_arm import MeasurementRefused, extract_release, latest_release_tag, prepare_tag_runtime
 
 from exomem import latency_watch
+from exomem.install_info import distribution_probe
 from exomem.request_latency_contract import load_contract
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1097,9 +1098,9 @@ async def measure_absolute(arm: Arm, cases: list, *, repeats: int, pressure_wait
         arm.require_timeable()
         # This interpreter reports its imported module; a checkout SHA alone cannot attest served bytes under -I.
         runtime = json.loads(arm.run_python(
-            "import json, sys, exomem; from importlib.metadata import version; "
-            "print(json.dumps({'python': sys.executable, 'python_version': sys.version.split()[0], "
-            "'module_origin': exomem.__file__, 'version': version('exomem')}))"))
+            "import json, sys, exomem\n" + distribution_probe("release")
+            + "print(json.dumps({'python': sys.executable, 'python_version': sys.version.split()[0], "
+            "'module_origin': exomem.__file__, 'version': release}))"))
         for case in cases:
             await attempt(case, "warmup", 0)
         deadline = time.monotonic() + pressure_wait_seconds

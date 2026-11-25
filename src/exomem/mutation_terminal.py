@@ -60,6 +60,12 @@ _RECORD_RECEIPT_FIELDS = (
     "gap_fingerprint",
     "checkpoint_snapshot_hash",
     "minimum_reader_version",
+    # Only a receipt of an automatic collection creation, or of the append that created its collection,
+    # carries these: the owner reviews what the agent created. `added_fields` is the same review for a write
+    # that added fields to its collection.
+    "automatic",
+    "created_collection",
+    "added_fields",
 )
 _RECORD_RECEIPT_MARKER = "exomem.records-mutation"
 _RECORD_RECEIPT_VERSION = 1
@@ -971,6 +977,18 @@ def _artifact_receipt_projection(result: Any) -> dict[str, Any]:
                     unverified.append("transcription")
                 else:
                     row["transcription"] = recorded
+            if "caption" in item:
+                # A caption is recorded, or not, exactly as a transcription is.
+                if (recorded := transcription(item["caption"])) is None:
+                    unverified.append("caption")
+                else:
+                    row["caption"] = recorded
+            if "cite" in item:
+                # The wikilink that text about the kept original carries to cite it.
+                if string(item["cite"], limit=2048):
+                    row["cite"] = item["cite"]
+                else:
+                    unverified.append("cite")
             if "adoption" in item:
                 if (receipt := adoption_receipt(item["adoption"], item)) is None:
                     unverified.append("adoption")
@@ -1144,6 +1162,7 @@ def _structure_suggestion_projection(leaf: Any) -> dict[str, Any] | None:
 
 
 def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    from .name_drift import KIND as name_drift_kind
     from .note_cohesion import KIND as note_cohesion_kind
     from .ownership_review import KIND as ownership_kind
 
@@ -1154,6 +1173,8 @@ def _structure_suggestion_kind_projection(value: Mapping[str, Any]) -> dict[str,
         return _note_cohesion_projection(value)
     if kind == ownership_kind:
         return _ownership_projection(value)
+    if kind == name_drift_kind:
+        return _rename_projection(value)
     return None
 
 
@@ -1248,6 +1269,35 @@ def _ownership_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
         "id": item_id({"ref": ref, "fingerprint": fingerprint}),
         "question": question,
     }
+
+
+#: Bounds of the rename suggestion's text fields: a file name is at most 255 bytes, and the call
+#: and the outcome sentence each hold one short statement.
+_MAX_RENAME_NAME_CHARS = 255
+_MAX_RENAME_TEXT_CHARS = 800
+
+
+def _rename_projection(value: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The rename a retitling write suggests: the outcome, the names and the spelled call."""
+    from .name_drift import KIND
+
+    fields = {
+        name: value.get(name)
+        for name in ("outcome", "ref", "current_name", "planned_name", "call")
+    }
+    limits = {
+        "outcome": _MAX_RENAME_TEXT_CHARS,
+        "call": _MAX_RENAME_TEXT_CHARS,
+        "ref": _MAX_RENAME_TEXT_CHARS,
+        "current_name": _MAX_RENAME_NAME_CHARS,
+        "planned_name": _MAX_RENAME_NAME_CHARS,
+    }
+    if any(
+        not isinstance(fields[name], str) or not 0 < len(fields[name]) <= limits[name]
+        for name in fields
+    ):
+        return None
+    return {"kind": KIND, **fields}
 
 
 def _records_routing_projection(leaf: Any) -> dict[str, Any] | None:
@@ -2143,6 +2193,58 @@ def with_fast_acknowledgement(
     return frozen
 
 
+class LeafWarning(str):
+    """A warning that work run after the terminal adds to the leaf's own, such as the not-exact
+    warning of a governed transition that settles after its request derived its rows."""
+
+    __slots__ = ()
+
+
+def with_leaf_index_observed(
+    terminal: Mapping[str, Any], observations: Sequence[Any], warnings: Sequence[str] = ()
+) -> Mapping[str, Any]:
+    """The terminal whose leaf ``index`` names each component that it deferred as the later
+    ``observations`` (index reports) do over its paths, with ``warnings`` added to the leaf's own.
+
+    A leaf reports its index while it holds its boundary, before the work that its request runs
+    after the terminal; the reply also carries that work's observation (``derived_components``).
+    Each ``deferred`` component of the leaf's report, or of each report under its index (a move's),
+    takes the later observation, so that one reply says one thing.
+    """
+    from . import index_sync
+
+    leaf = terminal.get("leaf_result")
+    if not isinstance(leaf, Mapping):
+        return terminal
+    index = leaf.get("index")
+    current_leaf: dict[str, Any] = dict(leaf)
+    if observations and isinstance(index, Mapping):
+
+        def refreshed(value: Any) -> Any:
+            if isinstance(value, list):
+                return [refreshed(item) for item in value]
+            if isinstance(value, Mapping):
+                return index_sync.with_observed_components(value, observations)
+            return value
+
+        current_leaf["index"] = (
+            refreshed(index)
+            if "components" in index
+            else {key: refreshed(value) for key, value in index.items()}
+        )
+    if warnings:
+        current_leaf["warnings"] = [*(leaf.get("warnings") or ()), *map(str, warnings)]
+    if current_leaf == leaf:
+        return terminal
+    current_leaf = source_result_attribution.carry(leaf, current_leaf)
+    changed = {**terminal, "leaf_result": current_leaf}
+    if warnings:
+        count = terminal.get("warnings_count")
+        known = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        changed["warnings_count"] = known + len(warnings)
+    return source_result_attribution.carry(terminal, changed)
+
+
 def as_replay(terminal: Any) -> Any:
     """Mark a stored terminal that answers a retry, so the reply says it is the earlier commit's.
 
@@ -2649,12 +2751,16 @@ def project_terminal(
             "operation", "action", "scope", "stored", "contexts", "context", "levels",
             "revision", "before_hash", "after_hash", "receipt_id", "engagement",
         ) if key in leaf})
-    elif (
-        isinstance(leaf, Mapping)
-        and isinstance(leaf.get("run_id"), str)
-        and str(leaf["run_id"]).startswith("cur-")
-        and isinstance(leaf.get("plan_id"), str)
+    elif isinstance(leaf, Mapping) and (
+        (
+            isinstance(leaf.get("run_id"), str)
+            and str(leaf["run_id"]).startswith("cur-")
+            and isinstance(leaf.get("plan_id"), str)
+        )
+        # A relocation that derives no step seals no run; its summary says why.
+        or leaf.get("action") == "relocate"
     ):
+        # `summary` and `progress` are bounded by their builders (`curation.SUMMARY_SAMPLE`, counts).
         compact.update(
             {
                 key: leaf[key]
@@ -2671,6 +2777,11 @@ def project_terminal(
                     "next_action",
                     "outcome",
                     "recovery",
+                    "sealed",
+                    "steps",
+                    "summary",
+                    "progress",
+                    "stopped",
                 )
                 if key in leaf
             }
@@ -2883,6 +2994,18 @@ def project_terminal(
     return reply
 
 
+def reply_leaf(diagnostics: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The leaf result in a full reply's ``diagnostics``, as ``project_terminal`` places it.
+
+    A reply that acknowledges derived components nests the leaf under ``leaf_result``; any other
+    reply spreads a mapping leaf beside ``operational``.
+    """
+    leaf = diagnostics.get("leaf_result")
+    if "derived_components" in diagnostics and isinstance(leaf, Mapping):
+        return leaf
+    return diagnostics
+
+
 def _agent_reply(
     wide: Mapping[str, Any],
     result: Mapping[str, Any],
@@ -3042,7 +3165,7 @@ def valid_record_receipt(value: Any) -> bool:
     if operation == "discard":
         return _valid_discard_receipt(value)
     # nosemgrep: ep-word-membership -- The record receipt's operation names are a closed protocol.
-    if operation not in {"create", "append", "update"} or value.get("outcome") not in {
+    if operation not in {"create", "append", "update", "retract"} or value.get("outcome") not in {
         "committed",
         "replayed",
     }:
@@ -3096,6 +3219,16 @@ def valid_record_receipt(value: Any) -> bool:
         return (
             _hash(value.get("before_item_hash"))
             and _hash(value.get("after_item_hash"))
+            and _hash(value.get("before_container_hash"))
+            and _hash(value.get("after_container_hash"))
+            and value.get("payload_hash") is None
+        )
+    if operation == "retract":
+        # A retraction leaves no after-version; a retry of its request id replays the stored receipt.
+        return (
+            outcome == "committed"
+            and _hash(value.get("before_item_hash"))
+            and value.get("after_item_hash") is None
             and _hash(value.get("before_container_hash"))
             and _hash(value.get("after_container_hash"))
             and value.get("payload_hash") is None

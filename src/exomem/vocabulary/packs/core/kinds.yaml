@@ -1,4 +1,4 @@
-# The unit kinds Exomem ships. A kind is what a `##` heading says a unit is.
+# The unit kinds Evermatter ships. A kind is what a `##` heading says a unit is.
 #
 # `labels` map a language tag to the kind's name in that language, and each label names the kind
 # as a heading, as `## Claim` does. A shipped label is English and always spells the kind's own key
@@ -15,6 +15,7 @@
 schema_version: 1
 kinds:
   claim: {description: Portable claim semantic block, labels: {en: Claim}, heading_aliases: [claims], traits: [assertion, page_claim]}
+  correction: {description: Portable correction semantic block, labels: {en: Correction}, heading_aliases: [corrections], traits: [assertion, replacement]}
   finding: {description: Portable finding semantic block, labels: {en: Finding}, heading_aliases: [findings], traits: [assertion]}
   evidence: {description: Portable evidence semantic block, labels: {en: Evidence}, heading_aliases: [proof, proofs, evidences]}
   decision: {description: Portable decision semantic block, labels: {en: Decision}, heading_aliases: [decisions]}

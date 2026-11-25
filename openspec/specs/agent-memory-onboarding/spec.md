@@ -76,7 +76,7 @@ private names, and project-specific tenant tokens.
 - **THEN** they pass without private-token or machine-path findings
 
 ### Requirement: Learning instruction for every client
-Exomem SHALL ship one learning instruction in the user's voice. It SHALL ask the agent to recall what Exomem holds about the work before it starts, and to save each reusable fact it establishes as one concise observation, updating an existing note when one covers it. The text SHALL have one source in the package. The assistant guide, the remote quickstart and the prominence guide SHALL give the same text as paste-in custom instructions for hosted clients, and a documentation check SHALL fail when a doc copy differs from the package text. No server, bootstrap or hook channel SHALL inject the learning instruction.
+Exomem SHALL ship one learning instruction in the user's voice. It SHALL ask the agent to recall what Exomem holds about the work before it starts, and to save each reusable fact it establishes as one concise observation, updating an existing note when one covers it. It SHALL ask the agent to keep each file the user hands over to read, such as an attachment, a screenshot or a document the user points to, as a Source by its exact bytes whether or not the file settles anything, to report that in one line, and to treat the kept file's claims as unverified. It SHALL exclude files the agent works on in the user's own repositories. The text SHALL have one source in the package. The assistant guide, the remote quickstart and the prominence guide SHALL give the same text as paste-in custom instructions for hosted clients, and a documentation check SHALL fail when a doc copy differs from the package text. No server, bootstrap or hook channel SHALL inject the learning instruction.
 
 #### Scenario: A hosted-client user finds the paste-in text
 - **WHEN** a user follows the remote quickstart to connect ChatGPT or claude.ai
@@ -90,3 +90,27 @@ Exomem SHALL ship one learning instruction in the user's voice. It SHALL ask the
 - **WHEN** the CL-Bench P arm prepares a question
 - **THEN** it lays the packaged learning instruction where setup would place it for that client
 - **AND** the run manifest records the text's digest and the place it was laid
+
+#### Scenario: A handed file is kept without a second request
+- **WHEN** a user hands the agent a transcript and asks only what it shows
+- **THEN** the agent keeps the transcript as a Source by its exact bytes and says so in one line
+- **AND** the agent does not present any claim in it as verified because it was kept
+
+### Requirement: Proof files go to Evidence in the turn they arrive
+
+The learning instruction, the bootstrap profile's `binary_upload` entry, the `save_evidence` description and the skill scaffold SHALL ask the agent to keep a file the user shares to prove something as Evidence in the same turn, and to cite it in what it writes. The bootstrap profile SHALL name `upload_files` with `scope` and `category` for a client without file handles. Saving stays subject to `proactive_capture`.
+
+#### Scenario: A serial label is kept in its turn
+
+- **WHEN** a user shares a photo of a product's serial label and asks the agent to register its warranty
+- **THEN** the agent keeps the photo as Evidence in that turn, or gives the user the page link when it cannot send the bytes
+- **AND** any observation it writes about the serial carries the returned citation
+
+### Requirement: Agents never keep a shared secret
+
+The same texts SHALL ask the agent never to keep a card number, security code or password that a shared file shows, and to ask the user for a copy with the secret covered.
+
+#### Scenario: A card photo is not kept
+
+- **WHEN** a user shares a photo that shows a full card number
+- **THEN** the agent does not keep it and asks for a copy with the number covered

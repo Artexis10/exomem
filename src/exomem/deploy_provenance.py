@@ -21,15 +21,17 @@ import importlib.util
 import json
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError, distribution, version
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
+
+from . import install_info
 
 # Import-name -> extra it belongs to. `find_spec` does not execute module code,
 # so probing these stays cheap even for the heavy ML packages.
 _EXTRA_PROBES: dict[str, tuple[str, ...]] = {
     "embeddings": ("sentence_transformers", "torch"),
-    "media": ("faster_whisper", "fitz"),
+    "media": ("faster_whisper", "pypdfium2"),
     "vision": ("PIL",),
 }
 
@@ -40,7 +42,7 @@ _ACCEL_TAGS = ("+cu", "+rocm", "+xpu")
 
 def _package_version() -> str:
     try:
-        return version("exomem")
+        return install_info.installed_version()
     except Exception:  # noqa: BLE001 — provenance must never raise
         return "unknown"
 
@@ -54,9 +56,7 @@ def _install_source_and_root() -> tuple[str, Path | None]:
     confusion.
     """
     try:
-        dist = distribution("exomem")
-    except PackageNotFoundError:
-        return "unknown", None
+        dist = install_info.installed_distribution()
     except Exception:  # noqa: BLE001
         return "unknown", None
 

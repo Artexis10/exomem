@@ -33,3 +33,26 @@
 - [ ] 4.2 Run the full corpus, independent review, CI, merge and the ordinary release.
 - [ ] 4.3 Verify on the installed service: a new conversation receives the catalogue and a matching turn loads the skill.
 - [ ] 4.4 Synchronize and archive after the nonoptional tasks have code, test and merge evidence. Run `openspec validate --all --strict` before and after.
+
+## 5. Method activation from ordinary turns
+
+- [x] 5.1 Select skills and Records collections with the bounded method-fit judgment over their authored descriptions, served first and bounded by `method_fit_max_items`; verify selection, none, a failed call, an unsupplied label and no placement.
+- [x] 5.2 Carry each selected skill's contract under `method_contract_max_chars` in the MCP packet and the start-of-turn hook; verify whole, cut and over-allowance cases.
+- [x] 5.3 Report method use evidence in the owner served-context readout from the served rows and the local read and write logs; verify followed, not observed and disabled-log cases.
+- [x] 5.4 Add the no-magic-word fixtures (technology discussed, experiment approved, outcome reported, Exomem failure, each with a negative twin) as session-close scenarios with scorer-only keys; record the packet-level run against base and candidate.
+- [x] 5.5 Run the fixtures through the session-close bench on real models; record whether the agent followed the contract and wrote to the keyed destination.
+- [x] 5.6 Compare method selection with no judgment, a local placement and an API placement on the same cases; record per-case exact match with intervals, and recommend a placement.
+- [ ] 5.7 Verify on the installed service: an ordinary turn serves the matching vault skill with its contract, and the owner readout shows its use evidence.
+
+## 6. Catalogue-first activation
+
+- [x] 6.1 List visible Records collections in the catalogue beside skills, with `kind`, and prove that reading an item's ref returns the whole page.
+- [x] 6.2 Keep the listing turn-independent and name an overflowing catalogue's unlisted items of the turn's touched domains, then those the task context reached, in `turn_items`; verify fit, overflow, no-domain and held-across-turns cases.
+- [x] 6.3 Serve `advice` in the catalogue and apply the no-hook lever the tool-only dev run supports (next action, task projection or server instructions); name skills and collections in agent-facing text.
+- [x] 6.4 Seed the session-close bench warm (catalogue built before the actor's first recall), count warming abstentions, and let an arm carry a selector placement.
+- [x] 6.5 Decide the catalogue shape on a fresh held-out set with a tool-only real client: catalogue alone against catalogue plus the selector, per-case exact with intervals; keep the selector off by default.
+- [x] 6.6 Ask for recall on a later turn that opens a subject from the user's life or work, in clients without hooks, through the server instructions within their 900-character bound; prove it with a tool-only real client on the cases that exposed the miss and on fresh cases, with general-only negatives.
+  - Server instructions only; proved on fresh cases and the scale set (design, "A later subject in a client without hooks"; run record `subject-switch-s1`).
+- [x] 6.7 Make the shipped skill's description ask for recall on subjects of the user's own life or work, for clients that defer tools and hide server instructions; prove it on the incident regression cases and on fresh cases with a client that behaves that way.
+  - Skill description only; proved in the bench's `deferred-skill` client mode on the incident regression cases and on fresh cases with the off level unchanged (run records `deferred-skill-description-s1` and `-s2`; design, "A client that defers tools and hides server instructions"). The live claude.ai check follows the release.
+- [ ] 6.8 Name every item an overflowing catalogue could not list, within `skills_names_max_chars`, so a collection that declares no topic and shares no word with the turn still reaches the agent; prove it on the installed service with the turn that exposed the miss.

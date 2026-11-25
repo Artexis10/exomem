@@ -1,0 +1,11 @@
+{
+  "id": "m14-friend-database-job",
+  "title": "A friend's job on database internals comes up at dinner",
+  "suite": "session-close",
+  "seed": "m00",
+  "engagement": "balanced",
+  "turns": [
+    "Perrin came for dinner last night. The new job has settled in and now it's all about how a database keeps its files consistent when the power cuts out in the middle of a write. Honestly I understood about half of it.",
+    "It was a good evening. Remind me, what doesn't Perrin eat?"
+  ]
+}

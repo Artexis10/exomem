@@ -491,7 +491,7 @@ def test_the_status_ages_an_intent_that_the_projector_deferred(stored, writer, p
 def test_a_put_never_replaces_an_earlier_version_that_a_person_restored(
     stored, writer, projecting, ending
 ):
-    """A projector that counts the audit rows of a path's earlier lives as Exomem's own, so that it
+    """A projector that counts the audit rows of a path's earlier lives as Evermatter's own, so that it
     replaces a person's restored file with the store's newer bytes."""
     first = b"# Gamma\n\nThe first life of this page.\n"
     commit(writer, **put(NEW, first))
@@ -516,7 +516,7 @@ def test_a_delete_never_removes_an_earlier_version_that_a_person_restored(
     stored, writer, projecting
 ):
     """A projector that unlinks a file whose bytes match an earlier life of the path, which a
-    person restored, because it counts every audit row of the path as Exomem's own."""
+    person restored, because it counts every audit row of the path as Evermatter's own."""
     first = b"# Gamma\n\nThe first life of this page.\n"
     commit(writer, **put(NEW, first))
     projecting.run_pass()
@@ -533,7 +533,7 @@ def test_a_delete_never_removes_an_earlier_version_that_a_person_restored(
 
 
 def test_a_put_never_replaces_a_version_that_a_person_restored_across_a_rollback(stored, tmp_path):
-    """A projector that counts the writes from before a rollback as Exomem's own, so that it
+    """A projector that counts the writes from before a rollback as Evermatter's own, so that it
     replaces a restored file with the store's newer bytes, though the vault ran in file mode and a
     person changed it in between."""
     first = b"# Gamma\n\nThe first version, written before the rollback.\n"
@@ -998,9 +998,9 @@ def sha(body):
 def test_the_facts_of_a_batch_name_each_paths_current_life_as_a_single_read_does(
     stored, writer, projecting
 ):
-    """A batched facts read that counts the bytes of an earlier life as Exomem's, or misses those of
+    """A batched facts read that counts the bytes of an earlier life as Evermatter's, or misses those of
     the current one, when one batch mixes a recorded path, a reset, a queued removal and a move:
-    the projector then replaces a file that a person restored, or holds Exomem's own file."""
+    the projector then replaces a file that a person restored, or holds Evermatter's own file."""
     recorded, reset, removed = f"{NOTES}/Recorded.md", f"{NOTES}/Reset.md", f"{NOTES}/Removed.md"
     moved_from, moved_to = f"{NOTES}/Moved.md", f"{NOTES}/Archive/Moved.md"
     first, second, third = b"# One\n", b"# Two\n", b"# Three\n"

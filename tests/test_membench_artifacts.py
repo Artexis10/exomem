@@ -58,7 +58,7 @@ def test_sentinel_is_visible_in_every_text_kind() -> None:
 
 def test_pdf_degrades_honestly_when_renderer_missing(monkeypatch) -> None:
     def boom(content, token):  # type: ignore[no-untyped-def]
-        raise pdf_renderer.PdfUnavailable("no pymupdf in this environment")
+        raise pdf_renderer.PdfUnavailable("the text cannot be set in the base font")
 
     monkeypatch.setattr("membench.artifacts.pdf_renderer.render", boom)
     token = sentinel("SRC-TEST0002")
@@ -70,14 +70,21 @@ def test_pdf_degrades_honestly_when_renderer_missing(monkeypatch) -> None:
     assert "[pdf-unavailable]" in text and token in text
 
 
-def test_pdf_real_path_matches_environment() -> None:
+def test_pdf_artifact_is_a_pdf_that_holds_the_sentinel_and_is_byte_stable() -> None:
     token = sentinel("SRC-TEST0003")
-    result = render_artifact(_content(ArtifactKind.PDF), token)
-    if pdf_renderer.pymupdf_version() is None:
-        assert result.actual_kind is ArtifactKind.PDF_UNAVAILABLE
-    else:  # pragma: no cover - environment dependent
-        assert result.actual_kind is ArtifactKind.PDF
-        assert result.data.startswith(b"%PDF")
+    first = render_artifact(_content(ArtifactKind.PDF), token)
+    second = render_artifact(_content(ArtifactKind.PDF), token)
+    assert first.actual_kind is ArtifactKind.PDF and first.degradation is None
+    assert first.data.startswith(b"%PDF") and token.encode() in first.data
+    assert first.bytes_sha256 == second.bytes_sha256
+
+
+def test_a_pdf_whose_text_does_not_fit_one_page_degrades_instead_of_losing_the_overflow() -> None:
+    long = _content(ArtifactKind.PDF)
+    long.lines = [f"Line {n}: the drift index measured {n} points." for n in range(120)]
+    result = render_artifact(long, sentinel("SRC-TEST0006"))
+    assert result.actual_kind is ArtifactKind.PDF_UNAVAILABLE
+    assert result.degradation and "pdf renderer unavailable" in result.degradation
 
 
 def test_png_degrades_honestly_when_renderer_missing(monkeypatch) -> None:
@@ -121,5 +128,4 @@ def test_renderer_versions_report_absent_rather_than_raising() -> None:
 
     versions = renderer_versions()
     assert versions["pillow"] == ("absent" if image_renderer.pillow_version() is None else versions["pillow"])
-    assert versions["pymupdf"] == ("absent" if pdf_renderer.pymupdf_version() is None else versions["pymupdf"])
     assert all(isinstance(value, str) for value in versions.values())

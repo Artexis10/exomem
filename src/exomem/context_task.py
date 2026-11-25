@@ -11,13 +11,14 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pydantic import TypeAdapter
 
 from . import (
+    activation_conventions,
     context_roles,
     find_corpus,
     find_results,
@@ -34,6 +35,7 @@ from . import (
     vault_skills,
     working_set,
     working_set_currency,
+    working_set_index,
 )
 from .governance import egress, principal
 
@@ -41,10 +43,18 @@ log = logging.getLogger(__name__)
 
 # Request resource bounds; these do not define any knowledge vocabulary.
 MAX_CANDIDATES = 12
-RESET_ADVICE = "Discard held methods."
+#: At most this many collection manifests are offered to the method-fit judgment, so one turn reads a bounded number.
+MAX_COLLECTION_CARRIERS = 48
+#: How much of a collection manifest's body the judgment reads as its description: enough for what one item is.
+COLLECTION_DESCRIPTION_CHARS = 600
+RESET_ADVICE = "Discard the skills, collections and approaches you hold."
 READ_ADVICE = "Retrieval lead; read the source and its current state before using it."
 #: The `kind` of a method item that is a whole vault skill rather than one unit of a page.
-SKILL_KIND = "skill"
+SKILL_KIND = vault_skills.KIND_SKILL
+#: The `kind` of a method item that is a whole collection manifest: the collection's authored contract.
+COLLECTION_KIND = vault_skills.KIND_COLLECTION
+#: The `selection` of a method that the method-fit judgment chose for this turn, rather than retrieval.
+METHOD_FIT = "method_fit"
 
 # Use the serving serializer for admitted YAML scalars, including authored dates.
 _PUBLIC_SOURCE = TypeAdapter(Any)
@@ -53,7 +63,7 @@ _PUBLIC_SOURCE = TypeAdapter(Any)
 def empty(state: str = "empty", *, reset: bool = False) -> dict[str, Any]:
     block: dict[str, Any] = {
         "state": state, "candidates": [], "methods": {"reset": reset, "items": []},
-        "missing": [], "interpretation": {"state": "disabled"},
+        "missing": [], "interpretation": {"state": "disabled"}, "method_fit": {"state": "disabled"},
     }
     if reset:
         block["methods"]["advice"] = RESET_ADVICE
@@ -68,10 +78,20 @@ def _add_missing(block: dict[str, Any], reason: str) -> None:
 
 
 def item_line(item: Mapping[str, Any], *, method: bool = False) -> str:
-    if method and item.get("kind") == SKILL_KIND:
+    if method and item.get("kind") in (SKILL_KIND, COLLECTION_KIND):
         # The name and description are page text, so they are quoted and escaped like a method's title.
         name, description = (json.dumps(str(item.get(key, "")), ensure_ascii=False) for key in ("name", "description"))
-        return f"Skill {name}: {description}. Load it with read_page before acting."
+        label = "Skill" if item.get("kind") == SKILL_KIND else "Collection"
+        contract = item.get("contract")
+        if not contract or not contract.get("text"):
+            return f"{label} {name}: {description}. Load it with read_page before acting."
+        # The contract is page text too: quoted and escaped, so no line of it reads as part of the instruction.
+        text = json.dumps(str(contract["text"]), ensure_ascii=False)
+        if contract.get("complete"):
+            return f"{label} {name}: {description}. Its whole text follows; follow it where it fits: {text}"
+        return (
+            f"{label} {name}: {description}. Its opening follows; load the rest with read_page before acting: {text}"
+        )
     if method:
         # The title is page text, so it is quoted and escaped: no title can read as part of the fixed instruction.
         title = json.dumps(str(item.get("attribution", "")), ensure_ascii=False)
@@ -106,12 +126,13 @@ def packet_chars(block: Mapping[str, Any]) -> int:
     return len("\n".join(lines)) + (1 if lines else 0)
 
 
-def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
+def _reasoned(block: dict[str, Any], link: dict[str, Any], reach: Reach | None = None) -> bool:
     """Build a link's `why` when the allocation first tries it; False when it cannot be listed.
 
     The reason reads pages, so a link the allowance never reaches costs no read; the line's length is part of
     what the allowance charges, so it is built before the link is measured. A reader view that cannot be read
-    leaves the link unlisted and the lane reported failed, as an unreadable graph does.
+    leaves the link unlisted and the lane reported failed, as an unreadable graph does, and the link's target
+    is then a page the turn reaches that the response does not serve.
     """
     build = link.pop("build_why", None)
     if build is None:
@@ -119,7 +140,9 @@ def _reasoned(block: dict[str, Any], link: dict[str, Any]) -> bool:
     try:
         link["why"] = build()
     except egress.ReaderViewUnavailable:
-        _add_missing(block, "lane_failed")
+        _add_missing(block, _LANE_FAILED)
+        if reach is not None:
+            reach.stop(_LANE_FAILED)
         return False
     return True
 
@@ -213,6 +236,42 @@ def _deadline_check() -> None:
         raise TaskDeadline("task source preparation is unavailable")
 
 
+#: Every request-budget stage of task discovery is named under this prefix, from the whole lane down to its links.
+DISCOVERY_STAGE_PREFIX = "working_set.task_context"
+
+
+@dataclass
+class Reach:
+    """The pages this response's task context serves for the turn, and why discovery stopped short of them, if it did.
+
+    A lane that decides which pages are served records its failure here as it happens. A deadline is read from the
+    request budget's own record, which names every discovery stage it skipped or stopped. The block's `budget`
+    reason cannot stand in for either: it also names a lead that did not fit the character allowance, a bound by
+    design that leaves the served pages complete.
+    """
+
+    paths: set[str] = field(default_factory=set)
+    stopped: str | None = None
+
+    def stop(self, reason: str) -> None:
+        if self.stopped is None:
+            self.stopped = reason
+
+    def gap(self) -> str | None:
+        if self.stopped is not None:
+            return self.stopped
+        budget = request_budget.current()
+        cut = budget is not None and any(
+            stage.startswith(DISCOVERY_STAGE_PREFIX) for stage in (*budget.skipped, *budget.truncated)
+        )
+        return "budget" if cut else None
+
+
+#: The discovery reason that a lane deciding the served pages failed, as `working_set.task_candidates` and
+#: `working_set.attach_task_links` report it. Their other reasons are deadlines, read from the budget, or bounds.
+_LANE_FAILED = "lane_failed"
+
+
 def _serve_without_deadline() -> None:
     """The final guard re-reads only leads already served, so a deadline that has passed must not drop them."""
 
@@ -224,10 +283,7 @@ def full_source_access(root: Path, caller: Any, *, provider=None) -> bool:
     walk filter and by `quick_page_visible`, so a store outage withholds the pages the store owns. A failure
     to prove ownership still makes the walk filter raise, and the task context reports unavailable.
     """
-    policy, _active = egress.gate_state(root)
-    who = principal.effective_principal().with_purpose(caller.purpose)
-    return (provider is None and egress.policy_empty_without_writer(root, policy)
-            and egress.unrestricted_content_access(root, who))
+    return provider is None and egress.unrestricted_source_access(root, purpose=caller.purpose)
 
 
 def project_source(root: Path, source_ref: str, caller: Any, *, cache=None, expected_hash=None, provider=None, check=None):
@@ -445,10 +501,49 @@ def _remember_sources(root: Path, caller: Any, sources: Mapping[str, SourceProje
         }
 
 
-def _method_items(source: SourceProjection, source_ref: str, *, whole: bool = False) -> list[dict[str, Any]]:
+def contract_of(body: str, max_chars: int) -> dict[str, Any] | None:
+    """The released body of a skill as its contract, cut at a line boundary to `max_chars`; None when 0."""
+    if max_chars <= 0:
+        return None
+    text = body.strip()
+    if len(text) <= max_chars:
+        return {"text": text, "complete": True}
+    return {"text": _cut_lines(text, max_chars), "complete": False}
+
+
+def _cut_lines(text: str, max_chars: int) -> str:
+    """The longest run of whole leading lines of `text` within `max_chars`, else a whole-word prefix of the first."""
+    if max_chars <= 0:
+        return ""
+    head = text[:max_chars + 1]
+    cut = head.rfind("\n")
+    if cut > 0:
+        return head[:cut].rstrip()
+    words = head[:max_chars].rsplit(" ", 1)[0] if len(text) > max_chars else head
+    return words.rstrip()
+
+
+def _fit_contract(block: dict[str, Any], method: dict[str, Any], allowance: int) -> bool:
+    """Cut `method`'s contract until the block fits `allowance`; False when it cannot fit even without one."""
+    contract = method.get("contract")
+    while packet_chars(block) > allowance and contract and contract.get("text"):
+        overflow = packet_chars(block) - allowance
+        # The rendered text is escaped, so a cut of the overflow alone can fall short; it repeats until it fits.
+        contract["text"] = _cut_lines(contract["text"], len(contract["text"]) - overflow)
+        contract["complete"] = False
+    if contract is not None and not contract.get("text"):
+        method.pop("contract")
+    return packet_chars(block) <= allowance
+
+
+def _method_items(
+    source: SourceProjection, source_ref: str, *, whole: bool = False, selection: str | None = None,
+    contract_chars: int = 0,
+) -> list[dict[str, Any]]:
     """The method items one released source offers.
 
     `whole` serves a page that lists no method as one method itself, for a page its owner named as the method.
+    A skill carries its released body as its contract, within `contract_chars`, and the lead's `selection`.
     """
     skill = vault_skills.recognise(source.public["path"], source.public.get("frontmatter"))
     references = source.methods or ((skill_ref(source),) if whole and source.methods == () else ())
@@ -465,10 +560,104 @@ def _method_items(source: SourceProjection, source_ref: str, *, whole: bool = Fa
                 kind=SKILL_KIND, name=skill.name, read_ref=skill_ref(source),
                 description=" ".join(egress.without_wikilinks(skill.description).split()),
             )
+            if selection:
+                method["selection"] = selection
+            if contract := contract_of(str(source.public.get("body") or ""), contract_chars):
+                method["contract"] = contract
         elif source.title:
             method["attribution"] = source.title
         items.append(method)
     return items
+
+
+def _skill_description(source: SourceProjection) -> str:
+    """A skill's authored trigger text, as released: its frontmatter `description`."""
+    return str((source.public.get("frontmatter") or {}).get("description") or "")
+
+
+def _body_text(source: SourceProjection) -> str:
+    return str(source.public.get("body") or "")
+
+
+def _selected_methods(
+    root: Path, *, caller: Any, catalogue: Any, turn: str, conversation: Any, sources: dict, contract_chars: int,
+    index_token: tuple[int, int, int] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The skills and collections the method-fit judgment selects for the turn, as whole methods with their contracts.
+
+    The carriers are the visible skill pages and collection manifests, each offered by the text its author wrote to say
+    what it is for. Only a caller with full source access is offered them, as for every method. The judgment is
+    optional and default-off (`context_fit.select_methods`); any failure selects nothing.
+    """
+    from . import context_fit
+
+    limit = int(activation_conventions.load_conventions(root).conventions.budget("method_fit_max_items") or 0)
+    if limit <= 0 or caller.restricted:
+        return [], {"state": "disabled"}
+    try:
+        if context_fit.configured(root, context_fit.METHOD_FIT_ENV) is None:
+            return [], {"state": "disabled"}
+    except (ValueError, OSError):
+        # A missing, unreadable or in-vault placement file is a failed judgment, never a failed turn.
+        log.warning("method-fit placement unusable", exc_info=True)
+        return [], {"state": "unavailable"}
+    try:
+        pending = set(catalogue.pending())
+        carriers: list[dict[str, Any]] = []
+        # Skills first: when the input allowance runs out, the user's own skills are offered before collections.
+        for entry in catalogue.entries_by_id(catalogue.skill_ids()):
+            if entry.path and entry.path not in pending:
+                carriers.append({
+                    "name": entry.skill, "path": entry.path, "kind": SKILL_KIND, "description_of": _skill_description,
+                    "max_chars": vault_skills.DESCRIPTION_MAX_CHARS,
+                })
+        # A Records collection's manifest body is its authored contract. The manifests come from the index the update
+        # published, so this enumerates no directory; their text is read only when the judgment offers them.
+        manifests = working_set_index.records_manifests(root, index_token[1], token=index_token) if index_token else ()
+        for manifest in manifests[:MAX_COLLECTION_CARRIERS]:
+            path = str(getattr(manifest, "path", ""))
+            if path:
+                carriers.append({
+                    "name": str(manifest.title or path), "path": path, "kind": COLLECTION_KIND,
+                    "description_of": _body_text, "max_chars": COLLECTION_DESCRIPTION_CHARS,
+                })
+    except Exception:  # noqa: BLE001 - a carrier list that cannot be read in time is a failed judgment, never a failed turn
+        log.warning("method-fit carriers unreadable", exc_info=True)
+        return [], {"state": "unavailable"}
+    chosen, state = context_fit.select_methods(
+        root, caller=caller, carriers=carriers, turn=turn, conversation=conversation, limit=limit, sources=sources,
+    )
+    methods = []
+    for carrier in chosen:
+        try:
+            methods.extend(_selected_method(root, carrier, caller, sources, contract_chars))
+        except TaskDeadline:
+            break
+        except Exception:  # noqa: BLE001 - a selected method that cannot be read or built costs that method, never the turn
+            log.warning("selected method unreadable", exc_info=True)
+    return methods, state
+
+
+def _selected_method(
+    root: Path, carrier: dict[str, Any], caller: Any, sources: dict, contract_chars: int,
+) -> list[dict[str, Any]]:
+    """The served items of one selected carrier: a skill's whole method, or a collection with its contract."""
+    source = project_source(root, carrier["path"], caller, cache=sources)
+    if source is None:
+        return []
+    if carrier["kind"] == SKILL_KIND:
+        items = _method_items(source, carrier["path"], whole=True, selection=METHOD_FIT, contract_chars=contract_chars)
+        return [item for item in items if item.get("kind") == SKILL_KIND]
+    method = {
+        "ref": skill_ref(source), "source_ref": carrier["path"], "source_version": source.version,
+        "applicability": "read_required", "read_ref": skill_ref(source), "kind": COLLECTION_KIND,
+        "name": source.title or carrier["name"], "selection": METHOD_FIT,
+        # The contract below carries the whole body, so the line's description is only its opening sentence.
+        "description": vault_skills.summary(" ".join(egress.without_wikilinks(_body_text(source)).split()), 200),
+    }
+    if contract := contract_of(str(source.public.get("body") or ""), contract_chars):
+        method["contract"] = contract
+    return [method]
 
 
 def _declared_methods(
@@ -535,12 +724,13 @@ def compile_context(
     timings: find_types.FindTimings | None = None,
     index_token: tuple[int, int, int] | None = None,
     prepare_slice: Callable[[], tuple[frozenset[str], int]] | None = None,
-    reach: set[str] | None = None,
+    reach: Reach | None = None,
 ) -> dict[str, Any]:
     """Revalidate before selection, then allocate complete source-bound read routes.
 
     `reach`, when given, receives the paths of the pages this response serves for the turn: each lead that this
-    block or the turn slice routes, and each link target that the block lists.
+    block or the turn slice routes, and each link target that the block lists. It also learns when a lane that
+    decides those pages failed, or discovery did not run.
     """
     from . import working_set_runtime
 
@@ -548,6 +738,8 @@ def compile_context(
         # Without the raw fast path, discovery and method revalidation would prepare released sources on this
         # request. It reports the state that a released corpus over its preparation allowance already reports,
         # and held methods reset as they do on every unavailable branch.
+        if reach is not None:
+            reach.stop("task_context_unavailable")
         return empty("unavailable", reset=bool(held))
     sources: dict[str, SourceProjection | None] = {}
     with find_types.timing_span(timings, "working_set.methods"):
@@ -585,9 +777,14 @@ def compile_context(
             block["state"] = "partial"
             return block
         block["missing"] = missing
+        if reach is not None and any(gap.get("reason") == _LANE_FAILED for gap in missing):
+            reach.stop(_LANE_FAILED)
         candidates = []
         identities: dict[tuple[str, str], dict[str, Any]] = {}
         methods_by_source: dict[str, list[dict[str, Any]]] = {}
+        contract_chars = int(
+            activation_conventions.load_conventions(root).conventions.budget("method_contract_max_chars") or 0
+        )
         for candidate in discovered:
             try:
                 with find_types.timing_span(timings, "working_set.task_context_projection"):
@@ -597,7 +794,10 @@ def compile_context(
                 _add_missing(block, "budget")
                 break
             if source is None:
-                _add_missing(block, "lane_failed")
+                # A discovered lead the caller cannot be served in full is a page the turn reaches and no block reads.
+                _add_missing(block, _LANE_FAILED)
+                if reach is not None:
+                    reach.stop(_LANE_FAILED)
                 continue
             item = {
                 **candidate, "source_version": source.version,
@@ -618,8 +818,16 @@ def compile_context(
             candidates.append(item)
             if source.methods is None:
                 _add_missing(block, "lane_failed")
-            if items := _method_items(source, candidate["source_ref"]):
+            if items := _method_items(
+                source, candidate["source_ref"],
+            ):
                 methods_by_source.setdefault(candidate["source_ref"], []).extend(items)
+        with find_types.timing_span(timings, "working_set.method_fit"):
+            selected, block["method_fit"] = _selected_methods(
+                root, caller=caller, catalogue=catalogue, turn=turn, conversation=conversation, sources=sources,
+                contract_chars=contract_chars, index_token=index_token,
+            )
+        selected_paths = {method["source_ref"] for method in selected}
         declared_by_lead, cut_short, resolver_cold = _declared_methods(root, caller, candidates, sources, methods_by_source)
         if cut_short:
             _add_missing(block, "budget")
@@ -658,21 +866,41 @@ def compile_context(
             root, candidates, link_targets=link_targets, caller=caller, timings=timings, target_paths=target_paths,
         ):
             _add_missing(block, reason)
+            if reach is not None and reason == _LANE_FAILED:
+                # The leads' link targets are pages the turn reaches; without them the served pages are short.
+                reach.stop(_LANE_FAILED)
         # A lead is admitted together with its first connection when both fit; the rest fill the
         # room every lead and method leaves, in lead order. A lead's own method outranks its first
         # link, but a first link may take the room that a later lead would have used.
         linked: list[tuple[dict[str, Any], list[dict[str, str]], bool]] = []
         # The links each admitted lead may still list, by lead; its first link can return here.
         tails: dict[int, list[dict[str, str]]] = {}
+        # A method the judgment selected for this turn is served first: it is the turn's answer to "how", so no
+        # retrieval lead may take its room. Its contract is cut before the method is dropped.
+        # Every selected method is seated by its plain line first, so one long contract never starves another
+        # method of its place; the contracts then fill the room that is left, in selection order.
+        contracts = {id(method): method.pop("contract", None) for method in selected}
+        for method in selected:
+            block["methods"]["items"].append(method)
+            if packet_chars(block) > allowance:
+                block["methods"]["items"].pop()
+                _add_missing(block, "budget")
+        for method in selected:
+            if contracts[id(method)] and any(method is served for served in block["methods"]["items"]):
+                method["contract"] = contracts[id(method)]
+                _fit_contract(block, method, allowance)
         for item in candidates:
             links = item.pop("links", [])
-            # Guarded turn leads already carry this route; keep only the additional method projection.
-            if item["ref"] not in covered and item["source_ref"] not in covered:
+            # Guarded turn leads already carry this route, and a page the method-fit judgment selected is routed by its
+            # own method item; keep only the method projection for both.
+            if item["source_ref"] in selected_paths:
+                pass
+            elif item["ref"] not in covered and item["source_ref"] not in covered:
                 block["candidates"].append(item)
                 if packet_chars(block) > allowance:
                     block["candidates"].pop()
                     _add_missing(block, "budget")
-                elif links and _reasoned(block, links[0]):
+                elif links and _reasoned(block, links[0], reach):
                     item["links"] = links[:1]
                     if packet_chars(block) > allowance:
                         item.pop("links")
@@ -686,6 +914,8 @@ def compile_context(
             for method in (*methods_by_source.get(item["source_ref"], ()), *methods_by_source.get(declared_by_lead.get(item["source_ref"], ""), ())):
                 if any(method is served for served in block["methods"]["items"]):
                     continue  # a page that is both a lead and a lead's declared method is served once
+                if method.get("kind") in (SKILL_KIND, COLLECTION_KIND) and method["source_ref"] in selected_paths:
+                    continue  # the method-fit judgment already served this page whole, with its contract
                 block["methods"]["items"].append(method)
                 if packet_chars(block) > allowance and item.get("links") and id(item) in tails:
                     # The lead's own method outranks its first link, which returns if room remains.
@@ -694,7 +924,7 @@ def compile_context(
                         tails[id(item)][:0] = first
                     else:
                         item["links"] = first
-                if packet_chars(block) > allowance:
+                if not _fit_contract(block, method, allowance):
                     block["methods"]["items"].pop()
                     _add_missing(block, "budget")
         for item, links, named in linked:
@@ -711,7 +941,7 @@ def compile_context(
                 served = item["links"] = []
             before = len(served)
             for link in links:
-                if not _reasoned(block, link):
+                if not _reasoned(block, link, reach):
                     break
                 served.append(link)
                 if packet_chars(block) > allowance:
@@ -727,13 +957,15 @@ def compile_context(
                     block["candidates"].remove(item)
                     _add_missing(block, "budget")
         if reach is not None:
-            _record_reach(reach, candidates, block["candidates"], covered, target_paths)
+            _record_reach(reach.paths, candidates, block["candidates"], covered, target_paths)
         has_content = bool(block["candidates"] or block["methods"]["items"])
         block["state"] = "partial" if block["missing"] else ("ready" if has_content else "empty")
         _remember_sources(root, caller, sources)
         return block
     except Exception:  # noqa: BLE001 - optional discovery cannot discard a usable map
         log.warning("task context unavailable", exc_info=True)
+        if reach is not None:
+            reach.stop(_LANE_FAILED)
         return empty("unavailable", reset=bool(held))
 
 

@@ -275,7 +275,7 @@ def test_the_edits_of_collection_and_part_pages_are_listed_apart_and_written_now
     assert {edit["page"] for edit in foreign["edits"]["items"]} == {RECORD_PAGE, PART_PAGE}
     counts = report["counts"]
     assert counts["link_edits_in_collection_and_part_pages"] == 2
-    # The headline count of edits is the pages that Exomem owns, so these two are not in it.
+    # The headline count of edits is the pages that Evermatter owns, so these two are not in it.
     assert counts["link_edits"] == 4
     assert "2 more link edits" in report["outcome"]
 

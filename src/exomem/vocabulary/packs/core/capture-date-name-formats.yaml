@@ -1,0 +1,34 @@
+schema_version: 1
+registry: capture-date-name-formats
+# File-name shapes that state when a picture was taken. Each `pattern` matches a whole
+# file name without its extension, ignoring case, and names the groups year, month, day,
+# hour, minute and second; the time is the maker's local wall clock, the same basis as an
+# EXIF time that states no offset. `maker` names what writes the shape and the description
+# says why it states a capture time. A name that records only a save, paste or send time
+# does not belong here. Google Pixel `PXL_` names are absent on purpose: they carry a UTC
+# time, and this registry has no clock basis, so reading them as local time would shift the day.
+entries:
+  gnome-screenshot:
+    label: GNOME screenshot
+    description: The GNOME screenshot tool names a file after the moment it grabbed the screen.
+    attributes:
+      maker: GNOME Screenshot
+      pattern: 'Screenshot from (?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}) (?P<hour>\d{2})-(?P<minute>\d{2})-(?P<second>\d{2})(?:[ -]\d+)?'
+  android-camera:
+    label: Android camera file
+    description: Android camera apps name a photo or video after its shutter time.
+    attributes:
+      maker: Android camera apps
+      pattern: '(?:IMG|VID|MVIMG)?_?(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})[_-](?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})\d{0,3}(?:[_ -]\d+|\s\(\d+\))?(?:\.MP)?'
+  android-screenshot-compact:
+    label: Android screenshot
+    description: Android's screenshot service names a file after the moment it grabbed the screen.
+    attributes:
+      maker: Android screenshot service
+      pattern: 'Screenshot_(?P<year>\d{4})(?P<month>\d{2})(?P<day>\d{2})-(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})(?:_.*)?'
+  android-screenshot-dashed:
+    label: Android screenshot with dashed time
+    description: Some Android builds name a screenshot after the moment it grabbed the screen, with dashes in the time.
+    attributes:
+      maker: Android screenshot service
+      pattern: 'Screenshot_(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})-(?P<hour>\d{2})-(?P<minute>\d{2})-(?P<second>\d{2})(?:-\d+)?(?:_.*)?'

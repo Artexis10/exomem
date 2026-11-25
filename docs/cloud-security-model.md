@@ -1,10 +1,10 @@
 <!-- authority:non-specification -->
 
-# Exomem Cloud security model
+# Evermatter Cloud security model
 
-Exomem Cloud is the managed Exomem service of Substrate Systems OÜ. Each account gets one cell that runs
+Evermatter Cloud is the managed Evermatter service of Substrate Systems OÜ. Each account gets one cell that runs
 this repository's server. Each section states a claim, mostly from the
-[privacy page](https://substratesystems.io/exomem/privacy), the public code behind it, a check and its
+[privacy page](https://evermatter.ai/privacy), the public code behind it, a check and its
 limits. The control plane is in the public [substrate repository](https://github.com/substrate-systems/substrate).
 Deployment values are not public, so this page marks each control that is off by default.
 
@@ -254,17 +254,19 @@ Lock of 30 days by default.
 
 ## Image provenance and admission
 
-**Claim.** Each released image carries a build attestation from this repository's release workflow.
+**Claim.** Each released image carries a build attestation from the release workflow of the repository that built it.
 
 **Enforced.** [release-please.yml](../.github/workflows/release-please.yml) attests each image and
 publishes the bundles as `exomem-image-*.sigstore.json` release assets. `verify_attestation` in
 [cloud_deploy.py](../infra/scripts/cloud_deploy.py) checks the attestation before it sets the cell
-image. The admission policy `exomem-cellctl-scope` in
+image. It derives the builder from the image name: `ghcr.io/substrate-systems/evermatter` from
+`substrate-systems/evermatter`, and `ghcr.io/artexis10/exomem` (every release cut before the repository
+moved) from `Artexis10/exomem`. It refuses any other image. The admission policy `exomem-cellctl-scope` in
 [cellctl.yaml](../infra/helm/platform/templates/cellctl.yaml) admits only digest-pinned images from the
 configured repository.
 
-**Check.** Run `gh attestation verify oci://ghcr.io/artexis10/exomem:<version>-cloud --repo
-Artexis10/exomem --signer-workflow Artexis10/exomem/.github/workflows/release-please.yml --source-ref
+**Check.** Run `gh attestation verify oci://ghcr.io/substrate-systems/evermatter:<version>-cloud --repo
+substrate-systems/evermatter --signer-workflow substrate-systems/evermatter/.github/workflows/release-please.yml --source-ref
 refs/tags/v<version>`.
 
 **Limits.** Admission checks no signatures, because the signature policy in
@@ -288,7 +290,7 @@ public.
 
 ## What the service is not
 
-Exomem Cloud is not zero-knowledge or end-to-end encrypted. The edge and gateway see requests and
+Evermatter Cloud is not zero-knowledge or end-to-end encrypted. The edge and gateway see requests and
 responses. Substrate Systems holds the keys, so it could deliberately read your content. When Home and
 its viewer are on, Substrate on Vercel sees what they show (`callCloudViewerTool` in `cloud-home-mcp.ts`).
 `cloudHomeChannelEnabled` and `cloudViewerEnabled` are off by default. Home's own grants do not appear

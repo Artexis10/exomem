@@ -36,7 +36,7 @@
       `lean`/`ml` per design.md D6; env vars per D7 (`EXOMEM_HOST=0.0.0.0`,
       `EXOMEM_LOG_DIR=/data/logs`, `ml` adds `HF_HOME=/data/hf`); `VOLUME /data`;
       `EXPOSE 8765`; `COPY LICENSE /LICENSE`; OCI labels
-      (`org.opencontainers.image.source`, `.licenses=AGPL-3.0-or-later`, `.description`);
+      (`org.opencontainers.image.source`, `.licenses` per product-licensing, `.description`);
       `ENTRYPOINT ["exomem"]`; `CMD ["--transport","http","--port","8765"]`. No
       `HEALTHCHECK` in the image itself (design.md D5).
 - [x] 2.2 `.dockerignore`: allowlist form — `*` then `!src/`, `!pyproject.toml`,

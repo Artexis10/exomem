@@ -1,0 +1,25 @@
+# Tasks
+
+## 1. Text
+
+- [x] 1.1 Append the custody and repository-scope sentences to `LEARNING_INSTRUCTION`, and update the three guide copies.
+- [x] 1.2 In the Balanced and Maximal blocks, write "Never save chat transcripts" and scope the quiet list to notes; keep each block under 1,500 characters.
+- [x] 1.3 Scope the quiet list to notes in `_BASELINE_CAPTURE` and the scaffold copies, and write "no chat transcripts" in the Stop-hook capture check.
+
+## 2. Receipts
+
+- [x] 2.1 Make a `content` capture's reply say that Exomem kept text, not the original file.
+- [x] 2.2 Implement `options.custody_only`: record `custody_only: true` on the Source, say "kept for custody only" in the outcome line, skip it in `unprocessed_source`, and list it in a new `custody_source` family that stays `info` and outside the default attention set. Teach the option in the ingest and capture skill text.
+
+- [x] 2.3 Give the unheld Source upload step a `next_action` that sends an agent holding the file to the held route. Round 5 on 2026-11-20 found agents whose unheld send stored a bare copy: no title, no url and a second Source of a re-sent file.
+## 3. Harness
+
+- [x] 3.1 Wait until recall stops abstaining with `index_warming`, and count a unit that starts while warming as a harness fault.
+- [x] 3.2 Raise the actor's turn cap to 20 and use the production upload configuration.
+- [x] 3.3 Add the two negative cases and a held-out positive written outside the iterating session. The negatives are in `cases/handed-file-custody.json`; a separate author wrote the held-out positive outside the repository on 2026-11-20.
+
+## 4. Proof and delivery
+
+- [x] 4.1 Run base against changed on real models and record the per-case result against the ship bar. PR #2938 records it: on 2026-11-20 one blind held-out run with 3 repeats kept the handed files without a nudge in 3 of 3 changed units and 0 of 3 base units, and the final code kept none of the files in the four negative cases.
+- [x] 4.2 If the bar is missed, build the Stop-hook custody check and run again. Not needed: the run in 4.1 met the bar.
+- [x] 4.3 Regenerate derived artifacts, including the plugin and cloud plugin, and run the public-artifact privacy gate.

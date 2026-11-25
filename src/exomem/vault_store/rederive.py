@@ -140,11 +140,15 @@ def configured_overlays(root: Path) -> frozenset[str] | None:
     return frozenset(instances.storage(spec, binding)[0] for spec in specs for binding in bindings)
 
 
-def record_overlay_change(tx: Connection, root: Path, paths: Iterable[str], revision: int) -> None:
-    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+def changes_overlay(root: Path, paths: Iterable[str]) -> bool:
+    """Whether a change of ``paths`` changes an overlay source (`is_overlay_source`)."""
     overlays = functools.cache(lambda: configured_overlays(root))
-    if any(is_overlay_source(root, rel, overlays=overlays) for rel in paths):
-        _set(tx, OVERLAY_REVISION, str(revision))
+    return any(is_overlay_source(root, rel, overlays=overlays) for rel in paths)
+
+
+def record_overlay_change(tx: Connection, revision: int) -> None:
+    """Record, inside the commit's transaction, that this revision changed an overlay source."""
+    _set(tx, OVERLAY_REVISION, str(revision))
 
 
 def record_derived_from_files(tx: Connection, revision: int) -> None:
@@ -230,8 +234,8 @@ def _owners_behind(value: str | None, *, required_version: int | None = None) ->
 def pending(conn: Connection, root: Path) -> str:
     """Whether a batch is owed: ``idle``, ``waiting`` for the projector, or ``ready`` to run.
 
-    It reads only, so the store thread asks it on a plain read and takes the vault's mutation
-    boundary for a batch that can run, never for a tick with nothing to do.
+    It reads only, so the store thread asks it on a plain read and opens its writer for a batch
+    that can run, never for a tick with nothing to do. No batch takes the vault's mutation boundary.
     """
     return _due(conn, root)[0]
 

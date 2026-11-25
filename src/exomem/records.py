@@ -23,9 +23,17 @@ from typing import Any, NotRequired
 
 from typing_extensions import TypedDict
 
-from . import record_formats, record_governance, state_paths, vault, writer_lease
+from . import (
+    automatic_collection,
+    record_formats,
+    record_governance,
+    state_paths,
+    vault,
+    writer_lease,
+)
 from . import structured_collections as collections
 from .collection_profiles import profile_for
+from .collection_store import link_declarations
 from .kbdir import managed_join
 
 log = logging.getLogger(__name__)
@@ -240,6 +248,19 @@ def lifecycle_guards(
         "expected_manifest_hash": manifest.manifest_version.hash,
         "expected_container_hash": _container_hash(manifest, snapshot),
     }
+
+
+def validate_new_row(
+    manifest: collections.CollectionManifest, item: Mapping[str, Any], *, body: str | None = None
+) -> None:
+    """Refuse, with `append_record`'s own errors, a first row that `manifest` cannot hold.
+
+    A caller that creates the collection for one row checks it here first, so a refused row leaves no empty collection.
+    """
+    _refuse_excluded_authored_names(item)
+    _validate_values(manifest, item)
+    if body is not None:
+        _validate_body(body)
 
 
 def append_record(
@@ -1366,7 +1387,7 @@ def bulk_upsert_records(
                     _bulk_reject(
                         index,
                         "INVALID_BULK_ROW",
-                        "a row is an object of item, optional body and optional source",
+                        "a row is an object of item, optional body and source; a source is required on the row or once for the batch",
                     )
                 )
                 continue
@@ -2172,9 +2193,10 @@ def _plan_create_audit(
     scaffold: bool,
     transition_id: str,
     why: str,
+    automatic: bool = False,
 ) -> tuple[str | None, str, vault.LogWritePlan]:
     """A file create's after item and container hashes, and the log writes of its event, the
-    archive of a rotation it makes due included.
+    archive of a rotation it makes due included. An automatic create adds its marker line to the event.
 
     ``proposed_manifest_hash`` is the hash of the caller's manifest before the commit marks it.
     It names that archive, so validation and the commit name the same one.
@@ -2216,6 +2238,8 @@ def _plan_create_audit(
         before_container_hash=None,
         proposed_manifest_hash=proposed_manifest_hash,
     )
+    if automatic:
+        audit = f"{audit}\n{automatic_collection.create_line(manifest.collection_id)}"
     return (
         after_item_hash,
         after_container_hash,
@@ -2230,8 +2254,13 @@ def create_collection(
     *,
     why: str,
     scaffold: bool = True,
+    automatic: bool = False,
 ) -> dict[str, Any]:
-    """Create a new collection only when its manifest and canonical source are absent."""
+    """Create a new collection only when its manifest and canonical source are absent.
+
+    `automatic` marks an agent-initiated create: the daily bound is checked under the mutation lock,
+    and the create's log entry records it, for the next count and the inventory.
+    """
     root = Path(vault_root)
     _validate_why(why)
     path = root / manifest_path
@@ -2252,6 +2281,8 @@ def create_collection(
             root, path.relative_to(root).as_posix(), leaf_policy="absent"
         )
         _require_activity_log(root)
+        if automatic:
+            automatic_collection.require_daily_room(root)
         proposed_manifest_hash = manifest.manifest_version.hash
         audit_correlation = _transition_id()
         marked_manifest_text = record_formats.render_manifest_audit_head(
@@ -2299,6 +2330,7 @@ def create_collection(
             scaffold=scaffold,
             transition_id=audit_correlation,
             why=why,
+            automatic=automatic,
         )
         record_governance.precommit_authorize_mutation(
             root,
@@ -2328,7 +2360,7 @@ def create_collection(
         except (vault.PathGuardError, vault.CreateOnlyConflict, OSError, ValueError) as error:
             raise _publication_error(error) from error
         _refresh_manifest_due_state(root, manifest)
-        return _result(
+        receipt = _result(
             operation="create",
             manifest=manifest,
             key=None,
@@ -2341,6 +2373,7 @@ def create_collection(
             outcome="committed",
             audit_correlation=audit_correlation,
         )
+        return {**receipt, "automatic": True} if automatic else receipt
 
 
 def validate_collection_create(
@@ -2492,6 +2525,12 @@ def _validate_collection_create_for_profile(
         "normalized_contract": _normalized_manifest_contract(manifest),
         "warnings": warnings,
     }
+
+
+def manifest_text(vault_root: Path, manifest: collections.CollectionManifest) -> str:
+    """The text of a file collection's manifest as it is stored now."""
+    data, _guard = _read_record_bytes(Path(vault_root), manifest.path)
+    return data.decode("utf-8")
 
 
 def validate_collection_revision(
@@ -3034,6 +3073,7 @@ def _validate_revision_manifest(
         )
     record_formats.validate_storage_contract(proposed)
     record_governance.require_proposed_manifest_visibility(root, proposed)
+    link_declarations.require_relations(root, proposed, current)
     newly_required = _newly_required(current, proposed)
     for record in snapshot.records:
         _validate_values(proposed, record.values, written=newly_required)
@@ -3424,6 +3464,7 @@ def _preflight_collection_create(
         diagnostic = manifest.view_diagnostics[0]
         raise collections.CollectionError(diagnostic.code, diagnostic.reason)
     record_formats.validate_storage_contract(manifest)
+    link_declarations.require_relations(root, manifest)
     source = root / manifest.storage.source
     _assert_portable_absent(root, source)
     if source.exists() or _casefold_alias(source):
@@ -3463,6 +3504,7 @@ def _normalized_manifest_contract(
                 **({"enum": list(spec.enum)} if spec.enum else {}),
                 **({"units": list(spec.units)} if spec.units else {}),
                 **({"link_kind": spec.link_kind} if spec.link_kind is not None else {}),
+                **({"relation": spec.relation} if spec.relation is not None else {}),
                 **({"offset": spec.offset} if spec.offset is not None else {}),
             }
             for name, spec in manifest.schema.fields.items()

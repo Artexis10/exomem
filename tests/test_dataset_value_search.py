@@ -297,6 +297,96 @@ def test_a_dataset_replaced_together_with_its_card_is_searched_by_its_new_values
     assert result.path not in _paths(_find(vault, ACCOUNT))
 
 
+def test_a_card_unreadable_while_the_service_starts_is_found_once_it_reads(vault, monkeypatch):
+    # A starting file-mode service reads cards through the private-identity inventory, and a
+    # read that waits out its budget on the inventory build gives no page. That dataset must be
+    # found once reads work, not hidden for the life of the process.
+    from exomem import reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = reserved_paths.read_generic_bytes
+    starting = True
+
+    def read_while_starting(vault_root, relative, **options):
+        if starting and relative == result.sidecar_path:
+            raise reserved_paths.ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        return original_read(vault_root, relative, **options)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", read_while_starting)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: not starting)
+
+    during_start = _find_response(vault, ACCOUNT)
+    starting = False
+    assert result.path in _paths(_find(vault, ACCOUNT))
+
+    # The reply that missed the dataset said that its results may be incomplete.
+    assert isinstance(during_start, dict), "the reply during start-up carried no warming notice"
+    assert result.path not in _paths(during_start["hits"])
+    assert dataset_values.LANE in during_start["warming"]["components"]
+
+
+def test_a_card_unreadable_once_the_service_has_started_is_not_read_on_every_search(vault, monkeypatch):
+    # With the private-identity inventory built, no start-up wait explains a card that reads
+    # nothing (a linked or refused file). Reading it again on every search would be cost without end.
+    from exomem import reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = reserved_paths.read_generic_bytes
+    original_resolve = find._resolve_page
+    card_resolutions = []
+
+    def refused_card(vault_root, relative, **options):
+        if relative == result.sidecar_path:
+            raise reserved_paths.ReservedPathLeafError("RESERVED_PATH")
+        return original_read(vault_root, relative, **options)
+
+    def counted_resolve(vault_root, rel, *args, **options):
+        if rel == result.sidecar_path:
+            card_resolutions.append(rel)
+        return original_resolve(vault_root, rel, *args, **options)
+
+    monkeypatch.setattr(reserved_paths, "read_generic_bytes", refused_card)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: True)
+    monkeypatch.setattr(find, "_resolve_page", counted_resolve)
+
+    first = _find_response(vault, ACCOUNT)
+    resolutions_after_first = len(card_resolutions)
+    second = _find_response(vault, ACCOUNT)
+
+    assert resolutions_after_first > 0
+    assert len(card_resolutions) == resolutions_after_first
+    for reply in (first, second):
+        hits = reply["hits"] if isinstance(reply, dict) else reply
+        assert result.path not in _paths(hits)
+        assert not isinstance(reply, dict) or dataset_values.LANE not in reply.get("warming", {}).get("components", ())
+
+
+def test_a_reply_that_could_not_read_an_original_while_the_service_starts_says_so(vault, monkeypatch):
+    # The original's read also waits on the private-identity inventory. A search that misses
+    # the dataset for that reason says that its results may be incomplete.
+    from exomem import media_store, reserved_paths
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    original_read = media_store.read_original_bytes
+    starting = True
+
+    def read_while_starting(vault_root, path, **options):
+        if starting and path == result.path:
+            raise reserved_paths.ReservedPathLeafError("CAPABILITY_UNAVAILABLE")
+        return original_read(vault_root, path, **options)
+
+    monkeypatch.setattr(media_store, "read_original_bytes", read_while_starting)
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: not starting)
+
+    during_start = _find_response(vault, ACCOUNT)
+    assert isinstance(during_start, dict), "the reply during start-up carried no warming notice"
+    assert result.path not in _paths(during_start["hits"])
+    assert dataset_values.LANE in during_start["warming"]["components"]
+
+    starting = False
+    assert result.path in _paths(_find(vault, ACCOUNT))
+
+
 def test_an_original_that_no_longer_matches_its_card_is_not_served(vault):
     result = _preserve(vault, "supplier-profile.json", PROFILE)
     assert result.path in _paths(_find(vault, ACCOUNT))
@@ -526,3 +616,76 @@ def test_a_stale_value_terms_index_is_dropped_on_rebuild(vault, tmp_path):
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master")}
     conn.close()
     assert not any(name.startswith("value_terms") for name in tables)
+
+
+def test_a_write_to_another_page_makes_the_next_search_read_no_dataset_card(vault, monkeypatch):
+    # Every write moves the projection key. Reading all of a vault's cards again after each one
+    # cost the first search after a write more than a second on an installed service.
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    first = _preserve(vault, "supplier-profile.json", PROFILE)
+    _preserve(vault, "carrier-profile.json", PROFILE.replace(b"Brightwater", b"Northgate"))  # a card no write touches
+    for scope, paths in (
+        ("vault", vault_module.walk_vault_md(vault)),
+        ("kb", find._walk_md(vault / "Knowledge Base")),
+    ):
+        freshness.seed(vault, scope, ((str(path), freshness.stat_signature(path)) for path in paths))
+    assert first.path in _paths(_find(vault, ACCOUNT))
+    # Count the lane's own card reads: recall admission can also read card pages while the
+    # lexical index is busy, which says nothing about the lane.
+    original_qualify = dataset_values._qualify
+    card_reads = []
+
+    def counted_qualify(vault_root, paths):
+        paths = list(paths)
+        card_reads.extend(paths)
+        return original_qualify(vault_root, paths)
+
+    monkeypatch.setattr(dataset_values, "_qualify", counted_qualify)
+    _note(vault, "Notes/Insights/unrelated.md", "An unrelated insight.", updated="2026-11-23", number=7)
+    freshness.on_files_changed(vault, changed=[vault / "Knowledge Base" / "Notes/Insights/unrelated.md"])
+
+    assert first.path in _paths(_find(vault, ACCOUNT))
+    assert card_reads == [], "a write that touched no card read the cards again"
+
+    # A changed card is read again and drops the value it no longer vouches for.
+    card = vault / first.sidecar_path
+    card.write_text(
+        card.read_text(encoding="utf-8").replace("inspection_status: ready", "inspection_status: invalid_data"),
+        encoding="utf-8",
+    )
+    freshness.on_files_changed(vault, changed=[card])
+    assert first.path not in _paths(_find(vault, ACCOUNT))
+    assert card_reads == [first.sidecar_path]
+
+
+def test_a_card_that_failed_to_read_once_is_found_after_the_next_write(vault, monkeypatch):
+    # A started service can still fail one card read (a sharing violation, a full descriptor
+    # table). The registry never names that card again, because it did not change, so the next
+    # write must still read it, or its dataset stays hidden until the process restarts.
+    from exomem import freshness, reserved_paths
+    from exomem import vault as vault_module
+
+    result = _preserve(vault, "supplier-profile.json", PROFILE)
+    for scope, paths in (
+        ("vault", vault_module.walk_vault_md(vault)),
+        ("kb", find._walk_md(vault / "Knowledge Base")),
+    ):
+        freshness.seed(vault, scope, ((str(path), freshness.stat_signature(path)) for path in paths))
+    monkeypatch.setattr(reserved_paths, "identity_catalogue_ready", lambda vault_root: True)
+    original_resolve = find._resolve_page
+    failing = True
+
+    def fails_during_one_search(vault_root, rel, *args, **options):
+        if failing and rel == result.sidecar_path:
+            return None
+        return original_resolve(vault_root, rel, *args, **options)
+
+    monkeypatch.setattr(find, "_resolve_page", fails_during_one_search)
+    assert result.path not in _paths(_find(vault, ACCOUNT))
+    failing = False
+
+    _note(vault, "Notes/Insights/unrelated.md", "An unrelated insight.", updated="2026-11-23", number=8)
+    freshness.on_files_changed(vault, changed=[vault / "Knowledge Base" / "Notes/Insights/unrelated.md"])
+    assert result.path in _paths(_find(vault, ACCOUNT))

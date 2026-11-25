@@ -1,13 +1,13 @@
 {
   "name": "exomem",
-  "description": "Governed long-term memory over a markdown vault: raw sources stay immutable, conclusions are compiled with provenance, and nothing is deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at your vault; run `exomem setup` if you do not have one yet.",
-  "version": "0.193.0",
+  "description": "Evermatter (formerly Exomem): governed long-term memory over a markdown vault. Raw sources stay immutable, conclusions are compiled with provenance, and nothing is deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at your vault; run `evermatter setup` if you do not have one yet.",
+  "version": "0.204.0",
   "author": {
     "name": "Substrate Systems O\u00dc",
     "url": "https://substratesystems.io"
   },
-  "homepage": "https://substratesystems.io/exomem",
-  "repository": "https://github.com/Artexis10/exomem",
+  "homepage": "https://evermatter.ai",
+  "repository": "https://github.com/substrate-systems/evermatter",
   "license": "Apache-2.0",
   "keywords": [
     "memory",
@@ -21,8 +21,8 @@
   "userConfig": {
     "mcp_url": {
       "type": "string",
-      "title": "Exomem MCP URL",
-      "description": "Optional full Exomem MCP service URL ending in /mcp. Leave blank and run `exomem setup` to configure a native client route.",
+      "title": "Evermatter MCP URL",
+      "description": "Optional full Evermatter MCP service URL ending in /mcp. Leave blank and run `exomem setup` to configure a native client route.",
       "default": "",
       "required": false
     }

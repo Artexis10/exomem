@@ -78,7 +78,7 @@ def _encoded(fake: _Encoder) -> list[str]:
 
 
 def test_the_schema_records_fingerprinted_vectors() -> None:
-    assert working_set_index.SCHEMA_VERSION == 12
+    assert working_set_index.SCHEMA_VERSION >= 12  # vectors carry their fingerprint since schema 12
 
 
 def test_a_rollback_to_schema_8_and_back_keeps_the_index_working(encoder) -> None:

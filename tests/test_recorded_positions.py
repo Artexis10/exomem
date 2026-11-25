@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,15 @@ from test_working_set_withheld_twins import _withhold
 from exomem import (
     activation_conventions,
     commands,
+    context_task,
+    epistemic_graph,
     lexstore,
     positions,
+    request_budget,
     semantic_language_registry,
     served_context,
     working_set,
+    working_set_index,
 )
 from exomem._hooks import exomem_retrieve_nudge as hook
 from exomem.governance import egress, principal
@@ -266,6 +271,226 @@ def test_a_turn_without_leads_reports_an_empty_block_not_an_unavailable_one(
     assert record["positions"] == {"state": "empty", "refs": [], "overflow_refs": []}
 
 
+def _starve(monkeypatch: pytest.MonkeyPatch, stage: str) -> None:
+    """The request deadline arrives at `stage` of task discovery, and at no other stage."""
+    real = working_set.budget_exhausted
+
+    def exhausted(name: str, **kwargs) -> bool:
+        if name == stage:
+            request_budget.current().note_skipped(name)
+            return True
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(working_set, "budget_exhausted", exhausted)
+
+
+def test_a_turn_whose_task_discovery_ran_out_of_time_reports_the_block_unavailable_not_empty(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On the installed service a recall spent its request budget before task discovery ran, so the block had no
+    pages to read and said `empty`: the agent read "no recorded position" where none had been looked for."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    _starve(monkeypatch, "working_set.task_context")
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        packet = _activate(vault, turn=TURN, max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+
+    assert packet["task_context"]["candidates"] == []
+    assert packet["positions"] == {"state": "unavailable", "items": [], "overflow_refs": [], "omitted": 0, "reason": "budget"}
+
+
+def test_a_turn_whose_task_discovery_stopped_early_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline cut the leads' links, so the linked page that holds the position was never read; the block
+    said `empty`, as if the pages the turn reaches held no position."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    _starve(monkeypatch, "working_set.task_context_links")
+
+    token = request_budget.set_current(request_budget.RequestBudget(seconds=50))
+    try:
+        packet = _activate(vault, turn=TURN, max_chars=8000)
+    finally:
+        request_budget.reset_current(token)
+
+    # Other leads were served, so the block read some pages: what it found is partial, not none.
+    assert packet["task_context"]["candidates"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "budget"}
+
+
+def test_a_turn_whose_link_lookup_failed_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The connection graph was unavailable, so the linked page that holds the position was never read; the task
+    context said `lane_failed` and the block still read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("graph unavailable")
+
+    monkeypatch.setattr(working_set, "read_connections", unavailable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_link_reasons_could_not_be_read_reports_the_positions_it_read_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph listed the link, but its reason could not be read, so the link and the linked page that holds the
+    position were dropped after discovery; the block still read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    read_connections = working_set.read_connections
+
+    def unreadable() -> str:
+        raise egress.ReaderViewUnavailable("reader view unavailable")
+
+    def with_unreadable_reasons(*args, **kwargs):
+        return {
+            seed: (tuple(replace(connection, build_why=unreadable) for connection in listed), omitted)
+            for seed, (listed, omitted) in read_connections(*args, **kwargs).items()
+        }
+
+    monkeypatch.setattr(working_set, "read_connections", with_unreadable_reasons)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_collection_routing_could_not_be_read_reports_its_positions_as_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable manifest index read as "no collection to route to", so a lead only routing finds was missing
+    and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def unreadable(*args, **kwargs):
+        raise OSError("manifest index unreadable")
+
+    monkeypatch.setattr(working_set_index, "records_manifests", unreadable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"]["state"] == "partial" and packet["positions"]["reason"] == "lane_failed"
+    # The lanes that still ran served the lead and its link, so the position they reach is served.
+    assert [item["ref"].rpartition("/")[2] for item in packet["positions"]["items"]] == ["studio-equipment-log.md#slow-cool"]
+
+
+def test_a_turn_whose_lead_could_not_be_projected_reports_its_positions_as_not_the_whole(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A discovered lead whose source could not be projected was dropped with its links, so the linked page that
+    holds the position was never read; the task context said `lane_failed` and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    lead, _long_page = _lead_linking_to_a_long_page(
+        vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n",
+    )
+    _ready(vault)
+    project_source = context_task.project_source
+
+    def unprojectable_lead(root, source_ref, caller, **kwargs):
+        return None if source_ref == lead else project_source(root, source_ref, caller, **kwargs)
+
+    monkeypatch.setattr(context_task, "project_source", unprojectable_lead)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    # Other leads were served, so the block read some pages: what it found is partial, not none.
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_graph_snapshot_was_refused_after_the_availability_check_reports_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph reported itself available, then refused the snapshot the link lookup opened, and the lookup read
+    that as "no edges": the linked page that holds the position was never read and the block read as complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+    # The availability check passed; every snapshot opened after it is refused.
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "available", lambda self: True)
+    monkeypatch.setattr(epistemic_graph.EpistemicGraphIndex, "_open_read_snapshot", lambda self, *args, **kwargs: None)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_turn_whose_graph_could_not_interpret_an_authoring_page_reports_partial(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The graph dropped an edge whose authoring page's selected interpretation it could not read, and the lookup
+    read that as "no such link": the linked page that holds the position was never read and the block read as
+    complete."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    def uninterpretable(self, stored):
+        # As a missing summary or a parser-version mismatch does: the page is marked unavailable and its edge dropped.
+        self.parents.unavailable.add(str(stored.get("source_path") or "authoring-page.md"))
+        return None
+
+    monkeypatch.setattr(epistemic_graph.GraphView, "edge", uninterpretable)
+
+    packet = _activate(vault, turn=TURN, max_chars=8000)
+
+    assert {"role": "task_context", "reason": "lane_failed"} in packet["task_context"]["missing"]
+    assert packet["positions"] == {"state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "lane_failed"}
+
+
+def test_a_dense_reading_over_a_matrix_that_lags_a_visible_rewrite_reports_the_lane_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A managed matrix lagging a rewrite drops the rewritten page's rows and still said `ready`, so discovery read
+    as complete while the page the person had just rewritten went unread by meaning."""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from exomem import embeddings, readiness
+
+    resident = SimpleNamespace(
+        matrix=np.eye(2, dtype=np.float32), metadata=[("fresh.md", 0), ("rewritten.md", 0)],
+        stale_paths=frozenset({"rewritten.md"}),
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(readiness, "runtime_managed", lambda: False)
+    monkeypatch.setattr(readiness, "should_defer", lambda _name: False)
+    monkeypatch.setattr(embeddings, "activation_fingerprint", lambda: "encoder")
+    monkeypatch.setattr(embeddings, "embed_activation_query_if_loaded", lambda _text: [1.0, 0.0])
+    monkeypatch.setattr(embeddings, "peek_embedding_index", lambda _root: SimpleNamespace(
+        identity=SimpleNamespace(fingerprint="encoder"), resident_matrix=lambda: resident,
+    ))
+
+    _hits, lagging = working_set._resident_vector_paths(tmp_path, "kiln schedule", {"fresh.md", "rewritten.md"}, 5)
+    _hits, unaffected = working_set._resident_vector_paths(tmp_path, "kiln schedule", {"fresh.md"}, 5)
+
+    assert lagging == "lane_failed"
+    # A stale page the caller may not see leaves the caller's reading whole.
+    assert unaffected == "ready"
+
+
 def test_a_position_on_a_superseded_page_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A page its author retired for a newer one was served as a ready position, presenting a withdrawn view as current."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
@@ -309,8 +534,34 @@ def test_a_long_position_is_served_whole_beside_a_short_one_within_the_shipped_b
     assert block["overflow_refs"] == []
 
 
-def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A guest whose ceiling serves a page as a 600-character excerpt was handed a 1,792-character unit of it whole."""
+def _reach_page_as_a_served_leads_link_would(monkeypatch: pytest.MonkeyPatch, page: str, after_compile=None) -> None:
+    """This fixture's guest task context serves no leads, so `page` joins the reach as a served lead's link would.
+
+    `after_compile` runs once the block is compiled and before terminal egress decides it.
+    """
+    compile_block = positions.compile_block
+
+    def compile_with_page(root, caller, *, reach, **kwargs):
+        block = compile_block(root, caller, reach={*reach, page}, **kwargs)
+        if after_compile is not None:
+            after_compile()
+        return block
+
+    monkeypatch.setattr(positions, "compile_block", compile_with_page)
+
+
+def _eight_short_positions() -> tuple[list[str], str]:
+    """Eight dated positions of about 97 characters each: any one fits a 600-character excerpt, all eight do not."""
+    views = [f"I prefer cone {cone} for the stoneware body, view number {cone}, a fairly short line of text here to count" for cone in range(6, 14)]
+    body = "".join(f"- [preference] {view} (2026-03-0{day}) ^cone-{day + 5}\n\n" for day, view in enumerate(views, start=1))
+    return views, body
+
+
+def test_a_caller_served_page_excerpts_gets_a_long_position_counted_not_named(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A guest whose ceiling serves a page as a 600-character excerpt was handed a 1,792-character unit of it whole.
+
+    Its unit refs are dead ends: that caller reads a page's excerpt, never one of its units, so a left-out unit is counted.
+    """
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     long_view = (
         "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. "
@@ -323,12 +574,7 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path
     )
     _withhold(vault, excerpted, ceiling=egress.LEVEL_EXCERPT)
     _ready(vault)
-    # This fixture's guest task context serves no leads, so the page joins the reach as a served lead's link would.
-    compile_block = positions.compile_block
-    monkeypatch.setattr(
-        positions, "compile_block",
-        lambda root, caller, *, reach, **kwargs: compile_block(root, caller, reach={*reach, excerpted}, **kwargs),
-    )
+    _reach_page_as_a_served_leads_link_would(monkeypatch, excerpted)
 
     owner = _activate(vault, turn=TURN, max_chars=8000)["positions"]
     guest = _activate(vault, _external(), turn=TURN, max_chars=8000)["positions"]
@@ -336,11 +582,102 @@ def test_a_caller_served_page_excerpts_gets_a_long_position_as_a_ref(vault: Path
     assert len(long_view) > 1_500 > egress.PAGE_EXCERPT_MAX
     assert sorted(item["text"] for item in owner["items"]) == sorted([long_view, short_view])
     assert [item["text"] for item in guest["items"]] == [short_view]
-    assert [ref.rpartition("/")[2] for ref in guest["overflow_refs"]] == ["studio-equipment-log.md#crazing"]
+    assert guest["overflow_refs"] == []
+    assert guest["omitted"] == 1
+    assert positions.overflow_line([], 1) in hook._format_positions_block(guest).splitlines()
 
 
-def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Real-model replays used the block when it was read last with its framing first, and mostly ignored it mid-packet."""
+def test_several_short_positions_on_an_excerpted_page_share_its_excerpt_bound(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each of eight 97-character positions fit the 600-character excerpt bound alone; together they handed the guest 776 characters of the page."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    views, body = _eight_short_positions()
+    _lead, excerpted = _lead_linking_to_a_long_page(vault, body)
+    _withhold(vault, excerpted, ceiling=egress.LEVEL_EXCERPT)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, excerpted)
+
+    owner = _activate(vault, turn=TURN, max_chars=8000)["positions"]
+    guest = _activate(vault, _external(), turn=TURN, max_chars=8000)["positions"]
+
+    assert sum(len(view) for view in views) > egress.PAGE_EXCERPT_MAX
+    assert len(owner["items"]) == len(views)
+    served = sum(len(item["text"]) for item in guest["items"])
+    assert 0 < served <= egress.PAGE_EXCERPT_MAX
+    assert len(guest["items"]) + guest["omitted"] == len(views)
+    assert guest["overflow_refs"] == []
+
+
+def test_a_page_the_caller_may_read_no_text_of_lists_no_unit_line_or_ref(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit on a page with a text bound of 0 was named by ref, a ref to a page whose text the caller may not read.
+
+    Admission already withholds a page below the release floor, so a bound of 0 reaches the compile only when the two
+    decisions part, as they can when a policy changes between them. The compile's own read of the bounds says 0 here.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. " * 40
+    _lead, page = _lead_linking_to_a_long_page(
+        vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n\n- [preference] I prefer cone 6 (2026-03-01) ^cone-six\n",
+    )
+    _withhold(vault, page, ceiling=egress.LEVEL_FULL)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page)
+    page_text_bounds, reads = egress.page_text_bounds, []
+
+    def bounds(root, paths, **kwargs):
+        reads.append(1)
+        return dict.fromkeys(paths, 0) if len(reads) == 1 else page_text_bounds(root, paths, **kwargs)
+
+    monkeypatch.setattr(egress, "page_text_bounds", bounds)
+
+    guest = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert reads
+    # The guest's task discovery does not run in this fixture, so the one page read is only part of the reach.
+    assert guest["task_context"]["state"] == "unavailable"
+    assert guest["positions"] == {
+        "state": "partial", "items": [], "overflow_refs": [], "omitted": 0, "reason": "task_context_unavailable",
+    }
+
+
+def test_a_policy_that_tightens_before_terminal_egress_does_not_serve_more_than_the_new_excerpt_bound(
+    vault: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The block was compiled for a guest released the whole page, then the page's ceiling dropped to an excerpt."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    views, body = _eight_short_positions()
+    _lead, page = _lead_linking_to_a_long_page(vault, body)
+    _withhold(vault, page, ceiling=egress.LEVEL_FULL)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page, after_compile=lambda: _withhold(vault, page, ceiling=egress.LEVEL_EXCERPT))
+
+    packet = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert packet["positions"]["state"] == "unavailable"
+    assert packet["positions"]["items"] == []
+    assert all(view not in json.dumps(packet) for view in views)
+
+
+def test_a_count_of_units_left_out_of_a_page_the_policy_then_withholds_is_not_served(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A unit counted but not named has no served line, so the terminal recheck skipped its page and `omitted: 1` still said it existed.
+
+    The one position here is longer than the guest's 600-character excerpt bound; the page's ceiling then drops to none.
+    """
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    long_view = "I attribute the crazing on the spring batch to the faster cool, not to the glaze recipe. " * 12
+    _lead, page = _lead_linking_to_a_long_page(vault, f"- [preference] {long_view} (2026-03-02) ^crazing\n")
+    _withhold(vault, page, ceiling=egress.LEVEL_EXCERPT)
+    _ready(vault)
+    _reach_page_as_a_served_leads_link_would(monkeypatch, page, after_compile=lambda: _withhold(vault, page, ceiling=0))
+
+    packet = _activate(vault, _external(), turn=TURN, max_chars=8000)
+
+    assert len(long_view) > egress.PAGE_EXCERPT_MAX
+    assert packet["positions"]["state"] == "unavailable"
+    assert packet["positions"]["omitted"] == 0
+
+
+def test_the_positions_block_leads_the_maps_response_and_opens_with_its_framing(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A later refactor that puts the block back at the end or mid-packet loses the first-answer effect measured in replays."""
     monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
     _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
     _ready(vault)
@@ -348,8 +685,32 @@ def test_the_positions_block_ends_the_maps_response_and_opens_with_its_framing(v
     packet = _activate(vault, turn=TURN, max_chars=8000)
 
     assert "served_context_id" in packet
-    assert list(packet)[-1] == "positions"
+    assert list(packet)[0] == "positions"
     assert list(packet["positions"]) == ["about", "state", "items", "overflow_refs", "omitted"]
+    # The packet's reported size is still the size of what is sent once the block has moved.
+    sent = json.dumps(
+        {**packet, "budget": {key: value for key, value in packet["budget"].items() if key != "serialized_chars"}},
+        ensure_ascii=False, separators=(",", ":"),
+    )
+    assert packet["budget"]["serialized_chars"] == len(sent)
+
+
+def test_the_block_that_is_served_asks_for_the_position_first_and_never_for_agreement(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reverting the framing to the older passage still equals `positions.ABOUT`, so the served words are checked for the contract."""
+    monkeypatch.setenv("EXOMEM_ACTIVATION_PACKET", "maps")
+    _lead_linking_to_a_long_page(vault, "- [preference] I prefer a slow cool below 600 degrees for celadon (2026-03-02) ^slow-cool\n")
+    _ready(vault)
+
+    about = _activate(vault, turn=TURN, max_chars=8000)["positions"]["about"]
+
+    assert about == positions.ABOUT
+    assert "open your first answer with it" in about
+    assert "state the recorded position before you answer yes or no" in about
+    # Replies softened a plain contradiction into "weakens" and kept the position alive; the passage must ask for the contradiction.
+    assert "whether it supports the position, leaves it open or contradicts it" in about
+    assert "When it contradicts the position, say that it does" in about
+    assert "do not keep the position alive with a possibility the evidence gives no reason for" in about
+    assert "agree" not in about.lower()
 
 
 def test_a_vault_category_that_declares_the_trait_is_selected(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -485,3 +846,46 @@ def test_the_hook_renders_every_served_position_whole_under_its_framing() -> Non
     assert all(positions.item_line(item) in lines for item in block["items"])
     assert positions.overflow_line(block["overflow_refs"], block["omitted"]) in lines
     assert hook._POSITIONS_MAX_CHARS == activation_conventions.BUDGET_BOUNDS["positions_max_chars"][1]
+
+
+def test_the_hook_renders_the_positions_before_the_map_and_the_task_leads() -> None:
+    """The service leads its response with the block; a hook that renders it after the map and the leads buries it again."""
+    packet = {
+        "map": {"generation": "map", "ref": "exomem://map", "items": [{"title": "Kiln log", "ref": "exomem://vault/log.md"}]},
+        "task_context": {
+            "state": "ready", "methods": {"reset": False, "items": []},
+            "candidates": [{"ref": "exomem://vault/log.md", "source_ref": "exomem://vault/log.md", "title": "Kiln log", "reason": "Named.", "read_ref": "exomem://vault/log.md"}],
+        },
+        "positions": {
+            "state": "ready", "about": positions.ABOUT, "overflow_refs": [], "omitted": 0,
+            "items": [{"ref": "exomem://vault/log.md#first", "text": "I prefer a slow cool below 600 degrees", "title": "Kiln log", "date": "2026-03-02"}],
+        },
+    }
+
+    text, *_ = hook._format_map_with_slice(packet, 4000, "")
+
+    lines = text.splitlines()
+    leading = next(index for index, line in enumerate(lines) if line.startswith("- positions:"))
+    assert leading < next(index for index, line in enumerate(lines) if line.startswith("- map:"))
+    assert leading < next(index for index, line in enumerate(lines) if line.startswith("- task lead:"))
+
+
+def test_the_hook_says_when_the_positions_block_is_not_the_whole() -> None:
+    """The hook dropped an unavailable block and a partial one without items, so a hook-fed agent read a position the
+    service never read as none: the same text as a turn with no recorded position."""
+    unread = {"state": "unavailable", "reason": "budget", "items": [], "overflow_refs": [], "omitted": 0}
+    part = {
+        "state": "partial", "reason": "lane_failed", "about": positions.ABOUT, "overflow_refs": [], "omitted": 0,
+        "items": [{"ref": "exomem://vault/log.md#first", "text": "I prefer a slow cool below 600 degrees", "title": "Kiln log", "date": "2026-03-02"}],
+    }
+    none = {"state": "empty", "items": [], "overflow_refs": [], "omitted": 0}
+
+    assert hook._format_positions_block(unread) == (
+        "- positions unavailable (budget): a recorded position may exist that is not shown; search before you treat one as absent"
+    )
+    assert hook._format_positions_block(part).splitlines() == [
+        f"- positions: {positions.ABOUT}",
+        positions.item_line(part["items"][0]),
+        "- positions partial (lane_failed): a recorded position may exist that is not shown; search before you treat one as absent",
+    ]
+    assert hook._format_positions_block(none) == ""

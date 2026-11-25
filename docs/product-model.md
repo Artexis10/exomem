@@ -1,19 +1,19 @@
 <!-- authority:non-specification -->
 
-# Exomem product model
+# Evermatter product model
 
-Exomem is durable memory with sources, proof, history, and review for MCP-capable agents.
+Evermatter is durable memory with sources, proof, history, and review for MCP-capable agents.
 
-Built-in AI memory and Exomem should be complementary:
+Built-in AI memory and Evermatter should be complementary:
 
 | Layer | Use it for | Do not use it for |
 | --- | --- | --- |
 | Built-in AI memory | Preferences, working rules, tone, routing instructions, small stable facts about how to help the user | Project history, research conclusions, legal/warranty records, source material, proof, supersession history |
-| Exomem | Durable governed knowledge: sources, proof/evidence, decisions, records, compiled conclusions, review queues, and history | Ephemeral chat state or private assistant implementation preferences |
+| Evermatter | Durable governed knowledge: sources, proof/evidence, decisions, records, compiled conclusions, review queues, and history | Ephemeral chat state or private assistant implementation preferences |
 
 ## Simple actions
 
-Users and agents should think in verbs first. Exomem's internal page types still enforce governance, but normal prompts should not require the user to choose them.
+Users and agents should think in verbs first. Evermatter's internal page types still enforce governance, but normal prompts should not require the user to choose them.
 
 | User action | What it means | Backed by |
 | --- | --- | --- |
@@ -43,14 +43,14 @@ make a user choose.
 | Imported | Adoption and migration staging, never the permanent home of live user-owned state. |
 
 Planning and Records have distinct semantic profiles but share the structured
-collection substrate. Exomem Planning owns durable intent and prioritisation.
+collection substrate. Evermatter Planning owns durable intent and prioritisation.
 Planning is standalone by default and may coordinate with a user-authored
 workflow contract that declares companion ownership. Companion references remain
 opaque and do not establish tool availability or external truth. Planning may
 point to Records as observed evidence, but neither layer mirrors the other or
 infers progress, completion, medical conclusions, or personal judgment.
 
-See [Records](records.md) for the manual-first collection contract.
+See [Records](records.md) for the collection contract.
 
 ### Source classification is metadata; the folder is a projection
 
@@ -71,7 +71,7 @@ without a kind is refused with the vault's known kinds and their counts. A
 capture with no agent in the loop (the terminal UI, the hosted capture box, the
 upload form, a legacy-vault import) is recorded as `unclassified`, and later
 captures carry an advisory `source_classification_debt` suggestion that counts
-those sources and the legacy `Sources/Other/` pages. Exomem never classifies or
+those sources and the legacy `Sources/Other/` pages. Evermatter never classifies or
 moves anything on its own: the agent reads each source, chooses its kind, and
 reclassifies it. Until then every such source stays valid, readable, and
 retrievable exactly where it is.
@@ -89,7 +89,7 @@ Claim/finding/evidence-level edges remain semantic-block metadata. See
 
 ## Existing vaults
 
-An existing vault is not a migration problem by default. Exomem treats non-KB folders as read-only input and creates a governed `Knowledge Base/` layer beside them.
+An existing vault is not a migration problem by default. Evermatter treats non-KB folders as read-only input and creates a governed `Knowledge Base/` layer beside them.
 
 The adoption modes are explicit:
 
@@ -121,4 +121,4 @@ Evidence is proof-bound. A receipt saved for a warranty case, a legal letter, an
 
 ## Compared with note graph tools
 
-A searchable graph of Markdown notes is useful, but it is not the whole product. Exomem adds governed writes, source-to-note provenance, evidence/proof handling, explicit supersession, review queues, multimodal extraction, and one command registry that exposes the same behavior through MCP, CLI, REST, and OpenAPI.
+A searchable graph of Markdown notes is useful, but it is not the whole product. Evermatter adds governed writes, source-to-note provenance, evidence/proof handling, explicit supersession, review queues, multimodal extraction, and one command registry that exposes the same behavior through MCP, CLI, REST, and OpenAPI.

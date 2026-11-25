@@ -5,12 +5,13 @@ to a phrase that find's lexical presence check must find in its extracted text.
 The Cloud image build (`Dockerfile`, stage `cloud`) and
 `scripts/check-media-samples.py` read it.
 
-The script needs the document libraries, Pillow, pillow-heif, pidng, python-docx and a CJK font. Run it
-in a throwaway container, not on the host:
+The script needs the document libraries, Pillow, pidng, python-docx, reportlab and a CJK font. Run it
+in a throwaway container, not on the host. It does not write `ocr-eng.heic`: that file is a committed
+binary, because the product's HEIF reader (pi-heif) decodes only and no encoder is installed here.
 
     docker run --rm -v "$PWD:/w" -w /w python:3.12-slim sh -c \
       "apt-get update && apt-get install -y fonts-noto-cjk fonts-dejavu-core && \
-       pip install pillow pillow-heif==1.8.1 pidng pymupdf python-docx openpyxl python-pptx odfdo && \
+       pip install pillow pidng reportlab python-docx openpyxl python-pptx odfdo && \
        python scripts/make-media-samples.py tests/fixtures/media-samples"
 """
 
@@ -98,16 +99,6 @@ def _png(path: Path, lines: list[str], *, font: str, vertical: bool = False) -> 
     image.save(path, optimize=True)
 
 
-def _heic(source: Path, target: Path) -> None:
-    from PIL import Image
-    from pillow_heif import from_pillow
-
-    with Image.open(source) as image:
-        from_pillow(image.convert("RGB")).save(
-            target, quality=90, enc_params={"x265:pools": "1", "x265:frame-threads": "1"}
-        )
-
-
 def _dng(source: Path, target: Path) -> None:
     """A camera raw of `source` as a phone shot in portrait records it.
 
@@ -141,7 +132,7 @@ def _dng(source: Path, target: Path) -> None:
         (Tag.ColorMatrix1, [[1, 1], [0, 1], [0, 1], [0, 1], [1, 1], [0, 1], [0, 1], [0, 1], [1, 1]]),
         (Tag.CalibrationIlluminant1, CalibrationIlluminant.D65),
         (Tag.AsShotNeutral, [[1, 1], [1, 1], [1, 1]]), (Tag.BaselineExposure, [[0, 1]]),
-        (Tag.Make, "Exomem"), (Tag.Model, "Synthetic sample"),
+        (Tag.Make, "Evermatter"), (Tag.Model, "Synthetic sample"),
         (Tag.DNGVersion, DNGVersion.V1_4), (Tag.DNGBackwardVersion, DNGVersion.V1_2),
     ):
         tags.set(tag, value)
@@ -182,14 +173,14 @@ def main(out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     import docx
-    import fitz
     import openpyxl
     import pptx
     from odfdo import Cell, Document, DrawPage, Frame, Header, Paragraph, Row, Table
+    from reportlab.pdfgen import canvas
 
-    pdf = fitz.open()
-    pdf.new_page().insert_text((72, 72), f"Notes for the {PHRASES['sample.pdf']}.")
-    pdf.save(out / "sample.pdf")
+    pdf = canvas.Canvas(str(out / "sample.pdf"))
+    pdf.drawString(72, 720, f"Notes for the {PHRASES['sample.pdf']}.")
+    pdf.save()
 
     word = docx.Document()
     word.add_heading("Field notes", level=1)
@@ -254,7 +245,6 @@ def main(out: Path) -> None:
     )
 
     _png(out / "ocr-eng.png", OCR_LINES["ocr-eng.png"], font=LATIN_FONT)
-    _heic(out / "ocr-eng.png", out / "ocr-eng.heic")
     _dng(out / "ocr-eng.png", out / "ocr-eng.dng")
     _png(out / "ocr-est.png", OCR_LINES["ocr-est.png"], font=LATIN_FONT)
     _png(out / "ocr-jpn.png", OCR_LINES["ocr-jpn.png"], font=CJK_FONT)

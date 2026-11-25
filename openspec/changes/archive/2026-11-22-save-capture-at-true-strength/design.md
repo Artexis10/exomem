@@ -1,0 +1,31 @@
+## Context
+
+The hook renders the activation `capture_policy` block as `say` only, and cuts it to its first sentence above 1,600 characters. Every hook revision since the block began reads only `say`. The longest rendering, at `silent` with `confirm-shortcut`, is 1,587 characters including the header, and the populated bootstrap core has 24 to 59 bytes of headroom at `maximal`.
+
+MCP-only clients receive the block as raw JSON with no cap.
+
+## Decisions
+
+### One principle, not two lists
+
+The old text named material that stays quiet ("tentative events", "unresolved questions"). Agents read each list as a general rule and saved nothing unsettled. A real-model probe also saw an excluded class echoed into a write as a disclaimer that kept the excluded detail. The new rule states what to do with a claim, at its true strength, and gives one reason to write nothing: nothing later needs it. The rule names no excluded material, and it scopes the silence to writes.
+
+### The full rule rides its own key
+
+`rules` is a new key, not a longer `say`. A longer `say` would pass the hook's cap and silence every capture rule. A hook installed before `rules` existed ignores a new key and renders `say`, so `say` keeps `_EPISTEMIC_CAPTURE`, which is a one-sentence form of the rule. The hook that knows `rules` renders it after `say` under `_CAPTURE_RULES_MAX_CHARS`, a budget 25% above the measured text. A longer `rules` is omitted whole. The hook never cuts `say` to make room.
+
+The bootstrap core stays at its byte ceiling and carries no new text. The baseline tail loses "tentative events", which frees 19 bytes. The first sentence of that text already requires stability or recurrence and reuse value, which keeps a tentative claim from becoming a baseline.
+
+### Tentative stays out of the baseline, and in the notes
+
+A tentative claim fails the baseline test, so it gets no facet and no affiliation. When later work could use it, the agent saves it as one compiled observation that states it is unconfirmed. This reverses the earlier rule that an unsure report of an event stays unwritten unless a collection has a note field. A tentative claim is still never written as an event that happened.
+
+### The rules take no map room
+
+The stance, skills and positions blocks have their own bounds, so they neither reduce `max_chars` nor count in `budget.used_chars`. `rules` follows them. The server counts and reserves the block without `rules`, so the first request of a session keeps the map it had and the smallest `max_chars` that receives the block does not move. `budget.serialized_chars` still counts `rules`, because it names what is sent. The hook subtracts `say` from its working-set ceiling and renders `rules` on top, so the charged working set plus `rules` is at most the working-set ceiling plus 1 (the separator) plus the rules allowance, `_CAPTURE_RULES_MAX_CHARS`. The positions, stance, skills and profile blocks render beside them under their own bounds.
+
+## Risks
+
+- A model may read "true strength" as licence to save every uncertain remark. The trivia clause and the reuse test limit it. The real-model run covers a trivia control.
+- Session recaps name incidental material more often: 4 of 16 control runs, against 1 of 16 on the base text. A recap line such as "answered a brief question about an aside" is accurate, and no note is written about the aside. The next capture change keeps incidental material out of recaps too.
+- The core headroom stays small. The change adds no core text.

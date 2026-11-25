@@ -372,7 +372,7 @@ exomem_start_service() {
 exomem_assert_service_stopped() {
     local captured_pids="$1" ports="$2" service_id="${3:-}" pid port
     exomem_service_is_stopped "$service_id" || {
-        echo "service manager does not prove Exomem stopped; offline migration refused." >&2
+        echo "service manager does not prove Evermatter stopped; offline migration refused." >&2
         return 1
     }
     [[ -n "$captured_pids" ]] || {
@@ -382,7 +382,7 @@ exomem_assert_service_stopped() {
     while IFS= read -r pid; do
         [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
         if exomem_pid_alive "$pid"; then
-            echo "captured Exomem transition pid $pid is still alive; offline migration refused." >&2
+            echo "captured Evermatter transition pid $pid is still alive; offline migration refused." >&2
             return 1
         fi
     done <<< "$captured_pids"
@@ -409,7 +409,7 @@ exomem_assert_stopped_resume_authority() {
         return 1
     fi
     exomem_service_is_stopped "$service_id" || {
-        echo "service manager does not prove Exomem stopped; stopped-transition recovery refused." >&2
+        echo "service manager does not prove Evermatter stopped; stopped-transition recovery refused." >&2
         return 1
     }
     pids="$(exomem_transition_receipt_field \
@@ -436,11 +436,11 @@ exomem_assert_stopped_resume_authority() {
 exomem_assert_service_restarted() {
     local before="${1:-0}" after="${2:-0}"
     if ! [[ "$after" =~ ^[1-9][0-9]*$ ]] || ! exomem_pid_alive "$after"; then
-        echo "no running Exomem worker pid was observed after start." >&2
+        echo "no running Evermatter worker pid was observed after start." >&2
         return 1
     fi
     if [[ "$before" =~ ^[1-9][0-9]*$ && "$before" == "$after" ]]; then
-        echo "Exomem is still running the captured pre-transition pid $before." >&2
+        echo "Evermatter is still running the captured pre-transition pid $before." >&2
         return 1
     fi
 }
@@ -548,10 +548,23 @@ exomem_service_binding_path() {
     exomem_bind_service_state_root "$1" "$2" "" binding-path
 }
 
+# The release installs under `evermatter` or, for installs made before the
+# rename, `exomem`; the probe reads whichever name the interpreter has.
+# A copy of install_info.DISTRIBUTION_NAMES, temporary: openspec rename-to-evermatter task 4.2 retires it.
 exomem_installed_version() {
     local python="$1"
     [[ -x "$python" ]] || return 1
-    "$python" -c "import importlib.metadata as m; print(m.version('exomem'))" 2>/dev/null
+    "$python" -c "
+import importlib.metadata as m
+for name in ('evermatter', 'exomem'):
+    try:
+        print(m.version(name))
+        break
+    except m.PackageNotFoundError:
+        continue
+else:
+    raise SystemExit(1)
+" 2>/dev/null
 }
 
 # Pull the exomem version out of a `uv pip install` plan read on stdin, or print
@@ -673,12 +686,23 @@ PY
     printf '%s' "$value"
 }
 
-# True when the per-user uv tool registry already owns Exomem.  Looking at the
-# registry, rather than merely `command -v exomem`, avoids taking over an
-# independently managed pip/pipx command in auto mode.
-exomem_uv_tool_has_exomem() {
+# Print the name of the per-user uv tool that owns the CLI, `evermatter` or, for
+# an install made before the rename, `exomem`; fail when there is none.  Looking
+# at the registry, rather than merely `command -v exomem`, avoids taking over an
+# independently managed pip/pipx command in auto mode.  A tool keeps upgrading
+# under its own name: installing the other name beside it would collide on the
+# shared `exomem` and `kb` executables.
+exomem_uv_tool_name() {
     command -v uv >/dev/null 2>&1 || return 1
-    uv tool list 2>/dev/null | grep -Eq '^exomem([[:space:]]|$)'
+    local listing name
+    listing="$(uv tool list 2>/dev/null)" || return 1
+    for name in evermatter exomem; do
+        if grep -Eq "^${name}([[:space:]]|\$)" <<< "$listing"; then
+            printf '%s\n' "$name"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Align the lean user-facing command with the exact release verified from the
@@ -692,8 +716,8 @@ exomem_sync_uv_cli() {
             return 0
             ;;
         auto)
-            if ! exomem_uv_tool_has_exomem; then
-                echo "No existing uv-managed Exomem CLI; auto mode will not install one."
+            if ! exomem_uv_tool_name >/dev/null; then
+                echo "No uv tool named evermatter or exomem is installed; auto mode will not install one."
                 return 0
             fi
             ;;
@@ -711,20 +735,22 @@ exomem_sync_uv_cli() {
         echo "cannot sync the CLI without a verified live service version." >&2
         return 1
     }
-    echo "Aligning lean uv-tool CLI to exomem==$service_version..."
+    local tool
+    tool="$(exomem_uv_tool_name || echo evermatter)"
+    echo "Aligning lean uv-tool CLI to $tool==$service_version..."
     # `--force` also replaces an operator-owned launcher (a regular file, where
     # uv would put a symlink) in uv's bin directory. Keep those and put them back.
     local bin_dir saved name
     bin_dir="$(uv tool dir --bin 2>/dev/null || true)"
     saved="$(mktemp -d)"
-    for name in exomem kb; do
+    for name in evermatter exomem kb; do
         if [[ -n "$bin_dir" && -f "$bin_dir/$name" && ! -L "$bin_dir/$name" ]]; then
             cp -p "$bin_dir/$name" "$saved/$name"
         fi
     done
     local status=0
-    uv tool install --force "exomem==$service_version" --compile-bytecode || status=$?
-    for name in exomem kb; do
+    uv tool install --force "$tool==$service_version" --compile-bytecode || status=$?
+    for name in evermatter exomem kb; do
         if [[ -f "$saved/$name" ]]; then
             rm -f "$bin_dir/$name"
             mv "$saved/$name" "$bin_dir/$name"
@@ -795,28 +821,29 @@ exomem_write_owned_managed_manifest() {
 # shadowed command is a split install waiting to reappear after PATH changes.
 exomem_verify_visible_clis() {
     local expected="$1" python="$2" require_one="${3:-0}"
-    local found=0 command_name executable output actual
-    for command_name in exomem kb; do
+    local found=0 command_name executable output actual tool
+    tool="$(exomem_uv_tool_name || echo evermatter)"
+    for command_name in evermatter exomem kb; do
         while IFS= read -r executable; do
             [[ -n "$executable" ]] || continue
             found=1
             if ! output="$("$executable" --version --json 2>&1)"; then
-                echo "CLI verification failed: $executable does not support --version --json. Repair with: uv tool install --force exomem==$expected" >&2
+                echo "CLI verification failed: $executable does not support --version --json. Repair with: uv tool install --force $tool==$expected" >&2
                 return 1
             fi
             if ! actual="$(printf '%s' "$output" | "$python" -c 'import json,sys; print(json.load(sys.stdin).get("version", ""))')"; then
-                echo "CLI verification failed: $executable returned invalid version JSON. Repair with: uv tool install --force exomem==$expected" >&2
+                echo "CLI verification failed: $executable returned invalid version JSON. Repair with: uv tool install --force $tool==$expected" >&2
                 return 1
             fi
             if [[ "$actual" != "$expected" ]]; then
-                echo "CLI/service split: $executable reports '$actual' while the live service reports '$expected'. Repair with: uv tool install --force exomem==$expected" >&2
+                echo "CLI/service split: $executable reports '$actual' while the live service reports '$expected'. Repair with: uv tool install --force $tool==$expected" >&2
                 return 1
             fi
             echo "Verified $executable -> exomem $actual"
         done < <(type -a -p "$command_name" 2>/dev/null | awk '!seen[$0]++')
     done
     if [[ "$require_one" == 1 && "$found" == 0 ]]; then
-        echo "CLI sync completed but neither exomem nor kb is visible on PATH. Run 'uv tool update-shell', open a new shell, and retry." >&2
+        echo "CLI sync completed but none of evermatter, exomem or kb is visible on PATH. Run 'uv tool update-shell', open a new shell, and retry." >&2
         return 1
     fi
 }

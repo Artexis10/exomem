@@ -2840,8 +2840,8 @@ def test_superseded_replica_cannot_land_staged_write(
     resume = threading.Event()
     original_create_artifact = vault_module._BatchWorkspace.create_artifact
 
-    def pause_after_staging(workspace, name: str, content: bytes):  # noqa: ANN001
-        result = original_create_artifact(workspace, name, content)
+    def pause_after_staging(workspace, name: str, content: bytes, **options):  # noqa: ANN001, ANN003
+        result = original_create_artifact(workspace, name, content, **options)
         if name.startswith("stage-"):
             staged.set()
             assert resume.wait(_HOLD_SECONDS)

@@ -56,6 +56,7 @@ from .vault import (
     normalize_wikilink,
     plan_log_writes,
     read_guarded_text,
+    relative_posix,
     render_wikilink_target,
     resolve_filename_slug,
     sibling_name_variants,
@@ -1076,7 +1077,10 @@ def link(
         project=project,
     )
     top_index = kb / "index.md"
-    if not top_index.is_file():
+    # A store-mode top index is a stored page that may have no file yet, so the store answers first.
+    from .vault_store import read as store_read
+
+    if not store_read.holds_file(vault_root, relative_posix(top_index, vault_root)):
         warnings.append(f"{managed_join('index.md')} missing; skipped Recent activity bump")
     elif connector_boundary.effect_admission(vault_root)(top_index):
         top_text, top_guard = read_guarded_text(vault_root, top_index)

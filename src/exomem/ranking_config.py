@@ -29,6 +29,13 @@ class RankingConfig:
     """
 
     rrf_k: int = 60  # Cormack/Clarke/Buettcher 2009 default; fusion.py
+    # ---- Passage lexical term budget (`passage_terms.term_budget` has the measurement) ----
+    # A fused passage search keeps the rarest `passage_terms_max_units` query units that are
+    # on at most `passage_terms_common_fraction` of the chunks, once the sidecar holds
+    # `passage_terms_common_min_chunks` chunks.
+    passage_terms_max_units: int = 6
+    passage_terms_common_fraction: float = 0.03
+    passage_terms_common_min_chunks: int = 500
     # Note-type role knobs; `note_type_factor` maps each role to one of them.
     compiled_boost: float = 1.15
     source_penalty: float = 0.85
@@ -108,6 +115,11 @@ class RankingConfig:
     clip_semantic_alpha: float = 0.01
     # The working set's own floor: the median and MAD of fewer images are noise.
     clip_semantic_min_population: int = 50
+    # When the caller's filters admit only images and videos, the band is off and the CLIP lane
+    # takes this fusion weight in place of its intent weight: the caller has said the answer is a
+    # picture, so picture match leads and the text lanes vote among the pictures. 5.0 found the most
+    # targets in a dev sweep over 21 photos and 18 screenshots (1, 2, 3, 5, 10 and CLIP order alone).
+    clip_media_restricted_weight: float = 5.0
 
     def note_type_factor(self, role: str | None) -> float:
         """The ranking knob a note-type role takes; no role, or `evidence`, is neutral.

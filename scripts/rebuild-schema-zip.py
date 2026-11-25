@@ -31,6 +31,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from exomem import package_skills as package_module  # noqa: E402
+from exomem import workflow_skills  # noqa: E402
 
 
 def main() -> int:
@@ -66,7 +67,7 @@ def main() -> int:
         except FileNotFoundError as e:
             print(f"rebuild-schema-zip: {e}", file=sys.stderr)
             return 2
-        built = scratch / "exomem.zip"
+        built = scratch / f"{workflow_skills.CORE_SKILL_NAME}.zip"
         shutil.copyfile(built, zip_path)
     finally:
         shutil.rmtree(scratch)

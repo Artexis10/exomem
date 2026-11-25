@@ -50,7 +50,21 @@ Layout:
 - `scenarios/session-close/answer-keys/<case-id>.json` contains the independent scorer-only object. A missing, null or malformed key refuses scoring.
 - Each key has `reference`, `must_change`, `must_not_change`, `recap` and `new_pages`. The scorer rejects page paths outside the seed. `new_pages: none` still permits the recap Source.
 
+Image turns:
+
+- A turn is a string, or an object `{"text": "...", "images": ["fixtures/label.png"]}`. The loader refuses unknown keys, a missing file, a file that is not a PNG, JPEG, GIF or WebP image, and a path that leaves the case folder.
+- The actor receives each image as a base64 image block ahead of the text. It still runs with `--tools ""`: it has no shell and cannot send file bytes, as in a chat client with no code execution.
+- `scenarios/session-close/fixtures/render_fixtures.py` rebuilds the two invented images (`label.png`, `card.png`) with the standard library only.
+- `c13-proof-attachment` shares a product box label to register a warranty. `c14-card-in-photo` shares a payment card to keep with a receipt. Both replay the incident of 24 Nov 2026, where the agent transcribed a shared photo and never kept the image as Evidence.
+- A key may add `evidence`: `keep` (c13) or `withhold` (c14). The scorer then reads the recorded tool calls, each with the turn that made it, and adds these checks to the run:
+  - `custody_attempted_same_turn` (`keep`): the image turn holds a `save_evidence` call with `files`, or an `upload_files` call with lane `evidence`, a scope and a category. This is the agent's choice, and it decides the case.
+  - `custody_completed_same_turn` (`keep`): that call's reply holds a stored file. An issued handoff is unknown, because the person still has to send the file. It is unknown when every reply says the transport has no HTTP upload session, which this suite's stdio server always says, so the suite cannot show a file actually kept.
+  - `card_not_kept` (`withhold`): the run holds no `save_evidence` or `save_source` call and no Evidence- or Source-lane `upload_files` call.
+- The report adds an `evidence custody` measure. It is not applicable to every other case.
+
 `--client-mode plugin` is the default. It appends the arm's skill and installs its Stop and UserPromptSubmit hooks. Omitting `--hook-turn` keeps those hooks; that flag adds a separate synthetic close ask. `--client-mode tool-only` keeps the same strict real MCP server, stages no plugin hooks, and appends no skill. It requests `disableAllHooks: true` in the supplied settings file. Combining tool-only with `--hook-turn` is rejected before launch.
+
+`--client-mode deferred-skill` stands in for a chat app that shows a third-party server's tools only through tool search and does not show its server instructions. It stages no hooks and allows only the `ToolSearch` and `Skill` built-ins. It sets `ENABLE_TOOL_SEARCH`, copies the arm's scaffold skill into the session's project skills, and starts the arm's server with its instructions removed. The agent sees the skill's description until it loads the skill. A row is an error unless the start event lists the skill and tool search. Hook rules are the same as for tool-only.
 
 The [official hook setting](https://code.claude.com/docs/en/settings-reference#disableallhooks) does not override managed hooks or force-enabled managed plugin hooks. Settings record the requested configuration. A complete connected tool-only trace must report zero observed hook starts and completed invocations. Observed hooks or unavailable observations leave no-hook acceptance unknown; capture and fresh counts remain separate. Raw evidence stays available, and the harness does not retry automatically. Real-model evidence must establish the observed client behavior.
 
@@ -179,3 +193,17 @@ This family measures recall on short follow-up turns: a carried subject ("and th
 - Generate with `run --suite session-close --case-dir benchmarks/import_guidance/scenarios/follow-up`. No case has a `recall_turn`; the last reply is what matters.
 - The scorer's capture judge never reads replies, so `session-score` yields only the deterministic page checks (the session must change no page). Reply quality is judged by the replay batch: run `PYTHONPATH=benchmarks python -m import_guidance.followup_judge_scenarios --case-dir <cases> --out <judge dir>`, then `judge-prepare --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>` and, once the judge returns lines, `judge-import --judgments <file> --stage-c <runs.jsonl> --suite <judge dir>/scenarios --out <judge dir>`.
 - `answer-keys/<id>.json` is the session-close key; `answer-keys/<id>.marks.json` carries the same reference for the judge batch. The criteria F1 to F3 apply to the final reply only.
+
+## Method check
+
+This check shows which of the user's own methods the product serves when the user never names them. The cases are in `scenarios/method-activation/`: a user discusses a technology for a project, approves a trial, reports an outcome, points out a memory failure, or asks to archive a relative's files under her own folder, plus negative twins. A lane that never saw the implementation wrote the 20 cases, their seed vault (`seeds/m00/`) and the keys. Each key adds `methods` (the skill pages the trigger turn should be served), `destination` and `trigger_turn` to the session-close key fields.
+
+The check is model-free except for the method-fit placement under test. It runs no actor.
+
+1. Write a placement file for each arm that selects methods. A local placement names a loopback Ollama endpoint, its model, the model's digest from `/api/tags` and the runtime version from `/api/version`.
+2. Run `PYTHONPATH=benchmarks python -m import_guidance.method_check --arm base=<checkout> --arm local=<checkout>:<placement.json> --cases benchmarks/import_guidance/scenarios/method-activation --out <dir outside every repository>`.
+3. Read `<out>/summary.json`. It gives each arm's exact matches, false selections and misses, and each arm's per-case difference from the first arm with its 95% bootstrap interval.
+
+Each arm seeds its own vault with its own scaffold, starts its own stdio server, and waits until the index stops warming before it asks a case. An arm without a placement shows what the product serves today.
+
+The capture cases for the same brief stay in their own suite, `benchmarks/membench/outcome/incidents/cases/` (suites `structured-capture`, `capture-routing` and `reported-failed-advice`). They seed collections through the product, inject transport faults and check vault state, so they are referenced by suite and case id, never copied here.

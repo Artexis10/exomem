@@ -30,7 +30,7 @@ Effect = Literal["read", "write"]
 #: What a completed write did, in the one word the user-facing summary leads with. This is a closed
 #: contract set, not vault vocabulary: the summary sentence is built from it, and each write
 #: operation declares exactly one (a write that declares none gets no summary).
-OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored"]
+OutcomeVerb = Literal["saved", "updated", "moved", "deleted", "replaced", "discarded", "restored", "retracted"]
 
 #: How the MCP surface publishes a converted command. `public` lists the typed tools and
 #: the two doors of `public_surface`, and `grouped` names the grouped command itself.
@@ -90,6 +90,9 @@ class OperationEntry:
     outcome_verb: OutcomeVerb | None = None
     #: A repeat of this write changes nothing more than its first run did. Reads are idempotent already.
     idempotent: bool = False
+    #: The service may queue this write when the boundary is busy and apply it later (`write_intake`).
+    #: False for a job start and for a protocol step whose reply the caller needs for its next step.
+    queues_when_busy: bool = True
 
     @property
     def kind(self) -> str:
@@ -110,6 +113,12 @@ class OperationEntry:
 
     def matches(self, action: object, arguments: Mapping[str, object]) -> bool:
         return self.action == action and all(item.matches(arguments) for item in self.constraints)
+
+
+#: `(synonym, leaf)` pairs: a second name every rendering accepts for a leaf field, never published.
+#: A typed tool names its paging cursor `more`; a grouped operation names it `continuation`.
+#: It lives here, beside the rows, because a surface can be built before any command registers.
+LEAF_SYNONYMS = (("more", "continuation"),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,10 +162,22 @@ class Rendering:
             raise ValueError("a leaf kind field needs an alias to preserve the discriminator")
         if set(wire) & fields:
             raise ValueError("a field alias collides with another leaf field")
+        if any(synonym in fields for synonym, _ in LEAF_SYNONYMS):
+            raise ValueError("a field synonym collides with a leaf field")
 
-    def leaf_fields(self, fields: Mapping[str, Any]) -> dict[str, Any]:
-        """Translate wire fields without allowing an alias to overwrite a raw leaf field."""
+    def leaf_fields(self, kind: str, fields: Mapping[str, Any]) -> dict[str, Any]:
+        """Translate wire fields without allowing an alias to overwrite a raw leaf field.
+
+        A synonym renames only for an operation whose own fields take the leaf; any other
+        operation keeps the name the caller sent, so its refusal names that field.
+        """
         result = dict(fields)
+        taken = set().union(*(variant.fields for variant in self.variants if variant.kind == kind))
+        for synonym, leaf in LEAF_SYNONYMS:
+            if synonym in result and leaf in taken:
+                if leaf in result:
+                    raise ValueError(f"conflicting fields {synonym!r} and {leaf!r}; send one")
+                result[leaf] = result.pop(synonym)
         for wire, leaf in self.field_aliases:
             if leaf in fields:
                 raise ValueError(f"conflicting raw field {leaf!r}; use alias {wire!r}")
@@ -268,6 +289,13 @@ class CommandOperations:
                 return entry.outcome_verb
         return None
 
+    def queues_when_busy(self, action: object, arguments: Mapping[str, object]) -> bool:
+        """Whether the write that `action` and `arguments` select may be queued; False when none matches."""
+        for entry in self.entries:
+            if entry.effect == "write" and (self.selector is None or entry.matches(action, arguments)):
+                return entry.queues_when_busy
+        return False
+
     def every_field(self) -> frozenset[str]:
         """Every field some operation accepts, which is the grouped command's whole signature."""
         return frozenset().union(*(entry.fields for entry in self.entries))
@@ -320,6 +348,7 @@ def _entry(
     public_kind: str | None = None,
     outcome_verb: OutcomeVerb | None = None,
     idempotent: bool = False,
+    queues_when_busy: bool = True,
 ) -> OperationEntry:
     return OperationEntry(
         action=action,
@@ -332,6 +361,7 @@ def _entry(
         public_kind=public_kind,
         outcome_verb=outcome_verb,
         idempotent=idempotent,
+        queues_when_busy=queues_when_busy,
     )
 
 
@@ -372,10 +402,11 @@ RECORDS = CommandOperations(
             CHANGE_RECORDS,
             "write",
             "Change records",
-            "Change human-owned Records: create a collection, append, update or bulk-upsert "
-            "items, discard a held candidate, revise or rebaseline a manifest, or start or "
-            "cancel an import. `operation.kind` selects the operation. Propose a new collection "
-            "before creating it. Guarded writes need the hashes that the matching read returns. "
+            "Change human-owned Records: create a collection, append, update, retract or "
+            "bulk-upsert items, discard a held candidate, revise or rebaseline a manifest, or "
+            "start or cancel an import. `operation.kind` selects the operation. Under silent capture "
+            "create a minimal collection with `automatic`; otherwise propose it first. Guarded writes "
+            "need the hashes that the matching read returns. "
             "Help: bootstrap(section=\"records_planning\").",
             # Success detail shapes a write's terminal response; a read has no such level.
             tool_arguments=("response_detail",),
@@ -403,7 +434,7 @@ RECORDS = CommandOperations(
             effect="read", constraints=(LiteralConstraint(("import_request", "mode"), "status"),),
         ),
         _entry(
-            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold"),
+            "create", CHANGE_RECORDS, ("manifest_path", "manifest_text", "why", "scaffold", "automatic"),
             ("manifest_path", "manifest_text", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
         # `item` is required only when the caller is not resuming a held candidate,
@@ -412,7 +443,7 @@ RECORDS = CommandOperations(
             "append", CHANGE_RECORDS,
             (
                 "collection", "item", "why", "item_key", "expected_container_hash", "body",
-                "delivery", "held", "hold",
+                "delivery", "held", "hold", "new_collection", "new_fields",
             ),
             ("collection", "why"), effect="write", outcome_verb="saved",  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
@@ -420,11 +451,19 @@ RECORDS = CommandOperations(
             "update", CHANGE_RECORDS,
             (
                 "collection", "item_id", "item_key", "changes", "expected_container_hash",
-                "expected_item_version", "why", "refresh_presentation", "held", "hold",
+                "expected_item_version", "why", "refresh_presentation", "held", "hold", "new_fields",
             ),
             # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
             ("collection", "why"),
             effect="write", destructive=True, outcome_verb="updated",
+        ),
+        # A retraction takes the row out of current state and keeps its history; the page it names stays.
+        _entry(
+            "retract", CHANGE_RECORDS,
+            ("collection", "item_id", "item_key", "expected_container_hash", "expected_item_version", "why"),
+            # `item_id` stands for the key and both guards; the leaf asks for them when it is absent.
+            ("collection", "why"),
+            effect="write", destructive=True, outcome_verb="retracted",
         ),
         _entry(
             "bulk_upsert", CHANGE_RECORDS,
@@ -448,12 +487,12 @@ RECORDS = CommandOperations(
         # A start replaces the values of rows it re-imports; cancelling a job removes nothing.
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", destructive=True, outcome_verb="saved",
+            effect="write", destructive=True, outcome_verb="saved", queues_when_busy=False,
             constraints=(LiteralConstraint(("import_request", "mode"), "start"),),
         ),
         _entry(
             "import", CHANGE_RECORDS, _RECORD_IMPORT_FIELDS, _RECORD_IMPORT_FIELDS,
-            effect="write", outcome_verb="discarded",
+            effect="write", outcome_verb="discarded", queues_when_busy=False,
             constraints=(LiteralConstraint(("import_request", "mode"), "cancel"),),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         ),
     ),
@@ -551,7 +590,7 @@ _TOOL_HELP = {
     "preserve_evidence": ("write", "Preserve evidence", "Preserve original text or attached files as governed Evidence. File attachments stay in top-level files."),
     "read_review": ("read", "Read review", "Read review queues, provenance, drift, backlog or one review item's bounded context. Submit meaning questions through triage_memory."),
     "triage_memory": ("write", "Triage memory", "Save a review decision or submit a meaning question. These writes do not grant mutation authority."),
-    "read_media": ("read", "Read media", "Show stored images or video frames to the model, or inspect media processing status."),
+    "read_media": ("read", "Read media", "Show images, video frames or stored previews, or inspect media processing status."),
     "change_media": ("write", "Change media", "Process, retry, reprocess or replicate media."),
     "read_connections": ("read", "Read connections", "Find links, relations and entity candidates, or inspect a bounded graph neighborhood."),
     "change_connections": ("write", "Change connections", "Create a governed entity or accept a reviewed relation using current fingerprints."),
@@ -582,8 +621,8 @@ def _literal(field: str, value: bool | str | None, omitted: bool = False, *, imp
     return LiteralConstraint(tuple(field.split(".")), value, allow_omitted=omitted, implied=implied)
 
 
-def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb=None, idempotent=False):
-    return (action, tool, fields, required, kind, constraints, destructive, verb, idempotent)
+def _row(action, tool, fields=None, required=(), *, kind=None, constraints=(), destructive=False, verb=None, idempotent=False, queues_when_busy=True):
+    return (action, tool, fields, required, kind, constraints, destructive, verb, idempotent, queues_when_busy)
 
 
 # Fields remain grouped by the leaf job that owns them. Conditional values are closed API
@@ -593,6 +632,7 @@ _REMAINING = {
     "bootstrap": (None, (_row("instructions", "bootstrap"),)),
     "coordination_status": (None, (_row("writer-status", "bootstrap"),)),
     "inspect_captured_sources": (None, (_row("inventory", "read_memory"),)),
+    "inspect_name_drift": (None, (_row("name_drift", "check_memory"),)),
     "inspect_capture_erasure_policy": (None, (_row("erasure_policy", "read_memory"),)),
     "reserve_source_capture": (None, (_row("reserve_capture", "reserve_capture", verb="saved"),)),
     "settle_source_capture": (None, (_row("settle_capture", "settle_capture", verb="updated"),)),
@@ -635,12 +675,13 @@ _REMAINING = {
     "read_media": ("media", (
         _row("video", "read_media", ("path", "max_frames", "start_sec", "end_sec", "max_side"), ("path",)),
         _row("image", "read_media", ("path", "paths", "max_side", "region")),
+        _row("preview", "read_media", ("path",), ("path",)),
     )),
     "process_media": ("operation", (
         _row("status", "read_media", ("path", "paths")),
-        _row("process", "change_media", ("path", "paths", "language", "multilingual"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("process", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("retry", "change_media", ("path", "paths"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("reprocess", "change_media", ("path", "paths", "language", "multilingual", "diarize"), verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
         _row("replicate", "change_media", ("store",), ("store",), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     )),
     "triage_memory": (None, (
@@ -667,6 +708,7 @@ _REMAINING = {
         _row("upkeep", "read_review", ("categories", "limit", "filters")),
         _row("plan-progress", "read_review", ("path", "limit", "filters")),
         _row("write-advisory-result", "read_review", ("ref",), ("ref",)),
+        _row("queued-write", "read_review", ("ref", "limit")),
         _row("procedure_approvals", "read_review", ("limit", "filters")),
         _row(held_operation.LIST_MODE, held_operation.REVIEW_TOOL, ("limit",)),
         _row("vocabulary", "read_review", ("limit", "continuation", "state", "path", "query", "family", "filters"),
@@ -689,11 +731,16 @@ _REMAINING = {
         _row("add", "change_observations", None, ("path", "content", "category"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("update", "change_observations", None, ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("remove", "change_observations", ("path", "unit", "unit_ref", "expected_fingerprint", "expected_hash", "reason"), ("path",), destructive=True, verb="updated"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        # A claim correction previews with validate_only, which reads like `validate`: it lands nothing and never queues.
+        _row("supersede", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), verb="saved"),
+        _row("supersede", "prepare_note", None, ("path",), kind="validate-supersede", constraints=(_literal("validate_only", True, implied=True),)),
+        _row("assess", "change_observations", None, ("path",), constraints=(_literal("validate_only", False, True),), destructive=True, verb="updated"),
+        _row("assess", "prepare_note", None, ("path",), kind="validate-assess", constraints=(_literal("validate_only", True, implied=True),)),
     ), True),
     "manage_memory_file": ("operation", (
         _row("list", "browse_memory", ("path", "recursive", "include_hidden"), kind="files"),
         _row("trash-list", "browse_memory", ("date",)),
-        _row("propose-reclassification", "browse_memory", ("path", "source_kind", "domain", "reason"), ("path",)),
+        _row("propose-reclassification", "browse_memory", ("path", "source_kind", "domain", "reason", "preview_run_id", "cursor"), ("path",)),
         *(_row(action, "change_files", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), constraints=(_literal("validate_only", False, True),), destructive=action == "append", verb="updated" if action == "append" else "saved") for action in ("create", "append")),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         *(_row(action, "browse_memory", ("path", "content", "frontmatter", "overwrite", "allow_curated", "kind", "parents", "validate_only", "draft_id", "draft_hash", "draft_token", "semantic_transition_token", "relation_disposition", "relation_review_hash", "relation_review_reason", "promotion_reason"), ("path",), kind=f"validate-{action}", constraints=(_literal("validate_only", True, implied=True),)) for action in ("create", "append")),
         _row("move", "change_files", ("old_path", "new_path", "update_wikilinks", "allow_curated", "promotion_reason", "validate_only", "preview_digest"), ("old_path", "new_path"), constraints=(_literal("validate_only", False, True),), destructive=True, verb="moved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
@@ -710,14 +757,14 @@ _REMAINING = {
     )),
     "episode_memory": ("action", (
         _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved"),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
+        _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
         _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),
         _row("candidates", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
         _row("coverage", "read_episode", ("episode", "order", "max_leaves", "postcommit")),
-        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
-        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("prepare", "record_episode", ("episode", "candidate", "proposal", "input_revision", "journal_digest", "order", "max_leaves"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("disposition", "record_episode", ("episode", "candidate", "disposition", "reason", "input_revision", "journal_digest"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("resume", "record_episode", ("episode", "candidate", "input_revision", "journal_digest", "order", "max_leaves", "postcommit"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
     ), True),
 }
 
@@ -847,12 +894,14 @@ def _maintenance_rows():
             _row("collections-store", "check_memory", ("cursor",)),
             # The cutover previews here and takes no argument; the owner applies its plan_id with the CLI.
             _row("collections-cutover", "check_memory", ())]
-    for action, field, default, write_extra in (("fix", "dry_run", True, ("rebuild_embeddings",)),
-                                                ("backfill-ids", "dry_run", True, ()),
-                                                ("capture-metadata", "dry_run", True, ()),
-                                                ("convert-originals", "dry_run", True, ()),
-                                                ("reconcile", "dry_run", False, ("rebuild_graph",))):
-        fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit")
+    # The last element is what only the preview of recovery also takes: it names the arguments the write applies.
+    for action, field, default, write_extra, read_extra in (
+            ("fix", "dry_run", True, ("rebuild_embeddings",), ()),
+            ("backfill-ids", "dry_run", True, (), ()),
+            ("capture-metadata", "dry_run", True, ("recover", "originals_root"), ("recover", "originals_root")),
+            ("convert-originals", "dry_run", True, (), ()),
+            ("reconcile", "dry_run", False, ("rebuild_graph",), ())):
+        fields = ("categories", "dry_run", "rebuild_embeddings", "rebuild_graph", "detail", "legacy_sample_limit", *read_extra)
         for value in (True, False, None):
             read = value is True if action == "reconcile" else value is not False
             # A write offers only the flags its mode uses, and names the preview it runs and why;
@@ -882,12 +931,13 @@ def _maintenance_rows():
         "propose-compensation": ("run_id",),
         "apply-compensation": ("run_id", "plan_id", "expected_plan_fingerprint", "why"),
         "revert": ("review_ref", "expected_plan_fingerprint", "why"),
+        "relocate": ("pages", "review_ref", "to_project", "folder", "from_project"),
     }
     if set(fields_by_action) != set(CURATION_ACTIONS):
         raise RuntimeError("curation operation fields drifted from CURATION_ACTIONS")
     for action in CURATION_ACTIONS:
         read = action in READ_ONLY_ACTIONS
-        destructive = not read and action not in {"propose", "propose-compensation"}  # nosemgrep: ep-word-membership -- closed CURATION_ACTIONS names.
+        destructive = not read and action not in {"propose", "propose-compensation", "relocate"}  # nosemgrep: ep-word-membership -- closed CURATION_ACTIONS names.
         rows.append(_row("curation", "check_memory" if read else "repair_memory",
                          ("curation_action", *fields_by_action[action]),
                          kind=f"curation-{action}", constraints=(_literal("curation_action", action, implied=True),),
@@ -915,14 +965,14 @@ def register_operations(command: str, parameters: Iterable[Any] | None = None) -
     available = frozenset(p.name for p in parameters if p.name != selector and p.name != "response_detail")
     signature_required = frozenset(p.name for p in parameters if p.required and p.name != selector)
     entries = []
-    for action, tool, fields, required, kind, constraints, destructive, verb, idempotent in rows:
+    for action, tool, fields, required, kind, constraints, destructive, verb, idempotent, queues_when_busy in rows:
         fields = (available if retain else frozenset(required) | frozenset(item.path[0] for item in constraints)) if fields is None else frozenset(fields)
         # Singletons retain their exact required fields from the original signature.
         required = signature_required if selector is None else frozenset(required)
         effect = _TOOL_HELP[tool][0]
         entries.append(_entry(action, tool, fields, required, effect=effect,
                               constraints=constraints, public_kind=kind, destructive=destructive, outcome_verb=verb,
-                              idempotent=idempotent))
+                              idempotent=idempotent, queues_when_busy=queues_when_busy))
     specs = []
     for name in dict.fromkeys(entry.rendering for entry in entries):
         variants = [entry for entry in entries if entry.rendering == name]

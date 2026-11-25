@@ -28,9 +28,9 @@ and [the graph comparison](comparison-basic-memory-graph.md) (probe-level
 graph capability, `scripts/graph_value_benchmark.py`; its cross-contender
 claims were **withdrawn 2026-08-09** — see that page's banner).
 
-**Design stance: the benchmark exists to falsify Exomem's claims, not to
+**Design stance: the benchmark exists to falsify Evermatter's claims, not to
 flatter them.** A result that exposes weaknesses is a successful result.
-Founder experience ("Exomem is more useful than Basic Memory during work") is
+Founder experience ("Evermatter is more useful than Basic Memory during work") is
 anecdotal and confounded by explicit invocation habits; this system separates
 memory quality from invocation behaviour and from familiarity.
 
@@ -86,7 +86,7 @@ requiring the missing structure.
 
 The five ABSENT rows are first-class benchmark targets, not footnotes: Track B
 contains as-of, disputed-state, calibration, injection-as-data, and
-revocation scenario families precisely because Exomem currently has nothing
+revocation scenario families precisely because Evermatter currently has nothing
 structural to answer them with.
 
 ## Sibling audit record (pinned states at design time)
@@ -146,11 +146,11 @@ merged with organic-session numbers.
 Fourteen ways this benchmark could accidentally rig itself, each with a v0.1
 mitigation (implemented as a test or lint wherever possible):
 
-1. Corpus phrasing mirrors Exomem ontology → banned-vocabulary lint generated
-   from Exomem op/type/relation names; paraphrase seeds.
+1. Corpus phrasing mirrors Evermatter ontology → banned-vocabulary lint generated
+   from Evermatter op/type/relation names; paraphrase seeds.
 2. Ingestion altitude asymmetry between providers → ingested-doc-count parity
    check joins the fairness gate.
-3. `supports_group_reuse` asymmetry taxes Exomem per group → v0.1 runs
+3. `supports_group_reuse` asymmetry taxes Evermatter per group → v0.1 runs
    ungrouped datasets only; parity is a scheduled fix.
 4. Judge contamination by product-identifying strings → sanitizer maps
    `exomem://`/permalink/path shapes to neutral tokens; a leakage grep fails
@@ -160,7 +160,7 @@ mitigation (implemented as a test or lint wherever possible):
 6. Control-prompt selection bias → the activation control set is predeclared
    and frozen before first measurement and includes hard negatives; known gate
    limits are documented, not hidden.
-7. Health metrics only Exomem can produce → metrics are split into
+7. Health metrics only Evermatter can produce → metrics are split into
    comparative (observable on any provider) vs introspective (labeled,
    excluded from cross-product tables).
 8. Lexical-machine bias (embeddings broken here) → single-profile runs; every
@@ -175,7 +175,7 @@ mitigation (implemented as a test or lint wherever possible):
     gains a sanity gate (a provider with zero hits on >50% of queries and no
     skip fails the run) plus a canary query that must hit for every
     non-skipped provider.
-13. Journey scripts written to Exomem's happy path → journeys are defined in
+13. Journey scripts written to Evermatter's happy path → journeys are defined in
     product-neutral event language; each product's mapping table is published
     for review.
 14. Basename-collision credit in the Track A scorer → generated corpora
@@ -196,7 +196,7 @@ are never aggregated into published numbers.
 
 - Generate: `uv run python benchmarks/run.py generate --seed <seed> --out benchmarks/corpus/generated/<seed>`
 - Verify determinism: run generate twice; compare manifests.
-- Exomem Track B run: `uv run python benchmarks/run.py run --provider exomem-local --mode wire --profile lexical --corpus benchmarks/corpus/generated/<seed>`
+- Evermatter Track B run: `uv run python benchmarks/run.py run --provider exomem-local --mode wire --profile lexical --corpus benchmarks/corpus/generated/<seed>`
 - Track A smoke (from the basic-memory worktree): `uv run bm-bench run retrieval --providers bm-local,exomem-local,baseline-grep --top-k 10 --bm-local-path <worktree> ...`
 - Every run writes a fresh `benchmarks/runs/<id>/` (never overwritten) whose
   `manifest.json` + `environment.json` pin commits, versions, profiles,

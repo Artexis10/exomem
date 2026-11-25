@@ -20,10 +20,11 @@ import shutil
 import subprocess
 import tomllib
 import zipfile
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
 
-from . import workflow_skills
+from . import client_config, install_info, workflow_skills
+from .install_hook import CLAUDE_CONTINUATION_CLIENT_ARG
 from .kbdir import managed_root
 
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
@@ -34,8 +35,8 @@ APACHE_LICENSE = Path(__file__).parent / "_licenses" / "Apache-2.0.txt"
 
 #: Wherever a shipped doc shows an install line it writes this placeholder instead
 #: of a version: every deployment fills the release it ships, so no copy advises a
-#: mutable install (`exomem@latest`, unversioned `uvx exomem`, `pip install
-#: exomem`) and every example command names an immutable one. Unrendered, it still
+#: mutable install (`evermatter@latest`, unversioned `uvx evermatter`, `pip install
+#: evermatter`) and every example command names an immutable one. Unrendered, it still
 #: reads as an ordinary fill-in like the docs' other `<...>` placeholders.
 RELEASE_PLACEHOLDER = "<exomem-release>"
 
@@ -52,10 +53,10 @@ def release_version() -> str:
         project = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {})
     except (OSError, tomllib.TOMLDecodeError):
         project = {}
-    if project.get("name") == "exomem" and project.get("version"):
+    if project.get("name") in install_info.DISTRIBUTION_NAMES and project.get("version"):
         return str(project["version"])
     try:
-        return version("exomem")
+        return install_info.installed_version()
     except PackageNotFoundError:
         return RELEASE_PLACEHOLDER
 
@@ -125,7 +126,7 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
     """Require personalized output inside its explicit vault.
 
     The sole checkout exception is the known git-ignored ``.exomem-private/``
-    root in the active Exomem checkout. Checkout public/release paths are
+    root in the active Evermatter checkout. Checkout public/release paths are
     rejected even when this module is imported from an installed wheel.
     """
 
@@ -151,8 +152,10 @@ def ensure_personalized_output(path: Path, *, vault: Path) -> Path:
 
 
 def _core_payload(vault: Path | None) -> dict[str, str]:
-    """Files for the core `exomem` skill archive, keyed by archive-relative path."""
-    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
+    """Files for the core skill archive, keyed by archive-relative path."""
+    workflow_skills.validate_contract_projection(
+        workflow_skills.CORE_SKILL_NAME, _SKILL_SRC, core=True
+    )
     payload: dict[str, str] = {
         "SKILL.md": render_shipped_markdown((_SKILL_SRC / "SKILL.md").read_text(encoding="utf-8"))
     }
@@ -200,7 +203,11 @@ def _workflow_payload(name: str) -> dict[str, str]:
 
 def skill_payload(name: str, *, vault: Path | None = None) -> dict[str, str]:
     """Return the complete canonical payload for a core or workflow skill."""
-    return _core_payload(vault) if name == "exomem" else _workflow_payload(name)
+    return (
+        _core_payload(vault)
+        if name == workflow_skills.CORE_SKILL_NAME
+        else _workflow_payload(name)
+    )
 
 
 def _write_zip(path: Path, payload: dict[str, str]) -> int:
@@ -217,10 +224,16 @@ def _write_zip(path: Path, payload: dict[str, str]) -> int:
 #
 # The plugin installs skills and hooks in one action. Its MCP declaration is an
 # optional shared HTTP endpoint: a blank URL is inert on current Claude Code, so
-# enabling the plugin never launches another full Exomem core per chat session.
+# enabling the plugin never launches another full Evermatter core per chat session.
 # Local-only users can opt into stdio explicitly with `exomem setup --stdio`.
 # The skills/ and hooks/ trees are GENERATED from the same package sources and
 # guarded by a sync test rather than hand-maintained.
+
+#: The plugin's name and its server key stay `exomem` for now. Claude Code stores an HTTP server's
+#: sign-in under its name (a plugin server's under the plugin and server names), so a rename signs
+#: each user out. A later release renames both with a sign-in notice. The plugin's skills are
+#: renamed already: a skill rename signs nobody out.
+PLUGIN_NAME = "exomem"
 
 _PLUGIN_HOOK_EVENTS: tuple[tuple[str, str | None], ...] = (
     ("Stop", None),
@@ -238,6 +251,11 @@ _PLUGIN_HOOK_SCRIPTS: dict[str, str] = {
     "SessionEnd": "exomem-continuation-checkpoint.sh",
     "SessionStart": "exomem-continuation-checkpoint.sh",
 }
+# The checkpoint core requires --client; the nudge cores infer it, so only this wrapper
+# needs it. The value comes from the installer's own continuation command.
+_PLUGIN_HOOK_ARGS: dict[str, str] = {
+    "exomem-continuation-checkpoint.sh": CLAUDE_CONTINUATION_CLIENT_ARG,
+}
 
 
 def _write_generated(path: Path, payload: dict) -> None:
@@ -248,19 +266,20 @@ def _write_generated(path: Path, payload: dict) -> None:
 
 def _package_version() -> str:
     try:
-        return version("exomem")
+        return install_info.installed_version()
     except PackageNotFoundError:
         return "0+unknown"
 
 
 def _plugin_manifest() -> dict:
     return {
-        "name": "exomem",
+        "name": PLUGIN_NAME,
         "description": (
-            "Governed long-term memory over a markdown vault: raw sources stay "
-            "immutable, conclusions are compiled with provenance, and nothing is "
-            "deleted - it is superseded. Requires EXOMEM_VAULT_PATH to point at "
-            "your vault; run `exomem setup` if you do not have one yet."
+            "Evermatter (formerly Exomem): governed long-term memory over a markdown "
+            "vault. Raw sources stay immutable, conclusions are compiled with "
+            "provenance, and nothing is deleted - it is superseded. Requires "
+            "EXOMEM_VAULT_PATH to point at your vault; run `evermatter setup` if "
+            "you do not have one yet."
         ),
         "version": _package_version(),
         # Listing metadata. A curated marketplace entry shows author, homepage,
@@ -268,8 +287,8 @@ def _plugin_manifest() -> dict:
         # The Hosted manifest has carried them since it was first generated, and
         # these are deliberately the same values so the two listings agree.
         "author": {"name": "Substrate Systems OÜ", "url": "https://substratesystems.io"},
-        "homepage": "https://substratesystems.io/exomem",
-        "repository": "https://github.com/Artexis10/exomem",
+        "homepage": "https://evermatter.ai",
+        "repository": "https://github.com/substrate-systems/evermatter",
         "license": "Apache-2.0",
         "keywords": ["memory", "knowledge-base", "markdown", "obsidian", "mcp", "notes"],
         # No "hooks" key: hooks/hooks.json is loaded automatically by convention,
@@ -281,9 +300,9 @@ def _plugin_manifest() -> dict:
         "userConfig": {
             "mcp_url": {
                 "type": "string",
-                "title": "Exomem MCP URL",
+                "title": "Evermatter MCP URL",
                 "description": (
-                    "Optional full Exomem MCP service URL ending in /mcp. "
+                    "Optional full Evermatter MCP service URL ending in /mcp. "
                     "Leave blank and run `exomem setup` to configure a native client route."
                 ),
                 "default": "",
@@ -291,7 +310,8 @@ def _plugin_manifest() -> dict:
             }
         },
         "mcpServers": {
-            "exomem": {
+            # The server key stays `exomem` with the plugin name: Claude Code stores the sign-in under both.
+            client_config.LEGACY_SERVER_NAME: {
                 "type": "http",
                 "url": "${user_config.mcp_url}",
             }
@@ -315,17 +335,14 @@ def _plugin_hooks() -> dict:
         entry: dict = {}
         if matcher is not None:
             entry["matcher"] = matcher
-        entry["hooks"] = [
-            {
-                "type": "command",
-                "command": (
-                    f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{_PLUGIN_HOOK_SCRIPTS[event]}"'
-                ),
-            }
-        ]
+        script = _PLUGIN_HOOK_SCRIPTS[event]
+        command = f'bash "${{CLAUDE_PLUGIN_ROOT}}/hooks/{script}"'
+        if script in _PLUGIN_HOOK_ARGS:
+            command += f" {_PLUGIN_HOOK_ARGS[script]}"
+        entry["hooks"] = [{"type": "command", "command": command}]
         events.setdefault(event, []).append(entry)
     return {
-        "description": "Exomem capture, retrieval, and continuation hooks.",
+        "description": "Evermatter capture, retrieval, and continuation hooks.",
         "hooks": events,
     }
 
@@ -342,7 +359,9 @@ def sync_plugin(plugin_root: Path) -> dict:
     hooks_dir = plugin_root / "hooks"
     manifest_dir = plugin_root / ".claude-plugin"
 
-    workflow_skills.validate_contract_projection("exomem", _SKILL_SRC, core=True)
+    workflow_skills.validate_contract_projection(
+        workflow_skills.CORE_SKILL_NAME, _SKILL_SRC, core=True
+    )
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         workflow_skills.validate_contract_projection(
@@ -357,18 +376,18 @@ def sync_plugin(plugin_root: Path) -> dict:
     # nested would expose every SKILL.md at two paths at once.
     shutil.copytree(
         _SKILL_SRC,
-        skills_dir / "exomem",
+        skills_dir / workflow_skills.CORE_SKILL_NAME,
         ignore=shutil.ignore_patterns("workflow-skills", "__pycache__", "relation-reviews"),
     )
     # The copytree ships the scaffold byte-for-byte except release placeholders,
     # which pin the release this plugin was synced from.
-    for document in (skills_dir / "exomem").rglob("*.md"):
+    for document in (skills_dir / workflow_skills.CORE_SKILL_NAME).rglob("*.md"):
         document.write_text(
             render_shipped_markdown(document.read_text(encoding="utf-8")),
             encoding="utf-8",
             newline="\n",
         )
-    names = ["exomem"]
+    names = [workflow_skills.CORE_SKILL_NAME]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         target = skills_dir / name
@@ -431,7 +450,8 @@ def package_skills(out_dir: Path | None = None, *, vault: Path | None = None) ->
     if vault is not None:
         out_dir = ensure_personalized_output(out_dir, vault=vault)
 
-    builds: list[tuple[str, dict[str, str]]] = [("exomem", skill_payload("exomem", vault=vault))]
+    core = workflow_skills.CORE_SKILL_NAME
+    builds: list[tuple[str, dict[str, str]]] = [(core, skill_payload(core, vault=vault))]
     for skill in workflow_skills.list_skills():
         name = str(skill["name"])
         builds.append((name, skill_payload(name)))

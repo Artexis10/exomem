@@ -18,6 +18,10 @@ import yaml
 from . import semantic_authoring
 from .vault import SHIPPED_SCHEMA_DIRNAME
 
+#: The core skill's name, and the prefix of every workflow skill's name in the index.
+CORE_SKILL_NAME = "evermatter"
+#: The name that core skill and the prefix of those workflow skills carried before the rename.
+LEGACY_SKILL_NAME = "exomem"
 WORKFLOW_SKILLS_DIR = Path(__file__).parent / "_scaffold" / "_Schema" / "workflow-skills"
 WORKFLOW_SKILLS_INDEX = WORKFLOW_SKILLS_DIR / "index.yaml"
 _SKILL_CONTRACT_LINE = re.compile(r"(?m)^  skill_contract: [^\r\n]*(?:\r?\n)?")
@@ -146,6 +150,11 @@ def load_index() -> dict[str, Any]:
     if not isinstance(skills, list):
         raise ValueError("workflow skill index must contain a skills list")
     return data
+
+
+def legacy_skill_name(name: str) -> str:
+    """The name that the core or a workflow skill ``name`` carried before the rename."""
+    return LEGACY_SKILL_NAME + name.removeprefix(CORE_SKILL_NAME)
 
 
 def list_skills() -> list[dict[str, Any]]:

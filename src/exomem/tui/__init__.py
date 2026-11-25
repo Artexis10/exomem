@@ -1,4 +1,4 @@
-"""Exomem's interactive terminal UI (the optional `tui` extra).
+"""Evermatter's interactive terminal UI (the optional `tui` extra).
 
 This package import must stay light: `__main__` imports it only after the TTY
 and extra-availability guards pass, and the Textual stack itself loads lazily

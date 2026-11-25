@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Deterministic graph-value benchmark for Exomem and Basic Memory."""
+"""Deterministic graph-value benchmark for Evermatter and Basic Memory."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ GOVERNED_DIMENSIONS = (
     "supersession_handling",
     "semantic_block_precision",
 )
-# Exomem-only: a must-pass fixture invariant (score_run/dominance_report's
+# Evermatter-only: a must-pass fixture invariant (score_run/dominance_report's
 # fixture_failures check covers every dimension in ALL_DIMENSIONS), but
 # DELIBERATELY excluded from COMMON_DIMENSIONS/GOVERNED_DIMENSIONS so it never
 # enters dominance_report's Basic-Memory comparison `checks` loop — find()'s
@@ -1419,7 +1419,7 @@ profiles:
             "provenance": "sources/evidence frontmatter with governed origin metadata",
             "lifecycle": "status plus supersedes/superseded_by frontmatter",
             "blocks": "semantic blocks with anchored relation metadata",
-            "scaffold": "generic Exomem schema scaffold; excluded from neutral note identities",
+            "scaffold": "generic Evermatter schema scaffold; excluded from neutral note identities",
         },
         corpus_hash=corpus_hash(root),
         artifact_paths=artifact_paths,
@@ -1672,7 +1672,7 @@ def _fact_parity(
             values[f"{field_name}:{fact_id}"] = {
                 "status": status,
                 "representation": (
-                    "native Exomem grammar"
+                    "native Evermatter grammar"
                     if contender == "exomem"
                     else (
                         "closest public Basic Memory grammar"
@@ -3428,7 +3428,7 @@ def _fresh_fixture_corpus(manifest: dict[str, Any], root: Path, probe_id: str) -
 
 
 def run_exomem_local_core_fixture(manifest: dict[str, Any], root: Path) -> dict[str, ProbeResult]:
-    """Fast model-free Exomem gate. Direct mode repeats agent-facing cases over MCP."""
+    """Fast model-free Evermatter gate. Direct mode repeats agent-facing cases over MCP."""
     from exomem import commands, freshness, lexstore, memory_refs, semantic_index
     from exomem import vault as vault_module
 
@@ -4051,7 +4051,7 @@ async def run_exomem_direct_probes(
     graph_cases: dict[str, CaseResult],
     media_modules: dict[str, Any] | None = None,
 ) -> dict[str, ProbeResult]:
-    """Exercise the local-core contract through Exomem's public MCP surface."""
+    """Exercise the local-core contract through Evermatter's public MCP surface."""
     probes = _profile_probe_map(manifest, profile)
     results: dict[str, ProbeResult] = {}
     runtime_paths: dict[str, str] = {}
@@ -5660,8 +5660,10 @@ async def run_exomem_direct_probes(
     await run("dataset-query", dataset_query)
 
     if profile == "full":
+        from exomem.media_types import PDF_READERS
+
         media_requirements = {
-            "media-pdf": ("fitz",),
+            "media-pdf": PDF_READERS,
             "media-image": ("PIL",),
             "media-audio": ("faster_whisper", "av"),
             "media-video": ("PIL", "faster_whisper", "av"),
@@ -5711,10 +5713,10 @@ async def prepare_exomem_indexes(
     chunks = int(result.get("summary", {}).get("embeddings_chunks", 0))
     if rewritten:
         raise RuntimeError(
-            "Exomem full indexing rewrote benchmark Markdown; renderer is not canonical"
+            "Evermatter full indexing rewrote benchmark Markdown; renderer is not canonical"
         )
     if chunks <= 0:
-        raise RuntimeError("Exomem full indexing produced no embedding chunks")
+        raise RuntimeError("Evermatter full indexing produced no embedding chunks")
     return result
 
 
@@ -6267,7 +6269,7 @@ async def run_basic_memory_direct_probes(
             continue
         if probe.get("basic_memory") == "unsupported":
             reason = (
-                "Basic Memory exposes ranked search but not Exomem's bounded raw-lane, "
+                "Basic Memory exposes ranked search but not Evermatter's bounded raw-lane, "
                 "fusion, degradation, durable-ref, semantic-unit, governance, dataset, "
                 "or media contract for this probe"
             )
@@ -6845,7 +6847,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             ),
             "- Correctness dimensions are independent; no weighted aggregate is computed.",
             "",
-            "| Representation | Exomem renderer | Basic Memory renderer |",
+            "| Representation | Evermatter renderer | Basic Memory renderer |",
             "|---|---|---|",
         ]
     )
@@ -6860,7 +6862,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             "",
             "## Independent dimensions",
             "",
-            "| Dimension | Exomem | Basic Memory |",
+            "| Dimension | Evermatter | Basic Memory |",
             "|---|---:|---:|",
         ]
     )
@@ -6932,7 +6934,7 @@ def render_markdown_report(report: dict[str, Any]) -> str:
     if dominance.get("checks"):
         lines.extend(
             [
-                "| Criterion | Exomem | Basic Memory | Passed |",
+                "| Criterion | Evermatter | Basic Memory | Passed |",
                 "|---|---:|---:|---:|",
             ]
         )
@@ -7248,10 +7250,12 @@ async def _run_exomem_mcp(
                 "EXOMEM_DISABLE_CLIP": "1",
             }
         )
+    from exomem.media_types import PDF_READERS
+
     media_modules = (
         python_module_inventory(
             python,
-            ("PIL", "fitz", "faster_whisper", "av"),
+            ("PIL", *PDF_READERS, "faster_whisper", "av"),
             cwd=REPO_ROOT,
             env=env,
         )
@@ -7296,7 +7300,7 @@ async def _run_exomem_mcp(
         async with client:
             tools = {tool.name for tool in await asyncio.wait_for(client.list_tools(), timeout)}
             if "connect_memory" not in tools:
-                raise RuntimeError("Exomem MCP server does not expose connect_memory")
+                raise RuntimeError("Evermatter MCP server does not expose connect_memory")
             registry = exomem_registry_inventory()
             inventory = {
                 "mcp": reconcile_operation_inventory(

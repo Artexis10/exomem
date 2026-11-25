@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import adopt as adopt_module
-from . import client_config, install_info, prominence
+from . import client_config, install_info, prominence, workflow_skills
 from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
@@ -40,7 +40,7 @@ from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
 
-_SKILL_NAME_MARKER = "name: exomem"
+
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
     shown = []
     for pack in packs[:limit]:
@@ -136,58 +136,6 @@ def _server_command(which_fn) -> list[str]:
     return ["uvx", "exomem", "--transport", "stdio"]
 
 
-def _read_json_object(path: Path) -> dict:
-    if not path.is_file():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ValueError(f"cannot inspect Claude MCP registrations in {path}: expected an object")
-    return value
-
-
-def _project_entry(config: dict, project_dir: Path) -> dict:
-    target = project_dir.resolve()
-    projects = config.get("projects")
-    if not isinstance(projects, dict):
-        return {}
-    for raw_path, value in projects.items():
-        if not isinstance(raw_path, str) or not isinstance(value, dict):
-            continue
-        try:
-            if Path(raw_path).expanduser().resolve() == target:
-                return value
-        except OSError:
-            continue
-    return {}
-
-
-def _registered_server(config: dict) -> dict | None:
-    servers = config.get("mcpServers")
-    if not isinstance(servers, dict):
-        return None
-    value = servers.get("exomem")
-    return value if isinstance(value, dict) else None
-
-
-def _claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, dict]:
-    """Inventory registrations without `claude mcp list/get` health checks."""
-    user_config = _read_json_object(config_path)
-    project_config = _read_json_object(project_dir / ".mcp.json")
-    found: dict[str, dict] = {}
-    candidates = (
-        ("local", _registered_server(_project_entry(user_config, project_dir))),
-        ("project", _registered_server(project_config)),
-        ("user", _registered_server(user_config)),
-    )
-    for scope, server in candidates:
-        if server is not None:
-            found[scope] = server
-    return found
-
-
 def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
     if route.transport == "http":
         return server.get("url") == route.url and server.get("type", "http") == "http"
@@ -228,7 +176,7 @@ def _restore_files(snapshots: dict[Path, _FileSnapshot]) -> None:
 
 
 def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
-    """Return enabled Exomem plugin IDs that still declare a stdio core."""
+    """Return enabled Evermatter plugin IDs that still declare a stdio core."""
     try:
         result = run_fn([claude, "plugin", "list", "--json"], **run_kwargs)
     except Exception as exc:  # noqa: BLE001 - an unknown plugin state must fail closed
@@ -248,22 +196,22 @@ def _legacy_stdio_plugins(claude: str, run_fn, run_kwargs: dict) -> list[str]:
         if not isinstance(plugin, dict) or plugin.get("enabled") is not True:
             continue
         plugin_id = str(plugin.get("id") or plugin.get("name") or "")
-        if "exomem" not in plugin_id.casefold():
+        if not any(name in plugin_id.casefold() for name in client_config.SERVER_NAMES):
             continue
-        servers = plugin.get("mcpServers")
-        server = servers.get("exomem") if isinstance(servers, dict) else None
-        if not isinstance(server, dict):
+        entry = client_config.server_entry(plugin.get("mcpServers"))
+        if entry is None:
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
-                "Exomem MCP inventory is missing"
+                "Evermatter MCP inventory is missing"
             )
+        server = entry[1]
         if server.get("command") or server.get("args"):
             legacy.append(plugin_id)
             continue
         if server.get("type") != "http" or not isinstance(server.get("url"), str):
             raise ValueError(
                 f"could not verify Claude plugin state for {plugin_id}: "
-                "Exomem MCP declaration is incomplete"
+                "Evermatter MCP declaration is incomplete"
             )
     return legacy
 
@@ -291,14 +239,6 @@ def _configured_mcp_url(
     if configured is None and "EXOMEM_BASE_URL" in environ:
         configured = environ["EXOMEM_BASE_URL"]
     return client_config.normalize_mcp_url(configured) if configured is not None else None
-
-
-def _default_claude_config_path(environ: dict[str, str]) -> Path:
-    """Return Claude's user-state path, including configured relocation."""
-    config_dir = environ.get("CLAUDE_CONFIG_DIR")
-    if config_dir:
-        return Path(config_dir).expanduser() / ".claude.json"
-    return Path.home() / ".claude.json"
 
 
 def _resolve_client_route(
@@ -347,7 +287,7 @@ def _register_claude(
     report,
 ) -> None:
     try:
-        registrations = _claude_registrations(
+        registrations = client_config.claude_registrations(
             config_path=config_path,
             project_dir=project_dir,
         )
@@ -359,7 +299,7 @@ def _register_claude(
     scope_text = _format_scopes(existing_scopes)
     desired_is_active = (
         existing_scopes == [scope]
-        and _registration_matches(route, registrations[scope])
+        and _registration_matches(route, registrations[scope][1])
     )
     if desired_is_active:
         report("register", f"[skipped: already registered in {scope}]")
@@ -369,14 +309,18 @@ def _register_claude(
     if existing_scopes and not replace:
         if yes or not _ask_yn(
             input_fn,
-            f"exomem is already registered in {scope_text}. Replace every explicit route?",
+            f"Evermatter is already registered in {scope_text}. Replace every explicit route?",
             False,
         ):
             report("register", f"[skipped: already registered in {scope_text}]")
             return
         replace = True
 
-    argv = route.claude_add_argv(claude, scope=scope)
+    # A replace keeps the server key the user already holds, so their tool prefix and the
+    # rules that match it survive; only an explicit migration renames the key.
+    kept_entry = registrations.get(scope) or next(iter(registrations.values()), None)
+    kept_name = kept_entry[0] if kept_entry else None
+    argv = route.claude_add_argv(claude, scope=scope, name=kept_name or client_config.SERVER_NAME)
     if replace:
         paths = (config_path, project_dir / ".mcp.json")
         try:
@@ -385,10 +329,10 @@ def _register_claude(
             report("register", f"[failed: could not snapshot Claude configuration: {exc}]")
             return
         failure = ""
-        for existing_scope in existing_scopes:
+        for existing_scope, (existing_name, _entry) in registrations.items():
             try:
                 result = run_fn(
-                    [claude, "mcp", "remove", "exomem", "--scope", existing_scope],
+                    [claude, "mcp", "remove", existing_name, "--scope", existing_scope],
                     **run_kwargs,
                 )
             except Exception as exc:  # noqa: BLE001 - restore is the safety boundary
@@ -467,16 +411,19 @@ def _register_codex(
     codex_home: Path | None = None,
 ) -> None:
     """Register the MCP server with Codex, preferring its CLI over file surgery."""
-    block = client_config.render_codex_block(route)
     path = _resolve_codex_home(codex_home) / "config.toml"
     try:
-        existing = client_config.codex_mcp_exists(path)
+        existing_name = client_config.codex_mcp_name(path)
     except ValueError as exc:
         report("register-codex", f"[failed: {exc}]")
         return
+    existing = existing_name is not None
+    # A replace keeps the server key the user already holds (see _register_claude).
+    name = existing_name or client_config.SERVER_NAME
+    block = client_config.render_codex_block(route, name=name)
     replace = replace_client_registration and existing
     if existing and not replace:
-        if yes or not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+        if yes or not _ask_yn(input_fn, f"Evermatter is already in {path}. Replace it?", False):
             report("register-codex", "[skipped: already in config.toml]")
             return
         replace = True
@@ -491,14 +438,14 @@ def _register_codex(
             return
         failure = ""
         try:
-            removed = run_fn([codex, "mcp", "remove", "exomem"], **run_kwargs)
+            removed = run_fn([codex, "mcp", "remove", existing_name], **run_kwargs)
             if removed.returncode != 0:
                 detail = (removed.stderr or "").strip() or (
                     f"codex mcp remove exited {removed.returncode}"
                 )
                 failure = detail
             else:
-                added = run_fn(route.codex_add_argv(codex), **run_kwargs)
+                added = run_fn(route.codex_add_argv(codex, name=name), **run_kwargs)
                 if added.returncode != 0:
                     failure = (added.stderr or "").strip() or (
                         f"codex mcp add exited {added.returncode}"
@@ -533,7 +480,7 @@ def _register_codex(
         return
 
     if codex:
-        argv = route.codex_add_argv(codex)
+        argv = route.codex_add_argv(codex, name=name)
         try:
             result = run_fn(argv, **run_kwargs)
         except Exception as exc:  # noqa: BLE001 - fall back to the config file
@@ -553,7 +500,7 @@ def _register_codex(
             if yes:
                 report("register-codex", "[skipped: already in config.toml]")
                 return
-            if not _ask_yn(input_fn, f"exomem is already in {path}. Replace it?", False):
+            if not _ask_yn(input_fn, f"Evermatter is already in {path}. Replace it?", False):
                 report("register-codex", "[skipped: already in config.toml]")
                 return
             outcome = client_config.merge_codex_mcp(block, path=path, replace=True)
@@ -634,13 +581,13 @@ def _offer_learning_instruction(
     if pending and not choice:
         print_fn("")
         print_fn(
-            "  Learning instruction: your request to the agent to recall Exomem before a "
+            "  Learning instruction: your request to the agent to recall Evermatter before a "
             "task and save what it learns."
         )
         print_fn(f"    {prominence.LEARNING_INSTRUCTION}")
         print_fn(
-            "  Setup keeps it between Exomem markers. Delete that block, or run "
-            "`exomem install-hook --uninstall --client all`, to remove it."
+            "  Setup keeps it between the `evermatter learning instruction` markers. Delete that "
+            "block, or run `exomem install-hook --uninstall --client all`, to remove it."
         )
     for name, client, path, change in pending:
         verb = "Update it in" if change == "updated" else "Add it to"
@@ -683,7 +630,7 @@ def run_setup(
     environ = dict(os.environ if environ is None else environ)
     project_dir = Path.cwd() if project_dir is None else Path(project_dir)
     claude_config_path = (
-        _default_claude_config_path(environ)
+        client_config.default_claude_config_path(environ)
         if claude_config_path is None
         else Path(claude_config_path)
     )
@@ -921,7 +868,7 @@ def run_setup(
             )
         claude = which_fn("claude")
         if not claude:
-            snippet = {"mcpServers": {"exomem": route.as_claude_config()}}
+            snippet = {"mcpServers": {client_config.SERVER_NAME: route.as_claude_config()}}
             print_fn("  claude CLI not found — add this to .mcp.json or Claude Code settings:")
             print_fn(json.dumps(snippet, indent=2))
             report("register", "[skipped: no claude CLI — snippet printed above]")
@@ -943,7 +890,7 @@ def run_setup(
             if legacy_plugins:
                 plugin_id = legacy_plugins[0]
                 print_fn(
-                    "  The enabled Exomem plugin still launches a full stdio core. "
+                    "  The enabled Evermatter plugin still launches a full stdio core. "
                     f"Run `claude plugin update {plugin_id}`, then `/reload-plugins` "
                     "(or restart Claude Code) before rerunning setup."
                 )
@@ -985,31 +932,37 @@ def run_setup(
         )
 
     # 7. skill — the brain; without it the tools sit unused
-    skill_target = (home / "skills" / "exomem") if home else None
+    skill_target = (home / "skills" / workflow_skills.CORE_SKILL_NAME) if home else None
+
+    def moved(record: dict) -> None:
+        # Reported as each move happens, so a later failure still leaves it on the record.
+        report(
+            "migrate",
+            f"[done] moved the previous `{record['skill']}` skill from {record['from']} "
+            f"to {record['backup']}",
+        )
+
     try:
         if skill_target is not None:
-            install_module.install_skill(skill_target)
+            install_module.install_skill(skill_target, on_moved=moved)
             report("skill", "[done] installed")
         else:
             # No explicit target: install into every client present on this
             # machine, so a Codex user gets the brain too rather than just tools.
-            installed = install_module.install_skills(client="auto")["installed"]
-            report("skill", f"[done] installed for {', '.join(installed)}")
+            installed = install_module.install_skills(client="auto", on_moved=moved)
+            report("skill", f"[done] installed for {', '.join(installed['installed'])}")
     except FileExistsError:
         target = skill_target if skill_target is not None else install_module.DEFAULT_TARGET
-        skill_md = target / "SKILL.md"
-        try:
-            head = skill_md.read_text(encoding="utf-8", errors="replace")[:2048]
-        except OSError:
-            head = ""
-        if _SKILL_NAME_MARKER not in head:
+        if install_module.skill_name(target / "SKILL.md") != workflow_skills.CORE_SKILL_NAME:
             report("skill", f"[skipped: {target} exists and is not the bundled skill — not overwriting]")
         elif not yes and _ask_yn(input_fn, "Skill already installed. Refresh it from this repo?", False):
             if skill_target is not None:
-                install_module.install_skill(skill_target, force=True)
+                install_module.install_skill(skill_target, force=True, on_moved=moved)
                 report("skill", "[done] refreshed")
             else:
-                installed = install_module.install_skills(client="auto", force=True)["installed"]
+                installed = install_module.install_skills(
+                    client="auto", force=True, on_moved=moved
+                )["installed"]
                 report("skill", f"[done] refreshed for {', '.join(installed)}")
         else:
             report("skill", "[skipped: already installed]")
@@ -1055,7 +1008,7 @@ def run_setup(
         report("hooks", "[skipped]")
 
     # 9. learning instruction — the user's own request to recall and save, placed in
-    # the instruction file each detected client reads. Never served by Exomem itself.
+    # the instruction file each detected client reads. Never served by Evermatter itself.
     claude_root = home if home is not None else install_module.client_home("claude")
     targets: list[tuple[str, str, Path]] = []
     if which_fn("claude") or claude_root.is_dir():
@@ -1086,9 +1039,17 @@ def run_setup(
     print_fn("Next steps:")
     if route.transport == "http":
         print_fn("  1. In Claude Code, use /mcp to authenticate the claude mcp connection.")
-        print_fn("     For Codex, run: codex mcp login exomem")
+        try:
+            codex_key = client_config.codex_mcp_name(
+                _resolve_codex_home(codex_home) / "config.toml"
+            )
+        except ValueError:
+            codex_key = None
+        print_fn(
+            f"     For Codex, run: codex mcp login {codex_key or client_config.SERVER_NAME}"
+        )
     else:
-        print_fn("  1. Restart Claude Code so it loads the exomem server and skill.")
+        print_fn("  1. Restart Claude Code so it loads the Evermatter server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
     print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
     print_fn(
@@ -1138,7 +1099,7 @@ def setup_main(argv: list[str]) -> int:
         action="store_const",
         const=True,
         dest="learning_instruction",
-        help="Add Exomem's learning instruction to the CLAUDE.md and AGENTS.md of detected "
+        help="Add Evermatter's learning instruction to the CLAUDE.md and AGENTS.md of detected "
         "clients without asking. --yes adds it only with this flag.",
     )
     learning.add_argument(
@@ -1153,7 +1114,7 @@ def setup_main(argv: list[str]) -> int:
     route = parser.add_mutually_exclusive_group()
     route.add_argument(
         "--mcp-url",
-        help="Shared Exomem service origin or exact /mcp URL (HTTPS, or loopback HTTP).",
+        help="Shared Evermatter service origin or exact /mcp URL (HTTPS, or loopback HTTP).",
     )
     route.add_argument(
         "--stdio",
@@ -1164,11 +1125,25 @@ def setup_main(argv: list[str]) -> int:
     parser.add_argument(
         "--replace-client-registration",
         action="store_true",
-        help="Replace existing Exomem MCP registrations across client scopes.",
+        help="Replace existing Evermatter MCP registrations across client scopes.",
     )
     parser.add_argument("--scope", choices=("user", "local", "project"), default="user",
                         help="claude mcp add scope (default: user — available in every project).")
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Move an install made before the rename from the `exomem` server key to "
+        "`evermatter` in Claude Code and Codex, and the managed instruction block with it. "
+        "Backs up each file it changes, never edits a rule or hook you wrote, and lists "
+        "those. Takes no other option.",
+    )
     args = parser.parse_args(argv)
+    if args.migrate:
+        if len(argv) > 1:
+            parser.error("--migrate takes no other option")
+        from .rename_migration import migrate
+
+        return migrate()
     if args.yes and not args.vault:
         parser.error("--yes requires --vault")
     return run_setup(

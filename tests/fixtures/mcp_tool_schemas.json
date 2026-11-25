@@ -128,7 +128,7 @@
     }
   },
   "add_record": {
-    "description": "Add a row to a Records collection the person owns. Outcomes go here; intentions go to Planning.",
+    "description": "Add a Records row. Outcomes go here; intentions go to Planning. If none fits, `new_collection` creates one from the row. Key dated observations by item and date. The user's words, your proposals and outside claims each get a field; `options.new_fields` adds one.",
     "inputSchema": {
       "properties": {
         "collection": {
@@ -141,17 +141,18 @@
         "why": {
           "type": "string"
         },
+        "new_collection": {
+          "type": "object",
+          "description": "{natural_key: [item fields that identify a row]}"
+        },
         "body": {
-          "type": "string",
-          "description": "Free text kept with the row."
+          "type": "string"
         },
         "hold": {
-          "type": "boolean",
-          "description": "Hold a row that fails validation."
+          "type": "boolean"
         },
         "held": {
-          "type": "string",
-          "description": "The id of a held row to resume."
+          "type": "string"
         },
         "options": {
           "type": "object",
@@ -201,7 +202,7 @@
     }
   },
   "create_note": {
-    "description": "Save a conclusion. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
+    "description": "Save a conclusion. Named items compared or tracked: add_record. Raw material: save_source; proof: save_evidence. Link a page or give unlinked_reason.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -397,7 +398,10 @@
             "set_fields",
             "fill_row",
             "edit_observation",
-            "remove_observation"
+            "remove_observation",
+            "supersede_observation",
+            "assess_observation",
+            "link_observation"
           ],
           "type": "string"
         },
@@ -484,17 +488,41 @@
           "type": "string",
           "description": "edit_observation, remove_observation: the unit id."
         },
+        "unit": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation: the claim's unit id or anchor."
+        },
+        "span": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation: the claim's exact text when its unit id is unknown."
+        },
+        "verdict": {
+          "type": "string",
+          "description": "assess_observation, edit_observation: a governed verdict such as confirmed, qualified, or refuted."
+        },
+        "check_by": {
+          "type": "string",
+          "description": "assess_observation: an ISO date to revisit the claim."
+        },
+        "kind": {
+          "type": "string",
+          "description": "supersede_observation, assess_observation, link_observation, edit_observation: a governed rich kind; required to promote a compact observation."
+        },
+        "as_of": {
+          "type": "string",
+          "description": "supersede_observation, edit_observation: the ISO date the claim started holding."
+        },
         "category": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "text": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "context": {
           "type": "string",
-          "description": "edit_observation."
+          "description": "edit_observation, supersede_observation."
         },
         "links": {
           "items": {
@@ -514,7 +542,7 @@
             "type": "object"
           },
           "type": "array",
-          "description": "edit_observation: the full list."
+          "description": "edit_observation: the full list; supersede_observation, link_observation: links to add."
         },
         "unlinked_reason": {
           "type": "string",
@@ -612,6 +640,10 @@
           "type": "boolean",
           "description": "Rebuild the row's Markdown view; `changes` may then be empty."
         },
+        "options": {
+          "type": "object",
+          "description": "Rare knobs: new_fields."
+        },
         "detail": {
           "enum": [
             "compact",
@@ -630,7 +662,7 @@
     }
   },
   "inspect_memory": {
-    "description": "Read-only operations that no typed tool covers: files, schema, governance, imports, maintenance, connections, review context, episodes, media, collection and plan details.",
+    "description": "Read-only fallback for files, schema, governance, imports, maintenance, connections, reviews, episodes, media, collections and plans.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -646,6 +678,7 @@
             "plans.validate",
             "plans.history",
             "writer.status",
+            "maintenance.name_drift",
             "settings.inspect",
             "graph.map",
             "files.overview",
@@ -657,6 +690,7 @@
             "imports.work_item",
             "media.video",
             "media.image",
+            "media.preview",
             "media.status",
             "review.item_context",
             "review.item",
@@ -664,6 +698,7 @@
             "review.provenance",
             "review.evolution",
             "review.advisory_result",
+            "review.queued_write",
             "review.held",
             "connections.suggest_links",
             "connections.suggest_relations",
@@ -775,6 +810,7 @@
           "type": "string",
           "enum": [
             "records.create",
+            "records.retract",
             "records.bulk_upsert",
             "records.discard",
             "records.revise",
@@ -860,7 +896,8 @@
             "curation.resume",
             "curation.propose_compensation",
             "curation.apply_compensation",
-            "curation.revert"
+            "curation.revert",
+            "curation.relocate"
           ],
           "description": "area.action; read_instructions(topic=<operation>) lists its fields."
         },
@@ -1080,7 +1117,7 @@
     }
   },
   "recall_context": {
-    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nRead map/task_context refs and method scope/exclusions with a page read.\nDiscard held methods on methods.reset. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
+    "description": "Recall authorized context; abstain if uncertain.\n\nReuse held context; conversation gives excerpts. Agent focus is not human intent.\nKeep identity/scope; clarify ambiguity. Due/refresh grants no writes.\nPage-read map/task_context refs and approach scope/exclusions.\nmethods.reset: drop held skills, collections, approaches. Follow next_action.\nepistemic_status: counts/completeness; a page read: provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1260,7 +1297,7 @@
     }
   },
   "save_evidence": {
-    "description": "Keep proof as append-only evidence: text with a name, or attached files.",
+    "description": "Keep proof as append-only evidence in the turn it arrives: text with a name, or attached files.",
     "inputSchema": {
       "properties": {
         "scope": {
@@ -1297,6 +1334,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1331,7 +1372,7 @@
     }
   },
   "save_source": {
-    "description": "Save original material verbatim. Never retype a file: pass attached files in `files`.",
+    "description": "Save originals verbatim. Never retype files. Use `files`.",
     "inputSchema": {
       "properties": {
         "title": {
@@ -1366,6 +1407,10 @@
               },
               "file_name": {
                 "type": "string"
+              },
+              "diarize": {
+                "type": "boolean",
+                "description": "Request or skip speaker labels for this audio or video file."
               }
             },
             "required": [
@@ -1401,7 +1446,7 @@
         },
         "options": {
           "type": "object",
-          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only."
+          "description": "Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity."
         },
         "detail": {
           "enum": [
@@ -1443,6 +1488,13 @@
           },
           "type": "array"
         },
+        "file_types": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Kinds to keep, e.g. [\"image\", \"video\"] for a photo, screenshot or video. If unsure a picture is meant, also search without it."
+        },
         "filters": {
           "type": "object",
           "description": "Metadata filter, such as {\"page.status\": \"active\"}."
@@ -1474,7 +1526,7 @@
     }
   },
   "supersede_note": {
-    "description": "Replace a changed conclusion; keep the old note linked and readable.",
+    "description": "Replace a changed conclusion; keep the old note linked and readable. For one claim inside a note, use edit_note action supersede_observation.",
     "inputSchema": {
       "properties": {
         "note": {
@@ -1568,11 +1620,11 @@
     }
   },
   "upload_files": {
-    "description": "Get a one-use upload for bytes on this machine. The reply gives the step that moves them; then pass the handle to save_source or save_evidence.",
+    "description": "Get a file handoff. Follow its next step. Evidence with scope and category saves on arrival; else held files go to save_source or save_evidence.",
     "inputSchema": {
       "properties": {
         "lane": {
-          "description": "Where the bytes go: source (original), evidence (proof) or import (folder archive; not Cloud).",
+          "description": "Source, Evidence or import archive.",
           "enum": [
             "source",
             "evidence",
@@ -1582,11 +1634,29 @@
         },
         "expected_sha256": {
           "type": "string",
-          "description": "SHA-256 of the file you intend to send."
+          "description": "File SHA-256."
+        },
+        "size_bytes": {
+          "minimum": 0,
+          "type": "integer",
+          "description": "Exact Source bytes."
+        },
+        "import_identity": {
+          "type": "string",
+          "description": "Held Source import ID."
         },
         "hold": {
           "type": "boolean",
-          "description": "Keep the upload for this session; needs expected_sha256."
+          "description": "Hold bytes for a later save."
+        },
+        "scope": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
         },
         "detail": {
           "enum": [

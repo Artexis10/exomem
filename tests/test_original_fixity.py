@@ -367,6 +367,163 @@ def test_a_restore_that_cannot_put_its_copy_in_place_tries_again_at_the_next_pas
     assert original.read_bytes() == TRANSCRIPT
 
 
+def _count_downloads(monkeypatch: pytest.MonkeyPatch) -> list[str | None]:
+    """Record the store of each download of a stored version: the read that a kept copy exists to avoid."""
+    downloads: list[str | None] = []
+    real = media_store.write_stored_original
+
+    def counted(vault, reference, sink, *, store=None, **options):
+        downloads.append(store)
+        return real(vault, reference, sink, store=store, **options)
+
+    monkeypatch.setattr(media_store, "write_stored_original", counted)
+    return downloads
+
+
+def _damaged_with_a_blocked_trash(vault: Path) -> tuple[Path, Path]:
+    """A cached original whose bytes changed, its pointer intact, and the Trash folder blocked: the restore finds a
+    verified copy and cannot put it in place."""
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    original_fixity.walk(vault)
+    original_fixity.run_pass(vault)
+    trash = vault / "Knowledge Base" / "_trash"
+    trash.write_bytes(b"")
+    original.write_bytes(DAMAGED)
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"corrupt_no_copy": 1}
+    return original, trash
+
+
+def test_the_retry_after_a_failed_trash_move_reads_the_kept_copy_and_downloads_nothing(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A replica download costs the owner egress and time: the retry must not pay it again for bytes already verified."""
+    original, trash = _damaged_with_a_blocked_trash(vault)
+    downloads = _count_downloads(monkeypatch)
+    trash.unlink()
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert downloads == []
+    [finding] = _findings(vault)
+    assert [step["source"] for step in finding.meta["route"]] == ["kept_copy"]
+    assert not original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest()).exists()
+
+
+def test_a_busy_restore_reuses_the_verified_download(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem.cli_ops import OpError
+
+    original = _stored(vault, "Recordings")
+    _offload(vault, original)
+    companion = original.with_name(original.name + ".md")
+    current = companion.read_text()
+    stale = current.replace(f"binary_size: {len(TRANSCRIPT)}", f"binary_size: {len(TRANSCRIPT) + 1}")
+    stale = stale.replace(f"artifact_size: {len(TRANSCRIPT)}", f"artifact_size: {len(TRANSCRIPT) + 1}")
+    assert stale != current
+    companion.write_text(stale)
+    original_fixity.walk(vault)
+    companion.write_text(current)
+    original.write_bytes(DAMAGED)
+    downloads = _count_downloads(monkeypatch)
+    guard = media_store._guard
+
+    def temporarily_busy(root, operation):
+        if operation == "original_fixity_restore":
+            raise OpError("MUTATION_BUSY", "the vault boundary is busy", details={"committed": False})
+        return guard(root, operation)
+
+    with monkeypatch.context() as busy:
+        busy.setattr(media_store, "_guard", temporarily_busy)
+        original_fixity.run_pass(vault, budget=len(TRANSCRIPT))
+
+    assert original.read_bytes() == DAMAGED
+    assert len(downloads) == 1
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    assert kept.read_bytes() == TRANSCRIPT
+    [failed] = _findings(vault)
+    assert failed.meta["route"][-1]["code"] == "MUTATION_BUSY"
+
+    assert original_fixity.run_pass(vault, budget=len(TRANSCRIPT)).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert len(downloads) == 1
+    assert not kept.exists()
+    [restored] = _findings(vault)
+    assert [step["source"] for step in restored.meta["route"]] == ["kept_copy"]
+
+
+def test_a_kept_copy_that_no_longer_hashes_to_the_binding_is_never_installed(
+        vault: Path, selected_store, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The kept copy sits in private state for days: bytes that changed there must not replace the owner's original."""
+    original, trash = _damaged_with_a_blocked_trash(vault)
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    kept.write_bytes(DAMAGED)
+    downloads = _count_downloads(monkeypatch)
+    trash.unlink()
+
+    assert original_fixity.run_pass(vault, budget=0).outcomes == {"restored": 1}
+
+    assert original.read_bytes() == TRANSCRIPT
+    assert downloads == [None]  # the pointer was read again: the kept copy failed its hash and was dropped
+    [finding] = _findings(vault)
+    [tried, used] = finding.meta["route"]
+    assert (tried["source"], tried["failed"], used["source"]) == ("kept_copy", "hash_mismatch", "media_store")
+
+
+def test_the_sweep_of_kept_copies_drops_the_stale_ones_of_every_batch_and_keeps_one_that_is_still_needed(vault: Path) -> None:
+    """The sweep takes the copies a batch at a time: a copy past the first batch must be judged, not skipped or dropped."""
+    digests = [hashlib.sha256(str(number).encode()).hexdigest() for number in range(450)]
+    for digest in digests:
+        original_fixity._kept_path(vault, digest).write_bytes(b"plaintext")
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.execute("INSERT INTO originals(path, sha256, kind, binding, state) VALUES ('needs-its-copy', ?, 'file', "
+                           "'binding', ?)", (digests[-1], original_fixity.CORRUPT_NO_COPY))
+
+        original_fixity._drop_unneeded_kept_copies(vault, connection)
+
+    kept = original_fixity._kept_path(vault, "0" * 64).parent.glob("*.kept")
+    assert [path.name for path in kept] == [f"{digests[-1]}.kept"]
+
+
+def test_the_sweep_of_kept_copies_asks_a_table_of_many_originals_through_an_index(vault: Path) -> None:
+    """A sweep that scanned the table for each batch would cost every pass more as the archive grows."""
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.executemany(
+            "INSERT INTO originals(path, sha256, kind, binding, state) VALUES (?, ?, 'file', 'binding', ?)",
+            [(f"file-{number}", hashlib.sha256(str(number).encode()).hexdigest(),
+              original_fixity.CORRUPT_NO_COPY if number % 100 == 0 else original_fixity.VERIFIED) for number in range(20_000)])
+        plan = " | ".join(step[3] for step in connection.execute(
+            "EXPLAIN QUERY PLAN " + original_fixity._KEPT_NEEDED.format(values="(?), (?)"), ("a" * 64, "b" * 64)))
+
+    assert "INDEX originals_unresolved" in plan and "SCAN originals" not in plan
+
+
+def test_the_sweep_of_kept_copies_gets_one_row_for_a_digest_that_many_unresolved_originals_share(vault: Path) -> None:
+    """Aliases of one file share a digest: the answer must not grow with them, or a pass would read a row for each."""
+    shared, other = hashlib.sha256(b"shared").hexdigest(), hashlib.sha256(b"other").hexdigest()
+    with contextlib.closing(original_fixity._connect(vault)) as connection, connection:
+        connection.executemany(
+            "INSERT INTO originals(path, sha256, kind, binding, state) VALUES (?, ?, 'file', 'binding', ?)",
+            [(f"alias-{number}", shared, original_fixity.CORRUPT_NO_COPY) for number in range(5_000)])
+
+        answered = connection.execute(original_fixity._KEPT_NEEDED.format(values="(?), (?)"), (shared, other)).fetchall()
+
+    assert [row[0] for row in answered] == [shared]
+
+
+def test_a_kept_copy_goes_when_the_original_is_whole_again(vault: Path, selected_store) -> None:
+    """A kept copy is the plaintext of an original: it must not outlive the finding that it served."""
+    original, _trash = _damaged_with_a_blocked_trash(vault)
+    kept = original_fixity._kept_path(vault, hashlib.sha256(TRANSCRIPT).hexdigest())
+    assert kept.exists()
+
+    original.write_bytes(TRANSCRIPT)  # the owner put the bytes back by hand
+    original_fixity.run_pass(vault, budget=0)
+
+    assert not kept.exists()
+
+
 def test_a_replace_that_keeps_failing_keeps_one_trash_copy_of_the_changed_bytes(
         vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     original = _stored(vault, "Recordings")

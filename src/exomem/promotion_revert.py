@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import curation, promotion_proof, promotions
+from . import capabilities, curation, promotion_proof, promotions
 
 
 def _error_code(error: BaseException) -> str:
@@ -240,7 +240,8 @@ def build(vault_root: Path, ref: str) -> RevertPlan:
     kind = str(entry["kind"])
     if kind not in {"edge", "entity"}:
         raise ValueError(
-            "INVALID_REVIEW_ACTION: a registry addition reverts through schema_memory, "
+            "INVALID_REVIEW_ACTION: a registry addition reverts through "
+            f"{capabilities.active_tools_text('schema_memory', 'write')}, "
             "not curation; read the item context for the call"
         )
     proofs = promotion_proof.subjects(vault_root, kind, entry["subjects"])

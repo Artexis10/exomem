@@ -41,13 +41,13 @@ class Findings:
     #: The oldest of them, which a report names.
     queued_first: list[str] = field(default_factory=list)
     #: Paths whose bytes on disk differ from the store's page: a person's edit that no import took in,
-    #: or the file beside a held item. A file of Exomem's that a queued intent replaces is not one.
+    #: or the file beside a held item. A file of Evermatter's that a queued intent replaces is not one.
     edited: list[str] = field(default_factory=list)
     #: Paths the store holds that the vault lacks: an outside delete.
     deleted: list[str] = field(default_factory=list)
     #: ``store_held`` rows: edits and deletes that an importer already set aside.
     held: list[tuple[str, str, bytes | None]] = field(default_factory=list)
-    #: Files at paths whose page the store no longer holds, which a person changed after Exomem
+    #: Files at paths whose page the store no longer holds, which a person changed after Evermatter
     #: removed or moved the page: held, or held once the queue is projected. The store's version
     #: of each is no file, so the rollback moves it into the trash.
     vacated: list[str] = field(default_factory=list)
@@ -64,7 +64,7 @@ def inspect(vault_root: Path, conn: sqlite3.Connection) -> Findings:
     nothing.
 
     A queued path's file counts as a person's only when the projector would hold it, so a file
-    that still has Exomem's earlier bytes is what the projection replaces, not an edit. The queue is
+    that still has Evermatter's earlier bytes is what the projection replaces, not an edit. The queue is
     read in batches, with one set of statements for each batch, and a path is classified before its
     file is read: a folder intent's folder and a binary are never read as a page.
     """
@@ -269,7 +269,7 @@ def _rollback(
             "VAULT_STORE_PROJECTION_PENDING",
             f"{found.queued} queued file(s) could not be projected, so their files lack the "
             f"store's bytes: {'; '.join(named)}",
-            "Make each named file or folder writable by Exomem, or move away what stands in its "
+            "Make each named file or folder writable by Evermatter, or move away what stands in its "
             "place, then run this command again. Nothing was rolled back.",
         )
     if found.unexported and not export_held:
@@ -416,7 +416,7 @@ def _export(
                 "VAULT_STORE_TRASH_REFUSED",
                 f"{rel} could not be moved to {trashed}: {reason}. Its page is no longer in the "
                 "store, so file mode must not find it there; nothing was rolled back",
-                f"Make {rel} a regular file that Exomem can move, and its trash folder writable, "
+                f"Make {rel} a regular file that Evermatter can move, and its trash folder writable, "
                 "or move the file out of the vault yourself. Then run this command again with a "
                 "new export directory; the vault stays in store mode until then.",
             ) from error

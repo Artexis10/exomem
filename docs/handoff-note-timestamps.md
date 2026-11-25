@@ -12,13 +12,13 @@ conversation context is assumed.
 
 ## The task
 
-Exomem records note `created` / `updated` as bare calendar dates. Move to
+Evermatter records note `created` / `updated` as bare calendar dates. Move to
 **second-granularity, timezone-aware timestamps going forward**, without
 rewriting history.
 
 ## Why this matters
 
-Exomem's differentiator is bitemporal reasoning — world time × knowledge time.
+Evermatter's differentiator is bitemporal reasoning — world time × knowledge time.
 It currently records its own **knowledge time to the day**. The recording
 granularity sits below the capability being claimed.
 
@@ -126,7 +126,7 @@ means reissuing the release.
 - Lean test command:
   `EXOMEM_DISABLE_EMBEDDINGS=1 uv run pytest tests/ -q --timeout=60`
 - Follow repo contribution instructions and OpenSpec conventions; validate any
-  OpenSpec change with `openspec validate <name> --strict`.
+  OpenSpec work with the strict gate: `source infra/tool-versions.env` then `node scripts/openspec_strict_gate.mjs -- npm exec --yes @fission-ai/openspec@$OPENSPEC_VERSION --`.
 
 ## Acceptance
 

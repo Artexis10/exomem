@@ -1,4 +1,4 @@
-"""The platform side of the Exomem Cloud media edge (add-cloud-media-store D4-D6).
+"""The platform side of the Evermatter Cloud media edge (add-cloud-media-store D4-D6).
 
 cellctl mints a cell's media key bundle, signs the cell's edge credential, plans
 the active set the edge loads, and reads the generation the edge reports. The

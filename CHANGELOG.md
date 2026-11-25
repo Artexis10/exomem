@@ -5,6 +5,284 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.204.0](https://github.com/substrate-systems/evermatter/compare/v0.203.0...v0.204.0) (2026-11-25)
+
+
+### Features
+
+* **media:** recover capture dates from file names and matching originals, with a recorded date source ([#3189](https://github.com/substrate-systems/evermatter/issues/3189)) ([3625de6](https://github.com/substrate-systems/evermatter/commit/3625de6d3f8f312c9f2179ce1072f5ef9f5e919d))
+
+
+### Bug Fixes
+
+* **release:** hold the Full-evidence dispatch while a cut is open ([#3194](https://github.com/substrate-systems/evermatter/issues/3194)) ([f00f14f](https://github.com/substrate-systems/evermatter/commit/f00f14f282abc609405d77e67f2510e104e306c9))
+
+## [0.203.0](https://github.com/substrate-systems/evermatter/compare/v0.202.0...v0.203.0) (2026-11-25)
+
+
+### Features
+
+* **compat:** accept both the exomem and evermatter agent names ([#3186](https://github.com/substrate-systems/evermatter/issues/3186)) ([72c0514](https://github.com/substrate-systems/evermatter/commit/72c0514ac27ddc46d386ad4909576e1c8db5245e))
+* **evidence:** keep a shared proof file in one call, with its caption, and never a card number ([#3165](https://github.com/substrate-systems/evermatter/issues/3165)) ([743ae94](https://github.com/substrate-systems/evermatter/commit/743ae94a930548a1cf2aa12498ae207629d62b54))
+* **search:** let an agent restrict a search to pictures ([#3163](https://github.com/substrate-systems/evermatter/issues/3163)) ([4c7d698](https://github.com/substrate-systems/evermatter/commit/4c7d698243dcd967fb42fb09672d533910f5e6a4))
+* **skill:** ask for recall on the user's own subjects in the skill description ([#3167](https://github.com/substrate-systems/evermatter/issues/3167)) ([c0b0620](https://github.com/substrate-systems/evermatter/commit/c0b0620f900bd91c8d145d1e149cc4838be0ab2b))
+* **skills:** name every skill and collection an overflowing catalogue cannot list ([#3188](https://github.com/substrate-systems/evermatter/issues/3188)) ([0db4a4b](https://github.com/substrate-systems/evermatter/commit/0db4a4bb40b4b53971438ac17400222c8b925e13))
+
+
+### Bug Fixes
+
+* **ci:** run the Full-evidence check when its window variable is unset ([#3183](https://github.com/substrate-systems/evermatter/issues/3183)) ([c057834](https://github.com/substrate-systems/evermatter/commit/c05783493777e36a542156da0e6be5cfa2a66510))
+* **records:** list the allowed values when a field is outside its enum ([#3187](https://github.com/substrate-systems/evermatter/issues/3187)) ([41f15a2](https://github.com/substrate-systems/evermatter/commit/41f15a2204a81c15dc06346d45a959159a2addb3))
+* **records:** read a withheld child column, child table or saved view as missing ([#3176](https://github.com/substrate-systems/evermatter/issues/3176)) ([02ae09a](https://github.com/substrate-systems/evermatter/commit/02ae09a9dc6c4fecfd593d5ccd68c000a1391f11))
+* **release:** check the native image licences on the runner's platform ([#3178](https://github.com/substrate-systems/evermatter/issues/3178)) ([28b7739](https://github.com/substrate-systems/evermatter/commit/28b7739360bf783ddd4aac884e40e093947a79f1))
+* **release:** observe PyPI long enough for a new project ([#3179](https://github.com/substrate-systems/evermatter/issues/3179)) ([795bc8d](https://github.com/substrate-systems/evermatter/commit/795bc8df54b06dc96b41e466dd5d103ba633b8ee))
+* **tools:** close the gaps left in refused tool calls ([#3172](https://github.com/substrate-systems/evermatter/issues/3172)) ([8ddc38e](https://github.com/substrate-systems/evermatter/commit/8ddc38ea02de08071f4e55425e1119cbe90f4867))
+* **writes:** let a stop end a queued save's replay promptly ([#3162](https://github.com/substrate-systems/evermatter/issues/3162)) ([13a6f98](https://github.com/substrate-systems/evermatter/commit/13a6f98a63ebfe4642a8babe8e5025fd39469771))
+
+
+### Performance
+
+* **lexstore:** keep the statistics base for a vault-sized corpus ([#3171](https://github.com/substrate-systems/evermatter/issues/3171)) ([222128a](https://github.com/substrate-systems/evermatter/commit/222128a243f1008e9b79deff6ea5555e202bdf08))
+* **lexstore:** make a rebuild after a write cost the change ([#3177](https://github.com/substrate-systems/evermatter/issues/3177)) ([f414bda](https://github.com/substrate-systems/evermatter/commit/f414bda3203919f799c5f253268bdfc12f9d1317))
+* **release:** cut from the newest fully tested commit ([#3180](https://github.com/substrate-systems/evermatter/issues/3180)) ([e63f1ef](https://github.com/substrate-systems/evermatter/commit/e63f1ef33a07748064bedc8c01856a37ca97d549))
+* **store:** admit store-mode writes without the graph handoff after a restart ([#3145](https://github.com/substrate-systems/evermatter/issues/3145)) ([9110f1b](https://github.com/substrate-systems/evermatter/commit/9110f1bf4ec68dc8dd04d94f289ce61aba14dc9b))
+
+## [0.202.0](https://github.com/substrate-systems/evermatter/compare/v0.201.0...v0.202.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **licensing:** license the server, CLI and images under FSL-1.1-ALv2 ([#3130](https://github.com/substrate-systems/evermatter/issues/3130))
+
+### Features
+
+* **cloud-rehearsal:** rehearse the automatic cell rollout end to end ([#2858](https://github.com/substrate-systems/evermatter/issues/2858)) ([00b9604](https://github.com/substrate-systems/evermatter/commit/00b9604a4b62bd73354a082e8a80ea4942a1059d))
+* **cloud:** relay the gateway's service notice in MCP results ([#3114](https://github.com/substrate-systems/evermatter/issues/3114)) ([6cf3980](https://github.com/substrate-systems/evermatter/commit/6cf3980c87726d709e66af6d9f55f598c4e2eeb5))
+* **cloud:** serve and accept more than one public gateway hostname ([#3136](https://github.com/substrate-systems/evermatter/issues/3136)) ([49b7e12](https://github.com/substrate-systems/evermatter/commit/49b7e123963351c4b8da2152ca2b5423251cf61b))
+* **licensing:** license the server, CLI and images under FSL-1.1-ALv2 ([#3130](https://github.com/substrate-systems/evermatter/issues/3130)) ([49da4f4](https://github.com/substrate-systems/evermatter/commit/49da4f42030b91916953a89545b480340b398bfe))
+* **licensing:** remove third-party strong copyleft from the product and its images ([#3108](https://github.com/substrate-systems/evermatter/issues/3108)) ([1deea8b](https://github.com/substrate-systems/evermatter/commit/1deea8b2537fc940481590fe066619e12e3cd577))
+* **mcp:** ask clients without hooks to recall per subject, even mid-conversation ([#3124](https://github.com/substrate-systems/evermatter/issues/3124)) ([66cf260](https://github.com/substrate-systems/evermatter/commit/66cf260cce6b431223ed15c65c380be7fbe77893))
+* **names:** find pages whose file name no longer follows their title ([#3103](https://github.com/substrate-systems/evermatter/issues/3103)) ([68fc8db](https://github.com/substrate-systems/evermatter/commit/68fc8db2f33c11b02553d69a4424ad5aeaa34b24))
+* rename the product to Evermatter on its external surfaces ([#3123](https://github.com/substrate-systems/evermatter/issues/3123)) ([813dbfe](https://github.com/substrate-systems/evermatter/commit/813dbfe8d7562a66c0f13189eb7047aaee4c32d2))
+* **store:** acknowledge saves at the commit, and let reads wait for their rows ([#3100](https://github.com/substrate-systems/evermatter/issues/3100)) ([bb8893f](https://github.com/substrate-systems/evermatter/commit/bb8893f0f9b464667b0c5abca96399efb575cd6b))
+* **units:** supersede, assess and link one claim inside a note ([#3143](https://github.com/substrate-systems/evermatter/issues/3143)) ([41276ad](https://github.com/substrate-systems/evermatter/commit/41276addfa75e045841a9380f212a267ede87096))
+
+
+### Bug Fixes
+
+* **activation:** keep legacy pages grandfathered after an exomem_id stamp ([#3161](https://github.com/substrate-systems/evermatter/issues/3161)) ([ca16019](https://github.com/substrate-systems/evermatter/commit/ca16019cd13650ec0f08979cbf6a282b74d26ec5))
+* **cloud-deploy:** fail a re-run while the rollout is paused ([#3151](https://github.com/substrate-systems/evermatter/issues/3151)) ([15a89af](https://github.com/substrate-systems/evermatter/commit/15a89af83850e6ecafb57b26b0c43fd2880c38ef))
+* follow the Evermatter rename in tests and diagnostics ([#3144](https://github.com/substrate-systems/evermatter/issues/3144)) ([5001574](https://github.com/substrate-systems/evermatter/commit/500157496d895fbea13aff012271e9ea22a944d1))
+* **graph:** leave barrier debt the queue owns to the queue ([#3157](https://github.com/substrate-systems/evermatter/issues/3157)) ([da8518a](https://github.com/substrate-systems/evermatter/commit/da8518a6d1d6af7baf3a8893e82c3943a1ad1a44))
+* **graph:** let a stop end start-up graph validation at the next page ([#3135](https://github.com/substrate-systems/evermatter/issues/3135)) ([f3d14fc](https://github.com/substrate-systems/evermatter/commit/f3d14fcd16aca2d0e188dafc468afb9fbeb49bdc))
+* **graph:** let a whole-vault rebuild wait out a brief deferred-index lock ([#3121](https://github.com/substrate-systems/evermatter/issues/3121)) ([01f93f7](https://github.com/substrate-systems/evermatter/commit/01f93f7869573a825890ad18f17724c21c09367f))
+* **licensing:** quiet LGPL in the image licence check and halve the OCR render peak ([#3116](https://github.com/substrate-systems/evermatter/issues/3116)) ([3d28e8c](https://github.com/substrate-systems/evermatter/commit/3d28e8cf893e663b60172a1abf938a704bbaebbd))
+* **recall:** offer store collections from the service's background index build ([#3111](https://github.com/substrate-systems/evermatter/issues/3111)) ([63644d2](https://github.com/substrate-systems/evermatter/commit/63644d26829ad0987df7b609501f6ac23309f42c))
+* **release:** keep a foreign commit visible after a rolled-back write ([#3141](https://github.com/substrate-systems/evermatter/issues/3141)) ([553d760](https://github.com/substrate-systems/evermatter/commit/553d760da08ea1e73d45672dfe3c73eb165d90e5))
+* **release:** verify each release against the repository that built it ([#3160](https://github.com/substrate-systems/evermatter/issues/3160)) ([380bdee](https://github.com/substrate-systems/evermatter/commit/380bdee7a672fc0d9a3cc7a5eb8728ee34efbac7))
+* **relocate:** refuse a moved page only for the debt the move adds ([#3120](https://github.com/substrate-systems/evermatter/issues/3120)) ([2cbdf41](https://github.com/substrate-systems/evermatter/commit/2cbdf4150709a46a73a00249536d7a81c3276fc0))
+* **runtime:** keep the recall registry through a slow watcher seed ([#3155](https://github.com/substrate-systems/evermatter/issues/3155)) ([d64a458](https://github.com/substrate-systems/evermatter/commit/d64a458a5853dbd4c86af36240b8604395179a6c))
+* **storage:** charge only an original's own pages to its derived room ([#3126](https://github.com/substrate-systems/evermatter/issues/3126)) ([12ecb7f](https://github.com/substrate-systems/evermatter/commit/12ecb7f41f68eef769acd8f8dc70a6ab512f6b1d))
+* **tools:** name what to change in refused tool calls ([#3159](https://github.com/substrate-systems/evermatter/issues/3159)) ([240e28b](https://github.com/substrate-systems/evermatter/commit/240e28bfc95ee79b1ce3ccfa908ccc721a7e582e))
+* **writes:** start the write intake before activation's start-up waits ([#3149](https://github.com/substrate-systems/evermatter/issues/3149)) ([9ba9501](https://github.com/substrate-systems/evermatter/commit/9ba95010af5e8a8e8c89ec9538fc5a7330b29b87))
+
+
+### Performance
+
+* **recall:** reread only changed dataset cards after a write ([#3079](https://github.com/substrate-systems/evermatter/issues/3079)) ([d702c8a](https://github.com/substrate-systems/evermatter/commit/d702c8a1a29cd11613a9d3fc3ac2e336a1a9b330))
+* **store:** keep collection view decisions across vault commits ([#3132](https://github.com/substrate-systems/evermatter/issues/3132)) ([9720da1](https://github.com/substrate-systems/evermatter/commit/9720da1b2a262a54354895fc03bd6f1cf63eb8e2))
+
+## [0.201.0](https://github.com/Artexis10/exomem/compare/v0.200.0...v0.201.0) (2026-11-23)
+
+
+### Features
+
+* **activation:** select user methods with a bounded judgment, carry their contract, report use ([#3056](https://github.com/Artexis10/exomem/issues/3056)) ([38af4dd](https://github.com/Artexis10/exomem/commit/38af4ddc14a0a67d7f8a2a4b00493223c8fe329f))
+* **activation:** show the agent its skills and collections, and let it decide ([#3098](https://github.com/Artexis10/exomem/issues/3098)) ([ec08c68](https://github.com/Artexis10/exomem/commit/ec08c68f8e70055e266f4f8e1eb2b05f31fad69a))
+* **cloud:** route cell discovery on the Cloud host to the gateway ([#3113](https://github.com/Artexis10/exomem/issues/3113)) ([bde442e](https://github.com/Artexis10/exomem/commit/bde442eb504aadd15af4dce54dc06b9325f9e0f3))
+* **curation:** relocate a set of pages with one approval ([#3086](https://github.com/Artexis10/exomem/issues/3086)) ([c0debc7](https://github.com/Artexis10/exomem/commit/c0debc7aed2b3082e69327b8cf1a1d4845523cc3))
+* **media:** reconcile owner storage protection ([#3082](https://github.com/Artexis10/exomem/issues/3082)) ([a8fa776](https://github.com/Artexis10/exomem/commit/a8fa7768a1a22888adc4559988ff7d00bdf07660))
+* **media:** store encrypted original replicas in Backblaze B2 ([#3094](https://github.com/Artexis10/exomem/issues/3094)) ([d1837b8](https://github.com/Artexis10/exomem/commit/d1837b839b888d07618b3d47e36e12474a2a6047))
+* **records:** capture recurring structured work automatically, within server bounds ([#3072](https://github.com/Artexis10/exomem/issues/3072)) ([12111f8](https://github.com/Artexis10/exomem/commit/12111f8c18727d2ac78cd185955dd8ee106ecb81))
+* **store:** derive a governed write's rows after it releases the vault boundary ([#3084](https://github.com/Artexis10/exomem/issues/3084)) ([e85d208](https://github.com/Artexis10/exomem/commit/e85d208bf41c6ed38de9ba28291023ca567d85a3))
+* **upload:** resume large personal Source handoffs ([#3026](https://github.com/Artexis10/exomem/issues/3026)) ([b8b26d8](https://github.com/Artexis10/exomem/commit/b8b26d8aa711d935be0d4c0fff40c25f398ded44))
+* **writes:** name failed queued saves in the owner's next save reply ([#3092](https://github.com/Artexis10/exomem/issues/3092)) ([6c1eb84](https://github.com/Artexis10/exomem/commit/6c1eb84b37763c448c3d852c9b3dc85d29190953))
+* **writes:** queue a busy save durably and apply it once instead of refusing it ([#3054](https://github.com/Artexis10/exomem/issues/3054)) ([fae7aee](https://github.com/Artexis10/exomem/commit/fae7aeee4ec6aaf8f27cdb44d8cd052590853a52))
+
+
+### Bug Fixes
+
+* **activation:** keep the recall_context description under its ceiling ([#3110](https://github.com/Artexis10/exomem/issues/3110)) ([31cb851](https://github.com/Artexis10/exomem/commit/31cb851bae985fc954b54b06752ed0ab59cc08ea))
+* **egress:** redact a withheld path that ends a sentence when the census is unpublished ([#3088](https://github.com/Artexis10/exomem/issues/3088)) ([e10e610](https://github.com/Artexis10/exomem/commit/e10e610daf281ba0162d38cc5431f633efcbecfd))
+* **egress:** restore one store request per command after [#2997](https://github.com/Artexis10/exomem/issues/2997) ([#3087](https://github.com/Artexis10/exomem/issues/3087)) ([972ae70](https://github.com/Artexis10/exomem/commit/972ae70cd3e204703d47b43a3e906e35d697e029))
+* **hooks:** tell the user when Exomem is disconnected instead of skipping capture ([#3109](https://github.com/Artexis10/exomem/issues/3109)) ([ece86ca](https://github.com/Artexis10/exomem/commit/ece86caabb8156303e01886aef02407547fd48e8))
+* **inventory:** read again a raw input that a commit replaced during its read ([#3107](https://github.com/Artexis10/exomem/issues/3107)) ([f08b1d8](https://github.com/Artexis10/exomem/commit/f08b1d88882808cb347e96593acd14004ec412d5))
+* **media:** keep file writes working when the media ledger is corrupt ([#3090](https://github.com/Artexis10/exomem/issues/3090)) ([a8d0792](https://github.com/Artexis10/exomem/commit/a8d079229ebdfafdc0dde59a9cbb71c5ee7f70d4))
+* **service:** start a promoted worker's collection store after its graph proof ([#3093](https://github.com/Artexis10/exomem/issues/3093)) ([3412d8c](https://github.com/Artexis10/exomem/commit/3412d8c59aa839bafd93aff7791ea30e6b54ff64))
+* **sources:** keep a missing custody target out of the repair refusal text ([#3096](https://github.com/Artexis10/exomem/issues/3096)) ([5f4f2a9](https://github.com/Artexis10/exomem/commit/5f4f2a9bc784e4c35e8796ce6eebdd1fa1d51779))
+* **sources:** page large reclassification previews and reuse verified receipt evidence ([#2997](https://github.com/Artexis10/exomem/issues/2997)) ([7b68513](https://github.com/Artexis10/exomem/commit/7b68513395f718f35d40f26f5ba7dea3df187f00))
+* **store:** catch up queued graph work before a migration stages ([#3106](https://github.com/Artexis10/exomem/issues/3106)) ([3300d17](https://github.com/Artexis10/exomem/commit/3300d1763189c2a34abc6205b4acb7218b6573dd))
+* **store:** make the recall projection live before a migration drains graph work ([#3112](https://github.com/Artexis10/exomem/issues/3112)) ([55a799e](https://github.com/Artexis10/exomem/commit/55a799ea3ab4559f8266652cf321f6bdcdd16fa7))
+* **store:** restore main CI after the derivation queue ([#3099](https://github.com/Artexis10/exomem/issues/3099)) ([5e0c579](https://github.com/Artexis10/exomem/commit/5e0c5796ad7558a5df014807a98b831b67f10686))
+* **upload:** release a parked session whose expiry falls between two clock reads ([#3104](https://github.com/Artexis10/exomem/issues/3104)) ([00d471d](https://github.com/Artexis10/exomem/commit/00d471d3290e279d1731af300b9fe944c0744283))
+* **vault-store:** start a store-mode service before its writer migrates the store ([#3068](https://github.com/Artexis10/exomem/issues/3068)) ([6d1e7ba](https://github.com/Artexis10/exomem/commit/6d1e7ba79c1917985d6f05175ead5e796b805794))
+* **vault:** reread a guarded file that a concurrent commit replaced during the read ([#3102](https://github.com/Artexis10/exomem/issues/3102)) ([b94b137](https://github.com/Artexis10/exomem/commit/b94b1370a7c896d429ffa9065fefdc689973ace0))
+* **writes:** keep the busy refusal for protocol steps of a queueable command ([#3089](https://github.com/Artexis10/exomem/issues/3089)) ([fd3eb4b](https://github.com/Artexis10/exomem/commit/fd3eb4b2d3787be448cf063da34d80e7f759261a))
+
+
+### Performance
+
+* **admission:** keep store-mode corpus verdicts from one save to the next ([#3080](https://github.com/Artexis10/exomem/issues/3080)) ([977a3d5](https://github.com/Artexis10/exomem/commit/977a3d5055e3694e5f5d0f301d9d99e68a64d36c))
+* **curation:** hold the vault boundary only at each step's canonical writes ([#3057](https://github.com/Artexis10/exomem/issues/3057)) ([59e5f56](https://github.com/Artexis10/exomem/commit/59e5f561d7447e7edc9b6d278fbd0a86be78fbfc))
+* **egress:** end literal spans anywhere in trailing full stops, and scan without tail copies ([#3091](https://github.com/Artexis10/exomem/issues/3091)) ([a9a0fed](https://github.com/Artexis10/exomem/commit/a9a0fed4432be52c4fa9409e7c7f6f6f954b8d0d))
+* **passages:** read lexical candidates in the dense snapshot and name them from a table ([#3073](https://github.com/Artexis10/exomem/issues/3073)) ([c4ac9e3](https://github.com/Artexis10/exomem/commit/c4ac9e3f5841b6c519c4ce5748bed36eda461830))
+* **search:** encode a page query on its own lane, not behind bulk encodes or model loads ([#3066](https://github.com/Artexis10/exomem/issues/3066)) ([86951c6](https://github.com/Artexis10/exomem/commit/86951c6dd5f6002c31299f07f56131f8f9b3559d))
+* **writes:** shorten a queued save's commit-marker hold, keep an uncertain replay's identity, and cap a resend's wait ([#3078](https://github.com/Artexis10/exomem/issues/3078)) ([f45180a](https://github.com/Artexis10/exomem/commit/f45180ae44fee6556804e0c23c634283bbf03d04))
+
+## [0.200.0](https://github.com/Artexis10/exomem/compare/v0.199.0...v0.200.0) (2026-11-22)
+
+
+### Features
+
+* **cloud:** verify retained restic backup packs ([#3030](https://github.com/Artexis10/exomem/issues/3030)) ([86e5db9](https://github.com/Artexis10/exomem/commit/86e5db9922237d7d14feef403ec7805a3c948ee2))
+* **media:** evict personal originals to a declared disk ([#3025](https://github.com/Artexis10/exomem/issues/3025)) ([c83d34b](https://github.com/Artexis10/exomem/commit/c83d34b7a24217c975cfcf76e1c71aa20ea996e2))
+* **media:** select speaker labels per recording ([#3033](https://github.com/Artexis10/exomem/issues/3033)) ([63ed9be](https://github.com/Artexis10/exomem/commit/63ed9be340a2a52a9b2aa7fe229245bb95acc480))
+
+
+### Bug Fixes
+
+* **audit:** scope the custody-only corpus read to custody-marked Sources ([#3043](https://github.com/Artexis10/exomem/issues/3043)) ([e0a20d4](https://github.com/Artexis10/exomem/commit/e0a20d4ef75391987f5ae51ef948971e6fdecc04))
+* **brief:** close the scorer review follow-ups and record the release proof ([#3035](https://github.com/Artexis10/exomem/issues/3035)) ([4011a0e](https://github.com/Artexis10/exomem/commit/4011a0e71530f70fd0281d3473e347a0c25a25a3))
+* **collection-store:** release a view that an earlier store instance rendered ([#3047](https://github.com/Artexis10/exomem/issues/3047)) ([cfb27c9](https://github.com/Artexis10/exomem/commit/cfb27c96d0797d64f60e16032160ab407c41c5b7))
+* **graph:** drop a fatal-family fence left behind by an older release ([#3053](https://github.com/Artexis10/exomem/issues/3053)) ([aa71b91](https://github.com/Artexis10/exomem/commit/aa71b91aa4e90c272820f5ade4c77dffc9955650))
+* **graph:** preserve startup proof and scoped repair across upgrades ([#3010](https://github.com/Artexis10/exomem/issues/3010)) ([eb54572](https://github.com/Artexis10/exomem/commit/eb54572e2c32cfb37736e0a7a721d280a5b03b61))
+* **lexstore:** re-queue a catch-up that a write outran before its proof ([#3059](https://github.com/Artexis10/exomem/issues/3059)) ([4accb37](https://github.com/Artexis10/exomem/commit/4accb37ecb2f3c3156e1d1837e73a586c4a8a4ee))
+* **outcome:** run the planted suite on the typed tool surface ([#3060](https://github.com/Artexis10/exomem/issues/3060)) ([bc82732](https://github.com/Artexis10/exomem/commit/bc8273213eae9303c10d4ffc219143cfc89ac606))
+* **plugin:** pass --client claude to the continuation checkpoint hooks ([#3040](https://github.com/Artexis10/exomem/issues/3040)) ([620781f](https://github.com/Artexis10/exomem/commit/620781f711233acde995fe21289ce66ba057f695))
+* **search:** keep dataset values searchable after a card read fails at start-up ([#3044](https://github.com/Artexis10/exomem/issues/3044)) ([b8087f7](https://github.com/Artexis10/exomem/commit/b8087f724e9be77087f7e2affd229346b549e89a))
+
+
+### Performance
+
+* **lexical:** keep BM25 first-seen order incrementally after a write ([#3048](https://github.com/Artexis10/exomem/issues/3048)) ([8e78313](https://github.com/Artexis10/exomem/commit/8e78313441d9947366a8f92dae7f1c39dc243096))
+* **passages:** rank lexical passage candidates from the terms index alone ([#3039](https://github.com/Artexis10/exomem/issues/3039)) ([6cec0dd](https://github.com/Artexis10/exomem/commit/6cec0dd2af2079b1e2224414baeb03fe14a8b3f5))
+* **store:** stop re-deciding every view on each owner save ([#3055](https://github.com/Artexis10/exomem/issues/3055)) ([93a1e75](https://github.com/Artexis10/exomem/commit/93a1e75015881982678fbd4bf23d82b1262f2e15))
+* **upload:** run an upload's derived fan-out after it releases the vault boundary ([#3052](https://github.com/Artexis10/exomem/issues/3052)) ([fcb88df](https://github.com/Artexis10/exomem/commit/fcb88dfc49329e7ba7ffea7cd99f5d4522b9f759))
+
+## [0.199.0](https://github.com/Artexis10/exomem/compare/v0.198.0...v0.199.0) (2026-11-22)
+
+
+### Features
+
+* **passages:** fuse lexical ranking with dense similarity in passage search ([#3031](https://github.com/Artexis10/exomem/issues/3031)) ([25c9f1e](https://github.com/Artexis10/exomem/commit/25c9f1e959ff3d4327c6cb425fb89bb4bf28b3b1))
+
+
+### Bug Fixes
+
+* **curation:** count a preference saved later on the profile's own day ([#3038](https://github.com/Artexis10/exomem/issues/3038)) ([de39e53](https://github.com/Artexis10/exomem/commit/de39e5319ec4a99efaa6e6be0ec7952ea385d526))
+* **positions:** report a cut-short task discovery as unavailable or partial ([#3029](https://github.com/Artexis10/exomem/issues/3029)) ([f9bbcd1](https://github.com/Artexis10/exomem/commit/f9bbcd1ba58063dd25e480b965881501641b538d))
+* **release:** land cuts without manual retries and stop waiting on latency suites ([#3036](https://github.com/Artexis10/exomem/issues/3036)) ([9421ca5](https://github.com/Artexis10/exomem/commit/9421ca5337d8d208618e81f1d01ae3f20ac1c818))
+
+## [0.198.0](https://github.com/Artexis10/exomem/compare/v0.197.0...v0.198.0) (2026-11-22)
+
+
+### Features
+
+* **media-replicas:** verify stored replicas on a cycle, quarantine and copy again ([#2978](https://github.com/Artexis10/exomem/issues/2978)) ([c91290c](https://github.com/Artexis10/exomem/commit/c91290ce3e541071c1097c540c92333823311def))
+* **media:** persist governed previews ([#3016](https://github.com/Artexis10/exomem/issues/3016)) ([14f3f3d](https://github.com/Artexis10/exomem/commit/14f3f3db648324d395fca019f128cedaddde49c0))
+* **records:** retract a store-backed row from current state, keeping its history (store schema 19) ([#2988](https://github.com/Artexis10/exomem/issues/2988)) ([d9c3727](https://github.com/Artexis10/exomem/commit/d9c37275500446f808997c8b82d397b1541ce316))
+
+
+### Performance
+
+* **governance:** avoid resolving page version IDs as file paths ([#3019](https://github.com/Artexis10/exomem/issues/3019)) ([cb3f040](https://github.com/Artexis10/exomem/commit/cb3f0401da43d8dd657c89673b72fabc9012d4d2))
+
+## [0.197.0](https://github.com/Artexis10/exomem/compare/v0.196.0...v0.197.0) (2026-11-22)
+
+
+### Features
+
+* **exomem:** retrieve timed Source passages and replay file imports ([#3003](https://github.com/Artexis10/exomem/issues/3003)) ([9e2a0ee](https://github.com/Artexis10/exomem/commit/9e2a0eeda7ad5483a5213e1ee0ffea404110cc82))
+
+
+### Bug Fixes
+
+* **rehearsal:** require a triggered kill on a warm writer ([#3014](https://github.com/Artexis10/exomem/issues/3014)) ([c6009d9](https://github.com/Artexis10/exomem/commit/c6009d94af505cb5bbdc81df57c92720056d6fd1))
+
+
+### Performance
+
+* **vault-store:** reduce served save overhead ([#3013](https://github.com/Artexis10/exomem/issues/3013)) ([52f58c6](https://github.com/Artexis10/exomem/commit/52f58c658184745512e100e405f38ba3b51055c0))
+
+## [0.196.0](https://github.com/Artexis10/exomem/compare/v0.195.0...v0.196.0) (2026-11-21)
+
+
+### Features
+
+* **capture:** save each claim at its true strength, with the full rule outside the hook's block ([#2985](https://github.com/Artexis10/exomem/issues/2985)) ([1e667b9](https://github.com/Artexis10/exomem/commit/1e667b9545db9a4bedcbe0f4ac5df7728140f811))
+* **positions:** lead the first answer with the person's recorded position ([#2991](https://github.com/Artexis10/exomem/issues/2991)) ([210a251](https://github.com/Artexis10/exomem/commit/210a251a577eefe9f769342d39c6437ed303e3cd))
+* **vault-store:** release opt-in store mode ([#3000](https://github.com/Artexis10/exomem/issues/3000)) ([ca88a9d](https://github.com/Artexis10/exomem/commit/ca88a9d54601114c30eef477b2e10cb07011c804))
+
+
+### Bug Fixes
+
+* **audit:** limit pointer checks to source and evidence cards ([#2995](https://github.com/Artexis10/exomem/issues/2995)) ([f7c7811](https://github.com/Artexis10/exomem/commit/f7c7811fe9c6b65b7853b8b41955ca0e27674741))
+* **mcp:** show readable titles in write summaries ([#3002](https://github.com/Artexis10/exomem/issues/3002)) ([287d089](https://github.com/Artexis10/exomem/commit/287d0895164e78938f41b77d977c00de675e0aa6))
+* **media:** report whether image OCR retained text ([#2994](https://github.com/Artexis10/exomem/issues/2994)) ([a8152e5](https://github.com/Artexis10/exomem/commit/a8152e5620afab984ed7228a5d61ce935f6d616d))
+* **recall:** keep catalogue lock waits within the request budget ([#3001](https://github.com/Artexis10/exomem/issues/3001)) ([1040f70](https://github.com/Artexis10/exomem/commit/1040f70ee0df5592fa6a973e651530bde950fa86))
+* **recall:** keep connection reasons within release bounds ([#2951](https://github.com/Artexis10/exomem/issues/2951)) ([4321a00](https://github.com/Artexis10/exomem/commit/4321a005d8fdff37423b33932d072337e47b80ce))
+* **records:** resolve capture method links without a Markdown suffix ([#3009](https://github.com/Artexis10/exomem/issues/3009)) ([ee869c4](https://github.com/Artexis10/exomem/commit/ee869c4849acf8b4ad80ec6594a06e7ac473836d))
+* **vault-store:** guard top index write-backs with the stored bytes ([#3004](https://github.com/Artexis10/exomem/issues/3004)) ([8091430](https://github.com/Artexis10/exomem/commit/8091430d2384a15ec0be3b6f41dffff800975729))
+
+
+### Performance
+
+* **media:** keep model work and fan-out out of the background media boundary holds ([#3008](https://github.com/Artexis10/exomem/issues/3008)) ([9add2fc](https://github.com/Artexis10/exomem/commit/9add2fca65bf65d37a682a712c522008f79fdf68))
+* **media:** reuse the CUDA diarizer in WSL2 ([#2999](https://github.com/Artexis10/exomem/issues/2999)) ([96b772b](https://github.com/Artexis10/exomem/commit/96b772be87b0687367f4a584e6642f4e25f65137))
+* **upload:** stage upload bytes before the boundary, install by rename ([#2989](https://github.com/Artexis10/exomem/issues/2989)) ([85d7b98](https://github.com/Artexis10/exomem/commit/85d7b98efd7fb90037a1418edc6a0b0f9197a90b))
+* **vault-store:** a save keeps the corpus and the writer resolver resident ([#2981](https://github.com/Artexis10/exomem/issues/2981)) ([fbfe8df](https://github.com/Artexis10/exomem/commit/fbfe8df99551e13456850196d82c5a02d283b068))
+* **vault-store:** share save census and count index rows ([#3006](https://github.com/Artexis10/exomem/issues/3006)) ([f7d5f52](https://github.com/Artexis10/exomem/commit/f7d5f520a9b93a1bc6065a72e3dcd59d3e2a5235))
+
+## [0.195.0](https://github.com/Artexis10/exomem/compare/v0.194.0...v0.195.0) (2026-11-21)
+
+
+### Features
+
+* **capture-nudge:** deliver the capture reminder on the next prompt (opt-in) ([#2986](https://github.com/Artexis10/exomem/issues/2986)) ([8ff42b7](https://github.com/Artexis10/exomem/commit/8ff42b707e23b4b42da037f7d9c22212bdf62976))
+
+
+### Bug Fixes
+
+* **agent:** stop agents misreading empty recall arrays, stub excerpts and the read-only rule ([#2980](https://github.com/Artexis10/exomem/issues/2980)) ([4958bbd](https://github.com/Artexis10/exomem/commit/4958bbd4132dc7e19e9aca84b441931fade369f4))
+* **backup:** keep the governance store in vault backups ([#2975](https://github.com/Artexis10/exomem/issues/2975)) ([1bd28ac](https://github.com/Artexis10/exomem/commit/1bd28acf1ac371572f740ab42bebc9d9b0298f42))
+
+## [0.194.0](https://github.com/Artexis10/exomem/compare/v0.193.0...v0.194.0) (2026-11-21)
+
+
+### Features
+
+* **backup:** back up a personal vault with restic, check it and prove restores ([#2968](https://github.com/Artexis10/exomem/issues/2968)) ([bcf8f8a](https://github.com/Artexis10/exomem/commit/bcf8f8a577b1c4d93f46942ad6ec4d318063a65f))
+* **capture:** save held views, open questions and settled values ([#2953](https://github.com/Artexis10/exomem/issues/2953)) ([991d329](https://github.com/Artexis10/exomem/commit/991d3299e071e17fa09475f6c527713665fdf893))
+* **media:** index capture date and place for photos and videos, withheld per original ([#2961](https://github.com/Artexis10/exomem/issues/2961)) ([6f2a8fa](https://github.com/Artexis10/exomem/commit/6f2a8fab6cfe64171773623d77b068a928639c10))
+* **media:** keep verified replicas of originals in several declared stores ([#2954](https://github.com/Artexis10/exomem/issues/2954)) ([f529d96](https://github.com/Artexis10/exomem/commit/f529d96d6d8f46a3527ea5ed750ca7638fba3081))
+* **sources:** keep the files a user hands the agent, and fix Source capture gaps ([#2938](https://github.com/Artexis10/exomem/issues/2938)) ([493b6a7](https://github.com/Artexis10/exomem/commit/493b6a733b00ec735b7d694dd03122381cdabe15))
+
+
+### Bug Fixes
+
+* **egress:** clear a hit's borrowed content when its source page is withheld ([#2955](https://github.com/Artexis10/exomem/issues/2955)) ([30d0e71](https://github.com/Artexis10/exomem/commit/30d0e718a6d8627f4d8e38b0fc187ed14fe46683))
+* **records:** resolve collection titles when served, name the id edit takes, and close the import hardening change ([#2965](https://github.com/Artexis10/exomem/issues/2965)) ([29cea43](https://github.com/Artexis10/exomem/commit/29cea43c60e71e89449deafa640c62a606c20119))
+* **sources:** let an agent correct a mislabelled Source from what it reads ([#2974](https://github.com/Artexis10/exomem/issues/2974)) ([7766c48](https://github.com/Artexis10/exomem/commit/7766c48d61ed04c06e42d01cf9acff7bca8b9561))
+
+
+### Performance
+
+* **passage-evidence:** hold passage search under concurrent callers ([#2963](https://github.com/Artexis10/exomem/issues/2963)) ([42fe397](https://github.com/Artexis10/exomem/commit/42fe39714f594d2f5c741537f782d13d01298a78))
+* **passage-evidence:** keep passage search fast during a capture ([#2976](https://github.com/Artexis10/exomem/issues/2976)) ([a4dd717](https://github.com/Artexis10/exomem/commit/a4dd71772be1cd7b809c0d8f70c1e7fbfb1c03f0))
+* **runtime:** background passes give way to requests in flight ([#2970](https://github.com/Artexis10/exomem/issues/2970)) ([25739fc](https://github.com/Artexis10/exomem/commit/25739fc930471659418305db257838215b365dc5))
+* **service:** shorten the worker's GIL switch interval to 1 ms ([#2979](https://github.com/Artexis10/exomem/issues/2979)) ([3cc021d](https://github.com/Artexis10/exomem/commit/3cc021dd5b60a4e8cb8e1802299b7a8398751f23))
+* **vault-store:** a save enriches and derives only the page it adds ([#2969](https://github.com/Artexis10/exomem/issues/2969)) ([833780f](https://github.com/Artexis10/exomem/commit/833780ff825cefd74f0d981083d5d7786d25a05c))
+
 ## [0.193.0](https://github.com/Artexis10/exomem/compare/v0.192.0...v0.193.0) (2026-11-20)
 
 

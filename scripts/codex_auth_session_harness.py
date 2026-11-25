@@ -18,12 +18,19 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from exomem.client_config import SERVER_NAME, SERVER_NAMES  # noqa: E402
+
 
 class HarnessFailure(RuntimeError):
     """The live client gate observed registration, login, or reuse failure."""
 
 
 SENTINEL_QUERY = "__exomem_codex_session_smoke_absent__"
+# The gate reads a call under either accepted server key; it registers SERVER_NAME only.
+_TOOL_PREFIXES = tuple(f"mcp__{name}__" for name in SERVER_NAMES)
+_ASK_MEMORY_NAMES = {"ask_memory", *(f"{prefix}ask_memory" for prefix in _TOOL_PREFIXES)}
 _SUCCESS_STATUSES = {"completed", "success", "succeeded"}
 _ERROR_STATUSES = {"cancelled", "error", "failed", "failure"}
 _ERROR_LIKE_STDERR = re.compile(
@@ -127,16 +134,16 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
         server = str(item.get("server") or item.get("server_name") or "")
         tool = str(item.get("tool") or item.get("name") or "")
         if not (
-            server.casefold() == "exomem"
-            or tool.casefold().startswith("mcp__exomem__")
+            server.casefold() in SERVER_NAMES
+            or tool.casefold().startswith(_TOOL_PREFIXES)
         ):
             raise HarnessFailure("fresh Codex process called an unexpected MCP tool")
-        if tool.casefold() not in {"ask_memory", "mcp__exomem__ask_memory"}:
-            raise HarnessFailure("fresh Codex process called an unexpected Exomem tool")
+        if tool.casefold() not in _ASK_MEMORY_NAMES:
+            raise HarnessFailure("fresh Codex process called an unexpected Evermatter tool")
         if _arguments(item.get("arguments")) != {"query": SENTINEL_QUERY}:
-            raise HarnessFailure("Exomem ask_memory call used unexpected arguments")
+            raise HarnessFailure("Evermatter ask_memory call used unexpected arguments")
         if _has_error_marker(item):
-            raise HarnessFailure("Exomem ask_memory call returned an error")
+            raise HarnessFailure("Evermatter ask_memory call returned an error")
 
         raw_id = item.get("id")
         call_id = (
@@ -148,13 +155,13 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
         if event.get("type") == "item.completed":
             if str(item.get("status") or "").casefold() not in _SUCCESS_STATUSES:
                 raise HarnessFailure(
-                    "Exomem ask_memory call lacked explicit success status"
+                    "Evermatter ask_memory call lacked explicit success status"
                 )
             completed_call_ids.append(call_id)
 
     if len(observed_call_ids) != 1 or len(completed_call_ids) != 1:
         raise HarnessFailure(
-            "fresh Codex process must contain one unambiguous completed Exomem call"
+            "fresh Codex process must contain one unambiguous completed Evermatter call"
         )
 
 
@@ -255,24 +262,24 @@ def run_harness(
     )
     _run_checked(
         runner,
-        ["codex", "mcp", "add", "exomem", "--url", url.strip()],
+        ["codex", "mcp", "add", SERVER_NAME, "--url", url.strip()],
         env=env,
-        action="register the Exomem MCP server",
+        action="register the Evermatter MCP server",
         timeout=30.0,
     )
     _run_checked(
         runner,
-        ["codex", "mcp", "login", "exomem"],
+        ["codex", "mcp", "login", SERVER_NAME],
         env=env,
-        action="complete the one interactive Exomem login",
+        action="complete the one interactive Evermatter login",
         timeout=300.0,
         interactive=True,
     )
 
     prompt = (
-        "Use the exomem MCP server now. Make exactly one harmless read-only "
+        f"Use the {SERVER_NAME} MCP server now. Make exactly one harmless read-only "
         f"ask_memory call with query '{SENTINEL_QUERY}'. Do not call any other "
-        "Exomem tool. Do not use shell commands."
+        "Evermatter tool. Do not use shell commands."
     )
     for index in range(1, runs + 1):
         result = _run_checked(
@@ -297,7 +304,7 @@ def run_harness(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", required=True, help="Exomem MCP connector URL")
+    parser.add_argument("--url", required=True, help="Evermatter MCP connector URL")
     parser.add_argument(
         "--codex-home",
         type=Path,

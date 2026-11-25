@@ -16,6 +16,7 @@ import sqlite3
 import sys
 import time
 from contextlib import closing
+from types import SimpleNamespace
 
 import pytest
 from hard_kill import KILLED, kill_self
@@ -32,9 +33,12 @@ from test_managed_collections_migration import OPERATOR_SECRET, coordinator_url 
 
 from exomem import __main__ as cli
 from exomem import (
+    deferred_index,
     epistemic_graph,
     find,
+    freshness,
     graph_sync,
+    index_sync,
     lexstore,
     memory_refs,
     records,
@@ -42,6 +46,7 @@ from exomem import (
     state_paths,
     writer_lease,
 )
+from exomem import vault as pages
 from exomem.collection_store import capability, connection, custody, replica, schema
 from exomem.collection_store.writer import CollectionWriter
 from exomem.governance.principal import library_scope
@@ -89,6 +94,9 @@ def vault(tmp_path, monkeypatch, coordinator_url, capsys):  # noqa: F811
     for name, value in _lease_environment(tmp_path, coordinator_url).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(capability, "RELEASED", RELEASED)
+    if capability.vault_store_migration_platform_refusal():
+        # Qualify the real NTFS migration path beyond the shipped platform refusal.
+        monkeypatch.setattr(capability, "sys", SimpleNamespace(platform="linux"))
     with library_scope():
         root = legacy_vault(tmp_path / "vault")
         (root / ALPHA).write_text(
@@ -144,6 +152,32 @@ def sidecar(path):
 def store_objects(root):
     with closing(connection.open_reader(connection.store_path(root))) as reader:
         return {name for (name,) in reader.execute("SELECT name FROM sqlite_master")}
+
+
+@pytest.mark.parametrize(("platform", "arguments"), [
+    ("win32", ("--dry-run",)),
+    ("win32", ("--apply", "--why", "drill")),
+    ("cygwin", ("--dry-run",)),
+    ("msys", ("--dry-run",)),
+])
+def test_windows_migration_refuses_and_leaves_the_vault_in_file_mode(
+    vault, capsys, monkeypatch, platform, arguments,
+):
+    """A Windows owner receives a named refusal before the unqualified migration touches the vault."""
+    monkeypatch.setattr(capability, "sys", SimpleNamespace(platform=platform))
+    before = vault_bytes(vault)
+
+    assert store_mode(vault, "migrate", *arguments) == 1
+
+    refusal = capsys.readouterr().err
+    assert "VAULT_STORE_WINDOWS_UNSUPPORTED" in refusal
+    assert "Keep using this vault in file mode" in refusal
+    assert store_mode(vault, "status") == 0
+    status = printed(capsys)
+    assert (status["mode"], status["gate"]) == (mode.FILE_MODE, "off")
+    assert status["migration_refusal"] == "VAULT_STORE_WINDOWS_UNSUPPORTED"
+    assert mode.state(vault) == mode.FILE_MODE
+    assert vault_bytes(vault) == before
 
 
 def test_a_migration_stores_every_file_and_the_rows_equal_the_sidecars_and_no_vault_byte_changes(
@@ -261,12 +295,13 @@ def test_a_file_edited_between_staging_and_install_refuses_the_migration(
     assert not mode.store_mode_active(vault)
 
 
-def _migrate_and_die(environment, released):
+def _migrate_and_die(environment, released, migration_platform):
     """`migrate --apply` in a fresh interpreter that the operating system kills inside the install transaction."""
     os.environ.clear()
     os.environ.update(environment)
     records._capture_sweep_carrier = records._due_state_carrier = lambda *a, **kw: None
     capability.RELEASED = released
+    capability.sys = SimpleNamespace(platform=migration_platform)
 
     def die(*arguments, **keywords):
         kill_self()
@@ -290,6 +325,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
         args=(
             {**os.environ, OPERATOR: OPERATOR_SECRET, "EXOMEM_WRITER_LEASE_TTL": SHORT_LEASE_TTL},
             RELEASED,
+            capability.sys.platform,
         ),
     )
     child.start()
@@ -318,7 +354,7 @@ def test_a_kill_during_the_install_leaves_file_mode_and_either_command_reruns_cl
 
 
 def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_before_the_migration(
-    vault, tmp_path
+    vault, tmp_path, monkeypatch
 ):
     """A rollback that loses a page or leaves an index that answers differently than before store mode, or a vault
     that cannot enter store mode again afterwards."""
@@ -339,7 +375,10 @@ def test_a_rollback_returns_every_find_and_graph_answer_that_the_vault_gave_befo
         "the graph answer must carry the link for this drill to mean anything"
     )
     assert migrate_apply(vault) == 0
-    assert rollback_apply(vault, tmp_path / "export") == 0
+    with monkeypatch.context() as windows:
+        windows.setattr(capability, "sys", SimpleNamespace(platform="win32"))
+        assert answers() == before
+        assert rollback_apply(vault, tmp_path / "export") == 0
     assert not mode.store_mode_active(vault)
     assert (
         state_migration.VAULT_STORE_COMPATIBILITY_ID
@@ -439,7 +478,7 @@ def test_a_rollback_projects_what_is_queued_and_its_dry_run_changes_nothing(
     vault, capsys, tmp_path
 ):
     """A rollback that refuses while projections are queued, which no offline step drains, or a
-    dry run that calls Exomem's own earlier bytes a person's edit, or that writes a file."""
+    dry run that calls Evermatter's own earlier bytes a person's edit, or that writes a file."""
     assert migrate_apply(vault) == 0
     alpha, gamma = b"# Alpha\n\nThe store's newer Alpha.\n", b"# Gamma\n\nA new page.\n"
     queue_writes(vault, (ALPHA, alpha), (GAMMA, gamma))
@@ -749,3 +788,92 @@ def test_a_migration_and_a_rollback_each_remove_the_staging_directory_that_a_kil
         (leftover / "staged.sqlite").write_bytes(b"half a database")
         assert command() == 0
         assert not leftover.exists()
+
+
+def _leave_graph_repair_queued(root):
+    """A cold-started service that saved a page and stopped before its startup proof cleared.
+
+    The service queues the page's graph repair instead of publishing it, so the sidecar stays behind
+    the files with the work owed. The service's gate dies with its process; the offline owner holds none.
+    """
+    epistemic_graph.require_startup_source_proof(root)
+    page = (
+        "---\ntitle: Gamma\ntype: note\nexomem_id: 01JGAMMA00000000000000000A\n---\n# Gamma\n\n"
+        "A new page that links [[Alpha]].\n"
+    )
+    pages.batch_atomic_write([pages.PlannedWrite(root / GAMMA, page)], vault_root=root)
+    epistemic_graph._admit_startup_source(root)  # the registry has no public release
+    assert deferred_index.graph_queue_pending(root), "the save must leave graph repair queued"
+    # `migrate` runs in a fresh process: no live recall projection and no resolver cache from the
+    # rebuild that built this fixture. Drop them, or the catch-up borrows this process's warm state.
+    freshness.invalidate(root)
+    find.evict_resolver_caches(root)
+
+
+def test_a_migration_catches_up_graph_work_that_a_stopped_service_left_queued(vault, capsys):
+    """A migration that refuses on parity because the service stopped before it published a saved page's graph rows."""
+    _leave_graph_repair_queued(vault)
+    queued = deferred_index.graph_queue_age(vault)[0]
+    capsys.readouterr()
+
+    assert migrate_apply(vault) == 0, capsys.readouterr().err
+
+    applied = printed(capsys)
+    assert applied["status"] == "migrated"
+    assert applied["graph_catch_up"]["receipts"] == queued
+    assert applied["graph_catch_up"]["left"] == 0
+    assert not deferred_index.graph_queue_pending(vault)
+    with closing(connection.open_reader(connection.store_path(vault))) as store:
+        assert store.execute(
+            "SELECT count(*) FROM graph_nodes WHERE node_key = ?", (f"file:{GAMMA}",)
+        ).fetchone() == (1,)
+
+
+def test_a_migration_dry_run_reports_queued_graph_work_and_leaves_it_queued(vault, capsys):
+    """A dry run that stays silent about work that the apply will catch up, or that drains it itself."""
+    _leave_graph_repair_queued(vault)
+    queued = deferred_index.graph_queue_age(vault)[0]
+    capsys.readouterr()
+
+    assert store_mode(vault, "migrate", "--dry-run", operator=False) == 0
+
+    report = printed(capsys)
+    assert report["status"] == "dry-run"
+    assert report["queued_graph_work"]["receipts"] == queued
+    assert report["queued_graph_work"]["oldest_age_seconds"] >= 0
+    assert "catches the graph index up" in report["queued_graph_work"]["apply"]
+    assert deferred_index.graph_queue_age(vault)[0] == queued
+
+
+@pytest.mark.parametrize("drain", ["clears nothing", "raises", "outlasts the ceiling"])
+def test_queued_graph_work_that_cannot_drain_refuses_before_any_staging(
+    vault, capsys, monkeypatch, drain
+):
+    """A migration that stages and proves a whole vault, or reports a traceback, when its catch-up cannot converge."""
+    _leave_graph_repair_queued(vault)
+    if drain == "clears nothing":
+        monkeypatch.setattr(index_sync, "drain_graph_work", lambda *args, **keywords: 0)
+    elif drain == "raises":
+
+        def failing(*args, **keywords):
+            raise RuntimeError("the graph sidecar is busy")
+
+        monkeypatch.setattr(index_sync, "drain_graph_work", failing)
+    else:
+        monkeypatch.setattr(migrate, "CATCH_UP_SECONDS", 0)
+    staged = []
+    stage = migrate.stage
+    monkeypatch.setattr(
+        migrate, "stage", lambda *args, **keywords: staged.append(1) or stage(*args, **keywords)
+    )
+    objects = store_objects(vault)
+    capsys.readouterr()
+
+    assert migrate_apply(vault) == 1
+
+    error = capsys.readouterr().err
+    assert "VAULT_STORE_GRAPH_NOT_CAUGHT_UP" in error
+    assert "exomem maintain --reconcile --rebuild-graph" in error
+    assert staged == []
+    assert store_objects(vault) == objects
+    assert not mode.store_mode_active(vault)

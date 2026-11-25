@@ -12,11 +12,13 @@ import json
 import math
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Final, Literal, Protocol, TypeAlias, cast
 
 from . import (
+    capture_dates,
     capture_metadata,
     originals,
     semantic_labels,
@@ -67,6 +69,7 @@ _KNOWN_STRING_FIELDS = frozenset(
         "page.file_type",
         "page.source_kind",
         "page.domain",
+        "page.capture_date_source",
         "unit.category",
         "unit.category_key",
         "unit.kind",
@@ -99,6 +102,9 @@ _PAGE_FIELDS = frozenset(
         "page.capture_date",
         "page.capture_lat",
         "page.capture_lon",
+        # How the capture day was found (a `capture-date-sources` key), so a caller can keep or drop a
+        # fallback day such as the day the source entered the vault.
+        "page.capture_date_source",
         # The two open source-classification axes. First-class rather than only
         # reachable through `page.frontmatter:/...` because they are a primary
         # way to find a source; page predicates are evaluated in memory over the
@@ -315,6 +321,31 @@ FOREIGN_ENTRY = _ForeignEntry()
 #: each is a selected meaning, so stored rows can only propose candidates on it.
 #: Closed filter field names that the filter schema declares, not vocabulary.
 ENTRY_AXES: Final = frozenset({"unit.category", "unit.kind"})
+
+
+def requires_one_of(plan: FilterPlan, field: str, allowed: AbstractSet[str]) -> bool:
+    """Whether the plan admits only pages whose `field` is one of `allowed`.
+
+    True when a top-level conjunct is an `$eq` or `$in` predicate on `field` whose values all lie
+    in `allowed`; the other conjuncts only narrow further. A disjunction or negation answers False.
+    """
+    root = plan.root
+    conjuncts = root.children if isinstance(root, AllOf) else () if root is None else (root,)
+    for node in conjuncts:
+        if not isinstance(node, Predicate) or node.field.name != field or not node.operators:
+            continue
+        values: list[object] = []
+        for operator, operand in node.operators:
+            if operator == "$eq" and isinstance(operand, TypedScalar):
+                values.append(operand.value)
+            elif operator == "$in" and isinstance(operand, tuple):
+                values.extend(scalar.value for scalar in operand)
+            else:
+                break
+        else:
+            if values and all(isinstance(value, str) and value in allowed for value in values):
+                return True
+    return False
 
 
 def compile_filter(
@@ -946,7 +977,7 @@ def _union_axis(axes: Sequence[frozenset[str] | None]) -> frozenset[str] | None:
 
 #: Page axes stored as one canonicalized scalar column plus a members array.
 INDEX_PAGE_SCALAR_AXES: Final = frozenset(
-    {"page.status", "page.type", "page.file_type", "page.source_kind", "page.domain"}
+    {"page.status", "page.type", "page.file_type", "page.source_kind", "page.domain", "page.capture_date_source"}
 )
 #: Page axes stored only as a members array.
 INDEX_PAGE_LIST_AXES: Final = frozenset({"page.project", "page.tags", "page.speakers"})
@@ -1614,6 +1645,15 @@ def page_view(page: Any) -> dict[str, Any]:
     if "capture_date" in frontmatter:
         captured = temporal.parse(frontmatter["capture_date"])
         out["capture_date"] = frontmatter["capture_date"] if captured is None else captured.day
+        out["capture_date_source"] = capture_dates.recorded_source(frontmatter.get("capture_date_source"))
+    elif page.file_kind in capture_metadata.KINDS and page.emitted_parent is None and "captured" in frontmatter:
+        # A photo or video whose file stated no date still has the day it entered the vault. That day
+        # is derived here, labelled with the fallback source, and stored nowhere, so it can never be
+        # mistaken for a date that the file stated. A scene frame or a part page is no media sidecar.
+        entered = temporal.parse(frontmatter["captured"])
+        if entered is not None:
+            out["capture_date"] = entered.day
+            out["capture_date_source"] = capture_dates.source_for("captured-field")
     for position in sorted(capture_metadata.LOCATION_FIELDS):
         stated = capture_metadata.coordinate(position, frontmatter.get(position))
         if stated is not None:
@@ -2126,6 +2166,7 @@ def _canonicalize_string(field: str, value: str, *, path: str = "$") -> str:
         "page.status",
         "page.type",
         "page.file_type",
+        "page.capture_date_source",
         "unit.form",
         "unit.verdict",
     }:

@@ -6,6 +6,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -626,27 +627,25 @@ def test_a_failing_drain_never_kills_the_daemon(
 def test_an_unreadable_queue_is_not_pending_and_does_not_raise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Queue-depth is a scheduling hint, not a contract."""
+    """A scheduling probe must survive an unavailable store."""
+    deferred_index.add_graph(tmp_path, ["Knowledge Base/Notes/a.md"])
 
-    def explode(_root: Path) -> int | None:
-        raise RuntimeError("sidecar unreadable")
+    def explode(_root: Path) -> sqlite3.Connection:
+        raise sqlite3.OperationalError("sidecar unreadable")
 
-    monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", explode)
+    monkeypatch.setattr(deferred_index, "_connect_readonly", explode)
 
     assert graph_drain._queue_pending(tmp_path) is False
 
 
-def test_a_whole_vault_marker_counts_as_pending(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_whole_vault_marker_counts_as_pending(tmp_path: Path) -> None:
     """The marker is raised exactly when the changed scope is unknown.
 
     That is the case the drain most needs to hear about, and it carries no
     per-path receipts, so a depth-only check would call the queue empty.
     """
-    monkeypatch.setattr(deferred_index, "graph_full_rebuild_pending", lambda _root: 7)
-    monkeypatch.setattr(deferred_index, "graph_status", lambda _root: {"count": 0})
-
+    assert graph_drain._queue_pending(tmp_path) is False
+    deferred_index.mark_graph_full_rebuild(tmp_path, generation=7)
     assert graph_drain._queue_pending(tmp_path) is True
 
 
@@ -886,8 +885,7 @@ def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
     """The bounded cover is tried once per generation, then whole-vault takes over.
 
     With coverage that never holds, no per-path drain can move the
-    acknowledgement. The first pass spends its one covering drain, the second
-    queues the whole-vault marker, and the third converges through it.
+    acknowledgement. The spent cover leaves its barrier for full recovery.
     """
     vault = _published_vault(tmp_path)
     created = vault / "Knowledge Base/Notes/Insights/c.md"
@@ -910,10 +908,8 @@ def test_a_cover_that_cannot_acknowledge_escalates_on_the_next_pass(
     assert deferred_index.graph_full_rebuild_pending(vault) is None
     assert not EpistemicGraphIndex(vault).available()
 
+    assert graph_sync.acknowledged_generation(vault) < committed.generation
     assert graph_drain._work_once(vault) == 1
-    assert deferred_index.graph_full_rebuild_pending(vault) is not None
-
-    graph_drain._work_once(vault)
     assert deferred_index.graph_full_rebuild_pending(vault) is None
     assert graph_sync.acknowledged_generation(vault) == committed.generation
     assert EpistemicGraphIndex(vault).available()
@@ -1022,7 +1018,8 @@ def test_a_barrier_behind_queued_repair_waits_for_the_queue(
     page.write_text(_page("C", "C links to [[a]] before the registry saw it."), encoding="utf-8")
     deferred_index.add_graph_receipts(vault, [rel])
     EpistemicGraphIndex(vault).suspend_reads()
-    epoch = freshness.mark_external_pending(vault, paths=[page]) if scoped_mark else 0
+    if scoped_mark:
+        freshness.mark_external_pending(vault, paths=[page])
     passes: list[str] = []
     real_pass = EpistemicGraphIndex._rebuild_all_off_boundary
 
@@ -1038,12 +1035,11 @@ def test_a_barrier_behind_queued_repair_waits_for_the_queue(
     assert deferred_index.graph_full_rebuild_pending(vault) is None, (
         "barrier recovery queued whole-vault debt behind queued repair"
     )
-    assert deferred_index.list_graph_paths(vault) == [rel]
-
-    freshness.on_files_changed(vault, changed=[page])
-    if scoped_mark:
-        freshness.clear_external_pending(vault, through=epoch)
-    graph_drain._work_once(vault)
+    if not scoped_mark:
+        assert deferred_index.list_graph_paths(vault) == [rel]
+        freshness.on_files_changed(vault, changed=[page])
+        graph_drain._work_once(vault)
+    assert not freshness.external_pending(vault)
 
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
@@ -1106,7 +1102,10 @@ def test_a_barrier_behind_a_receipt_that_never_drains_recovers_once_it_has_waite
     EpistemicGraphIndex(vault).suspend_reads()
     real_clock = time.time
     waited = 0.0
-    monkeypatch.setattr(deferred_index, "time", SimpleNamespace(time=lambda: real_clock() + waited))
+    monkeypatch.setattr(
+        deferred_index, "time",
+        SimpleNamespace(time=lambda: real_clock() + waited, monotonic=time.monotonic),
+    )
 
     def drainable_write(name: str) -> str:
         page = notes / "b.md"
@@ -1214,7 +1213,8 @@ def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
     started = time.time()
     monkeypatch.setattr(graph_drain, "time", SimpleNamespace(monotonic=lambda: now[0]))
     monkeypatch.setattr(
-        deferred_index, "time", SimpleNamespace(time=lambda: started + now[0] - 1000.0)
+        deferred_index, "time",
+        SimpleNamespace(time=lambda: started + now[0] - 1000.0, monotonic=time.monotonic),
     )
     monkeypatch.setattr(graph_drain._DEBT, "wait", wait)
     monkeypatch.setattr(graph_drain, "_stop", stop)
@@ -1249,6 +1249,49 @@ def test_a_queue_that_only_loses_races_to_commits_is_never_rebuilt_whole(
 
     assert deferred_index.list_graph_paths(vault) == []
     assert EpistemicGraphIndex(vault).available()
+
+
+@pytest.mark.parametrize("scope", ["over_cap", "missing_receipt", "unscoped", "empty_queue"])
+def test_busy_barrier_escalates_only_when_scoped_queue_coverage_is_disproved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, real_barrier: None, scope: str,
+) -> None:
+    vault = _published_vault(tmp_path)
+    paths = [f"Knowledge Base/Notes/observed-{i}.md" for i in range(graph_drain.DRAIN_LIMIT + 1)]
+    if scope != "empty_queue":
+        deferred_index.add_graph_receipts(vault, paths if scope == "over_cap" else paths[:1])
+    observations = paths if scope == "over_cap" else paths[1:2]
+    freshness.mark_external_pending(vault, paths=[] if scope == "unscoped" else observations)
+    EpistemicGraphIndex(vault).suspend_reads()
+    graph_drain.note_per_path_repair(vault, admissible=False)
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_epoch_admission", lambda self: True)
+
+    def busy(self: EpistemicGraphIndex, selected: list[Path]) -> dict[str, Any]:
+        raise OpError("MUTATION_BUSY", "A writer holds the vault.", details={"status": "retryable"})
+
+    monkeypatch.setattr(EpistemicGraphIndex, "drain_paths", busy)
+    graph_drain._work_once(vault)
+
+    assert not graph_drain.per_path_repair_raced(vault)
+    assert (deferred_index.graph_full_rebuild_pending(vault) is None) is (scope == "over_cap")
+
+
+def test_a_new_observation_during_the_contention_query_invalidates_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queued = "Knowledge Base/Notes/queued.md"
+    deferred_index.add_graph_receipts(tmp_path, [queued])
+    freshness.mark_external_pending(tmp_path, paths=[queued])
+    graph_drain.note_per_path_repair(tmp_path, admissible=False)
+    cover = deferred_index.graph_receipts_cover
+
+    def observe_after_query(root: Path, paths: Iterable[str]) -> bool:
+        assert cover(root, paths)
+        freshness.mark_external_pending(root, paths=["Knowledge Base/Notes/moved.md"])
+        return True
+
+    monkeypatch.setattr(deferred_index, "graph_receipts_cover", observe_after_query)
+    assert graph_drain.note_covered_contention(tmp_path) is None
+    assert graph_drain.per_path_repair_blocked(tmp_path)
 
 
 def test_a_batch_that_loses_a_commit_race_is_retried_whole_not_replayed_per_receipt(
@@ -2165,28 +2208,36 @@ def test_drain_rejects_a_resolver_prepared_before_a_concurrent_write(
     queued = [path.relative_to(vault).as_posix()]
     deferred_index.add_graph(vault, queued)
     assert deferred_index.list_graph_paths(vault) == queued
-    real_snapshot = find_module.recall_resolver_snapshot
-    passes: list[bool] = []
+    nodes = "SELECT path, source_hash FROM graph_nodes WHERE kind = 'file' ORDER BY path"
+    acknowledgement = (
+        "SELECT key, value FROM graph_meta WHERE key IN "
+        "('graph_sync_generation', 'graph_sync_digest', 'graph_sync_checkpoint') ORDER BY key"
+    )
+    with closing(sqlite3.connect(index.path)) as connection:
+        before = (connection.execute(nodes).fetchall(), connection.execute(acknowledgement).fetchall())
+    real_borrow = find_module.borrow_recall_resolver
+    raced = False
 
-    def racing_snapshot(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        resolver = real_snapshot(*args, **kwargs)
-        sibling.write_text(_page("Renamed B", "A new link target."), encoding="utf-8")
-        if dispatch_event:
-            freshness.on_files_changed(vault, changed=[sibling])
-        else:
-            freshness.mark_external_pending(vault, paths=[sibling])
-        return resolver
+    def racing_borrow(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal raced
+        borrowed = real_borrow(*args, **kwargs)
+        if borrowed is not None and not raced:
+            raced = True
+            sibling.write_text(_page("Renamed B", "A new link target."), encoding="utf-8")
+            if dispatch_event:
+                freshness.on_files_changed(vault, changed=[sibling])
+            else:
+                freshness.mark_external_pending(vault, paths=[sibling])
+        return borrowed
 
-    def forbidden_pass(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        passes.append(True)
-        return {"indexed_files": 0, "nodes": 0, "edges": 0}
-
-    monkeypatch.setattr(find_module, "recall_resolver_snapshot", racing_snapshot)
-    monkeypatch.setattr(index, "_refresh_paths_pass", forbidden_pass)
+    monkeypatch.setattr(find_module, "borrow_recall_resolver", racing_borrow)
     report = index.drain_paths([path])
+    assert raced
     assert report.get("moved") == 1
     assert report["published"] is False
-    assert passes == []
+    with closing(sqlite3.connect(index.path)) as connection:
+        after = (connection.execute(nodes).fetchall(), connection.execute(acknowledgement).fetchall())
+    assert after == before
     assert deferred_index.list_graph_paths(vault) == [path.relative_to(vault).as_posix()]
 
 

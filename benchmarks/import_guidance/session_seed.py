@@ -11,6 +11,7 @@ A seeded vault has no relation graph, and the product marks nothing from relatio
 A live vault has one because its writes build it. `--ready-graph` prepares that state before anything reads the seed.
 The arm's own `exomem maintain --reconcile` builds derived state without rewriting seed pages.
 This process then initializes its recall projection and resolver, adopts the published graph, and proves availability.
+Last, it builds the arm's activation index and context catalogue, so the actor's first recall is served warm.
 `record_worker.py` prepares the same process state after building its server, before waiting for the graph or reading it.
 The process prints one JSON line: the graph state it saw and the seconds it took.
 """
@@ -48,7 +49,20 @@ def main(seed: Path, vault: Path, product_root: Path, ready_graph: bool = False)
     reconcile()
     prepare_recall(vault)
     state = wait_for_graph(vault)
-    return {"graph": state, "seconds": round(time.monotonic() - started, 1)}
+    return {"graph": state, "catalogue": warm_catalogue(vault), "seconds": round(time.monotonic() - started, 1)}
+
+
+def warm_catalogue(vault: Path) -> str:
+    """Build the arm's activation index and context catalogue on disk, as a live vault's service already has them.
+
+    The actor's own stdio server is a fresh process: without this, its first `recall_context` answers
+    `index_warming` while its background pass builds the catalogue, and serves no context or skills catalogue.
+    This process is unmanaged, so `ensure` builds both inline and the actor's server opens them warm.
+    """
+    from exomem import context_catalogue
+
+    state, _catalogue, _stale = context_catalogue.ensure(vault)
+    return state
 
 
 def reconcile() -> None:

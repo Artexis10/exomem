@@ -1087,12 +1087,12 @@ item_schema:
     real_create = vault._BatchWorkspace.create_artifact
     calls = 0
 
-    def interrupt(workspace, name, content):  # noqa: ANN001
+    def interrupt(workspace, name, content, **options):  # noqa: ANN001
         nonlocal calls
         calls += 1
         if calls == 1:
             raise KeyboardInterrupt("stop creating record collection")
-        return real_create(workspace, name, content)
+        return real_create(workspace, name, content, **options)
 
     monkeypatch.setattr(vault._BatchWorkspace, "create_artifact", interrupt)
     with pytest.raises(KeyboardInterrupt, match="stop creating record collection"):

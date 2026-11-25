@@ -1,8 +1,8 @@
-# Exomem hosted infrastructure
+# Evermatter hosted infrastructure
 
 This tree owns the dedicated private-alpha deployment. The shared Substrate
 application remains in its own repository; tenant knowledge remains inside one
-isolated Exomem cell and its retained encrypted volume.
+isolated Evermatter cell and its retained encrypted volume.
 
 The lifecycle domains are deliberately split:
 
@@ -21,8 +21,8 @@ The lifecycle domains are deliberately split:
   normal apply path.
 - `ansible`: idempotent host hardening and pinned K3s bootstrap.
 - `helm/platform`: cluster-wide CSI, ingress, policy, scheduler, cellctl and the
-  Exomem Cloud gateway.
-- `cellctl`: the Exomem Cloud cell controller.
+  Evermatter Cloud gateway.
+- `cellctl`: the Evermatter Cloud cell controller.
 - `scripts`: non-printing validation, saved-plan, and secret handoff tooling.
 
 Cell controller PostgreSQL tests read the canonical paid-storage migration and grants from the revision in

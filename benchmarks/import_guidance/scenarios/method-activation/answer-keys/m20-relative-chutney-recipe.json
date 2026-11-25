@@ -1,0 +1,13 @@
+{
+  "reference": "Negative twin of the archive-placement case. The same relative is under discussion, but the person only asks what goes into the plum chutney she described on the phone. Nothing is being archived or filed, and no files are mentioned. The family-archive-placement method does not apply. No other method in the vault covers recalling a recipe. A correct assistant selects no method and answers from the existing chutney note: plums, onions, brown sugar, cider vinegar, ginger, mustard seed and a pinch of chilli, cooked slowly for about an hour, better after six weeks in the jar. It does not create a folder for the relative, does not log an archive placement and does not bring up her health notes. Adding a line about the call to her page would be acceptable but is not required.",
+  "must_change": [],
+  "must_not_change": [
+    "Skills/family-archive-placement/SKILL.md",
+    "Notes/Procedures/ottilie-plum-chutney.md"
+  ],
+  "recap": "optional",
+  "new_pages": "none",
+  "methods": [],
+  "destination": null,
+  "trigger_turn": 1
+}

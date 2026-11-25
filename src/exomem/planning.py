@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -30,6 +30,9 @@ from .planning_values import PlanningValues, Unavailable
 from .structured_collections import CollectionError, parse_plan_ref
 
 _LIFECYCLES = frozenset({"active", "archived"})
+#: The roles a progress-evidence descriptor may carry; `plan_progress.ROLES` is this tuple.
+EVIDENCE_ROLES = ("progress", "completion")
+_RELATION_REFUSAL = "Planning relationship is not available"
 _EXECUTION_KIND = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _AREA_FORBIDDEN = frozenset({"status", "priority", "commitment", "horizon", "area", "parent"})
 #: The fields the narrow `triage` transition may change; plan_memory's triage action fixes them.
@@ -46,8 +49,11 @@ _OPTIONAL = frozenset(
         "execution",
         "tags",
         "motivation",
+        "results",
     }
 )
+#: Planning bounds `results` at 16 as it bounds `motivation`, so one item cannot carry an unbounded link list.
+_MAX_RESULTS = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +113,10 @@ def normalize_item(
     _enum(values.get("lifecycle"), _LIFECYCLES, "lifecycle")
     area = values["kind"] == "area"
     if area and _AREA_FORBIDDEN & values.keys():
-        _invalid("areas cannot carry delivery state or hierarchy")
+        _invalid(
+            "areas cannot carry delivery state or hierarchy: "
+            + ", ".join(sorted(_AREA_FORBIDDEN & values.keys()))
+        )
     # The registry names the governed fields. A deliverable must declare each
     # governed field an area may not carry; any other governed field is optional.
     for name in planning_values.fields():
@@ -131,10 +140,9 @@ def _governed(
         return
     entry = _registered(planning_values, name, value)
     if entry is None:
-        if name == "kind":
-            _invalid("kind must be one of: " + ", ".join(planning_values.values("kind")))
         _invalid(
-            f"{name} is invalid; see schema_memory(operation=inspect, subject=planning-values)"
+            f"{name} must be one of: "
+            + collections.listed_within(planning_values.values(name))
         )
     if entry.status != "active":
         replacement = (entry.replaced_by or "").partition(".")[2]
@@ -1428,7 +1436,7 @@ def _validate_query_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 #: The inspection keys a collection's shape adds: recipes in items mode, page bounds in summary mode.
-_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "inbound")
+_OPTIONAL_INSPECTION_KEYS = ("presentation", "lifecycle_guards", "capacity", "references", "links", "inbound")
 
 
 def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1465,6 +1473,11 @@ def _validate_inspection_egress(value: Mapping[str, Any]) -> dict[str, Any] | No
         # The same bounded report the Records inspection admits, so one shape reaches egress.
         result["references"] = record_governance.inspection_references(value["references"])
         if result["references"] is None:
+            return None
+    if "links" in value:
+        # A link report entry is scalars only, the shape that bounded reference report admits.
+        result["links"] = record_governance.inspection_references(value["links"])
+        if result["links"] is None:
             return None
     if "inbound" in value:
         result["inbound"] = record_governance.inspection_inbound(value["inbound"])
@@ -1521,7 +1534,7 @@ def update(
     )
     _validate_declared_text(manifest, final)
     _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
-    return records.update_record(
+    result = records.update_record(
         vault_root,
         manifest,
         item_key=plan_id,
@@ -1537,6 +1550,7 @@ def update(
         _validate_inputs=_validate_inputs,
         _history_binding=_history_binding,
     )
+    return _with_completion_advisory(result, vault_root, manifest, matches[0].values, final)
 
 
 def triage(
@@ -1591,7 +1605,7 @@ def triage(
     )
     _validate_declared_text(manifest, final)
     _validate_relationships(vault_root, manifest, snapshot.records, plan_id, final)
-    return records.update_record(
+    result = records.update_record(
         vault_root,
         manifest,
         item_key=plan_id,
@@ -1607,6 +1621,7 @@ def triage(
         _validate_inputs=_validate_inputs,
         _history_binding=_history_binding,
     )
+    return _with_completion_advisory(result, vault_root, manifest, matches[0].values, final)
 
 
 def _validate_lifecycle(
@@ -1816,8 +1831,9 @@ def validate_hierarchy(
     for key, values in plans.items():
         kind = values["kind"]
         active = values["lifecycle"] == "active"
-        parent = _relation_target(manifest, values.get("parent"))
-        area = _relation_target(manifest, values.get("area"))
+        own = write is not None and key == write.plan_id
+        parent = _relation_target_or_unknown(manifest, values.get("parent"))
+        area = _relation_target_or_unknown(manifest, values.get("area"))
         if kind == "area":
             if parent is not None or area is not None:
                 _relation_error()
@@ -1829,16 +1845,16 @@ def validate_hierarchy(
                 or target["kind"] != "area"
                 or (active and target["lifecycle"] != "active")
             ):
-                _relation_error()
+                _rule_error(own, f"area takes {'an active' if active else 'an'} item of kind area")
         definition = _kind_definition(write, key, values)
         allowed = None if definition is None else tuple(definition.attributes["parents"])
         required_parent = active and _committed(values) and bool(allowed)
         if allowed == ():
             if parent is not None:
-                _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
         elif parent is None:
             if required_parent:
-                _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
         else:
             target = plans.get(parent)
             if (
@@ -1846,7 +1862,9 @@ def validate_hierarchy(
                 or (allowed is not None and target["kind"] not in allowed)
                 or (active and target["lifecycle"] != "active")
             ):
-                _relation_error()
+                if allowed is None:
+                    _relation_error()
+                _rule_error(own, _parent_rule(kind, allowed, active))
             if (
                 area is not None
                 and target.get("area") is not None
@@ -1906,10 +1924,55 @@ def _validate_final_relationships(
 def _validate_declared_text(
     manifest: collections.CollectionManifest, values: Mapping[str, Any]
 ) -> None:
-    """Refuse unrenderable authored text before shared record hashing."""
+    """Refuse what a write cannot store before shared record hashing: unrenderable authored text, and more
+    than the bound of `results` links on a collection that declares `results` as a list."""
     for name, value in values.items():
         if name in manifest.schema.fields:
             _validate_authored_text(value, name)
+    results = manifest.schema.fields.get("results")
+    # A legacy manifest may declare `results` as free text, so only the list form is bounded.
+    if results is not None and results.type == "array":
+        listed = values.get("results")
+        if isinstance(listed, list) and len(listed) > _MAX_RESULTS:
+            _invalid(f"results holds at most {_MAX_RESULTS} links")
+
+
+def completion_advisory(
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    before: Mapping[str, Any] | None,
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The reply addition for an update that moves an item to a done-class status while `results` is empty.
+
+    The update still commits. The advice applies only where the manifest declares `results`, because only
+    there can the caller act on it. The status class comes from the Planning values registry, never from a
+    status key, and a status the registry cannot place in a class gives no advice.
+    """
+    if before is None or before.get("status") == after.get("status") or after.get("results"):
+        return {}
+    if "results" not in manifest.schema.fields:
+        return {}
+    classes = PlanningValues(vault_root)
+    # `done` is one of the three classes the registry's class protocol fixes (`planning_values.CLASSES`).
+    if classes.planning_class(after.get("status")) != "done" or classes.planning_class(before.get("status")) == "done":
+        return {}
+    return {
+        "no_result_linked": "This item is done and has no linked result. "
+        "Set `results` to the record or page that holds its outcome."
+    }
+
+
+def _with_completion_advisory(
+    result: dict[str, Any],
+    vault_root: Path,
+    manifest: collections.CollectionManifest,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> dict[str, Any]:
+    if result.get("outcome") != "committed":
+        return result
+    return {**result, **completion_advisory(vault_root, manifest, before, after)}
 
 
 def _validate_authored_text(value: Any, name: str) -> None:
@@ -1940,8 +2003,45 @@ def _relation_target(manifest: collections.CollectionManifest, value: Any) -> st
     return parsed[1]
 
 
+def _relation_target_or_unknown(manifest: collections.CollectionManifest, value: Any) -> str | None:
+    """`_relation_target`, with a foreign or malformed reference read as a target no item has.
+
+    The empty string is no item's id, so such a reference refuses like a missing one.
+    """
+    try:
+        return _relation_target(manifest, value)
+    except CollectionError:
+        return ""
+
+
 def _relation_error() -> Never:
-    raise CollectionError("INVALID_PLAN_RELATION", "Planning relationship is not available")
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL)
+
+
+def _parent_rule(kind: str, parents: Sequence[str], active: bool) -> str:
+    """The item's own parent rule, from the registry's `parents` for its kind."""
+    if not parents:
+        return f"kind {kind} takes no parent"
+    return f"kind {kind} takes {'an active' if active else 'a'} parent of kind: {', '.join(parents)}"
+
+
+def _rule_error(own: bool, rule: str) -> Never:
+    """Refuse a relationship and, for the item being written, state its own rule.
+
+    The rule names nothing about any target, so a missing, withheld, wrong-kind or inactive
+    target all refuse with one text. A stored item keeps the plain refusal: its rule is not
+    the caller's to fix, and a read must not blame the caller for a stored item.
+    """
+    raise CollectionError("INVALID_PLAN_RELATION", _RELATION_REFUSAL, {"rule": rule} if own else {})
+
+
+def relation_refusal_message(error: CollectionError) -> str:
+    """The public text of an `INVALID_PLAN_RELATION`: the bounded base plus a rule it carries.
+
+    Only `_rule_error` sets a rule, so no other reason reaches the caller.
+    """
+    rule = error.details.get("rule")
+    return f"{_RELATION_REFUSAL}; {rule}" if type(rule) is str else _RELATION_REFUSAL
 
 
 def _validate_optional(values: Mapping[str, Any], *, validate_motivation: bool = True) -> None:
@@ -2009,8 +2109,8 @@ def _validate_evidence(value: Any) -> None:
             _invalid("progress evidence descriptor is invalid")
         if memory_refs.parse_memory_ref(descriptor["collection"]) is None:
             _invalid("progress evidence collection is invalid")
-        if descriptor["role"] not in {"progress", "completion"}:
-            _invalid("progress evidence role is invalid")
+        if descriptor["role"] not in EVIDENCE_ROLES:
+            _invalid(f"progress evidence role must be one of: {', '.join(EVIDENCE_ROLES)}")
         _bounded_string(descriptor["view"], "progress evidence view", 128)
 
 
@@ -2049,7 +2149,7 @@ def _date(value: Any, name: str) -> dt.date:
 
 def _enum(value: Any, allowed: set[str] | frozenset[str], name: str) -> None:
     if type(value) is not str or value not in allowed:
-        _invalid(f"{name} is invalid")
+        _invalid(f"{name} must be one of: {', '.join(sorted(allowed))}")
 
 
 def _bounded_string(value: Any, name: str, maximum: int) -> None:

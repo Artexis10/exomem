@@ -278,6 +278,8 @@ def _allowance(root: Path, config: dict, *, may_count: bool) -> dict:
 
 def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[str, int] | None) -> dict:
     """Every figure of the window budget; D12 fixes each formula."""
+    from .cloud_cell import store_identity
+
     volume, threshold = _read(lambda: _volume(root)), _read(lambda: _growth_threshold(config))
     limits, idle = _read(lambda: _limits(config)), _read(lambda: _eviction_idle(config))
     bounds = _read(lambda: _bounds(config, root))
@@ -308,7 +310,8 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         return max(0, min(largest(), reachable() + pinned))
 
     budget, reach = _figure(window_budget), _figure(reachable)
-    allowance = _allowance(root, config, may_count=series is not None)
+    schedules_series = store_identity()["kind"] != "personal"
+    allowance = _allowance(root, config, may_count=series is not None and schedules_series)
     section: dict = {
         "window_budget": budget,
         "reachable_budget": reach,
@@ -321,7 +324,7 @@ def _budget_section(root: Path, config: dict, windows: _Reading, series: tuple[s
         "drain": _drain(unfiled, occupancy, idle),
     }
     if series is not None:
-        section["demand"] = _demand(root, series, budget, reach)
+        section["demand"] = _demand(root, series, budget, reach, supported=schedules_series)
     return section
 
 
@@ -389,10 +392,12 @@ def _drain(unfiled: _Reading, occupancy: _Reading, idle: _Reading) -> dict:
     return drain
 
 
-def _demand(root: Path, series: tuple[str, int], budget: dict, reachable: dict) -> dict:
+def _demand(root: Path, series: tuple[str, int], budget: dict, reachable: dict, *, supported: bool) -> dict:
     """Record the series' demand with the budgets read here; the request never supplies one."""
     series_id, window_bytes = series
     outcome: dict = {"series_id": series_id, "bytes": window_bytes, "recorded": False}
+    if not supported:
+        return {**outcome, "reason": "personal eviction follows the configured disk pressure target"}
     if "bytes" not in budget or "bytes" not in reachable:
         return {**outcome, "reason": "the window budget or the reachable budget is unknown"}
     try:

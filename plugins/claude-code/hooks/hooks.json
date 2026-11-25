@@ -1,5 +1,5 @@
 {
-  "description": "Exomem capture, retrieval, and continuation hooks.",
+  "description": "Evermatter capture, retrieval, and continuation hooks.",
   "hooks": {
     "Stop": [
       {
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\" --client claude"
           }
         ]
       }
@@ -37,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\" --client claude"
           }
         ]
       }
@@ -48,7 +48,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/exomem-continuation-checkpoint.sh\" --client claude"
           }
         ]
       }

@@ -432,6 +432,10 @@ class ReadScope:
                 return
         except Exception:  # noqa: BLE001 - an unresolved final binding cannot release the earlier payload
             pass
+        writer = bound_writer(self.root)
+        if writer is not None:
+            # A projection decision kept in this scope rests on the binding that it could not prove again.
+            writer.handle.release_cache.projections.clear()
         from ..governance import egress
 
         collector = egress._collector()

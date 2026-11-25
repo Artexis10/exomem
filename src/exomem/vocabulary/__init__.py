@@ -36,6 +36,7 @@ __all__ = [
 def registry_specs() -> Mapping[str, RegistrySpec]:
     """Every vocabulary registry, keyed by its `schema_memory` subject."""
     from .. import (
+        capture_dates,
         document_forms,
         entity_types,
         homes,
@@ -65,6 +66,7 @@ def registry_specs() -> Mapping[str, RegistrySpec]:
             homes.SPEC,
             topic_carriers.SPEC,
             sync_providers.SPEC,
+            capture_dates.SPEC,
             page_fields.SPEC,
         )
     }

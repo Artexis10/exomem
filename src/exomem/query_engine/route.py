@@ -110,8 +110,9 @@ def run(writer, selector: str, raw, *, facade_profile: str,
         if links:
             # A bare-title or memory link may build the candidate index inside the query deadline;
             # a cold build that runs past it fails the query with QUERY_TIMEOUT, never drops the link.
-            session.project_with(_LinkProjector.create(writer.root, manifest, policy=operation.policy,
-                                                       authorize_path=operation.allows_file), fields=links)
+            session.project_with(_LinkProjector.create(
+                writer.root, manifest, policy=operation.policy, authorize_path=operation.allows_file,
+                row_label=reference_resolution.row_labeller(session)), fields=links)
         bound_refs: dict = {}
         bound_inverses: dict = {}
 

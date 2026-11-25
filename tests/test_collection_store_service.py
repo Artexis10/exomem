@@ -21,7 +21,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -287,7 +287,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
 
     from test_media_store import _offload
 
-    from exomem import add, indexes, media_store
+    from exomem import add, indexes, media_replicas, media_store
 
     root = _served_vault(tmp_path / "served", monkeypatch)
     shutil.copytree(vault / "Knowledge Base/_Schema", root / "Knowledge Base/_Schema", dirs_exist_ok=True)
@@ -309,6 +309,7 @@ def original_service(vault, source_schema, selected_store, tmp_path, monkeypatch
                     source_identity={"system": "archive", "record_id": "observation", "revision": "one"})
             path = root / saved.artifact_path
             _offload(root, path)
+            media_replicas.confirm_key_export(root)
             assert media_store.evict(root, path)
             yield started, saved.ref, path, expected, saved.path
         finally:
@@ -561,6 +562,38 @@ def test_a_remote_adopt_local_apply_succeeds_while_the_service_runs_and_a_remote
     assert (preview["step"], applied["status"]) == ("adopt-local", "adopted"), applied.get("reason")
     refused(lambda: remote(mode="collections-store-export", apply=True, plan_id="reviewed", why="export"),
             "MAINTENANCE_REQUIRES_CLI")
+
+
+def test_an_adoption_leaves_every_view_readable_by_its_owner(service):
+    """Defect: an adoption starts a new store instance and rewrites no view. The release proof
+    wanted the render under the new instance, so every view was withheld from every caller, the
+    owner included, until a row change rendered it again."""
+    root = service.root
+    descriptor = capabilities.ActiveSurfaceDescriptor(
+        surface="mcp", profile="test", tier2_enabled=True, product_commands=("maintain_memory",)
+    )
+
+    def views():
+        # History pages carry no instance stamp, so an adoption cannot strand them.
+        with closing(connection.open_reader(connection.store_path(root))) as reader:
+            return dict(reader.execute("SELECT path,state FROM projection_state WHERE kind!='history'"))
+
+    found = SimpleNamespace(root=root, meta=lambda: store_meta(root))
+    _published(found)
+    _until(lambda: views() and set(views().values()) == {"current"})
+    before = store_meta(root)[schema.META_INSTANCE_ID]
+    path = replica.replica_path(root)
+    path.write_bytes(path.read_bytes() + b"\0")  # another copy published over this host's replica
+    _preserved(found)
+    with capabilities.active_surface(descriptor):
+        preview = call(root, "maintain_memory", mode="collections-store-adopt-local")
+        applied = call(root, "maintain_memory", mode="collections-store-adopt-local", apply=True,
+                       plan_id=preview["plan_id"], why="adopt the copy this host holds")
+    assert applied["status"] == "adopted", applied.get("reason")
+    assert store_meta(root)[schema.META_INSTANCE_ID] != before
+
+    for view in views():
+        assert call(root, "read_memory", path=view)["path"] == view
 
 
 def test_records_summary_v1_gates_summary_create_import_and_query_until_released(
@@ -3023,3 +3056,98 @@ def test_a_store_whose_reference_state_was_lost_rebuilds_it_on_the_next_tick(ser
         _until(rebuilt)
     finally:
         restarted.stop()
+
+
+def test_the_services_background_activation_build_offers_a_store_collection(service):
+    """Recall's map lists the collections its activation index anchors, and the service builds that index on a
+    thread of its own, where no request binds the store. A store collection the build cannot see never reaches an
+    agent, which then saves a prose note beside the list the user already keeps."""
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "")
+
+
+def _built_on_a_thread_of_its_own(root, stamp):
+    """Build the activation index on a thread no request binds, as the service does; the collection anchors after it."""
+    from exomem import working_set_index, working_set_runtime
+
+    def build():
+        with suppress(OpError):  # a store that refuses the read fails the build, as the service logs it
+            working_set_runtime._warm_index(root, stamp, None)
+
+    thread = threading.Thread(target=build)
+    thread.start()
+    thread.join(120)
+    assert not thread.is_alive()
+    return {row.path for row in working_set_index.WorkingSetIndex(root).anchors() if row.kind == "collection"}
+
+
+def test_a_background_build_whose_store_read_is_refused_keeps_the_store_anchors_and_goes_on(service, monkeypatch):
+    """A store with no writer to read beside (opening, released when idle, held by a peer) must neither drop its
+    lists from recall nor stop the build: a build that failed instead would leave every new page out as well."""
+    from exomem import working_set_index
+
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "first")
+
+    def refused(*_args, **_kwargs):
+        raise connection.busy("the store is held")
+
+    monkeypatch.setattr(runtime.StoreServer, "read_beside", refused)
+    assert {manifest_path(), A_PATH} <= _built_on_a_thread_of_its_own(service.root, "second")
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert index.freshness_stamp() == "second" and index.store_unread()
+    # The map keeps the store's list too, so a request thread does not sweep the vault for it while the store refuses.
+    published = working_set_index.published_collection_manifests(service.root, index.token()[1], token=index.token())
+    assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def test_a_build_that_could_not_read_the_store_builds_again_once_a_writer_is_admitted(service, monkeypatch):
+    """A first build with no writer to read beside has no anchors to keep for the store's lists. Recorded as fresh,
+    it would leave them out of recall until the vault next changed."""
+    from exomem import working_set_index, working_set_runtime
+
+    def refused(*_args, **_kwargs):
+        raise connection.busy("the store is opening")
+
+    with monkeypatch.context() as opening:
+        opening.setattr(runtime.StoreServer, "read_beside", refused)
+        assert manifest_path() not in _built_on_a_thread_of_its_own(service.root, "opening")
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert index.freshness_stamp() == "opening" and index.store_unread()
+
+    working_set_runtime.ensure_index(service.root, freshness_stamp="opening")
+
+    _until(lambda: manifest_path() in {row.path for row in index.anchors() if row.kind == "collection"})
+    _until(lambda: not index.store_unread())
+
+
+def test_a_rolled_back_store_takes_its_lists_out_of_recall(service):
+    """A rollback stops the store serving its collections. A build that kept their anchors would offer lists that
+    every read then refuses, for as long as the rollback lasts."""
+    from exomem import working_set_index
+    from exomem.collection_store import capability
+
+    assert manifest_path() in _built_on_a_thread_of_its_own(service.root, "served")
+    with closing(sqlite3.connect(connection.store_path(service.root))) as raw:
+        raw.execute("INSERT OR IGNORE INTO store_meta(key, value) VALUES(?, '1')", (capability.DISABLED_KEY,))
+        raw.commit()
+
+    assert manifest_path() not in _built_on_a_thread_of_its_own(service.root, "rolled-back")
+    index = working_set_index.WorkingSetIndex(service.root)
+    assert not index.store_unread()
+    published = working_set_index.published_collection_manifests(service.root, index.token()[1], token=index.token())
+    assert published is not None and CID not in {manifest.collection_id for manifest in published}
+
+
+def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(service):
+    """Recall's map reads its collections from the manifest registry. After a restart the registry is cold, and a
+    first read that swept without the store would publish a set without the store's collections for the generation."""
+    from exomem import working_set_index
+
+    working_set_index.reset_collection_manifests_for_tests()
+    found = []
+    thread = threading.Thread(target=lambda: found.extend(working_set_index.collection_manifests(service.root, 1)))
+    thread.start()
+    thread.join(60)
+
+    published = working_set_index.published_collection_manifests(service.root, 1)
+    assert CID in {manifest.collection_id for manifest in found}
+    assert published is not None and CID in {manifest.collection_id for manifest in published}

@@ -57,7 +57,7 @@ RECORD_NAME = "vault-layout.yaml"
 
 @dataclass(frozen=True, slots=True)
 class LayoutRecord:
-    """A vault's record: its layout and the top-level entries that sit outside Exomem's care.
+    """A vault's record: its layout and the top-level entries that sit outside Evermatter's care.
 
     `path` is where the record was read, relative to the vault root.
     """

@@ -77,19 +77,19 @@ def test_http_route_renders_native_client_forms_without_credentials() -> None:
         "http",
         "--scope",
         "user",
-        "exomem",
+        "evermatter",
         "https://kb.example.com/mcp",
     ]
     assert route.codex_add_argv("codex") == [
         "codex",
         "mcp",
         "add",
-        "exomem",
+        "evermatter",
         "--url",
         "https://kb.example.com/mcp",
     ]
     parsed = tomllib.loads(client_config.render_codex_block(route))
-    assert parsed["mcp_servers"]["exomem"] == {
+    assert parsed["mcp_servers"]["evermatter"] == {
         "url": "https://kb.example.com/mcp"
     }
 
@@ -106,7 +106,7 @@ def test_stdio_route_uses_json_so_claude_preserves_child_flags() -> None:
         "add-json",
         "--scope",
         "project",
-        "exomem",
+        "evermatter",
     ]
     assert json.loads(argv[6]) == {
         "type": "stdio",
@@ -120,7 +120,7 @@ def test_rendered_block_is_valid_toml_with_windows_paths() -> None:
     """Backslashes in a Windows vault path must be escaped, not emitted raw."""
     parsed = tomllib.loads(_stdio_block())
 
-    server = parsed["mcp_servers"]["exomem"]
+    server = parsed["mcp_servers"]["evermatter"]
     assert server["command"] == "exomem"
     assert server["args"] == ["--transport", "stdio"]
     assert server["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
@@ -138,7 +138,7 @@ def test_creates_the_file_when_codex_has_no_config_yet(tmp_path: Path) -> None:
 
     assert outcome["action"] == "created"
     assert outcome["backup"] is None
-    assert "exomem" in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
+    assert "evermatter" in tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
 
 
 def test_preserves_every_other_server_and_setting(tmp_path: Path) -> None:
@@ -158,7 +158,7 @@ def test_preserves_every_other_server_and_setting(tmp_path: Path) -> None:
     assert parsed["model"] == "gpt-5"
     assert parsed["mcp_servers"]["other"]["command"] == "other-server"
     assert parsed["mcp_servers"]["other"]["args"] == ["--flag"]
-    assert parsed["mcp_servers"]["exomem"]["command"] == "exomem"
+    assert parsed["mcp_servers"]["evermatter"]["command"] == "exomem"
 
 
 def test_existing_registration_is_reported_not_silently_overwritten(tmp_path: Path) -> None:
@@ -191,10 +191,46 @@ def test_replace_swaps_only_our_section_and_backs_the_file_up(tmp_path: Path) ->
 
     assert outcome["action"] == "replaced"
     parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-    assert parsed["mcp_servers"]["exomem"]["command"] == "exomem"
+    assert parsed["mcp_servers"]["evermatter"]["command"] == "exomem"
     assert parsed["mcp_servers"]["keeper"]["command"] == "keep-me"
     # The previous content survives on disk for recovery.
     assert "hand-tuned" in Path(outcome["backup"]).read_text(encoding="utf-8")
+
+
+def test_a_registration_under_the_evermatter_key_counts_as_ours(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[mcp_servers.evermatter]\ncommand = "hand-tuned"\n', encoding="utf-8")
+
+    assert client_config.codex_mcp_name(path) == "evermatter"
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
+
+    assert outcome["action"] == "exists"
+    assert "hand-tuned" in path.read_text(encoding="utf-8")
+
+
+def test_replace_swaps_a_held_legacy_section_and_its_sub_tables_instead_of_adding_a_second(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "[mcp_servers.exomem]\n"
+        'command = "hand-tuned"\n'
+        "\n"
+        "[mcp_servers.exomem.env]\n"
+        'EXOMEM_VAULT_PATH = "/old/vault"\n'
+        "\n"
+        "[mcp_servers.keeper]\n"
+        'command = "keep-me"\n',
+        encoding="utf-8",
+    )
+
+    outcome = client_config.merge_codex_mcp(_stdio_block(), path=path, replace=True)
+
+    assert outcome["action"] == "replaced"
+    servers = tomllib.loads(path.read_text(encoding="utf-8"))["mcp_servers"]
+    assert set(servers) == {"evermatter", "keeper"}
+    assert servers["evermatter"]["env"]["EXOMEM_VAULT_PATH"] == WINDOWS_VAULT
+    assert servers["keeper"]["command"] == "keep-me"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows mode bits do not model POSIX 0600")
@@ -219,7 +255,7 @@ def test_diff_shows_the_user_what_changed(tmp_path: Path) -> None:
 
     outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
-    assert "+[mcp_servers.exomem]" in outcome["diff"]
+    assert "+[mcp_servers.evermatter]" in outcome["diff"]
 
 
 def test_refuses_to_write_when_the_result_would_not_parse(tmp_path: Path) -> None:
@@ -238,3 +274,39 @@ def test_codex_home_follows_the_env_override(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "elsewhere"))
 
     assert client_config.codex_config_path() == tmp_path / "elsewhere" / "config.toml"
+
+
+def _evermatter_block(text: str) -> str:
+    return (
+        f"{client_config.LEARNING_BEGIN}\n{text}\n"
+        f"{client_config.LEARNING_END}\n"
+    )
+
+
+def test_a_file_holding_the_evermatter_markers_is_updated_in_place_not_duplicated(
+    tmp_path: Path,
+) -> None:
+    claude_md = tmp_path / "CLAUDE.md"
+    above, below = "# My rules\n\n", "\n## Later notes\nKeep this.\n"
+    claude_md.write_text(f"{above}{_evermatter_block('older text')}{below}", encoding="utf-8")
+
+    outcome = client_config.place_learning_instruction(claude_md, "newer text")
+
+    assert outcome["action"] == "updated"
+    updated = claude_md.read_text(encoding="utf-8")
+    assert updated.startswith(above) and updated.endswith(below)
+    assert "older text" not in updated
+    assert updated.count("newer text") == 1
+    assert updated.count("learning instruction (managed by") == 1
+
+
+def test_uninstall_removes_a_block_written_with_the_evermatter_markers(tmp_path: Path) -> None:
+    claude_md = tmp_path / "CLAUDE.md"
+    claude_md.write_text(
+        f"# My rules\n\n{_evermatter_block('managed text')}\n## Later notes\n", encoding="utf-8"
+    )
+
+    outcome = client_config.remove_learning_instruction(claude_md)
+
+    assert outcome["action"] == "removed"
+    assert claude_md.read_text(encoding="utf-8") == "# My rules\n\n\n## Later notes\n"

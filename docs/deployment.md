@@ -11,7 +11,7 @@ don't need mobile access.
 This personal remote profile is still one user and one vault. The managed hosted
 service uses the same single-vault runtime as a private tenant cell behind a
 separate shared control plane; it is not made multi-tenant by pointing several
-accounts at the server configured below. Exomem Cloud operators should also
+accounts at the server configured below. Evermatter Cloud operators should also
 read the Cloud runbooks in [runbooks/](runbooks/) and the
 [Substrate control-plane contract](substrate-control-plane-contract.md).
 
@@ -68,7 +68,7 @@ The managed service has a different ingress and ownership boundary:
 client
   -> Substrate public auth / gateway / Home
   -> authoritative account mapping + internal entitlement
-  -> one private Exomem cell
+  -> one private Evermatter cell
   -> one tenant vault + isolated state/log/secret roots
 ```
 
@@ -94,7 +94,7 @@ gateway/cell pairs. Rollback stops routing, drains the affected cell, and starts
 the previous protocol-compatible image against the same vault. It never rolls
 canonical Markdown/media backward; disposable sidecars can be rebuilt.
 
-Paddle is not installed in, called by, or trusted by an Exomem cell. Substrate
+Paddle is not installed in, called by, or trusted by an Evermatter cell. Substrate
 owns Paddle checkout, webhooks, portal, reconciliation, and the provider-neutral
 entitlement projection consumed before routing and at cell startup. Paddle MCP
 is an operator/development aid for that control-plane lane, not production
@@ -107,7 +107,7 @@ cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
-#   --extra media pulls faster-whisper + Pillow + pymupdf + markitdown for
+#   --extra media pulls faster-whisper + Pillow + pypdfium2 + markitdown for
 #   SERVER-SIDE media extraction (auto transcribe/OCR/parse uploaded binaries →
 #   searchable). On Windows the [media] extra also pins the CUDA-12 runtime
 #   (cublas/cudnn/cudart) that ctranslate2 needs alongside torch's cu132 build.
@@ -308,6 +308,18 @@ On macOS the JSON also reports Activity Monitor's physical-footprint metric via
 limit. That limit is evaluated only when every server PID has a native sample,
 while `--max-rss-mb` keeps its existing RSS meaning.
 
+### Linux service with a one-core quota
+
+Under `CPUQuota=100%`, serving and media threads can use up the same period's
+CPU budget in parallel when they run across several cores. Place the whole
+service on one assigned logical CPU. The media child inherits the service's
+affinity and runs at lower priority. It continues existing speech jobs as
+foreground demand falls. [systemd scheduling options](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#CPUAffinity=)
+
+1. Assign one logical CPU from the service's allowed CPU set. Use the host's CPU placement for other services.
+2. Set `CPUAffinity=` to that CPU in the service's systemd drop-in, then apply it through the normal service deployment.
+3. Verify the serving worker and media child share the CPU and cgroup. The media child has the higher nice value.
+
 **macOS (launchd) — does not work today:**
 
 Kept for the darwin held-filesystem backend that does not exist yet. The
@@ -405,9 +417,9 @@ put its symlink) in uv's bin directory.
 
 ### Windows upgrade: legacy idempotency runtime DACL
 
-Exomem 0.47.0 began requiring a protected, principal-private DACL on Windows
+Evermatter 0.47.0 began requiring a protected, principal-private DACL on Windows
 idempotency runtime state. An install upgraded from 0.46.0 or earlier can already
-have a runtime directory whose inherited ACL does not meet that contract. Exomem
+have a runtime directory whose inherited ACL does not meet that contract. Evermatter
 does not silently rewrite it: the service and `exomem doctor` fail closed and print
 the exact offending path plus a one-line `icacls.exe` repair for the current runtime
 identity.
@@ -535,7 +547,7 @@ pwsh -File scripts/upgrade.ps1 -Vault "C:\path\to\vault"
 ```
 
 The migration lock serializes two new migrators; it cannot exclude an older
-Exomem release that does not know the lock exists. That is why the proven stop
+Evermatter release that does not know the lock exists. That is why the proven stop
 window is mandatory. `-SkipRestart` is unavailable for this transition. Any
 failure leaves the service stopped, including migration, doctor, start,
 new-worker, and live-version failures. Fix the failure and rerun the whole
@@ -580,7 +592,7 @@ exactly those files to a restic repository that you name.
 
 ## Deploying on a second machine (multi-host)
 
-Each machine has its own Exomem process and local vault replica. Replication moves
+Each machine has its own Evermatter process and local vault replica. Replication moves
 files; it does not decide which process may write. Choose the operating model that
 fits the downtime, automation, and operational complexity you actually want:
 
@@ -720,7 +732,7 @@ Nothing about the contract above depends on that worker. The coordinator and
 state contracts are plain HTTP, so any reverse proxy, load balancer or edge that
 implements them will do.
 
-Configure both Exomem hosts with the same vault ID and coordinator, but unique
+Configure both Evermatter hosts with the same vault ID and coordinator, but unique
 replica IDs. Desktop example:
 
 ```dotenv
@@ -773,7 +785,7 @@ default successful product response is compact and decisive (`ok`,
 count); `response_detail="full"` or `"legacy"` changes only presentation and is
 excluded from mutation identity.
 
-MCP does not expose the REST idempotency header through its tool schema. Exomem
+MCP does not expose the REST idempotency header through its tool schema. Evermatter
 therefore derives a privacy-safe local replay identity from the verified
 principal, hashed bearer, or MCP session plus the exact command and arguments.
 Its completed-result window is 600 seconds (10 minutes). Each MCP call also gets
@@ -852,13 +864,13 @@ admit the published store, because admitting it would lose that change:
 
 To finish the migration:
 
-1. Keep the Exomem service stopped on every host that serves the vault.
+1. Keep the Evermatter service stopped on every host that serves the vault.
 2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections migrate --vault <vault> --apply`.
 3. If the apply reports `status: restored`, wait until the writer lease expires, then run step 2 again.
 4. If the apply reports `COLLECTION_STORE_SYNC_PENDING`, wait for the vault replica, start and stop the service once, then repeat step 2.
 5. If the apply reports `COLLECTION_STORE_DIVERGED`, run `exomem collections adopt-local --vault <vault> --why "<reason>" --dry-run`, apply that preview with `--preview-id`, then run step 2 again.
 6. If the apply reports `COLLECTION_STORE_MIGRATION_STALE`, put back the files of each collection that it names, then run step 2 again.
-7. Start the Exomem services.
+7. Start the Evermatter services.
 
 The apply reports `marker_admitted` when the migration is finished.
 
@@ -912,6 +924,39 @@ keeps every row, history entry and preserved source, pauses import jobs and
 refuses summary reads with `COLLECTION_STORE_DISABLED`. A later release does
 not turn the vault's summary collections back on.
 
+### Store mode for vault pages
+
+New vaults start in file mode. An owner can opt in with `exomem store-mode migrate`.
+Store mode uses SQLite as the source for vault pages and indexes. The service
+projects the stored pages back to Markdown. Migration has been tested on
+Linux. Windows migration awaits NTFS acceptance.
+
+Use an existing collection store and a loopback lease coordinator with
+`EXOMEM_WRITER_LEASE_TOPOLOGY=single-host`. Upgrade every host that can open the
+vault to a build that checks the vault's store-mode marker before migration.
+Keep the service's vault, state root, and lease environment in your shell.
+Start the service once to build the indexes, then stop it and set
+`EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`.
+
+1. Run `exomem store-mode migrate --dry-run` to check the store, lease, and indexes.
+2. Run `exomem store-mode migrate --apply --why 'Enable store mode'` to move the vault.
+3. Run `exomem store-mode status` and check for `mode=store`.
+4. Start the service on the same state root so it serves the stored pages.
+
+CLI subcommands that read or write vault pages directly, such as
+`collections adopt-local`, refuse with `VAULT_STORE_CLI_REFUSED`
+in store mode. Use the service operation named in the refusal when available.
+
+To return to files, stop the service. From a directory outside the vault, run
+`exomem store-mode rollback --apply --export-to ./store-mode-export --why 'Return to file mode'`.
+Use a new or empty export directory. Add `--export-held` to keep unimported
+edits in the export before the store's pages replace the Markdown projections.
+Check for `mode=file` before starting the service again.
+
+If a former holder refuses with `VAULT_STORE_CLAIM_DISPLACED`, follow its
+offline rollback instructions on that state root. If it reports
+`VAULT_STORE_CLAIM_UNKNOWN`, use a build that can read the decision first.
+
 ### A release that changes the collection store's schema
 
 A release can change the schema of the live collection store. 0.119.0 changed
@@ -931,7 +976,13 @@ collections:
   Start the service once to migrate the store. `exomem collections create` holds
   the writer lease itself, so it migrates the store before it creates.
 
-File collections and knowledge writes are not affected.
+File collections are not affected, and neither are knowledge writes in file mode.
+
+In store mode the store also holds the vault's pages. The service still starts
+when its writer has not migrated the store yet, and it serves page reads from
+that store. This needs a store at schema 16 or later. Page writes go through the
+writer, so they refuse until the writer holds the lease and has migrated the
+store.
 
 If the migration fails, it rolls back and leaves the store at its earlier
 schema. The service status then reports the store as `schema_pending`, with the
@@ -979,6 +1030,13 @@ A release that does not support the ID then refuses at its own startup. Schema
 11 has no ID, because every release since 0.114.0 treats an unknown ID the same
 way, so an ID would also refuse 0.119.0 and later.
 
+Schema 19 makes a Records row retractable. It renames the table that holds every
+row to `item_rows`, adds a `retracted_txn` column, and puts a view named `items`
+over the current rows. The migration keeps every row and every history entry. A
+release before the one that introduced schema 19 cannot open the migrated store: it
+refuses a store schema newer than it supports, as it does for any newer schema. Back
+up the store with the release that you run now before you upgrade.
+
 If an earlier release refuses at startup with `STATE_MIGRATION_MANIFEST_INVALID`
 or `STATE_COMPATIBILITY_UNSUPPORTED` after a rollback, the vault holds state
 that the release cannot use. Roll forward to a release that supports it.
@@ -1007,7 +1065,7 @@ turns every store collection back into its file layout and then retires the
 store. Only the owner can export, with the service stopped on every host and the
 operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 
-1. Stop the Exomem service on every host that serves the vault.
+1. Stop the Evermatter service on every host that serves the vault.
 2. Preview the export: `exomem collections export --vault <vault> --dry-run`
 3. If the verdict is `blocked`, resolve each collection that the preview names, then preview again.
 4. Note the `plan_id` value in the preview.
@@ -1017,7 +1075,7 @@ operator credential, `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN`, set.
 8. If the apply reports `COLLECTION_STORE_COORDINATOR_UPGRADE_REQUIRED`, upgrade the coordinator, then start again at step 2.
 9. If a rerun reports `COLLECTION_STORE_EXPORT_VIEW_EDITED`, `COLLECTION_STORE_EXPORT_UNVERIFIED` or `COLLECTION_STORE_SYNC_PENDING`, follow "When an export cannot finish" below.
 10. On every other host, after the exported vault reaches it, run `exomem collections export --vault <vault> --retire-local`.
-11. Install the older release on every host, then start the Exomem services.
+11. Install the older release on every host, then start the Evermatter services.
 
 The services then read every collection from its files. The `--retire-local`
 step needs only the writer-lease credential, because it changes the host that
@@ -1127,9 +1185,9 @@ abandons it, on this host and on every host that adopts the replica.
 
 To abandon an export:
 
-1. Keep the Exomem service stopped on every host that serves the vault.
+1. Keep the Evermatter service stopped on every host that serves the vault.
 2. Run `EXOMEM_LEASE_COORDINATOR_OPERATOR_TOKEN=<operator token> exomem collections export --vault <vault> --abandon --plan-id <plan_id> --why "<reason>"`.
-3. Start the Exomem services. The services serve every store collection again.
+3. Start the Evermatter services. The services serve every store collection again.
 
 The command reports `abandoned`. The vault stays routed to the store, and the
 store keeps every row that it served before the export. The abandon rewrites no
@@ -1177,7 +1235,7 @@ a rolling mixed-provider deployment:
 3. Run offline and probed doctor on both replicas, then bring up only the new
    provider. Keep the public connector URL and connector registrations unchanged.
 4. Each existing client receives one expected `401` for its legacy reference JWT
-   and completes one final GitHub authorization. It then holds an Exomem-owned
+   and completes one final GitHub authorization. It then holds an Evermatter-owned
    opaque session with no advertised expiry. Do not delete/recreate connectors.
 5. Prove a session issued through one replica validates through the other. Run
    single-session and `--all` revocation checks. Run the Codex harness and the
@@ -1199,7 +1257,7 @@ python scripts/codex_auth_session_harness.py \
 Run this only against a disposable staged KB. The harness refuses a non-empty
 target `CODEX_HOME`, copies only the invoking Codex OpenAI `auth.json` into it
 with owner-only permissions, and verifies `codex login status` before registering
-Exomem. It never copies `config.toml`, `.credentials.json`, or prior MCP state.
+Evermatter. It never copies `config.toml`, `.credentials.json`, or prior MCP state.
 When `--codex-auth-source` is omitted, it resolves to `$CODEX_HOME/auth.json` for
 the invoking process, or `~/.codex/auth.json` when `CODEX_HOME` is unset. The
 acknowledgement is deliberately mandatory.
@@ -1245,10 +1303,10 @@ origin hostnames are operational endpoints, not separate connectors. After editi
 `.env`, restart each service so it reloads the coordination settings. Automatic
 two-way failover requires the replication layer to accept changes from either
 host. For Syncthing that means **Send & Receive on both hosts**; users of other
-replication systems should apply their equivalent. The writer lease guards Exomem
+replication systems should apply their equivalent. The writer lease guards Evermatter
 mutations, not direct Obsidian/filesystem edits, so do not edit a follower manually.
 Before deliberately stopping the active writer, let replication reach **Up to
-Date**; on an unclean crash, the lease prevents concurrent Exomem writers but cannot
+Date**; on an unclean crash, the lease prevents concurrent Evermatter writers but cannot
 recover bytes the old writer had not replicated yet.
 
 Replica release drift remains deployment housekeeping, but runtime compatibility
@@ -1289,13 +1347,13 @@ The Worker example sets `SUPPORTED_RUNTIME_CONTRACTS="1"`,
 `REQUIRE_COORDINATION="true"`. For an incompatible contract bump, first expand
 the accepted set (for example `"1,2"`), roll every replica, confirm doctor passes,
 then contract the set to the new version. The deployment platform owns immutable
-release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
+release pinning, rollout, and rollback. Evermatter deliberately has no cross-machine
 auto-updater, and the readiness contract is independent of Syncthing or any other
 replication product.
 
 ## Recall model and re-embedding
 
-A personal server and an Exomem Cloud cell encode recall with `BAAI/bge-m3`,
+A personal server and an Evermatter Cloud cell encode recall with `BAAI/bge-m3`,
 served from a pinned int8 ONNX artefact on CPU, and activation shares that one
 instance (about 0.65 GB resident). The first load fetches the published
 artefact, or builds it from the pinned export: a 2.2 GB download and a
@@ -1536,8 +1594,9 @@ generation the map was built from. One background pass rebuilds the map, and the
 the new one. A restricted caller never gets the owner's map: its packet is built in the call.
 
 The `budget` block has two sizes. `used_chars` is the prose the packet charges against `max_chars`.
-`serialized_chars` is the length of the packet as sent, in compact JSON, without the
-`serialized_chars` field itself. A map item omits `topics` when it has none, and omits
+`serialized_chars` is the length of the packet as the cell builds it, in compact JSON, without the
+`serialized_chars` field itself. A Cloud cell adds its `service_notice` field to the reply after that
+count, so the count excludes it. A map item omits `topics` when it has none, and omits
 `lifecycle_class` and `state` when they are unset.
 
 A client that holds the current map can send its `continuity` token back. When the map that the
@@ -1560,9 +1619,9 @@ services leave it off by default. `EXOMEM_DISABLE_RANKING` turns it off entirely
 The default CrossEncoder backend is PyTorch. To use ONNX, install
 `uv sync --extra embeddings --extra reranker-onnx` and set
 `EXOMEM_RERANKER_BACKEND=onnx` before starting the service. This uses the
-model's published ONNX export; Exomem does not export the model during a request.
+model's published ONNX export; Evermatter does not export the model during a request.
 The first load may download that export if it is not already in the model cache.
-The ONNX provider follows Exomem's device policy: CPU is the default, CUDA is
+The ONNX provider follows Evermatter's device policy: CPU is the default, CUDA is
 used only when that policy selects it, and MPS uses CPU. This setting changes
 the scorer runtime, not candidate retrieval or the automatic reranking policy.
 It does not establish a recall, latency, or memory improvement.
@@ -1820,10 +1879,18 @@ A client then points at `http://127.0.0.1:8764/mcp` with
   within that same cap, so one file of the largest size always fits. The
   listener refuses a hold that does not fit in free disk with
   `HELD_UPLOAD_NO_SPACE`.
+- For direct audio or video preservation, `exomem attach --diarize` requests
+  speaker labels and `--no-diarize` skips them. The choice also applies to
+  resumable uploads. Set `diarize` on the file handle when you redeem a held
+  upload. Use `kb process-media --operation reprocess` with `--path` and
+  the same flags to change an existing recording's choice. When labels are requested
+  and the optional diarizer is unavailable, Evermatter keeps the timed transcript
+  and reports that speaker labels are unavailable. Bulk backfill honors each
+  saved choice and leaves explicitly queued work to the media worker.
 - A remote client with a shell or a networked sandbox imports a folder by
   sending it as one plain or gzip tar or zip: `upload_files(lane="import")`
   returns a one-use upload, and `manage_memory` `imports.file` with its
-  `upload` token unpacks it into `_Imports/<id>/` and files it. Exomem Cloud
+  `upload` token unpacks it into `_Imports/<id>/` and files it. Evermatter Cloud
   refuses that lane. The unpack streams, refuses links, devices,
   absolute and `..` paths, encrypted entries and more than 65,536 entries, and
   leaves nothing behind when it refuses. `EXOMEM_IMPORT_MAX_EXPANDED_BYTES`
@@ -1858,18 +1925,39 @@ on that listener. The credential fixes the lane; metadata cannot change it.
 Evidence requires `filename`, `sha256` (of the whole file), `scope` and
 `category`. Source requires `filename` and `sha256`; its optional fields are
 `title`, `source_kind`, `domain`, `url`, `content_type` and `raw_protection`.
+Both lanes accept `diarize` as `true` or `false` for audio and video.
 Source uses the canonical Source writer and stores its original beside the
 Source page. It does not accept `archive=members`. Evidence also accepts
 `raw_protection` and `archive`. One request carries at most 64 MiB, and one session holds at most
 `EXOMEM_UPLOAD_SESSION_MAX_BYTES` (default 2 GiB). A session expires 24 hours
 after its last part.
 
+For a large original on the personal HTTP listener, call `upload_files` with
+`lane="source"`, the file's `expected_sha256` and its exact `size_bytes`.
+Above the one-shot limit, the reply describes a resumable Source upload.
+Save that reply privately as a handoff file and run `exomem attach --handoff-file handoff.json original.bin`.
+The same command resumes from the server's offset after a dropped request.
+It returns a Source receipt after the full hash matches and the Source commits.
+It can retrieve the same receipt for 24 hours after settlement. The account
+must retain its owner binding and the issuing MCP login must remain active.
+Refreshing the access token keeps that login active.
+Each receipt read applies the current release policy to the Source and its
+original. If the policy withholds either path, the upload keeps its receipt
+and reports that it cannot release it.
+
+If creation reports a spent handoff without returning a session, request a
+new handoff. If a known session becomes unavailable, check Source custody
+before starting another upload.
+
+Requests within the one-shot limit still produce a held file for `save_source`.
+An explicit hold or import identity keeps that limit. Cloud's gateway also uses
+the one-shot limit. The tool reports the applicable limit for an oversized request.
+
 A Source capability does not grant read access to its destination. If governance
 withholds the custody receipt, the session retains the bytes and reports
 `SOURCE_OUTCOME_UNKNOWN`. The canonical commit may already exist.
-Use an authorized reader to inspect
-custody, and reuse this session for a retry. A different caller's credential
-does not change this session's transfer principal.
+Use an authorized reader to inspect custody and use the same command to check
+the session's receipt.
 
 The service preserves the file only when its SHA-256 matches. `GET` on the
 session returns its state and, after the commit, the receipt. The state
@@ -1936,6 +2024,12 @@ session; do not create a new identity for an uncertain Source commit.
 without recovering its complete receipt. That state needs reconciliation and
 does not authorize another Source publication.
 
+Receipt reads use current release policy and a bounded comparison against the
+validated lifecycle snapshot. When the marker namespace changes, the server
+validates it in the background. The client keeps polling the same session while
+the receipt check is pending. The server may withhold identifiers when current
+metadata cannot establish release.
+
 A Source receipt preserves the original and its Source page. Its
 `semantic_compilation` field remains `unassessed` until an agent compiles the
 content into governed knowledge. Media status reports recorded processing and
@@ -1957,7 +2051,7 @@ uses shared storage.
 Each shared copy is a file named after the SHA-256 digest of its bytes:
 `_Originals/sha256/<first two digest characters>/<digest>.blob`. A filing's
 page records its path, digest and size, and the filing has no file at its own
-path. Exomem tools take the filing's path and read the shared copy, so a
+path. Evermatter tools take the filing's path and read the shared copy, so a
 preview, download, move or export works as before. A program that reads the
 folder directly finds the page but not the original. An archive can hold
 ordinary files and shared copies together, for example while a conversion
@@ -1968,7 +2062,7 @@ Three kinds of copy exist:
 - The format marker and each `.blob` file are canonical copies. They are part
   of the archive. Back them up with it, and never edit or delete them by hand.
   A backup without `_Originals/` loses the bytes of every shared original.
-- Exomem writes a staging copy under `_Originals/` while it publishes or
+- Evermatter writes a staging copy under `_Originals/` while it publishes or
   fetches a shared copy. A staging copy is not part of the archive, and
   exports leave it out.
 - A backup copy is an export or another copy of the archive. A whole-archive
@@ -1979,7 +2073,7 @@ Three kinds of copy exist:
 
 Shared storage does not change what an upload costs or what its answer says:
 
-- Exomem charges every upload in full. It stages and verifies all the bytes
+- Evermatter charges every upload in full. It stages and verifies all the bytes
   of a new filing before it looks for a shared copy, so the allowance and the
   upload session's limit count the whole file, also when an identical
   original is already stored.
@@ -1994,7 +2088,7 @@ your filings. Cloud offload, which runs in the background, can also show
 allowance results after it reuses a stored copy that another filing owns.
 Both limits existed before shared storage, and this release does not change
 them. An upload can also take a different time when an identical original is
-already stored, because Exomem then checks the stored copy's bytes instead of
+already stored, because Evermatter then checks the stored copy's bytes instead of
 writing a new one.
 
 ### New archives
@@ -2088,13 +2182,13 @@ nothing. Read that job until it ends, then preview again.
 A release without shared storage cannot read a shared copy. A compatibility
 export writes a separate archive for such a release, with each original as an
 ordinary file at its filing's path. The export reads the source archive and
-changes nothing in it. Exomem 0.182.0 is the declared release without shared
+changes nothing in it. Evermatter 0.182.0 is the declared release without shared
 storage: its own restore reads a compatibility export byte for byte.
 
 The export does these things:
 
 - It checks each original against its page's digest and size, and each page
-  against the bytes that Exomem read for it.
+  against the bytes that Evermatter read for it.
 - It fetches an original whose only copy is a stored Cloud version from the
   configured store.
 - It leaves out `_Originals/`, so the export records no shared-storage
@@ -2107,9 +2201,9 @@ that share one copy in the archive each get their own file in the export.
 
 To make a compatibility export:
 
-1. Stop the Exomem service on every host that serves the archive.
+1. Stop the Evermatter service on every host that serves the archive.
 2. Choose an export folder outside the archive, on a volume with enough free space.
-3. In the service's environment, run the script below with the Python interpreter of the Exomem installation.
+3. In the service's environment, run the script below with the Python interpreter of the Evermatter installation.
 4. If the script prints a path, keep that archive. Its name is `exomem-compatible-export-<digest>.zip`.
 5. If the script prints a code, fix the member that it names, then run step 3 again.
 
@@ -2138,11 +2232,11 @@ A failed export publishes no archive and leaves the source archive unchanged.
 It names one of these codes:
 
 - `DIGEST_MISMATCH`: an original differs from its page's digest or size. Do
-  not edit a damaged shared copy. Exomem's background check of stored
+  not edit a damaged shared copy. Evermatter's background check of stored
   originals restores it from a verified Cloud copy when the store holds one.
   Otherwise, restore `_Originals/` from a backup of the archive.
-- `ORIGINAL_UNAVAILABLE`: Exomem could not read or fetch an original.
-- `ORIGINAL_RETIREMENT_UNCONFIRMED`: Exomem cannot confirm a Trash entry's
+- `ORIGINAL_UNAVAILABLE`: Evermatter could not read or fetch an original.
+- `ORIGINAL_RETIREMENT_UNCONFIRMED`: Evermatter cannot confirm a Trash entry's
   retirement. Empty or restore that Trash entry first.
 - `SOURCE_CHANGED_DURING_EXPORT`: the archive changed during the export. Stop
   every writer, then export again.
@@ -2162,9 +2256,9 @@ their originals.
 
 To restore an export:
 
-1. Stop the Exomem service that will serve the restored archive.
+1. Stop the Evermatter service that will serve the restored archive.
 2. Choose a new restore folder whose path does not exist yet.
-3. In the service's environment, run the script below with the Python interpreter of the Exomem installation.
+3. In the service's environment, run the script below with the Python interpreter of the Evermatter installation.
 4. If the script prints `published`, point the service at the restore folder, then start it.
 5. If the script prints a code, run step 3 again with a new staging folder and a new restore folder.
 
@@ -2212,7 +2306,7 @@ launcher support, as "New archives" describes. This floor then applies to it
 without a conversion. An archive or cell created earlier keeps ordinary
 storage through every upgrade until its owner converts it.
 
-The refusal of Exomem 0.182.0 does not name shared storage. It prints
+The refusal of Evermatter 0.182.0 does not name shared storage. It prints
 `the state migration manifest is unreadable or invalid; startup refuses to
 guess`, and its `exomem doctor` advises a repair of the state authority. Do
 not follow that advice for an archive that records shared storage.

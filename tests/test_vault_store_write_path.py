@@ -1,9 +1,8 @@
 """A governed write to a store-mode vault commits in the store and writes no Markdown.
 
 OpenSpec make-vault-store-canonical tasks 2.2 and 2.3. The vault is the migration suite's generated
-vault in store mode, and the writer is bound as the store thread binds it (`require_servable` still
-refuses a store-mode service start, so no service holds the store here). The projector is off:
-nothing writes a stored page to disk, so every answer below comes from the store.
+vault in store mode. The fixture binds the writer as the store thread does. The projector is off,
+so every answer comes from the store.
 """
 
 from __future__ import annotations
@@ -21,12 +20,14 @@ from test_vault_store_migration import ALPHA, DIAGRAM, DIAGRAM_BYTES, vault  # n
 from test_vault_store_read_write import stored, writer  # noqa: F401
 from test_workflow_contracts import _proposal as workflow_contract_proposal
 
-from exomem import bm25, commands, deferred_index, lexstore, mode, note, workflow_contracts
+from exomem import bm25, commands, deferred_index, mode, note, workflow_contracts
 from exomem import vault as vault_module
 from exomem.cli_ops import OpError
 from exomem.collection_store import connection, preview, runtime
 from exomem.governance import artifact_census
-from exomem.vault_store import availability, projection, read, verify, write
+from exomem.vault_store import availability, derivation, projection, read, verify, write
+from exomem.vault_store import batch as store_batch
+from exomem.vault_store import mode as store_mode
 
 GAMMA = "Knowledge Base/Notes/Gamma.md"
 OUTSIDE = "Outside/Loose.md"
@@ -61,6 +62,12 @@ def store_rows(root, sql, *arguments):
 
 def revision(root):
     return store_rows(root, "SELECT revision FROM store_mode")[0][0]
+
+
+def commits_since(root, start):
+    """The canonical commits after revision ``start``. Each writes audit rows; a derivation that
+    moves the revision after one writes none."""
+    return store_rows(root, "SELECT COUNT(DISTINCT revision) FROM store_audit WHERE revision > ?", start)[0][0]
 
 
 def bm25_paths(root, word):
@@ -342,8 +349,8 @@ def test_store_page_writes_replace_and_delete_the_authored_row_key_projection(se
     assert all("The beacon must remain lit." not in hit["excerpt"] for hit in recreated)
 
 
-def test_a_batch_commits_the_pages_and_their_rows_at_one_revision(served):
-    """A reader between a page and its rows: the revision moves once for the whole batch."""
+def test_a_batch_commits_its_pages_at_one_revision(served):
+    """A reader between two pages of one batch: the pages commit together, at one revision."""
     start = revision(served)
     vault_module.batch_atomic_write(
         [
@@ -353,7 +360,13 @@ def test_a_batch_commits_the_pages_and_their_rows_at_one_revision(served):
         vault_root=served,
         post_commit_fanout=False,
     )
-    assert revision(served) == start + 1
+    assert store_rows(
+        served,
+        "SELECT DISTINCT revision FROM store_audit WHERE path IN (?, ?) AND revision > ?",
+        GAMMA,
+        ALPHA,
+        start,
+    ) == [(start + 1,)]
     with read.snapshot(served) as view:
         assert view.page(GAMMA).body == GAMMA_TEXT.encode()
         assert view.page(ALPHA).body == LINKING_ALPHA.encode()
@@ -443,26 +456,40 @@ def test_a_page_changed_between_the_check_and_the_commit_commits_nothing(served,
     assert read.owned_bytes(served, ALPHA) == b"# Alpha, raced\n"
 
 
-def test_a_failure_while_deriving_rolls_back_the_page_and_the_revision(served, writer, monkeypatch):  # noqa: F811
-    """A page that is stored and has no rows, as the derivation failed after the page was put."""
-    start = revision(served)
+def test_a_failure_while_deriving_keeps_the_page_and_reports_it_failed(served, writer, monkeypatch):  # noqa: F811
+    """A page whose rows cannot be derived: the page stays, status names the failure, and a retry
+    that succeeds makes the rows current."""
 
     def fail(*_arguments, **_keywords):
         raise RuntimeError("derivation failed")
 
-    monkeypatch.setattr("exomem.lexstore.write_page_rows", fail)
-    with pytest.raises(RuntimeError, match="derivation failed"):
+    with monkeypatch.context() as patch:
+        patch.setattr("exomem.lexstore.write_page_rows", fail)
         write.commit(
             writer,
             write.StoreChange(
                 write.Origin.GOVERNED, "test", puts=(write.PagePut(GAMMA, GAMMA_TEXT.encode()),)
             ),
         )
-    assert revision(served) == start
-    assert not store_rows(served, "SELECT 1 FROM store_pages WHERE path = ?", GAMMA)
+        assert read.owned_bytes(served, GAMMA) == GAMMA_TEXT.encode()
+        assert store_batch.row_report("upsert", [GAMMA], root=served).components[0].outcome == "deferred"
+        for _retry in range(derivation.ATTEMPTS - 1):
+            derivation.started(served.resolve(), writer)
+            derivation.drain(served.resolve(), writer)
+        figures = store_mode.status(served)
+        assert (figures["derived"], figures["derived_failed"]) == ("failed", 1)
+        assert figures["derived_failed_by_code"] == {derivation.FAILED: 1}
+        report = store_batch.row_report("upsert", [GAMMA], root=served)
+        assert {component.outcome for component in report.components} == {"failed"}
+        assert bm25_paths(served, "harbour") == []
+
+    derivation.started(served.resolve(), writer)
+    derivation.drain(served.resolve(), writer)
+    assert store_mode.status(served)["derived"] == "current"
+    assert bm25_paths(served, "harbour") == [GAMMA]
 
 
-@pytest.mark.parametrize("failing_step", ["bindings", "derivation"])
+@pytest.mark.parametrize("failing_step", ["bindings", "commit"])
 def test_a_mixed_batch_that_fails_after_its_files_are_published_restores_them_and_can_retry(
     served, monkeypatch, failing_step
 ):
@@ -479,14 +506,14 @@ def test_a_mixed_batch_that_fails_after_its_files_are_published_restores_them_an
         if failing_step == "bindings" and failing[0] and len(bindings_calls) == 2:
             raise RuntimeError("a binding changed after publication")
 
-    write_page_rows = lexstore.write_page_rows
+    enqueue = derivation.enqueue
 
-    def derive(*arguments, **keywords):
-        if failing_step == "derivation" and failing[0]:
-            raise RuntimeError("derivation failed")
-        return write_page_rows(*arguments, **keywords)
+    def commit_step(*arguments, **keywords):
+        if failing_step == "commit" and failing[0]:
+            raise RuntimeError("the commit failed")
+        return enqueue(*arguments, **keywords)
 
-    monkeypatch.setattr("exomem.lexstore.write_page_rows", derive)
+    monkeypatch.setattr(derivation, "enqueue", commit_step)
 
     def mixed_batch():
         return vault_module.batch_atomic_write(
@@ -520,7 +547,7 @@ def test_a_mixed_batch_that_fails_after_its_files_are_published_restores_them_an
     mixed_batch()
     assert (served / diagram).read_bytes() == payload
     assert (served / probe).exists()
-    assert revision(served) == start + 1
+    assert revision(served) > start
     assert bm25_paths(served, "harbour") == [GAMMA]
 
 

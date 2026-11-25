@@ -143,7 +143,7 @@ def test_an_encode_names_the_module_that_asked_and_separates_waiting(
     monkeypatch.setattr(recall_space, "_previous_gate", lambda: SimpleNamespace(
         admission=contextlib.nullcontext, execution=execution,
     ))
-    # A caller whose frame belongs to an Exomem module, without importing one
+    # A caller whose frame belongs to an Evermatter module, without importing one
     # that would need a model: the attribution reads the frame's module name.
     namespace = {"__name__": "exomem.context_pack", "embeddings": embeddings}
     exec("def ask():\n    return embeddings.embed_texts(['a', 'ccc', 'bb'])\n", namespace)
@@ -207,6 +207,42 @@ def test_failed_encodes_report_only_attempted_intervals(token, monkeypatch, phas
     if phase == "encode":
         expected["model_encode_us"] = 7
     assert measured == expected
+
+
+def test_a_search_query_waiting_for_its_lane_reports_the_wait(token, monkeypatch) -> None:
+    """The query-encode wait is the ledger's evidence for this cost; a turn taken outside the encode span reads 0."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import numpy as np
+
+    from exomem import embeddings, runtime_resources
+
+    model = SimpleNamespace(
+        concurrent_encodes=True, encode=lambda texts, **_kwargs: np.ones((len(texts), 1), dtype=np.float32)
+    )
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_MODEL", model)
+    monkeypatch.setattr(embeddings, "get_model", lambda: model)
+    monkeypatch.setattr(embeddings, "_prefixes", lambda *_args: ("", ""))
+    shared = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(runtime_resources, "_process_gate", lambda: shared)
+    lane = runtime_resources.ModelAdmissionGate(2)
+    monkeypatch.setattr(embeddings, "_QUERY_TURN_GATE", lane)
+    holding, release = threading.Event(), threading.Event()
+
+    def another_query():
+        with lane.admission(), lane.execution():
+            holding.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        other = pool.submit(another_query)
+        assert holding.wait(5)
+        threading.Timer(0.2, release.set).start()
+        embeddings.encode_query(SimpleNamespace(), "query")
+        other.result()
+    assert _names(token)["embeddings.encode"]["fields"]["execution_wait_us"] >= 150_000
 
 
 @pytest.mark.parametrize("separate", [False, True])

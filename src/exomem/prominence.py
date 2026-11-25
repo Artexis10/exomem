@@ -1,9 +1,9 @@
-"""Prominence level — one knob that governs how much Exomem speaks up.
+"""Prominence level — one knob that governs how much Evermatter speaks up.
 
 Where `mode` answers "how much of this machine may exomem use?", prominence answers
-the orthogonal question: **"how much should Exomem participate in a conversation?"**
+the orthogonal question: **"how much should Evermatter participate in a conversation?"**
 The two are deliberately separate. A laptop on battery can still want maximal recall;
-a workstation can still want Exomem to stay out of the way.
+a workstation can still want Evermatter to stay out of the way.
 
 Four canonical levels, over three behavioural axes — recall, capture, narration:
 
@@ -158,15 +158,18 @@ _CONFIG_KEY = "prominence"
 #: (`client_config.place_learning_instruction`), the hosted-client guides show it as
 #: paste-in text, and `tests/test_prominence.py` fails when a guide's copy differs.
 LEARNING_INSTRUCTION = (
-    "Use Exomem as the memory for my work. Before you start a task, recall what Exomem "
+    "Use Evermatter as the memory for my work. Before you start a task, recall what Evermatter "
     "holds about the systems, projects or topics it touches. As you work, save each "
     "reusable fact you establish (how something is structured, a pitfall, a method that "
     "worked) as one concise observation, and update an existing note when one covers it, "
     "so a later session does not have to find it again. Keep each file I hand you to read, "
     "such as an attachment, a screenshot or a document I point to, as a Source by its "
     "exact bytes, even when it settles nothing; tell me in one line, and treat what it "
-    "claims as unverified. Files you work on in my own repositories are not handed files. "
-    "Files that hold secrets, such as keys, tokens or a .env file, are not kept."
+    "claims as unverified. A file that proves something, such as a label, receipt or "
+    "warranty, goes in Evidence in the same turn, cited in what you write about it. "
+    "Files you work on in my own repositories are not handed files. Files that hold "
+    "secrets, such as keys, tokens, a .env file, a card number or a code, are not kept; "
+    "ask me for a copy with the secret covered."
 )
 
 #: The activation carrier, at `balanced` and `maximal` only.
@@ -222,11 +225,13 @@ _GLOBAL_STANCE_CAPTURE = (
     "Authorize each promoted unit; keep scoped rules local. "
 )
 
-#: A correction the user states is durable: an uncorrected note keeps recommending what the user
-#: already found wrong, and recall returns it as authoritative. Scoped by `proactive_capture`, so
-#: advisory offers the fix and silent makes it. `balanced`, `maximal` and the activation block share it.
+#: What the owner settles in conversation is durable: stored advice that failed or a claim the user
+#: corrected (an uncorrected note keeps recommending what the user already found wrong, and recall returns
+#: it as authoritative), and a decision or standing rule agreed here (a harness-local file never reaches
+#: another session). Scoped by `proactive_capture`, so advisory offers the save and silent makes it. One
+#: sentence: `balanced`, `maximal` and the activation block share it, and the core has no spare bytes.
 _CORRECTION_CAPTURE = (
-    "Stored advice the user says failed, or a claim they correct, is durable: correct it under "
+    "Failed stored advice, a corrected claim, or an agreed decision or standing rule is durable: save under "
     "proactive_capture."
 )
 
@@ -237,22 +242,52 @@ _BASELINE_CAPTURE = (
     "Capture stable preferences, recurring routines, historical baselines, or durable "
     "affiliations only when stability or recurrence and reusable comparison, interpretation, "
     "or decision value are clear. Route a uniquely resolved Entity facet or affiliation "
-    "there, else one concise compiled observation; Records only for a compatible existing "
-    "measurement. Before an affiliation facet, check the relation queue: a match the user "
+    "there, else one concise compiled observation; Records for recurring named items or "
+    "measurements. Before an affiliation facet, check the relation queue: a match the user "
     "confirms goes to link_acceptance; else save the facet. Fleeting preferences, one-offs, "
-    "incidental associations, trivia, and tentative events get no note."
+    "incidental associations and trivia get no note."
 )
 
-#: What a stepping stone saves beyond a personal baseline. "Tentative" quiets only a baseline's casual
-#: events; served unscoped it taught agents to drop a held view, an open question and the values a task
-#: settled, and to save a pointer to the working file instead. The classes are named as stepping stones
-#: because a real-model probe saw sessions that ended on one, with nothing decided, save nothing. It names
-#: no excluded material: agents echoed a "not X" clause into their writes as a disclaimer that kept X.
-#: Short by budget: above `_CAPTURE_POLICY_MAX_CHARS` the hook keeps only the block's lead sentence, so a
-#: longer text here silences every capture rule.
+#: The one-sentence form of `_CAPTURE_RULES`, in the `say` text that every hook revision renders. A
+#: stepping stone saves more than a personal baseline: a held view, an open question, an unsure report and
+#: the values a task settled. Each is named as a stepping stone because a real-model probe saw sessions that
+#: ended on one, with nothing decided, save nothing. It names no excluded material: agents echoed a "not X"
+#: clause into their writes as a disclaimer that kept X. Short by budget: above `_CAPTURE_POLICY_MAX_CHARS`
+#: the hook keeps only the block's lead sentence, so a longer text here silences every capture rule.
 _EPISTEMIC_CAPTURE = (
-    "Held views, open questions and settled values are stepping stones: save a view attributed, with its "
-    "uncertainty; a question as open; values in full. Mention nothing kept quiet."
+    "Held views, open questions, unsure reports and settled values are stepping stones: save each at its "
+    "true strength, attributed; values in full. A write never mentions what goes unsaved."
+)
+
+#: The key the full capture rule travels under in the activation `capture_policy` block.
+CAPTURE_RULES_KEY = "rules"
+
+#: The full capture rule, served under its own key. It did not fit the hook's per-turn cap on `say`
+#: (`_CAPTURE_POLICY_MAX_CHARS`), and a hook installed before this key existed renders `say` alone and
+#: ignores every other key, so `say` keeps the one-sentence form above. MCP-only clients, which have no
+#: hook, receive the whole block. The rule is one principle (a claim is never saved stronger than its
+#: source made it) and the classes that follow from it. It is not a vocabulary: each class names a
+#: kind of claim the agent judges, never a word the server matches.
+_CAPTURE_RULES = (
+    "Save what a later session will need, at its true strength: never write a claim more certain, more "
+    "general or more settled than its source made it. A held view, interpretation or working hypothesis "
+    "that the evidence does not settle is saved attributed to whoever holds it, with its uncertainty; a "
+    "remark made in passing is not a held view. A person's unsure report that later work could use is "
+    "saved as unsure and attributed, with its doubt, never as fact or as a baseline. A question the work "
+    "leaves open is saved as open, including whether something happened at all. Values a task settled, "
+    "such as times, prices, terms, contacts and limits, are saved in full, never as a pointer to a working "
+    "file. Trivia and one-offs get no note, because nothing later needs them. A write never mentions what "
+    "stays unwritten."
+)
+
+#: The recognition cue for recurring structured work, appended to `_CAPTURE_RULES` in the per-turn
+#: block. It names the kinds of item the agent judges (never a word the server matches), and routes
+#: them by the owner's `proactive_capture`, so advisory proposes the collection and silent makes it.
+#: The create step is the one call `add_record` with `new_collection`. Per-turn only: the bootstrap core
+#: has no bytes to spare, and the scaffold's Records procedure (`records_planning`) carries the full rule.
+_STRUCTURED_WORK_CAPTURE = (
+    "Named items that recur, are compared or change: add_record to a matching collection by natural key, "
+    "else with new_collection per proactive_capture; prose stays in Notes."
 )
 
 #: What a generated file is worth as a save, positive rule first. Handing a file to the user is the
@@ -275,8 +310,8 @@ _ORIGINAL_CAPTURE = (
 #: The route for a delivery the user reports: find the receipt the adoption left, then link it.
 #: Shared like the doctrine above, so the block and bootstrap give one route.
 _DELIVERY_CAPTURE = (
-    "Reported delivery: search for the artifact's Evidence receipt, then append one "
-    "delivery Record linking it to the compatible existing collection; no remote byte "
+    "Reported delivery: search for the artifact's Evidence receipt, then append a "
+    "delivery Record linking it to the compatible collection; no remote byte "
     "inference."
 )
 
@@ -287,7 +322,7 @@ _ARTIFACT_ADOPTION_CAPTURE = (
     + _ADOPTION_TRIGGER
     + " No handle: non-committing handoff. "
     + _DELIVERY_CAPTURE
-    + " Missing collection: structural_suggestions."
+    + " Missing collection: create a minimal one."
 )
 
 #: The episode-completeness pass, appended to `balanced` and `maximal` only.
@@ -305,7 +340,7 @@ _ARTIFACT_ADOPTION_CAPTURE = (
 #: on its next durable write. What must survive here is the rule, not the roster.
 _EPISODE_SWEEP_CAPTURE = (
     " After capture, make one bounded episode pass over the recent exchange for material "
-    "value in later work or recall, e.g. outcomes; not a closed set. "
+    "value in later work or recall, e.g. outcomes. "
     "Skip what the response lists as written recently; stay silent if nothing qualifies."
 )
 
@@ -689,7 +724,7 @@ def resolve_context(context: str) -> dict[str, str]:
         # An unreadable record must never hand a user MORE proactivity than they
         # last chose. The client default is `maximal` on hookless surfaces, so
         # falling through to it turned an identity that may well have saved `off`
-        # into the eagerest level Exomem has. The generic default is the honest
+        # into the eagerest level Evermatter has. The generic default is the honest
         # floor: the record is gone, so the client's own default cannot be the
         # thing that widens it. `effective_capture_level` withholds proactive
         # writes on top, in every projection that speaks about capture authority.
@@ -824,6 +859,8 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
     Branches only on the closed `proactive_capture` range. Under `off` the block is the meaning
     alone: no class list and no second disposition, so a quiet vault is not handed doctrine it may
     not act on. The routes are the constants bootstrap serves, so the two carriers cannot drift.
+    Every other block carries `say`, the text every hook renders, and `rules`, the full capture rule
+    that a hook built for it renders after `say` and an MCP-only client reads from the dict.
     `link_acceptance` is required: the queue route is only right for the vault's own setting,
     never a default.
     """
@@ -837,6 +874,7 @@ def capture_policy(disposition: str, link_acceptance: str) -> dict[str, str]:
         "disposition": disposition,
         "link_acceptance": link_acceptance,
         "say": f"{meaning} {link} {_CORRECTION_CAPTURE} {_BASELINE_CAPTURE} {_EPISTEMIC_CAPTURE} {_ADOPTION_TRIGGER} {_ORIGINAL_CAPTURE} {_DELIVERY_CAPTURE}",
+        CAPTURE_RULES_KEY: f"{_CAPTURE_RULES} {_STRUCTURED_WORK_CAPTURE}",
     }
 
 
@@ -954,7 +992,7 @@ def custom_instructions_route() -> str:
     deletes any served string that mentions one the active surface lacks, and a
     route that vanished on the surface it exists for would be no route at all.
     """
-    return "Paste the level block from the Exomem prominence guide into this client's custom instructions."
+    return "Paste the level block from the Evermatter prominence guide into this client's custom instructions."
 
 
 def _active_source(surface: str | None = None) -> str:

@@ -94,10 +94,12 @@ class CorpusLookupError(LookupError):
 
 
 #: The store, and the act of storing. Narrower than the retrieve-nudge's
-#: ``_KB_BEARING_RE`` by design — see the module docstring.
+#: ``_KB_BEARING_RE`` by design — see the module docstring. The store's names are
+#: the closed set of this product's own names: Evermatter, and Exomem from before
+#: the rename, because a person may say either.
 STORE_BEARING_RE = re.compile(
     r"\b("
-    r"exomem|kb|knowledge\s+base|planning|plan\s+items?|records?|recorded|recording"
+    r"evermatter|exomem|kb|knowledge\s+base|planning|plan\s+items?|records?|recorded|recording"
     r"|saves?|saved|saving|stores?|stored|storing|tracks?|tracked|tracking"
     r"|remember(?:s|ed|ing)?|captures?|captured|capturing"
     r"|log\s+(?:it|this|that)"
@@ -700,7 +702,7 @@ def _seed(
     records: ModuleType,
     collections: ModuleType,
     init_vault: Callable[[Path], object],
-    watch: "_GraphSyncWatch",
+    watch: _GraphSyncWatch,
 ) -> dict[str, object]:
     """The seed itself, with its collaborators passed in so a test can poison it."""
 
