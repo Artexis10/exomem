@@ -1186,12 +1186,13 @@ class _LinkProjector:
         # walk. Only when none can be borrowed does it walk the vault, within the
         # caps below.
         #
-        # `allow_cold_index=False` (bounded-latency callers only, e.g. late
-        # link projection) never takes that walk: when no generation can be
-        # borrowed it starts in the existing "index incomplete" state instead,
-        # so a bare title or memory reference resolves exactly as it already
-        # does whenever a cold walk hits its cap mid-scan -- withheld, never a
-        # new public state -- and `vault.walk_vault_md` is never called.
+        # `allow_cold_index=False` (bounded-latency callers, e.g. a query)
+        # never takes that walk: when no generation can be borrowed it starts
+        # in the existing "index incomplete" state instead, so a bare title or
+        # memory reference resolves exactly as it already does whenever a cold
+        # walk hits its cap mid-scan -- withheld -- and `vault.walk_vault_md`
+        # is never called. A query names the field it withheld that way in
+        # `unresolved_links`, and an absent corpus starts a background warm.
         # Path-shaped links never needed the index and keep resolving and being
         # authorized as today.
         empty = vault.WikilinkResolver.from_entries(root, ())
@@ -1205,7 +1206,10 @@ class _LinkProjector:
         from . import semantic_contract
 
         with call_spans.span("records.link_index", {}) as measured:
-            borrowed = semantic_contract.borrow_link_snapshot(self.root, declined=measured)
+            # A projector that may not walk asks for the background warm that lets a later one borrow.
+            borrowed = semantic_contract.borrow_link_snapshot(
+                self.root, declined=measured, schedule_warm=not self.walk_allowed
+            )
             if borrowed is not None:
                 self.borrowed = borrowed
                 self.owners_of = memory_refs.reference_owner_lookup(

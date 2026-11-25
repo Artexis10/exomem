@@ -2541,7 +2541,7 @@ def publish_capture_inventory(root: Path, witness, *, census: bool = False, excl
 
 
 def borrow_link_snapshot(
-    vault_root: Path, *, declined: dict[str, int] | None = None
+    vault_root: Path, *, declined: dict[str, int] | None = None, schedule_warm: bool = False
 ) -> LinkSnapshot | None:
     """Lend the last published corpus generation to a link projector, or None.
 
@@ -2553,19 +2553,26 @@ def borrow_link_snapshot(
     visibility live.
 
     `declined` receives the first reason this borrow declined, as one closed
-    `declined_<reason>` counter.
+    `declined_<reason>` counter. With `schedule_warm`, a borrow that finds no
+    corpus at all starts the one background warm that publishes it
+    (`find.schedule_link_index_warm`); a corpus that is only behind is left to
+    the watcher that advances it.
     """
     if not _CORPUS_CONTEXT_UPDATE_LOCK.acquire(blocking=False):
         if declined is not None:
             declined["declined_lock_busy"] = 1
         return None
+    reasons: dict[str, int] = {} if declined is None else declined
     try:
         snapshot = current_reference_identity_snapshot(
-            Path(vault_root), declined=declined, tolerate_external_pending=True
+            Path(vault_root), declined=reasons, tolerate_external_pending=True
         )
     finally:
         _CORPUS_CONTEXT_UPDATE_LOCK.release()
     if snapshot is None:
+        # Without the cache a warm keeps nothing, so it would rebuild the whole corpus on every query.
+        if schedule_warm and "declined_corpus_absent" in reasons and corpus_context_cache_enabled():
+            find_module.schedule_link_index_warm(Path(vault_root))
         return None
     context = snapshot._cache_context_identity
     if not isinstance(context, SemanticCorpusContext):

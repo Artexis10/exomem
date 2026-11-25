@@ -52,10 +52,12 @@ from exomem import __main__ as cli
 from exomem import (
     capabilities,
     commands,
+    find,
     memory_refs,
     record_governance,
     records,
     reserved_paths,
+    semantic_contract,
     state_migration,
     vault,
     writer_lease,
@@ -3201,3 +3203,31 @@ def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_lin
     assert [row["title"] for row in default["rows"]] == ["Lead"]
     assert "related" not in default["rows"][0]
     assert default["unresolved_links"] == ["related"]
+
+
+def test_a_records_query_that_finds_no_link_index_warms_it_for_the_next_one(service, monkeypatch):
+    """A query that finds no published link index answers without it and starts the background warm that
+    publishes one, so the next query resolves the link; or no warm, and the link stays unresolved."""
+    linked = "88888888-8888-4888-8888-888888888888"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Warmed").replace(
+        "    count: {type: integer}\n", "    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Warmed"),
+                manifest_text=text, why="rows with links")
+    page = call(service.root, "remember", title="Lead source", slug="lead-source", suggestions=False,
+                content="# Lead source\n\n- [operating constraint] Leads arrive weekly.\n")["path"]
+    reference = call(service.root, "read_memory", path=page)["ref"]
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # As on a service whose corpus was never built or was dropped: the cache is on, empty, and may warm.
+    monkeypatch.delenv("EXOMEM_DISABLE_CORPUS_CACHE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RESOLVER_WARM", raising=False)
+    semantic_contract.reset_corpus_context_cache()
+
+    cold = call(service.root, "record_memory", action="query", collection=linked)
+    assert find.await_recall_resolver_warm()
+    warm = call(service.root, "record_memory", action="query", collection=linked)
+
+    assert "related" not in cold["rows"][0]
+    assert cold["unresolved_links"] == ["related"]
+    assert warm["rows"][0]["related"] == [reference]
+    assert "unresolved_links" not in warm

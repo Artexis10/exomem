@@ -8679,6 +8679,8 @@ _QUERY_RESOLVER_REBUILDS: set[Path] = set()
 #: Vaults with an inbound-index background build running; same lock as above.
 _INBOUND_INDEX_REBUILDS: set[Path] = set()
 _TOMBSTONE_PROOF_REBUILDS: set[Path] = set()
+#: Vaults with a background corpus warm running for a Records query's link index; same lock as above.
+_LINK_INDEX_WARMS: set[Path] = set()
 
 
 def _follower_wait_seconds(*, allow_fallback: bool) -> float:
@@ -8793,6 +8795,19 @@ def schedule_tombstone_proof_warm(vault_root: Path, *, stop: threading.Event) ->
     )
 
 
+def schedule_link_index_warm(vault_root: Path) -> None:
+    """Warm the corpus whose published generation a Records query borrows for its links.
+
+    The owner that restores the link index a query found absent (`semantic_contract.borrow_link_snapshot`).
+    The query answers without the index and never waits for this build.
+    """
+    from . import semantic_contract
+
+    _schedule_resolver_warm(
+        vault_root, _LINK_INDEX_WARMS, semantic_contract.warm_corpus_context, "exomem-link-index-warm",
+    )
+
+
 def _schedule_resolver_warm(
     root: Path,
     inflight: set[Path],
@@ -8851,6 +8866,7 @@ def await_recall_resolver_warm(timeout: float = 30.0) -> bool:
                 _RECALL_RESOLVER_REBUILDS
                 or _QUERY_RESOLVER_REBUILDS
                 or _INBOUND_INDEX_REBUILDS
+                or _LINK_INDEX_WARMS
             ):
                 return True
         if time.monotonic() >= deadline:
