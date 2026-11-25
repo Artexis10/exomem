@@ -55,6 +55,10 @@ SHAPE_LIST = "list"
 # nosemgrep: ep-word-set -- The closed attribute values that the registry schema fixes, not vocabulary.
 SHAPES = frozenset({SHAPE_LIST})
 PACK = "page-fields.yaml"
+#: The attribute names that every field takes, and the two that only a provenance field takes. The pointer-only
+#: names are what the schema's attribute set holds beyond these (`_POINTER_ONLY_ATTRIBUTES`, below `SPEC`).
+_COMMON_ATTRIBUTES = frozenset({"field", "role"})
+_PROVENANCE_ONLY_ATTRIBUTES = frozenset({"source", "envelope"})
 _MAX_FIELD_CHARS = 128
 #: The keys that the write protocol itself maintains, so no registry source may give one a role:
 #: identity, lineage, note type and the write stamp.
@@ -102,8 +106,7 @@ def _check(entry: registry.Entry, entries: Mapping[str, registry.Entry]) -> None
 def _check_role_attributes(attributes: Mapping[str, Any]) -> None:
     """Each role takes its own attributes: a pointer has no `source`, and a provenance field has no pointer attribute."""
     if attributes["role"] == PROVENANCE_ROLE:
-        # nosemgrep: ep-word-search -- these are the pack schema's own pointer attribute names, a closed set this module defines
-        pointer_only = [name for name in ("writer", "carries", "shape") if name in attributes]
+        pointer_only = sorted(_POINTER_ONLY_ATTRIBUTES & attributes.keys())
         if pointer_only:
             raise registry.RegistryError(
                 f"INVALID_PAGE_FIELD: a provenance field takes no {pointer_only[0]}")
@@ -116,7 +119,7 @@ def _check_role_attributes(attributes: Mapping[str, Any]) -> None:
                 raise registry.RegistryError("INVALID_PAGE_FIELD: an envelope field names its envelope key")
         elif key is not None:
             raise registry.RegistryError("INVALID_PAGE_FIELD: only an envelope field names an envelope key")
-    elif "source" in attributes or "envelope" in attributes:
+    elif _PROVENANCE_ONLY_ATTRIBUTES & attributes.keys():
         raise registry.RegistryError("INVALID_PAGE_FIELD: only a provenance field takes source or envelope")
 
 
@@ -178,6 +181,8 @@ SPEC = registry.RegistrySpec(
     # Agents meet pointer fields only through a pointer write's refusal, not the bootstrap.
     summarize_keys=False,
 )
+#: The attribute names that only a pointer takes: the schema's attribute set without the common and provenance ones.
+_POINTER_ONLY_ATTRIBUTES = SPEC.attributes - _COMMON_ATTRIBUTES - _PROVENANCE_ONLY_ATTRIBUTES
 
 
 def fields_with_role(vault_root: Path | None, role: str) -> frozenset[str]:
