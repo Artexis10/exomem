@@ -310,9 +310,10 @@ release. To release main's tip regardless, set `source_commit` to main's head.
 The merge queue workflow keeps that evidence recent: after each landing on main
 it dispatches Full on main when no Full run on main or on a cut is running or
 has tested main's tip, no release-evidence run (such as an open cut's controller)
-is in progress, and main's newest Full is older than `FULL_EVIDENCE_HOURS` (a
-repository variable, default 4; `0` turns it off). So the first landing after a
-cut finishes usually starts the next Full.
+is in progress, and no Full run on main started within `FULL_EVIDENCE_HOURS` (a
+repository variable, default 4; `0` turns it off) since the newest release
+reconciliation. So the first landing after a cut finishes usually starts the
+next Full.
 
 2. Start or resume the cut; expect one controller run on main for that source.
 

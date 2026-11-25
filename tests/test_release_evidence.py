@@ -498,30 +498,33 @@ def test_release_prs_skip_the_queue_and_reconcile_prs_read_its_any_source_status
 
 
 @pytest.mark.parametrize(
-    "branch,age_hours,status,tested,cut_open,due",
+    "branch,age_hours,status,tested,cut_open,reconciled_hours,due",
     [
         # Main moved and its newest Full is older than the window: a cut would find nothing.
-        ("main", 5, "completed", "old", False, True),
-        ("main", 1, "completed", "old", False, False),
+        ("main", 5, "completed", "old", False, 20, True),
+        ("main", 1, "completed", "old", False, 20, False),
         # A running Full will supply the evidence; a second one only holds runners.
-        ("main", 5, "in_progress", "old", False, False),
+        ("main", 5, "in_progress", "old", False, 20, False),
         # Nothing landed since the last Full: rerunning it proves nothing new.
-        ("main", 5, "completed", "tip", False, False),
+        ("main", 5, "completed", "tip", False, 20, False),
         # A cut's own Full run on main's tip is evidence too; a copy would compete with it.
-        ("release-cuts/tip", 5, "in_progress", "tip", False, False),
-        ("release-cuts/tip", 1, "completed", "tip", False, False),
+        ("release-cuts/tip", 5, "in_progress", "tip", False, 20, False),
+        ("release-cuts/tip", 1, "completed", "tip", False, 20, False),
         # A cut's Full on an older commit predates its reconciliation; it holds off nothing.
-        ("release-cuts/old", 1, "completed", "old", False, True),
+        ("release-cuts/old", 1, "completed", "old", False, 20, True),
         # While a cut is open, a Full on main lacks its reconciliation and cannot serve.
-        ("main", 5, "completed", "old", True, False),
+        ("main", 5, "completed", "old", True, 20, False),
+        # A recent main Full from before the newest reconciliation cannot serve the next cut.
+        ("main", 1, "completed", "old", False, 0.5, True),
         # No Full run on main has ever finished.
-        (None, 0, "completed", "old", False, True),
+        (None, 0, "completed", "old", False, 20, True),
     ],
 )
 def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
-    monkeypatch, branch, age_hours, status, tested, cut_open, due
+    monkeypatch, branch, age_hours, status, tested, cut_open, reconciled_hours, due
 ):
-    created = evidence.datetime.now(evidence.UTC) - evidence.timedelta(hours=age_hours)
+    now = evidence.datetime.now(evidence.UTC)
+    created = now - evidence.timedelta(hours=age_hours)
     run = {
         "event": "workflow_dispatch",
         "head_branch": branch,
@@ -535,11 +538,9 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         "head_branch": "main",
         "head_sha": "older",
         "status": "completed",
-        "created_at": (created - evidence.timedelta(hours=10)).isoformat().replace("+00:00", "Z"),
+        "created_at": (now - evidence.timedelta(hours=30)).isoformat().replace("+00:00", "Z"),
     }
-    # A resume run queued behind the controller is always there during a cut; only a
-    # controller still in progress holds the dispatch.
-    automation = [{"status": "queued"}] + ([{"status": "in_progress"}] if cut_open else [])
+    reconciled = (now - evidence.timedelta(hours=reconciled_hours)).isoformat()
 
     def api(path):
         if path == "actions/workflows/ci.yml":
@@ -547,7 +548,9 @@ def test_full_on_main_is_due_only_when_its_evidence_is_old_and_main_moved(
         if path == "commits/main":
             return {"sha": "tip"}
         if path.startswith("actions/workflows/release-evidence-automation.yml/runs"):
-            return {"workflow_runs": automation}
+            return {"total_count": int(cut_open)}
+        if path.startswith("commits?sha=main&path=.github/release-cuts"):
+            return [{"commit": {"committer": {"date": reconciled.replace("+00:00", "Z")}}}]
         listed = branch and "event=workflow_dispatch" in path
         return {"workflow_runs": [run, older] if listed else []}
 
