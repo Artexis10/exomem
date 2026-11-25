@@ -39,6 +39,7 @@ from . import (
     access,
     adoption_consume,
     adoption_plan,
+    call_spans,
     capabilities,
     context_refs,
     due_state,
@@ -74,10 +75,10 @@ STATUS_PAGE_BYTES = 32 * 1024
 MAX_CANDIDATES_DEFAULT = 5000
 # Where Evermatter Cloud stages an uploaded collection (see `cloud_import_job`).
 IMPORT_STAGE_DIR = import_stage.STAGE_DIR
-# One `apply` batch holds at most this many items or bytes of originals (the
-# batch writer re-validates the whole batch per write, so cost grows with size).
-# 25 items is about 2-4 s on the measured vaults: a small share of the 50 s call.
-APPLY_CHUNK_ITEMS = 25
+# One `apply` batch holds at most this many items or bytes of originals. A batch costs about 3.5 s of fixed
+# work plus about 20-60 ms per item (2026-11-25 rehearsal, and a local 25/100/250-page batch stayed linear), so
+# the pacer, not this cap, sizes a chunk to its budget share; the cap only bounds one batch's memory and reply.
+APPLY_CHUNK_ITEMS = 250
 APPLY_CHUNK_BYTES = 64 * 1024 * 1024
 # A chunk is also cut so its predicted cost stays at most this share of the call's budget.
 APPLY_CHUNK_BUDGET_SHARE = 0.1
@@ -139,6 +140,22 @@ _NOTE_PRICE_FRESH_SECONDS = 300.0
 # A carried price sizes a call's first batch at this share of the room, so notes that cost
 # up to twice the carried price still fit; the call re-prices from that batch.
 _CARRIED_PRICE_ROOM_SHARE = 0.5
+# The run-object key for the chunk timings and rates of the run's last call that filed, with the wall-clock
+# time they were recorded. The next call starts from them while they are as fresh as a carried note price.
+_APPLY_PACE = "apply_pace"
+# The newest timed chunks a call carries to the next: enough for the fit, few enough to follow a slowing vault.
+_CARRIED_CHUNKS = 8
+# The run-object keys for the filed files that no batch has written to the Sources index and the log yet, as
+# [original, Source, sha256] rows in filing order, and for a batch that set out to write them and may not have.
+_INDEX_OWED = "index_owed"
+_RECORD_INTENT = "record_intent"
+# The run-object key that names one full save of `run.json`; a journal holds changes since the save it names.
+_GENERATION = "generation"
+_JOURNAL_FILE = "journal.json"
+# Keys that only `start`, `select` and `plan` write, each in a full save: `apply`, `file`, `finish` and `cancel`
+# never change them, so a journal leaves them out. A step that replaces one is caught and saves in full.
+_FIXED_KEYS = ("inventory", "plan", "selection", "scan_summary", "pack_suggestions", "plan_draft")  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_ABSENT = object()
 # The values of a rule's `adopt_as` are fixed by the rule schema, not by the vault.
 _ADOPT_AS = ("source", "note")  # nosemgrep: ep-word-set -- the closed values of the rule schema's `adopt_as`.
 # Per-item failures that mean "the original is not what the plan read".
@@ -238,12 +255,33 @@ def new_run_id(source_root: str, created_iso: str, inventory_fp: str, *, today: 
 # --------------------------------------------------------------------------- #
 # store
 # --------------------------------------------------------------------------- #
+@dataclass
+class _Saved:
+    """What a run's `run.json` holds, for a run a step opened to change: what its journal is measured from."""
+
+    #: The full save that `run.json` holds; None when no journal can be measured from it.
+    generation: str | None
+    #: Each fixed key's value as loaded: a step that replaces one cannot be journaled.
+    fixed: dict[str, object]
+    #: A copy of every other key as `run.json` holds it.
+    rest: dict
+
+
 class AdoptionRunStore:
-    """Load/save the canonical run objects under ``_Adoption/runs/<run_id>/``."""
+    """Load/save the canonical run objects under ``_Adoption/runs/<run_id>/``.
+
+    A page's run object holds its inventory, plan and outcomes, several megabytes for a large page. `save` writes it
+    whole and names that save with a fresh `generation`. A step that changes a run several times in one call opens it
+    with `load_for_update` and writes each change with `save_changes` (or `save_intent`, or `planned_changes` inside a
+    larger batch): `journal.json` beside it then holds every change since the last full save, and `load` folds that
+    journal in while its generation matches. Each journal write replaces the last one whole, and a full save names a
+    new generation, so a crash leaves either the older state or the newer one.
+    """
 
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)
         self.base = kb_root(self.vault_root) / "_Adoption" / "runs"
+        self._saved: dict[str, _Saved] = {}
 
     def run_dir(self, run_id: str) -> Path:
         return self.base / run_id
@@ -251,33 +289,114 @@ class AdoptionRunStore:
     def _run_file(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "run.json"
 
+    def _journal_file(self, run_id: str) -> Path:
+        return self.run_dir(run_id) / _JOURNAL_FILE
+
     def load(self, run_id: str | None) -> dict:
+        return self._load(run_id, for_update=False)
+
+    def load_for_update(self, run_id: str | None) -> dict:
+        """Load a run that this step will change and save, so its changes can go to the journal."""
+        return self._load(run_id, for_update=True)
+
+    def _load(self, run_id: str | None, *, for_update: bool) -> dict:
         if not run_id:
             raise AdoptionRunError("RUN_NOT_FOUND", "an adoption run_id is required")
-        f = self._run_file(run_id)
-        if not f.exists():
+        folder = self.run_dir(run_id)
+        if not (folder / "run.json").exists():
             raise AdoptionRunError("RUN_NOT_FOUND", f"no adoption run {run_id!r}")
         try:
-            return json.loads(f.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            saved, journal = _read_run_files(folder)
+            if for_update and isinstance(saved, dict):
+                self._remember(saved)
+            return _folded(saved, journal)
+        except (OSError, UnicodeError, ValueError) as exc:
             raise AdoptionRunError("RUN_NOT_FOUND", f"cannot read run {run_id!r}: {exc}") from exc
 
+    def _remember(self, run: dict) -> None:
+        rest = {key: value for key, value in run.items() if key not in _FIXED_KEYS}
+        self._saved[run["run_id"]] = _Saved(
+            generation=run.get(_GENERATION),
+            fixed={key: run.get(key, _ABSENT) for key in _FIXED_KEYS},
+            rest=json.loads(json.dumps(rest, ensure_ascii=False, default=str)),
+        )
+
     def planned_write(self, run: dict) -> PlannedWrite:
-        """The run object as a write, so a caller can commit it inside a larger batch."""
+        """The whole run object as a write, so a caller can commit it inside a larger batch."""
         run["updated"] = _now_iso()
-        # Compact: an import commits this object every 25 items, and indenting a multi-megabyte run costs real time.
+        run[_GENERATION] = secrets.token_hex(8)
+        # Compact: indenting a multi-megabyte run costs real time.
         content = json.dumps(run, ensure_ascii=False, default=str) + "\n"
         return PlannedWrite(path=self._run_file(run["run_id"]), content=content)
 
+    def planned_changes(self, run: dict) -> PlannedWrite:
+        """What changed in a run since its last full save, as a write; the whole run when no journal can say it."""
+        changes = self._changes(run)
+        if changes is None:
+            saved = self._saved.get(run["run_id"])
+            if saved is not None:
+                # The batch that carries this write may still fail, so no journal is measured from it.
+                saved.generation = None
+            return self.planned_write(run)
+        content = json.dumps(changes, ensure_ascii=False, default=str) + "\n"
+        return PlannedWrite(path=self._journal_file(run["run_id"]), content=content)
+
+    def _changes(self, run: dict) -> dict | None:
+        """The journal of `run`, or None when it was not opened for update or a fixed key was replaced."""
+        saved = self._saved.get(run["run_id"])
+        if saved is None or saved.generation is None or saved.generation != run.get(_GENERATION):
+            return None
+        if any(run.get(key, _ABSENT) is not value for key, value in saved.fixed.items()):
+            return None
+        run["updated"] = _now_iso()
+        replaced: dict = {}
+        entries: dict[str, dict] = {}
+        dropped: dict[str, list[str]] = {}
+        for key, value in run.items():
+            if key in _FIXED_KEYS:
+                continue
+            before = saved.rest.get(key, _ABSENT)
+            if isinstance(value, dict) and isinstance(before, dict):
+                # Keyed maps (outcomes, cursors, invocations) change a few entries per call, so only those are written.
+                changed = {name: item for name, item in value.items() if before.get(name, _ABSENT) != item}
+                gone = [name for name in before if name not in value]
+                if changed:
+                    entries[key] = changed
+                if gone:
+                    dropped[key] = gone
+            elif before is _ABSENT or before != value:
+                replaced[key] = value
+        return {
+            "run_id": run["run_id"], _GENERATION: saved.generation, "replaced": replaced, "entries": entries,
+            "dropped": dropped, "removed": [key for key in saved.rest if key not in run],
+        }
+
     def save(self, run: dict) -> None:
-        batch_atomic_write([self.planned_write(run)], vault_root=self.vault_root)
+        """Write the whole run object, with an empty journal for it when an earlier one exists."""
+        writes = [self.planned_write(run)]
+        journal = self._journal_file(run["run_id"])
+        if journal.exists():
+            # A stale journal is already ignored; replacing it keeps an older `run.json` from matching it again.
+            empty = {"run_id": run["run_id"], _GENERATION: run[_GENERATION], "replaced": {}, "entries": {},
+                     "dropped": {}, "removed": []}
+            writes.append(PlannedWrite(path=journal, content=json.dumps(empty) + "\n"))
+        batch_atomic_write(writes, vault_root=self.vault_root)
+        if run["run_id"] in self._saved:
+            self._remember(run)
+
+    def save_changes(self, run: dict) -> None:
+        """Write what changed since the run's last full save (see `planned_changes`)."""
+        self._write_changes(run)
 
     def save_intent(self, run: dict) -> None:
         """Freeze recovery scope without claiming that an import already committed."""
-        batch_atomic_write(
-            [self.planned_write(run)], vault_root=self.vault_root,
-            commit_point=False, post_commit_fanout=False,
-        )
+        self._write_changes(run, commit_point=False, post_commit_fanout=False)
+
+    def _write_changes(self, run: dict, **batch: bool) -> None:
+        write = self.planned_changes(run)
+        batch_atomic_write([write], vault_root=self.vault_root, **batch)
+        if write.path.name != _JOURNAL_FILE and run["run_id"] in self._saved:
+            self._remember(run)
 
     def load_proposals(self, run_id: str) -> dict:
         f = self.run_dir(run_id) / "proposals.json"
@@ -316,6 +435,23 @@ class AdoptionRunStore:
             run for run in self._readable_runs() if isinstance(run, dict) and run.get("source_root") == source_root
         )
 
+    def tallies_at(self, source_root: str, *, current: dict) -> list[_Tally]:
+        """What a `file` reply counts from every readable run that scanned `source_root`, in run id order.
+
+        `current` is a run as just loaded, counted as it stands. Every other run is read only when its files
+        changed since this process last counted it: a reply would otherwise parse every page of the import.
+        """
+        try:
+            folders = sorted(folder for folder in self.base.iterdir() if folder.name != current["run_id"])
+        except OSError:
+            folders = []
+        tallies = {current["run_id"]: _Tally.of(current)}
+        for folder in folders:
+            tally = _tally_of(folder)
+            if tally is not None:
+                tallies[folder.name] = tally
+        return [tallies[name] for name in sorted(tallies) if tallies[name].source_root == source_root]
+
     def runs_by_stage(self) -> dict[str, tuple[dict, ...]]:
         """Every readable run, grouped by the import whose stage it started in; the most recently updated first."""
         grouped: dict[str, list[dict]] = {}
@@ -351,8 +487,8 @@ class AdoptionRunStore:
             try:
                 if not stat.S_ISDIR(folder.stat().st_mode):
                     continue
-                run = json.loads((folder / "run.json").read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError):
+                run = _folded(*_read_run_files(folder))
+            except (OSError, UnicodeError, ValueError):
                 complete = False
                 continue
             if not isinstance(run, dict):
@@ -391,6 +527,116 @@ class AdoptionRunStore:
         if scope is not None:
             result.update(adopted_files=len(adopted) if complete else None, complete=complete)
         return result
+
+
+# What a `file` reply counts of one outcome, as bits (see `_Tally`).
+_FILED, _FAILED, _SKIPPED, _STORED = 1, 2, 4, 8
+# The runs a process keeps counted, by folder: enough for the pages of a few large imports.
+_TALLY_RUNS = 64
+_TALLIES: dict[str, tuple[tuple, _Tally]] = {}
+_TALLIES_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class _Tally:
+    """What a `file` reply counts of one run: its scan, its creation, its phase and each outcome as `_FILED`... bits."""
+
+    source_root: object
+    created: str
+    phase: object
+    outcomes: dict[str, int]
+
+    @classmethod
+    def of(cls, run: dict) -> _Tally:
+        outcomes: dict[str, int] = {}
+        for path, outcome in (run.get("outcomes") or {}).items():
+            status = outcome.get("status")
+            outcomes[path] = (
+                (_FILED if status in _APPLIED_STATUSES else 0) | (_FAILED if status == "failed" else 0)
+                # As `_skipped_duplicates` reads a skipped duplicate.
+                | (_SKIPPED if status == "already-applied" and "existing_ref" in outcome else 0)
+                | (_STORED if _source_status(outcome) == "applied" else 0)
+            )
+        return cls(run.get("source_root"), str(run.get("created") or ""), run.get("phase"), outcomes)
+
+
+def _tally_of(folder: Path) -> _Tally | None:
+    """The tally of the run in `folder`, read again only when its run object or journal changed; None if unreadable."""
+    try:
+        if not stat.S_ISDIR(folder.stat().st_mode):
+            return None
+        files = [folder / "run.json", folder / _JOURNAL_FILE]
+        key = tuple(
+            (info.st_ino, info.st_mtime_ns, info.st_size) if info is not None else None
+            for info in (_stat_or_none(path) for path in files)
+        )
+    except OSError:
+        return None
+    with _TALLIES_LOCK:
+        cached = _TALLIES.get(str(folder))
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        run = _folded(*_read_run_files(folder))
+        tally = _Tally.of(run) if isinstance(run, dict) else None
+    except (OSError, UnicodeError, ValueError, AttributeError, KeyError, TypeError):
+        return None
+    if tally is None:
+        return None
+    with _TALLIES_LOCK:
+        _TALLIES.pop(str(folder), None)
+        while len(_TALLIES) >= _TALLY_RUNS:
+            _TALLIES.pop(next(iter(_TALLIES)))
+        _TALLIES[str(folder)] = (key, tally)
+    return tally
+
+
+def _stat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.stat()
+    except FileNotFoundError:
+        return None
+
+
+def _read_run_files(folder: Path) -> tuple[object, object]:
+    """A run folder's `run.json` and its journal (None when it has none), as JSON."""
+    saved = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+    try:
+        journal = json.loads((folder / _JOURNAL_FILE).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        journal = None
+    return saved, journal
+
+
+def _folded(saved: object, journal: object) -> object:
+    """The run that `run.json` and its journal hold together (see `AdoptionRunStore`).
+
+    A journal of another full save is ignored: that save already holds its changes. A journal that cannot be read
+    raises, because the run it belongs to may be ahead of `run.json`.
+    """
+    if journal is None or not isinstance(saved, dict):
+        return saved
+    if not (
+        isinstance(journal, dict) and isinstance(journal.get("replaced"), dict)
+        and isinstance(journal.get("entries"), dict) and isinstance(journal.get("dropped"), dict)
+        and isinstance(journal.get("removed"), list)
+    ):
+        raise ValueError("the run's journal is not a journal")
+    if journal.get(_GENERATION) is None or journal.get(_GENERATION) != saved.get(_GENERATION):
+        return saved
+    for key in journal["removed"]:
+        saved.pop(key, None)
+    for key, changed in journal["entries"].items():
+        current = saved.get(key)
+        if not isinstance(current, dict) or not isinstance(changed, dict):
+            raise ValueError(f"the run's journal changes {key!r}, which is not a map")
+        current.update(changed)
+    for key, gone in journal["dropped"].items():
+        current = saved.get(key)
+        for name in gone if isinstance(current, dict) else ():
+            current.pop(name, None)
+    saved.update(journal["replaced"])
+    return saved
 
 
 def _status_path(raw: object) -> PurePosixPath | None:
@@ -887,7 +1133,7 @@ def _materialize_selection(
 # presentation helpers
 # --------------------------------------------------------------------------- #
 # Run-object keys that drive the lifecycle but are not part of what a caller reads.
-_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal"})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
+_INTERNAL_KEYS = frozenset({"plan_draft", "cursors", "inflight", "scope", "apply_invocations", _NOTE_PRICE, "sources_seal", _APPLY_PACE, _INDEX_OWED, _RECORD_INTENT, _GENERATION})  # nosemgrep: ep-word-set -- run-object keys that this module writes, not a vocabulary
 
 
 def _present(root: Path, run: dict, **extra) -> dict:
@@ -2059,10 +2305,11 @@ class _ApplyPacer:
     A call never starts a chunk whose predicted cost does not fit in the time left
     before the delivery reserve, after the fan-out the call already owes past the
     loop. A chunk costs its items, its bytes and its media requests. Costs are those
-    this call has measured, not a past call's, and the byte and media rates are the
-    dearest seen so far: chunk cost swings several-fold with media artifacts and a
-    contended index, so the last chunk is a poor guide to the next. A slow stretch shrinks the rest
-    of this call's chunks and nothing after it. Notes are the exception: `_create_notes`
+    this call has measured, and the byte and media rates are the dearest seen so far:
+    chunk cost swings several-fold with media artifacts and a contended index, so the
+    last chunk is a poor guide to the next. A call starts from the newest chunks and
+    rates that the run's last call recorded while they are fresh (`carried`), so it does
+    not spend its first chunks timing small probes again. `_create_notes` likewise
     sizes a call's first batch of notes on the price that the run's last call recorded.
 
     A commit also costs a fixed part that does not depend on its size, and that part grows
@@ -2073,7 +2320,7 @@ class _ApplyPacer:
     the call can file.
     """
 
-    def __init__(self, root: Path, budget: request_budget.RequestBudget) -> None:
+    def __init__(self, root: Path, budget: request_budget.RequestBudget, *, carried: object = None) -> None:
         from .writer_lease import active_derived_batch_custody
 
         self._root = root
@@ -2087,6 +2334,37 @@ class _ApplyPacer:
         self._started_items = 0
         # A fast-acknowledgement session runs the sidecar fan-out behind the reply.
         self._owes_fanout = not active_derived_batch_custody(root)
+        self._carry(carried)
+
+    def _carry(self, carried: object) -> None:
+        """Start from what the run's last call measured, when it is fresh and well formed."""
+        if not isinstance(carried, dict):
+            return
+        try:
+            age = dt.datetime.now(dt.UTC).timestamp() - float(carried["at"])
+            chunks = [(int(size), float(seconds)) for size, seconds in carried.get("item_chunks") or ()]
+            mib = carried.get("mib_seconds")
+            extraction = carried.get("extraction_seconds")
+            mib = None if mib is None else float(mib)
+            extraction = None if extraction is None else float(extraction)
+        except (KeyError, TypeError, ValueError):
+            return
+        if not 0 <= age <= _NOTE_PRICE_FRESH_SECONDS or any(size < 1 or seconds < 0 for size, seconds in chunks):
+            return
+        self._item_chunks = chunks[-_CARRIED_CHUNKS:]
+        self._mib_seconds, self._extraction_seconds = mib, extraction
+        if self._item_chunks:
+            self._price_items()
+
+    def carried(self) -> dict | None:
+        """What the next call starts from: the newest timed chunks and the dearest rates, with when they were taken."""
+        if not self._item_chunks and self._mib_seconds is None and self._extraction_seconds is None:
+            return None
+        return {
+            "at": dt.datetime.now(dt.UTC).timestamp(),
+            "item_chunks": [list(chunk) for chunk in self._item_chunks[-_CARRIED_CHUNKS:]],
+            "mib_seconds": self._mib_seconds, "extraction_seconds": self._extraction_seconds,
+        }
 
     @staticmethod
     def _tracked(rate: float | None, seen: float) -> float:
@@ -2298,6 +2576,8 @@ class _CallReads:
     notes: adoption_plan.NoteIndex | None = None
     stage: import_stage.Stage | None = None
     stage_read: bool = False
+    #: Whether a batch of this call has filed anything; only the first records what earlier calls owe (`_commit_chunk`).
+    filed: bool = False
 
     def open_sources(self, root: Path, run: dict) -> None:
         """List the Sources once, and read them in full only when the run's seal no longer holds."""
@@ -2342,11 +2622,47 @@ def _apply_invocation(run: dict) -> dict | None:
     return (run.get("apply_invocations") or {}).get(identity[0]) if identity else None
 
 
+def _record_row(item: adopt_module.ImportItem) -> dict[str, str]:
+    """How the indexes and the log record one filed file."""
+    return {"original_path": item.original_path, "source_path": item.target_rel, "original_sha256": item.sha256}
+
+
+def _settle_record_intent(root: Path, run: dict) -> None:
+    """Resolve a batch that set out to record owed rows and may have stopped: drop the rows if its entry landed."""
+    intent = run.pop(_RECORD_INTENT, None)
+    if not isinstance(intent, dict):
+        return
+    try:
+        landed = adopt_module.import_chunk_logged(root, intent["token"])
+    except adopt_module.AdoptError:
+        # An unreadable log cannot say; recording the rows again costs at most one repeated summary entry.
+        landed = False
+    if landed:
+        run[_INDEX_OWED] = (run.get(_INDEX_OWED) or [])[intent["rows"]:]
+
+
+def _record_owed(root: Path, store: AdoptionRunStore, run: dict, *, today: dt.date) -> None:
+    """Record the rows a page still owes, which no filing batch could carry, in a batch of their own."""
+    _settle_record_intent(root, run)
+    owed = run.get(_INDEX_OWED) or []
+    if owed:
+        token = hashlib.sha256(json.dumps([run["run_id"], owed], sort_keys=True).encode("utf-8")).hexdigest()
+        run[_RECORD_INTENT] = {"token": token, "rows": len(owed)}
+        store.save_intent(run)
+        with call_spans.span("adoption.bookkeeping", {"rows": len(owed)}):
+            adopt_module.record_imports(root, owed, today=today, token=token)
+    run.pop(_RECORD_INTENT, None)
+    run.pop(_INDEX_OWED, None)
+
+
 def _freeze_import_chunk(
     store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]],
-    *, run_date: dt.date,
+    *, run_date: dt.date, record: int | None,
 ) -> tuple[dict | None, bool]:
-    """Retain exact post-images before a rename or any destination is published."""
+    """Retain exact post-images before a rename or any destination is published.
+
+    `record` is how many owed rows the batch records with its own (see `_commit_chunk`), or None.
+    """
     invocation = _apply_invocation(run)
     if invocation is None:
         return None, False
@@ -2367,8 +2683,12 @@ def _freeze_import_chunk(
             [run["run_id"], invocation["identity_digest"], invocation["command_digest"], sequence, items], sort_keys=True,
         ).encode("utf-8")).hexdigest(),
     }
+    publication["record"] = record
+    if record is not None:
+        run[_RECORD_INTENT] = {"token": publication["operation_token"], "rows": record}
     invocation["publication"] = publication
-    store.save_intent(run)
+    with call_spans.span("adoption.save_intent"):
+        store.save_intent(run)
     return publication, False
 
 
@@ -2378,28 +2698,52 @@ def _commit_chunk(
     run_date: dt.date, label: str | None, reads: _CallReads,
     placed: Mapping[str, import_rename.Placed],
     publication: dict | None = None, reconciling: bool = False,
+    record: int | None = None, token: str | None = None,
 ) -> list[dict]:
-    """Commit one chunk's pages, artifacts, indexes, log and the run object in one batch.
+    """Commit one chunk's pages, artifacts and the run's changes in one batch.
 
     Returns the items now on disk. A batch that raises may still have committed, so
     each item is resolved by the same identity check the next call would use; the
     rest fail as retryable, and the call's closing save records them. `placed` holds the items
     whose binary is already at its Knowledge Base path. When the batch fails, a binary that this
     call renamed goes back to its stage; one that an earlier call renamed stays where it is.
+
+    The Sources index, the top index and the log are rewritten whole for any entry, so a batch
+    records its files there only when `record` says so: then the first `record` rows the run
+    owes and this batch's files, in one log entry named `token` (the frozen chunk's own token
+    when it has one). Otherwise the batch adds its files to the rows the run owes.
     """
     outcomes = run["outcomes"]
     for planned, _item in survivors:
         outcomes[planned["original_path"]] = _applied(planned)
         _hold_for_note(outcomes[planned["original_path"]], planned)
+    owed = list(run.get(_INDEX_OWED) or [])
+    own = [_record_row(item) for _planned, item in survivors]
+    recorded: object = record
+    if publication is not None:
+        token = publication["operation_token"]
+        recorded = publication.get("record", _ABSENT)
+    rows: list[dict] | None
+    if recorded is _ABSENT:
+        # A chunk frozen before filings deferred their bookkeeping records its own files, as it would have then.
+        rows = None
+    elif not isinstance(recorded, int):
+        rows = []
+        run[_INDEX_OWED] = owed + own
+    else:
+        rows = owed[:recorded] + own
+        run[_INDEX_OWED] = owed[recorded:]
+        run.pop(_RECORD_INTENT, None)
     try:
         invocation = _apply_invocation(run)
         if invocation is not None:
             invocation.pop("publication", None)
+        with call_spans.span("adoption.run_changes"):
+            changes = store.planned_changes(run)
         committed = adopt_module.commit_import_items(
             root, [item for _planned, item in survivors], today=run_date,
-            extra_writes=[store.planned_write(run)], source_counts=reads.source_counts,
-            reconcile=reconciling,
-            operation_token=publication["operation_token"] if publication else None,
+            extra_writes=[changes], source_counts=reads.source_counts,
+            reconcile=reconciling, operation_token=token, record=rows,
         )
     except Exception as error:  # noqa: BLE001 - a rolled-back batch is a retryable outcome
         if reconciling:
@@ -2424,6 +2768,15 @@ def _commit_chunk(
                 landed.append(planned)
             else:
                 unlanded.append((planned, item))
+        # Only the files this batch wrote are owed; whether its log entry landed is checked by the next record.
+        filed = {planned["original_path"] for planned in landed}
+        owed += [
+            row for row in own
+            if row["original_path"] in filed and outcomes[row["original_path"]]["target_path"] == row["source_path"]
+        ]
+        run[_INDEX_OWED] = owed
+        if rows:
+            run[_RECORD_INTENT] = {"token": token, "rows": len(owed)}
         if getattr(error, "code", None) == "PATH_GUARD_CONTENT":
             # The batch hashes each artifact as it copies it and names none when one differs from the
             # plan. Only now are the artifacts re-hashed, to fail the one that drifted and commit the rest.
@@ -2465,9 +2818,12 @@ def _commit_chunk(
 def _apply_chunk(
     root: Path, store: AdoptionRunStore, run: dict, chunk: list[dict], *,
     run_date: dt.date, ceiling: int, budget: request_budget.RequestBudget, stats: Counter,
-    written: list[str], reads: _CallReads, pacer: _ApplyPacer,
+    written: list[str], reads: _CallReads, pacer: _ApplyPacer, page_final: bool,
 ) -> list[float]:
-    """Apply one chunk; returns the seconds each media extraction request took."""
+    """Apply one chunk; returns the seconds each media extraction request took.
+
+    `page_final` marks the chunk that holds every item still pending in the call's scope.
+    """
     plan = run["plan"]
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
@@ -2481,6 +2837,7 @@ def _apply_chunk(
     placed: dict[str, import_rename.Placed] = {}
     invocation = _apply_invocation(run)
     publication = invocation.get("publication") if invocation else None
+    prework_started = time.monotonic()
     for planned in chunk:
         path = planned["original_path"]
         frozen = (publication.get("items") or {}).get(path) if publication else None
@@ -2611,8 +2968,12 @@ def _apply_chunk(
             item.artifact.placed = True
             placed[path] = moved
         survivors.append((planned, item))
+    call_spans.record_span(
+        "adoption.prework", (time.monotonic() - prework_started) * 1000.0, {"items": len(chunk)}
+    )
     landed = _file_survivors(
-        root, store, run, survivors, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads
+        root, store, run, survivors, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
+        page_final=page_final,
     )
     own_copies: list[tuple[dict, adopt_module.ImportItem]] = []
     for planned, text in deferred:
@@ -2630,16 +2991,18 @@ def _apply_chunk(
             continue
         own_copies.append((own, adopt_module.import_item(root, own, text=text, date_iso=plan["date"], collection=label)))
     landed += _file_survivors(
-        root, store, run, own_copies, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads
+        root, store, run, own_copies, stage=stage, placed=placed, run_date=run_date, ceiling=ceiling, reads=reads,
+        page_final=page_final,
     )
     landed_paths = {planned["original_path"] for planned in landed}
-    for planned in [*settled, *landed]:
-        outcome = outcomes[planned["original_path"]]
-        # A fresh write was hashed by the batch as it was written; a found copy is read back.
-        _settle_staged(
-            root, run, reads, planned, outcome, stats,
-            durable_verified=planned["original_path"] in landed_paths and _source_status(outcome) == "applied",
-        )
+    with call_spans.span("adoption.settle", {"items": len(settled) + len(landed)}):
+        for planned in [*settled, *landed]:
+            outcome = outcomes[planned["original_path"]]
+            # A fresh write was hashed by the batch as it was written; a found copy is read back.
+            _settle_staged(
+                root, run, reads, planned, outcome, stats,
+                durable_verified=planned["original_path"] in landed_paths and _source_status(outcome) == "applied",
+            )
     extractions: list[float] = []
     copied: list[str] = []
     for planned in landed:
@@ -2665,27 +3028,47 @@ def _apply_chunk(
 def _file_survivors(
     root: Path, store: AdoptionRunStore, run: dict, survivors: list[tuple[dict, adopt_module.ImportItem]], *,
     stage: import_stage.Stage | None, placed: dict[str, import_rename.Placed], run_date: dt.date, ceiling: int,
-    reads: _CallReads,
+    reads: _CallReads, page_final: bool,
 ) -> list[dict]:
     """File `survivors` in one batch: freeze their post-images, rename the staged binaries, then commit.
 
     Returns the items now on disk. Their Sources are then findable by the duplicate lookups of every later batch.
+    `page_final` marks a batch of the chunk that holds every item still pending in the call's scope.
     """
     if not survivors:
         return []
     outcomes = run["outcomes"]
     label = (run.get("collection") or {}).get("label")
-    publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date)
+    record, token = None, None
+    held = _apply_invocation(run)
+    first, reads.filed = not reads.filed, True
+    if (page_final or first and run.get(_INDEX_OWED)) and not (held and held.get("publication")):
+        # The call's first batch records what earlier calls filed, and a page's last batch records the rest.
+        _settle_record_intent(root, run)
+        record = len(run.get(_INDEX_OWED) or ())
+        if held is None:
+            token = hashlib.sha256(json.dumps(
+                [run["run_id"], (run.get(_INDEX_OWED) or [])[:record], [_record_row(item) for _p, item in survivors]],
+                sort_keys=True,
+            ).encode("utf-8")).hexdigest()
+            if record:
+                # Only rows that earlier calls saved need the intent; this batch's own rows are lost with it.
+                run[_RECORD_INTENT] = {"token": token, "rows": record}
+                with call_spans.span("adoption.save_intent"):
+                    store.save_intent(run)
+    publication, reconciling = _freeze_import_chunk(store, run, survivors, run_date=run_date, record=record)
     if stage is not None:
-        survivors = _file_by_rename(
-            root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
-        )
+        with call_spans.span("adoption.staging"):
+            survivors = _file_by_rename(
+                root, stage, survivors, run_id=run["run_id"], ceiling=ceiling, outcomes=outcomes, placed=placed
+            )
     if not survivors:
         return []
     landed = _commit_chunk(
         root, store, run, survivors,
         run_date=dt.date.fromisoformat(publication["date"]) if publication else run_date,
         label=label, reads=reads, placed=placed, publication=publication, reconciling=reconciling,
+        record=record, token=token,
     )
     for planned in landed:
         _release_hold(root, planned)
@@ -2838,7 +3221,8 @@ def _create_notes(
     if owed:
         # The outcomes are committed with the chunk's Sources and again here, so a
         # crash costs the identity check at most one chunk of notes.
-        store.save(run)
+        with call_spans.span("adoption.run_changes"):
+            store.save_changes(run)
 
 
 def _carried_note_price_ms(run: dict) -> float:
@@ -3167,7 +3551,7 @@ def apply(
     run_date = _today(today)
     store = AdoptionRunStore(root)
     with _LOCK:
-        run = store.load(run_id)
+        run = store.load_for_update(run_id)
         phase = run["phase"]
         # apply is re-runnable from any post-plan phase: `applying` resumes an interrupted
         # or budget-stopped run, and a finished one answers `already-applied`.
@@ -3299,7 +3683,7 @@ def apply(
             # Read once here, before the first chunk's timer, so the pacer does not price it into items.
             reads.open_sources(root, run)
 
-        pacer = _ApplyPacer(root, budget)
+        pacer = _ApplyPacer(root, budget, carried=run.get(_APPLY_PACE))
         stopped = False
         stop_reason: str | None = None
         chunks = 0
@@ -3336,6 +3720,7 @@ def apply(
             extractions = _apply_chunk(
                 root, store, run, chunk, run_date=run_date, ceiling=ceiling,
                 budget=budget, stats=stats, written=written, reads=reads, pacer=pacer,
+                page_final=len(chunk) == len(pending),
             )
             pacer.record(chunk, time.monotonic() - started, extractions)
             completed_paths = {item["original_path"] for item in chunk}
@@ -3414,7 +3799,12 @@ def apply(
             run["sources_seal"] = adoption_plan.sources_seal(reads.pages)
         if invocation is not None:
             invocation["reply"] = copy.deepcopy(reply)
-        store.save(run)
+        pace = pacer.carried()
+        if pace is not None:
+            run[_APPLY_PACE] = pace
+        # The one full save of the call: each chunk wrote only its changes.
+        with call_spans.span("adoption.run_object"):
+            store.save(run)
     return _present(root, run, **reply)
 
 
@@ -3422,7 +3812,7 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
     root = Path(root)
     store = AdoptionRunStore(root)
     with _LOCK:
-        run = store.load(run_id)
+        run = store.load_for_update(run_id)
         phase = run["phase"]
         # A run stopped by its budget holds an open cursor and may be cancelled; one with no
         # cursor died mid-call and must be resumed with `apply` first.
@@ -3436,6 +3826,8 @@ def cancel(root: Path, *, run_id: str, why: str | None) -> dict:
         if phase not in ("selecting", "planned", "applying", "partial", "failed"):
             raise AdoptionRunError("INVALID_PHASE", f"cancel is not allowed from phase {phase!r}")
         _refuse_pending_renames(root, "cancel", run_id=run_id)
+        # The Sources this page filed stay, so the indexes and the log record them.
+        _record_owed(root, store, run, today=_today(None))
         run["cancel"] = {"at": _now_iso(), "why": (why or "").strip() or None}
         run["phase"] = "cancelled"
         store.save(run)
@@ -3727,7 +4119,7 @@ def finish(
     run_date = _today(today)
     store = AdoptionRunStore(root)
     with _LOCK:
-        run = store.load(run_id)
+        run = store.load_for_update(run_id)
         if run["phase"] not in _FINISH_PHASES:
             raise AdoptionRunError(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
@@ -3746,6 +4138,8 @@ def finish(
         verify = run.get("verify") or {}
         verified_unchanged = verify.get("verified_unchanged", 0)
         verified_total = verify.get("verified_total", 0)
+        # Before the manifest, so the log reads in filing order: what the page's last batches filed, then its manifest.
+        _record_owed(root, store, run, today=run_date)
         manifest_path = None
         if write_manifest:
             manifest_path = _write_run_manifest(
@@ -4191,25 +4585,25 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     newest outcome, so a file that a new scan finds filed already counts once. A `done` reply's `filed` holds the
     stage's residual and, under `last_finished_page`, what the last `finish` reported about its own page alone.
     """
-    run = store.load(run["run_id"])
+    if stop is not None:
+        # A step that raised may have saved the page before it did: only the stored page says where it stands.
+        run = store.load(run["run_id"])
     filing, derived = _filing_state(root, store, run)
     if stop is not None:
         filing, derived = _STOPPED, stop
-    pages = (run, *_earlier_pages(store, run))
-    scans = sorted(store.runs_at(run["source_root"]), key=lambda page: str(page.get("created") or ""))
-    newest = {path: outcome for page in scans for path, outcome in (page.get("outcomes") or {}).items()}
+    scans = sorted(store.tallies_at(run["source_root"], current=run), key=lambda tally: tally.created)
+    newest = {path: marks for tally in scans for path, marks in tally.outcomes.items()}
     # A skipped duplicate is a file whose newest outcome names the Source that already held its bytes, as
     # `_skipped_duplicates` reads it. A file whose Source a page of this import stored stays filed when a later
     # scan meets that Source again, so each file counts once: as filed or as a skipped duplicate.
-    stored = {path for page in scans for path, outcome in (page.get("outcomes") or {}).items()
-              if _source_status(outcome) == "applied"}
-    skipped = _skipped_duplicates({path: outcome for path, outcome in newest.items() if path not in stored})
-    filed = sum(1 for outcome in newest.values() if outcome.get("status") in _APPLIED_STATUSES) - skipped
-    failed = sum(1 for outcome in newest.values() if outcome.get("status") == "failed")
+    stored = {path for tally in scans for path, marks in tally.outcomes.items() if marks & _STORED}
+    skipped = sum(1 for path, marks in newest.items() if path not in stored and marks & _SKIPPED)
+    filed = sum(1 for marks in newest.values() if marks & _FILED) - skipped
+    failed = sum(1 for marks in newest.values() if marks & _FAILED)
     remaining = _page_remaining(run) + int(run.get("inventory_truncated") or 0)
     if _next_filing_step(run) == "done":
         remaining += _unscanned(root, store, run)  # staged files that came after the scan, which a new scan files
-    pages_done = sum(1 for page in scans if page["phase"] in _FINISHED_PHASES)
+    pages_done = sum(1 for tally in scans if tally.phase in _FINISHED_PHASES)
     person: list[dict] = []
     if stop is None and filing == _STOPPED and run.get("apply_stop"):
         person.append({"need": "free_space", "text": run["apply_stop"]["next"]})
@@ -4228,6 +4622,7 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     if derived is not None:
         reply["stop"] = derived
     if filing == _DONE:
+        pages = (run, *_earlier_pages(store, run))
         finished = next((page for page in pages if page.get("finish")), None)
         # Read now from the stage, as `_unscanned` reads it, so a file put in the stage after the last `finish` is listed.
         residual = adoption_consume.residual(root, run, _APPLIED_STATUSES, pages[1:])
@@ -4246,8 +4641,8 @@ def _filing_reply(root: Path, store: AdoptionRunStore, run: dict, *, stop: dict 
     reply["person"] = person
     if filing == _WORKING or (filing == _STOPPED and run.get("apply_stop") and stop is None):
         with _LOCK:
-            latest = store.load(run["run_id"])
+            latest = store.load_for_update(run["run_id"])
             token = _issue_cursor(latest, "file")
-            store.save(latest)
+            store.save_changes(latest)
         reply["continuation"] = f"{run['run_id']}:{token}"
     return reply

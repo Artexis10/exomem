@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -748,3 +750,72 @@ def test_same_mcp_identity_recovers_note_and_terminal_crash_cuts(vault, monkeypa
             vault / planned["plan"]["items"][0]["target_path"]}
     finally:
         writer_lease.reset_managers_for_tests()
+
+
+@pytest.mark.parametrize(("identity", "cut"), [
+    (False, "after-intent"), (False, "after-log"),
+    (True, "after-intent"), (True, "after-log"), (True, "after-source"),
+])
+def test_stops_between_chunks_and_inside_the_recording_batch_file_and_log_each_item_once(
+    tmp_path, monkeypatch, identity, cut,
+):
+    """A call logs the files that earlier batches filed in its first batch. Catches a resume that files an item twice,
+    or logs a carried file twice or never, after a stop between chunks and a second one inside that recording batch."""
+    monkeypatch.setattr(adoption_run, "APPLY_CHUNK_ITEMS", 2)
+    root = _vault(tmp_path, {f"Coll/note-{n}.md": f"# Note {n}\n\nBody {n}.\n" for n in range(6)})
+    run_id, planned = _import(root, path="Coll", include=["Coll"])
+    plan_id = planned["plan"]["plan_id"]
+    log = root / "Knowledge Base/log.md"
+
+    class Interrupted(BaseException):
+        pass
+
+    def claimed(token: str, *, reconciling: bool):
+        if not identity:
+            return contextlib.nullcontext()
+        return writer_lease.active_mutation_claim_context(
+            claim_token=token * 24, command_digest="a" * 64, identity_digest="1" * 64, reconciling=reconciling,
+        )
+
+    real_chunk, chunks = adoption_run._apply_chunk, []
+
+    def stop_before_the_third_chunk(*arguments, **keywords):
+        chunks.append(1)
+        if len(chunks) == 3:
+            raise Interrupted()
+        return real_chunk(*arguments, **keywords)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run, "_apply_chunk", stop_before_the_third_chunk)
+        with claimed("a", reconciling=False), pytest.raises(Interrupted):
+            adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+    store = adoption_run.AdoptionRunStore(root)
+    assert len(store.load(run_id)["outcomes"]) == 4
+    assert "adopt-copy" not in log.read_text(encoding="utf-8")  # the first two chunks owe their log entry
+
+    real_intent = adoption_run.AdoptionRunStore.save_intent
+
+    def stop_after_the_record_intent(self, run):
+        real_intent(self, run)
+        if cut == "after-intent" and adoption_run._RECORD_INTENT in run:
+            raise Interrupted()
+
+    def stop_after(path):
+        if cut == "after-log" and path == log or cut == "after-source" and path.parent.name == "Imported":
+            raise Interrupted()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adoption_run.AdoptionRunStore, "save_intent", stop_after_the_record_intent)
+        patch.setattr(vault_module, "_after_batch_destination_published", stop_after)
+        with claimed("b", reconciling=True), pytest.raises(Interrupted):
+            adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+    with claimed("c", reconciling=True):
+        reply = adoption_run.apply(root, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert reply["phase"] == "applied" and reply["progress"]["remaining"] == 0
+    adoption_run.finish(root, run_id=run_id, today=TODAY)
+
+    assert sum(indexes._count_sources(root / "Knowledge Base/Sources").values()) == 6
+    assert "- Sources: 6" in (root / "Knowledge Base/index.md").read_text(encoding="utf-8")
+    assert sum(int(count) for count in re.findall(r"Copied (\d+) selected file", log.read_text(encoding="utf-8"))) == 6
+    entries = [entry for entry in vault_module.read_operation_log(root)["entries"] if entry["op"] == "adopt-copy"]
+    assert len({entry["provenance"]["import_chunk"] for entry in entries}) == len(entries)
