@@ -65,7 +65,7 @@ The extraction request that follows the commit of a paired original SHALL admit 
 
 ### Requirement: A paired page is not filed on its own
 
-A paired page and its part pages SHALL NOT be filed as Sources of their own, unless a stored Source keeps its own result as the replacement rule decides. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the item `SOURCE_CHANGED`.
+A paired page and its part pages SHALL NOT be filed as Sources of their own. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the item `SOURCE_CHANGED`.
 
 #### Scenario: No text Source holds a paired page
 
@@ -84,7 +84,7 @@ A paired page and its part pages SHALL NOT be filed as Sources of their own, unl
 
 ### Requirement: A page whose original is already stored pairs with that Source
 
-A sidecar-named page SHALL also pair with a stored Source whose original matches the page's `binary_sha256` and `binary_size`. The original MAY be stored in an earlier window or run, or be a staged duplicate of the stored one. When that Source's extraction is the page's own kept result, apply SHALL write nothing. Apply SHALL decide that by the extraction digest, with the page's text taken after the card-number and credential removal.
+A sidecar-named page SHALL also pair with a stored Source whose original matches the page's `binary_sha256` and `binary_size`. The original MAY come from an earlier window or run. When that Source's extraction or one of its prior extraction pages holds the page's kept result, apply SHALL write nothing. Apply SHALL decide that by a digest over the whole extraction text, part pages included, with the page's text taken after the card-number and credential removal.
 
 #### Scenario: A page in a later window keeps its result
 
@@ -96,9 +96,14 @@ A sidecar-named page SHALL also pair with a stored Source whose original matches
 - **WHEN** a paired page matches a stored Source whose extraction is that page's kept result
 - **THEN** apply writes nothing for the page, and the recording reports `already-applied`
 
+#### Scenario: Parts decide whether the result is the same
+
+- **WHEN** a paired page and its stored Source hold the same first part, and their third parts differ
+- **THEN** apply does not treat the page's result as already stored
+
 ### Requirement: A stored Source takes a paired page's result by the speech replacement rule
 
-When a paired page's stored Source does not hold the page's kept result, apply SHALL offer that result to the Source under the replacement rule of `speech-result-attachment`, without `replace_labelled`. When the rule accepts it, apply SHALL write the kept extraction to it, guarded by the Source page's content hash, and SHALL NOT file the page. When the rule refuses it, apply SHALL file the page as a text Source, as before, and the Source SHALL list that page in `prior_extractions`.
+When a stored Source does not hold a paired page's kept result, apply SHALL offer that result to the Source under the replacement rule of `speech-result-attachment`, without `replace_labelled`. When the rule accepts it, apply SHALL write the kept extraction to it, guarded by the Source page's content hash, and SHALL NOT file the page. When the rule refuses it, apply SHALL write the result, with its part pages, as a prior extraction page that the Source lists in `prior_extractions`.
 
 #### Scenario: A pending Source takes the page's result
 
@@ -112,9 +117,14 @@ When a paired page's stored Source does not hold the page's kept result, apply S
 
 #### Scenario: A labelled or named Source keeps its result
 
-- **WHEN** a paired page matches a stored Source whose transcript carries speaker labels or `speaker_names`
-- **THEN** the Source keeps its transcript, the page is filed as a text Source, and the Source lists that page in `prior_extractions`
-- **AND** the plan and the apply result count the page under its reason
+- **WHEN** a paired page with three parts matches a stored Source whose transcript carries speaker labels or `speaker_names`
+- **THEN** the Source keeps its transcript, and a prior extraction page that the Source lists holds the page's result with its three parts
+- **AND** no text Source holds the page, and the plan and the apply result count the page under its reason
+
+#### Scenario: A second run after a kept-out page writes nothing
+
+- **WHEN** the same folder is applied again after a labelled Source kept a page's result out
+- **THEN** apply finds the result on the Source's prior extraction page, and writes nothing
 
 #### Scenario: A running job does not replace a kept result
 
@@ -137,10 +147,16 @@ The selection rules that `exomem import` and `exomem cloud import` share SHALL s
 
 ### Requirement: An unpaired page is filed as before and counted
 
-A sidecar-named page that fails a pairing check SHALL keep today's behaviour: adoption files it as a text Source, and its original gets a pending extraction. The plan and the apply result SHALL count the originals stored with a kept extraction. They SHALL also count, by reason, the sidecar-named pages whose extraction was not kept.
+A sidecar-named page that fails a pairing check SHALL keep today's behaviour: adoption files it as a text Source, and its original gets a pending extraction. The plan and the apply result SHALL count the originals stored with a kept extraction. They SHALL also count, by reason, the sidecar-named pages whose extraction was not kept, and the unpaired pages whose part pages were not filed with them.
 
 #### Scenario: A mismatched page is filed as text and counted
 
 - **WHEN** a sidecar-named page records a `binary_size` that differs from its staged original
 - **THEN** adoption files the page as a text Source and the original with a pending extraction
 - **AND** the plan and the apply result count the page under its reason
+
+#### Scenario: An unpaired long page is counted without its parts
+
+- **WHEN** a sidecar-named page with three parts records a pending extraction
+- **THEN** adoption files the page as a text Source without its part pages
+- **AND** the plan and the apply result count the page among the unpaired pages whose part pages were not filed
