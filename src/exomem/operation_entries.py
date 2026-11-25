@@ -917,7 +917,7 @@ def _maintenance_rows():
         held_operation.RESOLVE_MODE, held_operation.REPAIR_TOOL, held_operation.RESOLVE_FIELDS,
         held_operation.RESOLVE_FIELDS, destructive=True, verb="updated",
     ))
-    for action in ("structured-files", "tag-variants", "collections-store-adopt-local", "collections-store-export"):
+    for action in ("structured-files", "tag-variants", "path-variants", "collections-store-adopt-local", "collections-store-export"):
         fields = ("collection", "apply", "plan_id", "source_snapshot", "why", "exclude_groups", "acknowledge_skipped")
         for value in (None, False, True):
             write = value is True

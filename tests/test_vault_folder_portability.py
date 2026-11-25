@@ -127,6 +127,128 @@ def test_an_existing_split_warns_and_does_not_block(vault: Path) -> None:
     assert len(warnings) == 1 and "'Garden'" in warnings[0] and "path_variants" in warnings[0]
 
 
+def test_a_capture_into_an_existing_split_lands_in_the_fuller_spelling(vault: Path) -> None:
+    """Defect: scope `garden` keeps filling `Evidence/garden/` beside a fuller `Evidence/Garden/`."""
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Garden" / "shared" / f"{name}.md")
+    _page(evidence / "garden" / "shared" / "d.md")
+
+    result = preserve_module.preserve(
+        vault, scope="garden", category="shared", filename="seed.txt", content="tomato"
+    )
+
+    assert result.path.startswith("Knowledge Base/Evidence/Garden/shared/")
+    assert sorted(p.name for p in (evidence / "garden" / "shared").iterdir()) == ["d.md"]
+
+
+def test_a_registered_folder_wins_a_split(vault: Path) -> None:
+    """Defect: the registry names `Garden`, yet writes pick the side that happens to be fuller."""
+    notes = vault / "Knowledge Base" / "Notes" / "Research"
+    _page(notes / "Garden" / "a.md")
+    for name in ("b", "c"):
+        _page(notes / "garden" / f"{name}.md")
+    project_keys.register_project_key(vault, "garden")
+    assert project_keys.load_project_registry(vault).folder_for("garden") == "Garden"
+
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/Research/garden/new/plan.md") == (
+        "Knowledge Base/Notes/Research/Garden/new/plan.md"
+    )
+
+
+def test_an_existing_path_in_a_split_keeps_its_spelling(vault: Path) -> None:
+    """Defect: a write to a file that exists under the smaller side forks it into the fuller side."""
+    notes = vault / "Knowledge Base" / "Notes"
+    for name in ("a", "b"):
+        _page(notes / "Garden" / f"{name}.md")
+    _page(notes / "garden" / "beds" / "plan.md")
+
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/garden/beds/plan.md") == (
+        "Knowledge Base/Notes/garden/beds/plan.md"
+    )
+    assert vault_module.respell_new_path(vault, "Knowledge Base/Notes/garden/beds/new.md") == (
+        "Knowledge Base/Notes/Garden/beds/new.md"
+    )
+
+
+def test_a_split_is_merged_into_its_canonical_spelling_and_exports(vault: Path) -> None:
+    """Defect: a split can only be merged file by file, its links break, and its folders stay behind."""
+    from exomem.commands import op_maintain_memory
+
+    kb = vault / "Knowledge Base"
+    captured = preserve_module.preserve(
+        vault, scope="garden", category="shared", filename="seed.txt", content="tomato"
+    ).path
+    for name in ("a", "b", "c"):
+        _page(kb / "Evidence" / "Garden" / f"{name}.md")
+    (kb / "Evidence" / "garden" / "old" / "empty").mkdir(parents=True)
+    linking = create_file(
+        vault, path="Knowledge Base/Notes/plan.md",
+        content=f"---\ntype: note\n---\n\nSee [[{captured.removeprefix('Knowledge Base/')}]].\n",
+    ).path
+
+    preview = op_maintain_memory(vault, mode="path-variants")
+    assert [split["canonical"] for split in preview["splits"]] == ["Garden"]
+    assert preview["blocked"] == [] and len(preview["batch"]) >= 1
+    moved = op_maintain_memory(
+        vault, mode="path-variants", apply=True, plan_id=preview["plan_id"], why="merge the garden split"
+    )
+    assert moved["outcome"] == "committed" and moved["files_remaining"] == 0
+
+    leftover = op_maintain_memory(vault, mode="path-variants")
+    assert "Knowledge Base/Evidence/garden" in leftover["empty_folders"]
+    removed = op_maintain_memory(
+        vault, mode="path-variants", apply=True, plan_id=leftover["plan_id"], why="remove emptied spelling"
+    )
+
+    assert "Knowledge Base/Evidence/garden" in removed["removed_folders"]
+    assert not (kb / "Evidence" / "garden").exists()
+    assert (vault / captured.replace("/garden/", "/Garden/", 1)).read_text() == "tomato"
+    assert "Evidence/Garden/shared/seed.txt" in (vault / linking).read_text()
+    assert op_maintain_memory(vault, mode="path-variants")["split_count"] == 0
+    vault_portability.check_path_collisions(
+        path.relative_to(vault).as_posix() for path in vault.rglob("*") if path.is_file()
+    )
+
+
+def test_one_apply_moves_files_that_share_a_linking_page(vault: Path) -> None:
+    """Defect: the first move rewrites a page that the next move also rewrites, so each apply stops after one file."""
+    from exomem import path_variants
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    for name in ("a", "b", "c"):
+        _page(evidence / "Garden" / f"{name}.md")
+    for name in ("d", "e"):
+        _page(evidence / "garden" / f"{name}.md")
+    linking = create_file(
+        vault, path="Knowledge Base/Notes/beds.md",
+        content="---\ntype: note\n---\n\n[[Evidence/garden/d]] and [[Evidence/garden/e]].\n",
+    ).path
+
+    preview = path_variants.preview(vault)
+    result = path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
+
+    assert result["outcome"] == "committed" and len(result["moved"]) == 2
+    text = (vault / linking).read_text()
+    assert "Evidence/Garden/d" in text and "Evidence/Garden/e" in text
+
+
+def test_a_stale_empty_folder_is_not_removed(vault: Path) -> None:
+    """Defect: a folder that gained a file after the preview is removed with it."""
+    from exomem import path_variants
+
+    evidence = vault / "Knowledge Base" / "Evidence"
+    _page(evidence / "Garden" / "a.md")
+    (evidence / "garden").mkdir(parents=True)
+    preview = path_variants.preview(vault)
+    assert preview["empty_folders"] == ["Knowledge Base/Evidence/garden"]
+    (evidence / "garden" / "late.txt").write_text("late")
+
+    with pytest.raises(ValueError, match="STALE_PATH_VARIANT_PLAN"):
+        path_variants.apply(vault, plan_id=preview["plan_id"], why="remove emptied spelling")
+    assert (evidence / "garden" / "late.txt").exists()
+
+
 def test_deleting_one_side_of_a_split_keeps_the_other_page_reference(vault: Path) -> None:
     """Defect: a delete of `food/a.md` read as `Food/a.md` drops the surviving page's row."""
     notes = vault / "Knowledge Base" / "Notes"

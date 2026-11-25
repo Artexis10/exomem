@@ -216,6 +216,8 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "original_fixity",
     "source_pointer_drift",
     "source_identity_conflict",
+    # A folder split blocks a whole-vault export, and nothing else tells the owner it is there.
+    "path_variants",
 )
 # The two exact-duplicate checks (`duplicate_audit`). Selectable through `audit` and `attention`, and out of the default union.
 DUPLICATE_CATEGORIES: tuple[str, ...] = ("duplicate_content", "duplicate_source_url")
@@ -228,7 +230,6 @@ OPTIONAL_CATEGORIES: tuple[str, ...] = (
     "semantic_category_governance",
     "semantic_strict_schema_drift",
     "semantic_relation_disposition",
-    "path_variants",
     # A vault meets its whole duplicate backlog on the first run, so a default audit would bury every other finding under it.
     *DUPLICATE_CATEGORIES,
     # Every past recap with a Decided line is uncited after an upgrade, so a default
@@ -1186,7 +1187,8 @@ def _check_path_variants(vault_root: Path) -> list[AuditFinding]:
                             + ", ".join(repr(name) for name in group)
                         ),
                         proposed_fix=(
-                            "merge by hand with manage_memory_file; nothing is merged automatically"
+                            f"preview the merge with {capabilities.active_call_text('maintain_memory', {'mode': 'path-variants'})}; "
+                            "nothing is merged until its plan is applied"
                         ),
                         paths=[f"{prefix}{name}" for name in group],
                         meta={"class": "defect"},

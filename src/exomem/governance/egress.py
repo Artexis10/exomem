@@ -7097,6 +7097,7 @@ _SELECTOR_ADAPTERS: dict[tuple[str, str], dict[str, str]] = {
         "structured-files": "apply-conditional",
         "curation": "mutation",
         "tag-variants": "apply-conditional",
+        "path-variants": "apply-conditional",
         "collections-store": "structure",
         "collections-store-adopt-local": "apply-conditional",
         "collections-store-export": "apply-conditional",

@@ -11,6 +11,7 @@ import hashlib
 import io
 import os
 import sqlite3
+import sys
 from contextlib import closing
 
 import pytest
@@ -672,6 +673,25 @@ def test_a_folder_and_a_name_that_only_the_store_holds_are_taken_not_new(served)
     assert (
         vault_module.respell_new_path(served, "Knowledge Base/stored only/Delta.md")
         == "Knowledge Base/Stored Only/Delta.md"
+    )
+
+
+@pytest.mark.skipif(sys.platform in {"win32", "darwin"}, reason="needs a case-sensitive volume")
+def test_a_page_written_into_a_split_lands_in_the_fuller_stored_spelling(served):
+    """Defect: the store walk accepts an exact folder and keeps filling the smaller side of a split."""
+    for stem in ("Gamma", "Delta"):
+        vault_module.batch_atomic_write(
+            [planned(served, f"Knowledge Base/Stored Only/{stem}.md", GAMMA_TEXT, create_only=True)],
+            vault_root=served,
+            post_commit_fanout=False,
+        )
+    loose = served / "Knowledge Base/stored only"
+    loose.mkdir(parents=True)
+    (loose / "chart.png").write_bytes(b"png")
+
+    assert (
+        vault_module.respell_new_path(served, "Knowledge Base/stored only/notes/Epsilon.md")
+        == "Knowledge Base/Stored Only/notes/Epsilon.md"
     )
 
 

@@ -7773,23 +7773,27 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
 
     A component that does not exist as spelled, but matches an existing sibling
     by `vault_name_key`, takes that sibling's spelling: `Notes/garden/x.md`
-    lands in an existing `Notes/Garden/`. An exact component always wins, and
-    the first component that matches nothing ends the walk, because the rest is
-    new. Only destinations come here. A recorded identity (a read, a delete, an
-    index key) keeps the host's spelling, so a split that already exists on a
+    lands in an existing `Notes/Garden/`. A folder on the way that already has
+    a variant sibling (a split) takes the split's canonical spelling
+    (`canonical_variant`), whichever spelling the caller named, unless the
+    destination is a file that already exists under the requested one. The first component
+    that matches nothing ends the walk, because the rest is new. Only
+    destinations come here. A recorded identity (a read, a delete, an index
+    key) keeps the host's spelling, so a split that already exists on a
     case-sensitive volume keeps two identities.
 
     `replacing` is the path that a move vacates. It is not a sibling to land
     on, so a move that changes only the case or Unicode form of a name still
-    renames it. Each component costs one `lstat`; a folder is listed only when
-    the component is missing. Fails open to `rel` when a component cannot be
-    read.
+    renames it. Each component costs one `lstat`, and each folder on the way
+    one listing; the destination's own folder is listed only when the leaf is
+    missing. Fails open to `rel` when a component cannot be read.
     """
     parts = [part for part in str(rel).replace("\\", "/").split("/") if part]
     stored = _respell_in_store(Path(vault_root), parts, replacing)
     if stored is not None:
         return stored
-    current = Path(vault_root)
+    root = Path(vault_root)
+    current = root
     spelled: list[str] = []
     for index, part in enumerate(parts):
         try:
@@ -7799,20 +7803,94 @@ def respell_new_path(vault_root: Path, rel: str, *, replacing: str | None = None
         except OSError:
             return rel
         else:
+            rest = parts[index + 1 :]
+            if rest:
+                part = _split_spelling(
+                    root, _listed(current), part, "/".join(spelled), replacing,
+                    exists=lambda name, base=current, rest=rest: _existing_file(base.joinpath(name, *rest)),
+                    entries=lambda name, base=current: _disk_entries(base / name),
+                )
             spelled.append(part)
             current = current / part
             continue
-        try:
-            names = os.listdir(current)
-        except OSError:
-            names = []
-        variant = _sibling_spelling(names, part, "/".join(spelled), replacing)
+        variant = _sibling_spelling(_listed(current), part, "/".join(spelled), replacing)
         if variant is None:
             spelled.extend(parts[index:])
             break
         spelled.append(variant)
         current = current / variant
     return "/".join(spelled)
+
+
+def _listed(directory: Path) -> list[str]:
+    try:
+        return os.listdir(directory)
+    except OSError:
+        return []
+
+
+def _existing_file(path: Path) -> bool:
+    return os.path.lexists(path) and not path.is_dir()
+
+
+def _disk_entries(directory: Path) -> set[str] | None:
+    """The names in a folder, or None when it is not a folder."""
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    return set(_listed(directory))
+
+
+def canonical_variant(
+    vault_root: Path, spellings: Iterable[str], entries: Callable[[str], set[str] | None]
+) -> str | None:
+    """The spelling of a folder split that writes and merges converge on, or None when none is a folder.
+
+    `entries` gives a spelling's folder entries, or None for a spelling that is not a folder. The
+    project registry decides first, because a registered folder is the identity that the path
+    projects; then the folder with the most entries, which a merge into it only grows; then
+    code-point order.
+    """
+    counts = {name: len(found) for name in sorted(spellings) if (found := entries(name)) is not None}
+    if not counts:
+        return None
+    from . import project_keys
+
+    registered = set(project_keys.load_project_registry(vault_root).project_to_folder.values())
+    named = [name for name in counts if name in registered]
+    if named:
+        return named[0]
+    return max(counts, key=counts.__getitem__)
+
+
+def _split_spelling(
+    vault_root: Path,
+    names: Iterable[str],
+    part: str,
+    prefix: str,
+    replacing: str | None,
+    *,
+    exists: Callable[[str], bool],
+    entries: Callable[[str], set[str] | None],
+) -> str:
+    """The spelling an existing folder `part` on a destination's way takes.
+
+    Without a listed variant sibling it is `part`. With one it is the split's canonical spelling,
+    unless the destination is a file that already exists under `part` (`exists`): a write to it
+    must not fork it into the other spelling. A destination folder that exists is steered, so a
+    caller that respells only a folder lands in the canonical one.
+    """
+    listed = set(names)
+    if part not in listed:
+        # A folding volume answered for a spelling it does not list: no split here.
+        return part
+    variants = [
+        name
+        for name in held_fs.name_variants(listed, part)
+        if (f"{prefix}/{name}" if prefix else name) != replacing
+    ]
+    if not variants or exists(part):
+        return part
+    return canonical_variant(vault_root, [part, *variants], entries) or part
 
 
 def _sibling_spelling(
@@ -7843,14 +7921,32 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
         return None
     spelled: list[str] = []
     with read.snapshot(vault_root) as view:
+
+        def names_in(prefix: str) -> set[str]:
+            names = {child.name for child in view.children(prefix)}
+            names.update(_listed(vault_root / prefix if prefix else vault_root))
+            return names
+
+        def entries(folder: str) -> set[str] | None:
+            stored = {child.name for child in view.children(folder)}
+            on_disk = _disk_entries(vault_root / folder)
+            if on_disk is None and not stored:
+                return None
+            return stored | (on_disk or set())
+
         for index, part in enumerate(parts):
             prefix = "/".join(spelled)
-            names = {child.name for child in view.children(prefix)}
-            try:
-                names.update(os.listdir(vault_root / prefix if prefix else vault_root))
-            except OSError:
-                pass  # a folder that only the store knows has no directory yet
+            names = names_in(prefix)
             if part in names:
+                rest = parts[index + 1 :]
+                if rest:
+                    part = _split_spelling(
+                        vault_root, names, part, prefix, replacing,
+                        exists=lambda name, prefix=prefix, rest=rest: _stored_or_on_disk(
+                            vault_root, view, "/".join(filter(None, (prefix, name, *rest)))
+                        ),
+                        entries=lambda name, prefix=prefix: entries(f"{prefix}/{name}" if prefix else name),
+                    )
                 spelled.append(part)
                 continue
             variant = _sibling_spelling(names, part, prefix, replacing)
@@ -7859,6 +7955,11 @@ def _respell_in_store(vault_root: Path, parts: list[str], replacing: str | None)
                 break
             spelled.append(variant)
     return "/".join(spelled)
+
+
+def _stored_or_on_disk(vault_root: Path, view: Any, rel: str) -> bool:
+    """Whether `rel` is a page the store holds or a file on disk."""
+    return bool(view.held_pages((rel,))) or _existing_file(vault_root / rel)
 
 
 # Probing the filesystem costs a couple of syscalls; the answer is a property
