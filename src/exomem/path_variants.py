@@ -393,28 +393,15 @@ def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
                 parent, _, name = rel.rpartition("/")
                 if not held_fs.name_variants(vault._listed(root / parent), name):  # noqa: SLF001
                     raise ValueError(_STALE)
-            log_plan = vault.plan_log_writes(
-                root,
-                date_iso=dt.date.today().isoformat(),
-                op="maintain_memory",
-                rel_path_no_ext=plan["empty"][-1],
-                body="Removed empty path-variant folders "
-                + json.dumps(
-                    {"plan_id": plan_id, "folders": plan["empty"], "rationale": why},
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ),
-                operation_token=f"{MODE}:{plan_id}",
-            )
-            if log_plan.warning is not None:
+            if _removal_log(root, plan_id, plan["empty"], why).warning is not None:
                 # The log entry is the record of what was removed; without it nothing is removed.
                 raise ValueError(
                     "PATH_VARIANT_AUDIT_UNAVAILABLE: the vault log is required to record the removal"
                 )
             removed = _remove_empty(root, plan["empty"])
             if removed:
-                vault.batch_atomic_write(list(log_plan.writes), vault_root=root)
+                # The entry names what was removed, which a write from outside the service can cut short.
+                vault.batch_atomic_write(list(_removal_log(root, plan_id, removed, why).writes), vault_root=root)
     remaining = plan["public"]["files_pending"] - len(moved)
     outcome = "committed" if moved or removed else "unchanged"
     if stopped is not None:
@@ -431,6 +418,23 @@ def apply(vault_root: Path, *, plan_id: str, why: str) -> dict[str, Any]:
         # A new preview lists what remains: more files, or the folders the moves emptied.
         **({"next": {"tool": "maintain_memory", "args": {"mode": MODE}}} if moved or stopped else {}),
     }
+
+
+def _removal_log(root: Path, plan_id: str, folders: list[str], why: str) -> Any:
+    return vault.plan_log_writes(
+        root,
+        date_iso=dt.date.today().isoformat(),
+        op="maintain_memory",
+        rel_path_no_ext=folders[-1],
+        body="Removed empty path-variant folders "
+        + json.dumps(
+            {"plan_id": plan_id, "folders": folders, "rationale": why},
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        operation_token=f"{MODE}:{plan_id}",
+    )
 
 
 def _move(root: Path, unit: dict, move_file: Callable, error_type: type, preview_required: str) -> dict:

@@ -106,7 +106,7 @@ The canonical spelling of a split SHALL be the spelling that the project registr
 
 ### Requirement: The preview's apply moves a batch into the canonical spelling
 
-`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL move the batch that the preview with that `plan_id` listed, from the other spellings into the canonical spelling within their own tree, through the ordinary file move with link rewrites. The merge SHALL be one-way: each move keeps the file's bytes, rewrites the links to it, and records its old path in the moved page's lineage, and no operation moves the files back. A file whose move or link rewrite would be refused SHALL be listed as blocked, not moved.
+`maintain_memory(mode="path-variants", apply=true, plan_id, why)` SHALL move the batch that the preview with that `plan_id` listed, from the other spellings into the canonical spelling within their own tree, through the ordinary file move with link rewrites. A file whose move or link rewrite would be refused SHALL be listed as blocked, not moved.
 
 #### Scenario: A split is merged
 
@@ -114,6 +114,16 @@ The canonical spelling of a split SHALL be the spelling that the project registr
 - **THEN** every file is under `Evidence/Garden/`
 - **AND** the link names the moved file
 - **AND** the next preview lists `Evidence/garden/` as an empty variant folder
+
+### Requirement: A split merge is one-way
+
+Each move of a split merge SHALL keep the file's bytes, rewrite the links to it, and record its old path in the moved page's lineage. No operation SHALL move the files back, and the merge's guidance SHALL say so before an owner applies it.
+
+#### Scenario: A merged file keeps its bytes and names its old path
+
+- **WHEN** the owner applies a batch that moves `Evidence/garden/seed.txt` into `Evidence/Garden/`
+- **THEN** `Evidence/Garden/seed.txt` holds the same bytes
+- **AND** its page's lineage names `Evidence/garden/seed.txt`
 
 ### Requirement: The preview's apply removes empty variant folders
 
