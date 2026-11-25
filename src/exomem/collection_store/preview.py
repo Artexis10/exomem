@@ -517,6 +517,7 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             if not projection:
                 return function(vault_root, *args, **kwargs)
             from ..cli_ops import OpError
+            from ..structured_collections import CollectionError
             from .runtime import projection_route
 
             # These consumers take a canonical path or page as their first argument; bulk callers decide each path below.
@@ -525,7 +526,9 @@ def canonical_read(function=None, *, projection=False, unavailable=None,
             try:
                 if isinstance(path, str) and (server := projection_route(vault_root, path)) is not None:
                     return _decide_through_store(server, read, batch, vault_root, path, args, kwargs)
-            except (CollectionStoreError, OpError):
+            # CollectionError is the store's content-free refusal of one page (its freshness signals raise it), so it
+            # withholds that page like a store outage does, instead of failing the whole response.
+            except (CollectionStoreError, OpError, CollectionError):
                 if unavailable is None:
                     raise
                 # Discovery withholds this C candidate instead of making unrelated A/B unavailable.
