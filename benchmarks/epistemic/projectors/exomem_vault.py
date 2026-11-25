@@ -148,7 +148,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="current",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:17",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:31",
     ),
     FieldDeclaration(
         field="revision_of",
@@ -163,7 +163,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="cites",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:59",
+        evidence="src/exomem/_scaffold/_Schema/references/page-types.md:34",
     ),
     FieldDeclaration(
         field="contradicts",
@@ -183,7 +183,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="locator",
         status="declared",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:163",
+        evidence="src/exomem/episode_materials.py:29",
     ),
     FieldDeclaration(
         field="open_question",
@@ -193,7 +193,7 @@ FIELD_DECLARATIONS: tuple[FieldDeclaration, ...] = (
     FieldDeclaration(
         field="uncertainty",
         status="available_via:open_threads_section",
-        evidence="src/exomem/_scaffold/_Schema/references/frontmatter.md:144",
+        evidence="src/exomem/_scaffold/_Schema/references/writing.md:61",
     ),
     FieldDeclaration(
         field="review_state",

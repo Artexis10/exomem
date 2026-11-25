@@ -94,7 +94,7 @@ def test_guidance_loads_every_documented_reference_path():
     schema_dir = ROOT / "src" / "exomem" / "_scaffold" / "_Schema"
     documented = {f"references/{path.name}" for path in (schema_dir / "references").glob("*.md")}
     assert documented <= set(guidance)
-    for name in ("references/recall.md", "references/writing.md", "references/operations.md"):
+    for name in ("references/recall.md", "references/writing.md", "references/tools.md"):
         assert guidance.get(name)
 
 

@@ -9864,7 +9864,7 @@ def op_episode_memory(
 
     Changes: prepare, disposition, resume routed leaves; episode_workflow_disabled
     refuses unless enabled. Then coverage and resume+postcommit attestation.
-    Help: references/operations.md.
+    Help: references/tools.md.
 
     Args:
         action: `record` and `input` write; `material`, `inspect`, `candidates`, `coverage` read.
@@ -12494,7 +12494,7 @@ def op_adoption_studio(
     of a window's "discarded, not filed" record; no tool undoes it.
     Status without run_id reports windows, budgets and the file limit (`unknown`
     is not zero); keep the source while `keep_source.keep` is true.
-    Details: references/operations.md.
+    Details: references/vault-care.md.
 
     Args:
         action: Lifecycle step.
@@ -13306,10 +13306,10 @@ def op_schema_memory(
     and usage; propose previews a delta; save applies upsert, alias, deprecate or
     remove with expected_hash and why; history lists kept versions; restore reverts one
     without rewriting pages.
-    Operations: references/operation-routing.md.
+    Operations: references/vocabulary.md.
 
     Args:
-        operation: Operation for the subject; see references/operation-routing.md.
+        operation: Operation for the subject; see references/vocabulary.md.
         name: Saved workflow key.
         subject: contract; a vocabulary registry (categories, entity-types, relations,
             source-kinds, domains, statuses, planning-values, note-types, homes,

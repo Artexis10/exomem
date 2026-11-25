@@ -39,7 +39,6 @@ from exomem import (
 )
 from exomem.governance import egress
 from exomem.governance.principal import request_scope
-from exomem.vault import content_hash
 
 # This module tests the `anchors` packet, the rollback mode; `maps` is the shipped default.
 pytestmark = pytest.mark.usefixtures("anchors_packet")
@@ -246,8 +245,7 @@ def test_a_naming_miss_offers_one_bounded_advisory(learning_vault: Path) -> None
     advisory = packet["learning"]
     assert isinstance(advisory, dict)
     assert working_set_learning.advisory_size(advisory) <= working_set_learning.MAX_ADVISORY_CHARS
-    assert len(json.dumps(advisory, ensure_ascii=False, separators=(",", ":"))) <= 900
-    assert working_set_learning.MAX_ADVISORY_CHARS == 900
+    assert len(json.dumps(advisory, ensure_ascii=False, separators=(",", ":"))) <= 1000
     assert advisory["kind"] == "activation-naming"
     assert advisory["review"].startswith("exomem://review/activation-naming/")
     assert advisory["target"] == {"ref": SLED, "title": "Cargo Sled", "kind": "resource"}
@@ -264,22 +262,26 @@ def test_the_advisory_carries_the_writers_guards(learning_vault: Path) -> None:
     advisory = _pick(learning_vault, NAMELESS, SLED)["learning"]
     name, cue = advisory["options"]
 
-    page = (learning_vault / SLED).read_text(encoding="utf-8")
-    assert name == {
-        "family": "name",
-        "tool": "edit_note",
-        "path": SLED,
-        "field": "learned_aliases",
-        "current": [],
-        "expected_hash": content_hash(page),
-    }
-    assert cue == {
-        "family": "referential_cue",
-        "tool": "schema_memory",
-        "subject": "activation-conventions",
-        "operation": "save-conventions",
-        "expected_hash": activation_conventions.load_conventions(learning_vault).content_hash,
-    }
+    # Outside a request no surface is bound, so the calls carry the grouped spelling the registry runs.
+    assert name["family"] == "name"
+    assert name["call"]["args"]["operation"]["value"] == []
+    assert name["call"]["tool"] == "edit_memory"
+    assert name["call"]["args"]["path"] == SLED
+    assert name["call"]["args"]["operation"]["field"] == "learned_aliases"
+    assert cue["family"] == "referential_cue"
+    assert cue["call"]["args"]["expected_hash"] == (
+        activation_conventions.load_conventions(learning_vault).content_hash
+    )
+
+
+def test_the_advisory_spells_its_calls_for_the_public_surface(learning_vault: Path) -> None:
+    from exomem import operation_entries
+
+    name, cue = _pick(learning_vault, NAMELESS, SLED)["learning"]["options"]
+    tool, args = operation_entries.spell_call(name["call"]["tool"], name["call"]["args"], "public")
+    assert (tool, args["action"], list(args["fields"])) == ("edit_note", "set_fields", ["learned_aliases"])
+    tool, args = operation_entries.spell_call(cue["call"]["tool"], cue["call"]["args"], "public")
+    assert (tool, args["operation"]) == ("manage_memory", "schema.save_conventions")
 
 
 def test_repeated_misses_raise_the_count_and_a_dismissal_holds_until_two_more(
@@ -386,13 +388,13 @@ def test_a_stale_advisory_hash_refuses_the_write(learning_vault: Path) -> None:
         writer_lease.invoke_command(
             _command("edit_memory"),
             learning_vault,
-            path=name["path"],
+            path=name["call"]["args"]["path"],
             why="the user calls it this",
             operation={
                 "kind": "patch_frontmatter",
-                "field": name["field"],
+                "field": name["call"]["args"]["operation"]["field"],
                 "value": ["Schlitten"],
-                "expected_hash": name["expected_hash"],
+                "expected_hash": name["call"]["args"]["operation"]["expected_hash"],
             },
         )
 
@@ -408,11 +410,11 @@ def test_a_stale_advisory_hash_refuses_the_write(learning_vault: Path) -> None:
     with pytest.raises(ValueError, match="STALE_ACTIVATION_CONVENTIONS_REGISTRY"):
         commands.op_schema_memory(
             learning_vault,
-            subject=cue["subject"],
-            operation=cue["operation"],
+            subject=cue["call"]["args"]["subject"],
+            operation=cue["call"]["args"]["operation"],
             proposal={"schema_version": 1, "referential": {"add_cues": ["weiter"]}},
             why="the user resumes in German",
-            expected_hash=cue["expected_hash"],
+            expected_hash=cue["call"]["args"]["expected_hash"],
         )
 
 

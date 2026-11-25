@@ -360,7 +360,7 @@ def test_the_real_schema_reader_works_on_both_layouts(tmp_path: Path) -> None:
     target = vault_module.shipped_schema_target(tmp_path)
     legacy = tmp_path / "Knowledge Base" / "_Schema"
     (legacy / "references").mkdir(parents=True, exist_ok=True)
-    for name in ("frontmatter.md", "page-types.md"):
+    for name in ("page-types.md",):
         (legacy / "references" / name).write_bytes((target / "references" / name).read_bytes())
     (legacy / "SKILL.md").write_bytes((target / "SKILL.md").read_bytes())
     import shutil
