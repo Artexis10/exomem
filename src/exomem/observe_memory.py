@@ -335,6 +335,7 @@ def observe_memory(
     removed_unit = None
     dropped_relations: tuple[tuple[str, str], ...] = ()
     dropped_outcome: str | None = None
+    lifted_frontmatter: list[tuple[str, str]] | None = None
     link_warnings: list[str] = []
     if proposal_mode == "remove":
         assert current_unit is not None
@@ -588,16 +589,29 @@ def observe_memory(
             and semantic_language_registry.normalize_label(kind) != _COMPACT_KIND
         )
         if normalized_relations and not explicit_rich_kind:
-            raise ObserveMemoryError(
-                "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
-                "typed unit relations require an explicit governed non-observation kind",
-                _rich_kind_remediation(
-                    language,
-                    category=normalized_category,
-                    projects=page_projects,
-                    page_type=page_type,
-                ),
+            rel_registry = (
+                current.definitions.snapshots["relations"].typed
+                if current.definitions is not None
+                else relation_registry.core_registry()
             )
+            lifted_frontmatter = _liftable_frontmatter_targets(
+                rel_registry, normalized_relations
+            )
+            if lifted_frontmatter is None:
+                raise ObserveMemoryError(
+                    "COMPACT_RELATIONS_REQUIRE_RICH_KIND",
+                    "typed unit relations require an explicit governed non-observation kind",
+                    _rich_kind_remediation(
+                        language,
+                        category=normalized_category,
+                        projects=page_projects,
+                        page_type=page_type,
+                    ),
+                )
+            # Every relation declares a forward page field, so the unit commits
+            # compact and each target lands in that frontmatter field in the
+            # same atomic write instead of on the unit.
+            normalized_relations = ()
         base_unit = current_unit if proposal_mode == "update" else None
         if base_unit is not None and relations is None and base_unit.relations:
             # `relations` replaces on update, so a call that omits it removes every relation the
@@ -720,9 +734,22 @@ def observe_memory(
     # Validation and its commit render the same authored day, including across midnight.
     pinned = temporal.parse(semantic_writes.transition_token_stamp(transition_token))
     authored_day = today or (pinned.day if pinned is not None else dt.date.today())
+    fm_text = editable.fm_text
+    lifted_outcome = None
+    if lifted_frontmatter:
+        fm_text, lifted_cited, lift_warnings = _lift_frontmatter_targets(
+            fm_text,
+            frontmatter,
+            lifted_frontmatter,
+            vault_root=vault_root,
+            resolver=find.writer_resolver_snapshot(vault_root),
+        )
+        link_warnings.extend(lift_warnings)
+        if lifted_cited:
+            lifted_outcome = _lifted_relations_outcome(lifted_cited)
     after_source = _rebuild_source(
         editable.original_text,
-        editable.fm_text,
+        fm_text,
         after_body,
         today=authored_day,
     )
@@ -857,6 +884,7 @@ def observe_memory(
             semantic=preflight.as_dict(),
             dropped_relations=dropped_relations,
             dropped_outcome=dropped_outcome,
+            lifted_outcome=lifted_outcome,
             warnings=link_warnings,
         )
 
@@ -918,6 +946,7 @@ def observe_memory(
         semantic=committed.as_dict(),
         dropped_relations=dropped_relations,
         dropped_outcome=dropped_outcome,
+        lifted_outcome=lifted_outcome,
         timings=(
             timings.as_dict() if timings is not None and write_timings_enabled() else None
         ),
@@ -1407,6 +1436,104 @@ def _canonical_context(value: str | None) -> str | None:
     return context
 
 
+def _liftable_frontmatter_targets(
+    rel_registry: relation_registry.RelationRegistry,
+    relations: tuple[tuple[str, str], ...],
+) -> list[tuple[str, str]] | None:
+    """Each relation's (field, target) when every one lifts to a page field, else None.
+
+    The test is the registry declaration alone: a relation whose entry binds no
+    forward `frontmatter_fields` entry stays a compact refusal. A vault overlay
+    declaring a new provenance relation gets the same lift without a code change.
+    """
+    lifted: list[tuple[str, str]] = []
+    for kind, target in relations:
+        definition = rel_registry.resolve(kind).definition
+        if definition is None:
+            return None
+        field = next(
+            (
+                name
+                for name, direction in definition.frontmatter_fields
+                if direction == "forward"
+            ),
+            None,
+        )
+        if field is None:
+            return None
+        lifted.append((field, target))
+    return lifted
+
+
+def _lift_frontmatter_targets(
+    fm_text: str,
+    frontmatter: dict[str, Any],
+    lifted: list[tuple[str, str]],
+    *,
+    vault_root: Path,
+    resolver: Any,
+) -> tuple[str, list[str], list[str]]:
+    """Splice each lifted target into its declared frontmatter field.
+
+    The writer is the same canonical-link normaliser `create_note` runs for its
+    `sources` argument, and the value lands in the canonical `[[path]]` form.
+    Existing entries keep their bytes; a target the field already cites is not
+    duplicated. Returns the patched YAML, the rendered links this call cites
+    and any normaliser warnings.
+    """
+    from . import note, record_formats
+
+    grouped: dict[str, list[str]] = {}
+    for field, target in lifted:
+        grouped.setdefault(field, []).append(target)
+    cited: list[str] = []
+    warnings: list[str] = []
+    for field, targets in grouped.items():
+        canonicals, field_warnings = note._normalize_sources(
+            targets, vault_root=vault_root, resolver=resolver
+        )
+        warnings.extend(field_warnings)
+        existing_raw = frontmatter.get(field)
+        existing_values: list[Any] = (
+            []
+            if existing_raw is None
+            else [existing_raw]
+            if isinstance(existing_raw, str)
+            else list(existing_raw)
+        )
+        existing_targets = {
+            target
+            for value in existing_values
+            for target in semantic_contract._frontmatter_targets(value)
+        }
+        additions: list[str] = []
+        for canonical in canonicals:
+            rendered = vault.render_wikilink_target(canonical, vault_root)
+            cited.append(rendered)
+            if canonical in existing_targets or rendered in existing_targets:
+                continue
+            additions.append(rendered)
+            existing_targets.add(rendered)
+        if not additions:
+            continue
+        merged = [
+            *existing_values,
+            *(f"[[{rendered}]]" for rendered in additions),
+        ]
+        # `fm_text` conventionally ends on its last content byte while the
+        # splice contract takes a terminated block; normalize in both directions.
+        fm_text = record_formats.splice_frontmatter_fields(
+            fm_text if fm_text.endswith("\n") else fm_text + "\n",
+            {field: merged},
+        ).removesuffix("\n")
+    return fm_text, cited, warnings
+
+
+def _lifted_relations_outcome(cited: list[str]) -> str:
+    named = ", ".join(cited)
+    return f"Cited {named} in the page's frontmatter."
+
+
 def _canonical_relations(values: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
     relations: list[tuple[str, str]] = []
     for index, value in enumerate(values):
@@ -1861,6 +1988,7 @@ def _result(
     semantic: dict[str, Any],
     dropped_relations: tuple[tuple[str, str], ...] = (),
     dropped_outcome: str | None = None,
+    lifted_outcome: str | None = None,
     timings: dict[str, Any] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1877,6 +2005,8 @@ def _result(
             {"kind": kind, "target": target} for kind, target in dropped_relations
         ]
         value["outcome"] = dropped_outcome
+    elif lifted_outcome is not None:
+        value["outcome"] = lifted_outcome
     if timings is not None:
         value["timings"] = timings
     if warnings:

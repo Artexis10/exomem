@@ -531,6 +531,124 @@ def test_anonymous_duplicate_selection_is_occurrence_exact(tmp_path: Path) -> No
     assert "- [rule] Tail" in source
 
 
+def _write_source_page(
+    root: Path, rel: str = "Knowledge Base/Sources/applied-export.md",
+) -> Path:
+    stem = Path(rel).stem
+    return _write_page(
+        root,
+        rel=rel,
+        source=(
+            "---\n"
+            "type: source\n"
+            f"exomem_id: {uuid.uuid4()}\n"
+            "---\n\n"
+            f"# {stem.replace('-', ' ').title()}\n\nFinal numbers.\n"
+        ),
+    )
+
+
+def test_a_compact_observation_lifts_a_provenance_relation_to_the_page(
+    tmp_path: Path,
+) -> None:
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+
+    result = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="The applied export holds the five-minute value.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    text = page.read_text(encoding="utf-8")
+    assert "- [config] The applied export holds the five-minute value." in text
+    frontmatter, _, _ = vault.parse_frontmatter(text)
+    assert frontmatter["sources"] == ["[[Knowledge Base/Sources/applied-export]]"]
+    assert "applied-export" in result["outcome"]
+
+    again = commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="A second reading of the same export.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+    assert "applied-export" in again["outcome"]
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == ["[[Knowledge Base/Sources/applied-export]]"]
+
+
+def test_a_compact_observation_keeps_existing_page_sources(tmp_path: Path) -> None:
+    _write_source_page(tmp_path)
+    _write_source_page(tmp_path, rel="Knowledge Base/Sources/earlier-brief.md")
+    page = _write_page(
+        tmp_path,
+        source=_page_source("# Observe\n\nExisting prose.\n").replace(
+            "updated: 2026-07-15\n",
+            'updated: 2026-07-15\nsources:\n  - "[[Knowledge Base/Sources/earlier-brief]]"\n',
+        ),
+    )
+
+    commands.op_observe_memory(
+        tmp_path,
+        path=PAGE,
+        operation="add",
+        category="config",
+        content="The export applies on top of the brief.",
+        relations=[{"kind": "derived_from", "target": "applied-export"}],
+    )
+
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter["sources"] == [
+        "[[Knowledge Base/Sources/earlier-brief]]",
+        "[[Knowledge Base/Sources/applied-export]]",
+    ]
+
+
+def test_a_compact_observation_refuses_a_non_provenance_relation(tmp_path: Path) -> None:
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="Typed relation needs rich form",
+            relations=[{"kind": "supports", "target": "[[Observe]]"}],
+        )
+
+    assert page.read_bytes() == before
+
+
+def test_a_compact_observation_refuses_a_mixed_call_whole(tmp_path: Path) -> None:
+    _write_source_page(tmp_path)
+    page = _write_page(tmp_path)
+    before = page.read_bytes()
+
+    with pytest.raises(ValueError, match="COMPACT_RELATIONS_REQUIRE_RICH_KIND"):
+        commands.op_observe_memory(
+            tmp_path,
+            path=PAGE,
+            operation="add",
+            category="config",
+            content="One liftable, one not",
+            relations=[
+                {"kind": "derived_from", "target": "applied-export"},
+                {"kind": "supports", "target": "[[Observe]]"},
+            ],
+        )
+
+    assert page.read_bytes() == before
+    frontmatter, _, _ = vault.parse_frontmatter(page.read_text(encoding="utf-8"))
+    assert frontmatter.get("sources") is None
+
+
 def test_rich_authoring_and_compact_relation_rejection(tmp_path: Path) -> None:
     page = _write_page(tmp_path)
     relation = [{"kind": "supports", "target": "[[Observe]]"}]

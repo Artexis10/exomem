@@ -9490,6 +9490,14 @@ def op_settle_source_capture(
     return capture_attempts_module.settle(vault_root, reservation, retire_owned=retire_owned)
 
 
+#: The step a committed save_source reply asks for when the saved file could be the current state
+#: of something a note already states. The projection merges it with the capture-sweep ask.
+_SAVE_SOURCE_PRESENTED_NEXT = (
+    "If the person presents this file as the current state, such as an applied or final export, "
+    "update the note's current statement now and cite this Source; keep the earlier value as dated history."
+)
+
+
 def op_capture_source(
     vault_root: Path,
     source_schema: object,
@@ -9725,6 +9733,10 @@ def op_capture_source(
                 )
             except ValueError as exc:
                 out["compile_guidance"] = {"available": False, "error": str(exc)}
+    # A settled replay (`mutated: false`) wrote nothing, so only a committed save asks for the
+    # presentation step. A custody_only Source is safekeeping, not material a note cites.
+    if out.get("mutated") is not False and custody_only is not True:
+        out["next_action"] = _SAVE_SOURCE_PRESENTED_NEXT
     return out
 
 

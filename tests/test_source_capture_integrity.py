@@ -84,3 +84,29 @@ def test_exact_original_file_is_preserved_with_its_hash(vault, source_schema, tm
     assert stored["outcome"] == "stored"
     assert Path(vault / stored["stored_path"]).read_bytes() == original
     assert stored["hash"] == digest
+
+def test_a_committed_save_reply_asks_the_agent_to_update_a_presented_current_state(vault, source_schema):
+    from exomem import mutation_terminal
+
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Applied export", source_kind="session",
+        content="The export's final text.")
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert reply["next_action"] == (
+        "If the person presents this file as the current state, such as an applied or final export, "
+        "update the note's current statement now and cite this Source; keep the earlier value as dated history."
+    )
+
+
+def test_a_custody_only_save_reply_carries_no_current_state_instruction(vault, source_schema):
+    from exomem import mutation_terminal
+
+    leaf = commands.op_capture_source(
+        vault, source_schema, title="Kept export", source_kind="session",
+        content="A file kept only for safekeeping.", custody_only=True)
+    reply = mutation_terminal.project_terminal(
+        mutation_terminal.committed_terminal(leaf, request_id="r", receipt_id=None, idempotency_key=None),
+        "compact", outcome_verb="saved")
+    assert "current state" not in reply.get("next_action", "")
