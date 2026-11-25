@@ -600,6 +600,7 @@ def append_record(
             audit_correlation=audit_correlation,
         )
         _release_held_file(root, resumed, warnings)
+        warnings.extend(_related_pages_not_looked_up(manifest, created=True))
         committed = _with_warnings(committed, warnings)
     # Outside the guard on purpose -- see `_due_state_carrier`.
     advisory = _due_state_carrier(
@@ -1830,11 +1831,14 @@ def bulk_upsert_records(
             origin_inputs=tuple(origin_inputs),
             dependency_plan=dependencies,
         )
-        return _report(
-            committed=True,
-            after_hash=prev_container,
-            first_transition=by_index[plans[0].index]["transition_id"],
-            last_transition=by_index[plans[-1].index]["transition_id"],
+        return _with_warnings(
+            _report(
+                committed=True,
+                after_hash=prev_container,
+                first_transition=by_index[plans[0].index]["transition_id"],
+                last_transition=by_index[plans[-1].index]["transition_id"],
+            ),
+            _related_pages_not_looked_up(manifest, created=bool(inserts)),
         )
 
 
@@ -5552,6 +5556,15 @@ def ignored_recipe_warnings(manifest: collections.CollectionManifest) -> list[di
     """``collections.ignored_recipes_diagnostic`` in validate's warning shape; empty when there is none."""
     diagnostic = collections.ignored_recipes_diagnostic(manifest)
     return [] if diagnostic is None else [{"code": diagnostic.code, "message": diagnostic.reason}]
+
+
+def _related_pages_not_looked_up(manifest: collections.CollectionManifest, *, created: bool) -> list[str]:
+    """The warning a file-mode Records write that created rows carries: only a vault store looks up related pages."""
+    if not created or manifest.semantic_profile != "records":
+        return []
+    from .collection_store import related_pages
+
+    return [related_pages.unavailable_warning("a Records collection kept as files never runs the lookup")]
 
 
 def _with_warnings(result: dict[str, Any], warnings: list[Any]) -> dict[str, Any]:

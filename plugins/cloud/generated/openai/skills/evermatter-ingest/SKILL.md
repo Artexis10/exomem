@@ -2,7 +2,7 @@
 name: evermatter-ingest
 description: Ingest an external article, PDF, pasted note, dataset, image, audio, or video into Evermatter while preserving raw evidence before compiling conclusions. Part of Evermatter, formerly Exomem.
 metadata:
-  skill_contract: d962f1acc6942019549b76331e787ddd6ba377b0a5436ae62bc7a63e6fd8449f
+  skill_contract: 9f788f969e6a2e54b1bdb2aa41766474467f885b70388d9ba964cdfd10bc5443
   version: "0.1.0"
 ---
 

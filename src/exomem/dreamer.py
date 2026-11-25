@@ -31,7 +31,9 @@ before the next page on the first foreground request or the first vault change.
 
 What it reads. The freshness registry's delta, or an exact diff of the live
 signature map against its persisted `seen` map (`dreamer_delta`). Never a
-filesystem walk, and no vault-wide snapshot to lose to a concurrent write.
+filesystem walk, and no vault-wide snapshot to lose to a concurrent write. The
+duplicate-fact family also reads the Records store read-only, through the
+store's read sessions, for the pages that rows link.
 
 Controls. `EXOMEM_DREAMER` (a kill switch that overrides the file), else the
 config key `dreamer` in the per-machine config file: `off` (default: no thread,
@@ -62,9 +64,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import dreamer_delta, dreamer_families, dreamer_store, foreground_activity, freshness
+from . import (
+    dreamer_delta,
+    dreamer_families,
+    dreamer_store,
+    foreground_activity,
+    freshness,
+    sensed_model,
+    sensor_worker,
+)
 from . import dreamer_policy as policy
-from . import sensed_model, sensor_worker
 
 log = logging.getLogger(__name__)
 
@@ -646,29 +655,40 @@ def run_once(
                     processed and store.pending_count(conn) > 0
                 ):
                     stop_reason = "pages"
-            if sensing_on():
-                # The sensed model follows `seen` in its own file, inside what
-                # is left of this tick's budgets.
-                def halt() -> str | None:
-                    spent = policy.tick_exhausted(
-                        pages=len(processed) + sensed.processed,
-                        cpu=clock.thread_time() - started_cpu,
-                        wall=clock.monotonic() - started_wall,
-                        page_limit=budget.pages,
-                        cpu_limit=budget.cpu,
-                        wall_limit=budget.wall,
-                    )
-                    if spent is not None:
-                        return spent
-                    if should_stop is not None and should_stop():
-                        return "stop"
-                    if foreground_activity.foreground_since(vault_root, started_real):
-                        return "foreground"
-                    return None
+            def halt(extra: int) -> str | None:
+                """Why the tick may do no more work, `extra` pages beyond the pages it processed."""
+                spent = policy.tick_exhausted(
+                    pages=len(processed) + extra,
+                    cpu=clock.thread_time() - started_cpu,
+                    wall=clock.monotonic() - started_wall,
+                    page_limit=budget.pages,
+                    cpu_limit=budget.cpu,
+                    wall_limit=budget.wall,
+                )
+                if spent is not None:
+                    return spent
+                if should_stop is not None and should_stop():
+                    return "stop"
+                if foreground_activity.foreground_since(vault_root, started_real):
+                    return "foreground"
+                return None
 
+            # The duplicate family's owed comparisons follow the pages, inside what is left of this tick's budgets.
+            owed_ctx = dreamer_families.Context(
+                vault_root=vault_root, store=store, conn=conn, now=clock.time(), shared=shared
+            )
+            try:
+                owed, owed_stop = dreamer_families.refresh_owed_duplicates(owed_ctx, halt)
+            finally:
+                owed_ctx.close()
+            if owed_stop is not None and stop_reason == "drained":
+                stop_reason = owed_stop
+            if sensing_on():
+                # The sensed model follows `seen` in its own file, inside what is left of this tick's budgets.
                 sensed = sensed_model.TickReport()
                 sensed_model.run_tick(
-                    vault_root, seen=store.seen_map(conn), halt=halt, now=clock.time(), report=sensed,
+                    vault_root, seen=store.seen_map(conn), halt=lambda: halt(owed + sensed.processed),
+                    now=clock.time(), report=sensed,
                     reseeding=bool(store.get_meta(conn, "reseeding")) and store.pending_count(conn) > 0,
                 )
             now = clock.time()
@@ -678,6 +698,7 @@ def run_once(
             refresh = (
                 delivered
                 or bool(processed)
+                or owed > 0
                 or token != store.get_meta(conn, "deliverable_token")
                 or (isinstance(next_settle, (int, float)) and now >= float(next_settle))
             )

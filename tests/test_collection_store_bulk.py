@@ -127,8 +127,10 @@ def test_generated_identity_receipt_replays_after_reopen_without_another_write(s
         assert tuple(handle.connection.iterdump()) == before
 
 
-def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store):
+def test_dispatcher_reconstructs_native_replay_without_an_outer_ledger(store, monkeypatch):
     """A lost transport ledger must not turn a verified replay into a bare receipt."""
+    # A replay does no page lookup, so the first reply would hold a lookup warning the replay never repeats.
+    monkeypatch.setattr("exomem.collection_store.related_pages.for_write", lambda *a, **kw: None)
     from test_due_state_bulk_carriers import _command
 
     create(store)

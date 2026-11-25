@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import threading
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
 
@@ -101,6 +101,10 @@ def match(target, target_id: str, value: str) -> str | None:
         return None
 
 
+# The spelling of a page's entry, which `link_match` writes and `link_page` reads back.
+_MEMORY = "memory:"
+
+
 def link_match(value: str) -> str | None:
     """What a canonical page or row ref is found by, or NULL for any other link value.
 
@@ -115,13 +119,18 @@ def link_match(value: str) -> str | None:
     """
     memory = memory_refs.parse_memory_ref(value)
     if memory is not None:
-        return f"memory:{memory}"
+        return f"{_MEMORY}{memory}"
     row = collections.parse_row_ref(value)
     if row is not None:
         # The two row profiles are fixed native identity protocols (`parse_row_ref`), not vocabulary.
         prefix = "plan" if row[0] == "planning" else "record"
         return f"{prefix}:{row[1]}/{row[2]}"
     return None
+
+
+def link_page(match: str) -> str | None:
+    """The identity of the page that a link entry names, or None for a row's entry or any other entry."""
+    return match.removeprefix(_MEMORY) if match.startswith(_MEMORY) else None
 
 
 def _entries(declaration, target_id: str, target, values: Mapping[str, Any]) -> list[str]:
@@ -389,6 +398,69 @@ def link_fields(conn) -> dict[str, tuple]:
         if links:
             found[collection_id] = links
     return found
+
+
+def link_pairs(declared: Mapping[str, tuple]) -> str:
+    """The declared link fields as the JSON array of `[collection_id, field]` pairs that a statement joins."""
+    return json.dumps([[collection_id, d.dotted] for collection_id, fields in declared.items() for d in fields])
+
+
+def link_pending(conn, declared: Mapping[str, tuple]) -> dict[str, set[str]]:
+    """The declared link fields whose index is still building, by collection; a field with no state row is.
+
+    A collection whose fields are all built costs one statement and is absent from the answer.
+    """
+    pending: dict[str, set[str]] = {}
+    for collection_id, field in conn.execute(
+            "SELECT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w WHERE NOT EXISTS ("
+            "SELECT 1 FROM item_reference_state s WHERE s.collection_id=json_extract(w.value,'$[0]')"
+            " AND s.field_path=json_extract(w.value,'$[1]') AND s.target_id=? AND s.ready=1)",
+            (link_pairs(declared), collections.LINK_TARGET)).fetchall():
+        pending.setdefault(collection_id, set()).add(field)
+    return pending
+
+
+def cited_fields(conn, declared: Mapping[str, tuple], keys: Iterable[str]) -> dict[str, set[str]]:
+    """The declared link fields whose index holds one of `keys` (`link_match` spellings), by collection.
+
+    One probe of the index's leading columns, so the cost follows the declared fields, never the rows.
+    """
+    found: dict[str, set[str]] = {}
+    for collection_id, field in conn.execute(
+            "SELECT DISTINCT json_extract(w.value,'$[0]'), json_extract(w.value,'$[1]') FROM json_each(?) w"
+            " CROSS JOIN json_each(?) a WHERE EXISTS (SELECT 1 FROM item_references r"
+            " WHERE r.collection_id=json_extract(w.value,'$[0]') AND r.field_path=json_extract(w.value,'$[1]')"
+            " AND r.match=a.value)", (link_pairs(declared), json.dumps(sorted(keys)))).fetchall():
+        found.setdefault(collection_id, set()).add(field)
+    return found
+
+
+def link_entries(conn, row_ids: Iterable[int]) -> dict[int, list[str]]:
+    """The link entries (`link_match` spellings) that the index holds for each of `row_ids`; a row with none is absent.
+
+    A reference field's entries share the table and may spell a natural key as a page, so only a field whose
+    state row names no target counts.
+    """
+    found: dict[int, list[str]] = {}
+    for row_id, match in conn.execute(
+            "SELECT r.row_id, r.match FROM item_references r JOIN item_reference_state s "
+            "ON s.collection_id=r.collection_id AND s.field_path=r.field_path AND s.target_id=? "
+            "WHERE r.row_id IN (SELECT value FROM json_each(?))",
+            (collections.LINK_TARGET, json.dumps(sorted(set(row_ids))))):
+        found.setdefault(row_id, []).append(match)
+    return found
+
+
+def unbuilt_rows(conn, row_ids: Iterable[int]) -> set[int]:
+    """The rows of `row_ids` whose link entries the backfill has not built yet, so no read can see their links.
+
+    A write keeps no entry for a row past a warming field's `built_through`; the backfill builds it later.
+    """
+    return {row_id for (row_id,) in conn.execute(
+        "SELECT i.row_id FROM items i JOIN item_reference_state s ON s.collection_id=i.collection_id "
+        "AND s.target_id=? AND s.ready=0 AND s.built_through<i.row_id "
+        "WHERE i.row_id IN (SELECT value FROM json_each(?))",
+        (collections.LINK_TARGET, json.dumps(sorted(set(row_ids)))))}
 
 
 def due(conn) -> tuple[str, ...]:
