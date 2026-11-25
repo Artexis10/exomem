@@ -100,12 +100,20 @@ def progress(conn, collection_id: str, field: str) -> dict[str, int]:
 
 
 def seed(conn, manifest, field: str) -> None:
-    """Give a requested field a warming state row, unless it has one or is no longer a declared scalar."""
+    """Give a requested field a warming state row, or reset one whose encoding is out of date.
+
+    A field that is no longer a declared scalar gets none. An out-of-date index is one that an earlier key
+    format built; a query cannot use it, and without this reset only a write to the collection would rebuild it.
+    """
     kind = indexable(manifest, field)
-    if kind is None or state(conn, manifest.collection_id, field) is not None:
+    if kind is None:
         return
-    conn.execute("INSERT INTO field_span_state(collection_id,field_path,encoding_hash,built_through,ready) "
-                 "VALUES(?,?,?,0,0)", (manifest.collection_id, field, encoding_hash(kind)))
+    found = state(conn, manifest.collection_id, field)
+    if found is None:
+        conn.execute("INSERT INTO field_span_state(collection_id,field_path,encoding_hash,built_through,ready) "
+                     "VALUES(?,?,?,0,0)", (manifest.collection_id, field, encoding_hash(kind)))
+    elif found[1] != encoding_hash(kind):
+        _reset(conn, found[0], kind)
 
 
 def folded(conn, field: str, kind: str, row_ids: Iterable[int]) -> Iterator[tuple[int, timeline.Span, int, str]]:

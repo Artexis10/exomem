@@ -485,6 +485,19 @@ def test_a_field_removed_or_retyped_loses_its_index(lamps, monkeypatch):
         "TIMELINE_WARMING"
 
 
+def test_an_index_of_an_earlier_key_format_rebuilds_when_a_query_asks(lamps, monkeypatch):
+    """After an upgrade that changes how values compare, an index no write reaches would stay warming for good."""
+    pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"])
+    build(lamps)
+    monkeypatch.setattr(timeline_index, "KEY_FORMAT", timeline_index.KEY_FORMAT + 1)
+
+    stale = pytest.raises(OpError, from_index, monkeypatch, lamps, **QUERIES["every span"]).value
+    build(lamps)
+
+    assert stale.code == "TIMELINE_WARMING"
+    assert from_index(monkeypatch, lamps, **QUERIES["every span"])["timeline"]["source"] == "index"
+
+
 def revise(writer, text):
     with request_scope(OWNER), preview_store(writer.root, writer.handle):
         guards = record_memory(writer.root, "inspect", collection=LAMPS)["lifecycle_guards"]
