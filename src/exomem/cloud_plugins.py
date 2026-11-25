@@ -37,6 +37,13 @@ _CLAUDE_DIRECTORY_SUFFIXES = frozenset(
     (".md", ".txt", ".json", ".yaml", ".yml", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 )
 _CLAUDE_DIRECTORY_NAMES = frozenset(("LICENSE", ".gitignore"))
+# claude.ai rejects an uploaded plugin whose description exceeds 500 characters
+# ("Plugin description must be at most 500 characters", observed on 2026-11-25; the
+# limit is not in the published docs). The name format is the documented directory
+# rule: lowercase letters, digits and hyphens, up to 64, starting and ending with a
+# letter or digit.
+_CLAUDE_DESCRIPTION_MAX = 500
+_CLAUDE_PLUGIN_NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 # An installer prefix immediately naming the package unpinned (`uvx evermatter`,
 # `pip install evermatter`) or a floating tag resolves a mutable source at run time;
 # the reviewer's "untrusted or mutable" finding covers both. Only the pinned
@@ -125,6 +132,17 @@ def _validate_openai(root: Path, package: Path) -> None:
         )
         value = json.loads((package / filename).read_text(encoding="utf-8"))
         jsonschema.validate(value, schema)
+
+
+def _validate_claude_manifest(manifest: dict) -> None:
+    """Refuse a Claude manifest that claude.ai's plugin upload or directory would reject."""
+    if not _CLAUDE_PLUGIN_NAME.fullmatch(manifest["name"]):
+        raise ValueError(f"Claude plugin name is not lowercase-hyphenated: {manifest['name']!r}")
+    if len(manifest["description"]) > _CLAUDE_DESCRIPTION_MAX:
+        raise ValueError(
+            f"Claude plugin {manifest['name']} description has {len(manifest['description'])} "
+            f"characters; claude.ai admits at most {_CLAUDE_DESCRIPTION_MAX}"
+        )
 
 
 def _validate_claude_directory(package: Path) -> None:
@@ -220,22 +238,26 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         display_name = identity_override.get("display_name", definition["display_name"])
         # An edition that sits beside another in one marketplace leads with who it is for,
         # so a person choosing between them can tell them apart from the listing alone.
+        # Claude listings take a short description; the readme keeps the full one.
         description = "\n\n".join(
-            part for part in (identity_override.get("lead"), definition["description"]) if part
+            part
+            for part in (identity_override.get("lead"), definition["claude_summary"])
+            if part
         )
         readme = (
             f"# {display_name}\n\n"
-            f"{description}\n\n"
+            + (f"{identity_override['lead']}\n\n" if identity_override.get("lead") else "")
+            + f"{definition['description']}\n\n"
             "## Getting started\n\n"
             + (
                 "Install the plugin and connect your Evermatter account. Check the account "
                 "shown on the sign-in page before approving access. "
                 if bundles_server
                 else "Connect Evermatter to your assistant first, as a connector or a custom "
-                "MCP server for your Evermatter Cloud account or your own Evermatter server. "
+                "MCP server for your Evermatter account or your own Evermatter server. "
                 "This edition adds lifecycle hooks and skills and bundles no MCP server, so "
                 "it uses the Evermatter connection your account already has. Install the "
-                "Evermatter Cloud plugin instead if you have not connected Evermatter. "
+                "Evermatter plugin instead if you have not connected Evermatter. "
             )
             + "Then chat normally. "
             "When something is worth keeping, ask Evermatter to remember it; in a new chat, "
@@ -329,6 +351,7 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             }
             path = target / ".claude-plugin/plugin.json"
             path.parent.mkdir()
+            _validate_claude_manifest(manifest)
             path.write_bytes(_json_bytes(manifest))
             # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
             # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).

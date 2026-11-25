@@ -1,6 +1,6 @@
-# Evermatter Cloud
+# Evermatter
 
-For an Evermatter Cloud account. Installs the Evermatter Cloud connection with lifecycle hooks and skills. If you already connect Evermatter another way, such as your own Evermatter server, install Evermatter hooks instead.
+For an Evermatter account: connects Claude to Evermatter and adds automatic recall and capture.
 
 Evermatter is a living knowledge base for your AI assistants, not a dump of chat history. It preserves decisions, sources, evidence, relationships, plans, and useful conclusions as organised knowledge you can revisit, correct, and build on.
 

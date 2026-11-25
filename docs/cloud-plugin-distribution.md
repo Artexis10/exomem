@@ -44,16 +44,20 @@ executable on a supported, normally trusted execution surface. They do not
 run in Claude Chat. Skills remain the same portable operating contract.
 
 The connector edition, `generated/claude-connector-hooks`, is listed in the
-repository marketplace as `evermatter-hooks`. It carries the same hooks and
+repository marketplace as `evermatter-self-hosted`. It carries the same hooks and
 skills as the hooked edition and bundles no MCP server. Install it on an
 account that already connects Evermatter, for example a self-hosted server
 added as a connector. Its hooks then activate that existing connection. The
 hooked edition would add a second server that points at Evermatter Cloud.
 
 The two marketplace editions name themselves in `plugins/cloud/definition.json`
-under `edition_identities`. The hooked edition shows as "Evermatter Cloud" and
-the connector edition as "Evermatter hooks". Each description opens with the
-account it serves, so a person can choose from the listing alone.
+under `edition_identities`. The hooked edition shows as "Evermatter" and the
+connector edition as "Evermatter (self-hosted)". Each description opens with the
+account it serves, so a person can choose from the listing alone. Claude
+manifests carry the short `claude_summary` after that lead; the readme keeps the
+full description. The build refuses a Claude manifest whose description exceeds
+500 characters, which claude.ai's plugin upload rejects, or whose name breaks the
+directory's lowercase-hyphen rule.
 
 Hook installation health does not prove that the client loaded or executed the
 registration. Native acceptance must observe a normally trusted fresh session,

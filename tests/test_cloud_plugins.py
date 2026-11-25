@@ -206,6 +206,23 @@ def test_claude_directory_validation_rejects_hooks_and_scripts(
         cloud_plugins._validate_claude_directory(tmp_path / "claude")
 
 
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ({"description": "x" * 501}, "description"),
+        ({"name": "Evermatter Hooks"}, "lowercase-hyphenated"),
+    ],
+)
+def test_claude_manifest_validation_rejects_what_claude_ai_refuses(
+    override: dict, message: str
+) -> None:
+    # claude.ai refused an uploaded plugin whose description ran past 500 characters;
+    # the build must fail before such a package ships.
+    manifest = {"name": "evermatter", "description": "Fits."} | override
+    with pytest.raises(ValueError, match=message):
+        cloud_plugins._validate_claude_manifest(manifest)
+
+
 def test_registered_cloud_hooks_do_not_read_or_forward_local_credentials(tmp_path: Path) -> None:
     # Catch a public archive carrying local credential access, or losing its
     # native activation/capture behaviour when that local-only dependency is absent.
