@@ -27,6 +27,7 @@ from . import (
     working_set,
     working_set_index,
 )
+from .collection_store import preview as store_preview
 from .governance import egress, principal
 
 
@@ -188,6 +189,14 @@ def compile_block(
     ]
     verdicts = egress.classify_units(root, [_unit(c.item, c.path) for c in candidates], purpose=caller.purpose)
     admitted = [candidate for candidate, verdict in zip(candidates, verdicts, strict=True) if verdict == egress.UNIT_KEPT]
+    # A busy store refuses a command's release decisions together, which withholds every store collection. The owner
+    # still hears their names (`preview.store_notice` grants a notice, never view bytes); nobody else hears of them.
+    refused = [
+        candidate for candidate, verdict in zip(candidates, verdicts, strict=True)
+        if verdict != egress.UNIT_KEPT and candidate.item["kind"] == vault_skills.KIND_COLLECTION
+    ]
+    if refused and not store_preview.pages_unavailable(root):
+        refused = []
     block = _empty()
     served: list[dict[str, Any]] = []
     unlisted: list[_Candidate] = []
@@ -203,12 +212,16 @@ def compile_block(
         used += cost
     # Each item left without a line is still named while its name fits, so the agent sees every collection and
     # skill it may choose from and decides itself; `omitted` then counts only the items not even named.
-    names, named = _fit_names(unlisted, names_chars)
+    names, named = _fit_names(unlisted + refused, names_chars)
+    noticed = [candidate for candidate in named if candidate in refused]
+    named = [candidate for candidate in named if candidate not in refused]
     block["omitted"] -= len(named)
-    if named:
+    if named or noticed:
         block["names"] = names
-    block["state"] = "ready" if block["items"] or named else "empty"
-    block["generation"] = _digest({"items": block["items"], "names": names, "omitted": block["omitted"]})
+    block["state"] = "ready" if block["items"] or named or noticed else "empty"
+    # The refused names stay out of the generation, so the next turn the store serves lists them again in full.
+    released = _fit_names(named, names_chars)[0] if noticed else names
+    block["generation"] = _digest({"items": block["items"], "names": released, "omitted": block["omitted"]})
     if block["state"] == "ready" and known_generation == block["generation"]:
         # The caller holds exactly these items: repeat none of them, and keep the count they were chosen with.
         block.update(state="unchanged", items=[])
@@ -216,9 +229,10 @@ def compile_block(
         served = []
     elif block["state"] == "ready":
         block["advice"] = _advice()
-        if named:
+        if named or noticed:
             block["names_advice"] = _names_advice()
         # Terminal egress decides the whole unit each name comes from, so a name never outlives its page's release.
+        # A refused name is the owner's notice, which `pages_unavailable` decided; terminal egress would refuse it again.
         served.extend(_unit(candidate.item, candidate.path) for candidate in named)
     turn_items, turn_used = [], 0
     for candidate in _of_the_turn(root, unlisted, domains, reached) if unlisted and turn_chars else ():

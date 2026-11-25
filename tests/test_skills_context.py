@@ -604,3 +604,50 @@ def test_names_fill_their_bound_exactly_across_both_kinds(skills_vault):
 
     assert filled["names"] == {"skill": ["mid", "zeta"], "collection": ["Pantry counts"]} and filled["omitted"] == 0
     assert short["names"] == {"skill": ["mid", "zeta"]} and short["omitted"] == 1
+
+
+def _store_refuses_collections(monkeypatch) -> None:
+    """The live failure of 2026-11-25: a store kept busy by a write stream refuses the command's release decisions,
+    and egress withholds every page the store owns. This stands in for that refusal at the egress boundary."""
+    from exomem import published_admission
+    from exomem.collection_store import connection
+
+    egress = skills_context.egress
+    decide = egress.classify_units
+
+    def refused_while_busy(root, units, **kwargs):
+        verdicts = decide(root, units, **kwargs)
+        decisions = published_admission.request_decisions()
+        decisions.refusals.setdefault("store", connection.busy("the collection store did not take this request"))
+        return [
+            egress.UNIT_WITHHELD_SILENTLY if "_collection.md" in json.dumps(unit) else verdict
+            for unit, verdict in zip(units, verdicts, strict=True)
+        ]
+
+    monkeypatch.setattr(egress, "classify_units", refused_while_busy)
+
+
+def test_a_busy_store_still_names_the_owners_collections_without_their_summaries(skills_vault, monkeypatch):
+    _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _refresh(skills_vault)
+    healthy = _activate(skills_vault)["skills"]
+    _store_refuses_collections(monkeypatch)
+
+    packet = _activate(skills_vault)
+    block = packet["skills"]
+
+    assert packet["generation"]["collection_store"] == "unavailable"
+    assert _names(block) == ["alpha", "mid", "zeta"]
+    assert block["names"] == {"collection": ["Depot stock"]}
+    assert "Observations of depot stock" not in json.dumps(block)
+    assert block["generation"] != healthy["generation"]
+
+
+def test_a_busy_store_tells_an_external_caller_nothing_of_the_collections(skills_vault, monkeypatch):
+    _collection(skills_vault, "Depot Stock", "Depot stock", DEPOT_BODY)
+    _refresh(skills_vault)
+    _store_refuses_collections(monkeypatch)
+
+    block = _activate(skills_vault, caller=_external())["skills"]
+
+    assert "Depot stock" not in json.dumps(block)
