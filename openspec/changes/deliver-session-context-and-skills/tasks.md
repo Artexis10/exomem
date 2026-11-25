@@ -72,5 +72,6 @@
   - Development cases (24): the needed page reached the first five leads in 4 on main and 5 with the change, +0.04 [−0.08, +0.17]. One case gained a page from no lead to lead 1. One case lost a page that only the keyword lane ranked, from lead 5 to below the first five.
   - Frozen held-out cases (10): 4 against 5, +0.10 [0, 0.30], one gained and none lost.
   - Task-discovery median on the development cases: 886 ms against 860 ms, −5.5 ms [−87, +54]. Main's own rerun drifted +145 ms.
-  - On the held-out cases: +97 ms [+6, +301], with no drift rerun. Most of it is in the deeper keyword lane. Ordering itself costs under 1 ms.
+  - On the held-out cases: +97 ms [+6, +301], with no drift rerun, so it does not separate the change from drift. Ordering itself costs under 1 ms. A paired timing of the keyword lane alone at both depths, on synthetic 4,000- and 16,000-page vaults, showed no difference.
+  - Run records stay outside the repository, with the private cases.
 - [ ] 7.3 Verify on the installed service that the broad question from the 2026-11-24 miss serves its compiled note among the rendered leads.

@@ -1516,20 +1516,21 @@ def task_candidates(
     `attach_task_links` once the leads are projected. Each lane records a child span of
     `working_set.task_context`, so a slow recall names its stage.
 
-    The leads follow the lanes' fused ranking, the reciprocal-rank fusion `search_memory` uses, not the
-    order the lanes ran in. Each lane reads as deep as search's own lanes do, so a page that two lanes
-    rank well outranks a page that one lane alone ranks first, and the text lane alone cannot fill
-    every lead. A collection the turn routes to stays first.
+    The leads follow the lanes' fused ranking, the reciprocal-rank fusion `search_memory` uses at its
+    adopted ranking config, not the order the lanes ran in. The keyword and dense lanes read as deep as
+    search's own lanes do, and the method lane keeps the lead limit. So a page that two lanes rank well
+    outranks a page that one lane alone ranks first, and the keyword lane alone cannot fill every lead.
+    A collection the turn routes to stays first.
     """
     from . import (
         bm25,
         collection_claims,
         context_task,
         context_views,
+        find,
         find_types,
         fusion,
         lexstore,
-        ranking_config,
         record_governance,
     )
     from .governance import egress
@@ -1600,7 +1601,8 @@ def task_candidates(
             found[path]["origins"].append(origin)
 
     method_queries: list[tuple[str, str]] = []
-    ranking = ranking_config.DEFAULT_RANKING
+    # Search's adopted config, so an operator's tuned fusion constant or depth moves both alike.
+    ranking = find._active_ranking()
     depth = max(limit * ranking.candidate_multiplier, ranking.candidate_floor)
     # Each lane's hits, best first, per origin; the leads come from their fusion.
     rankings: list[list[str]] = []
