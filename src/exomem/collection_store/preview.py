@@ -7,6 +7,7 @@ Nothing else, and no environment flag, changes file-mode routing.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext, suppress
 from contextvars import ContextVar
@@ -106,7 +107,12 @@ class _PreviewPhase:
             raise CollectionStoreError("COLLECTION_STORE_BOUNDARY_REQUIRED", "Source metadata requires the actual writer boundary")
         handle = self.depart()
         try:
-            with manager._lock:
+            # Reads beside the store thread borrow the store for one short snapshot read and take no
+            # boundary, so wait for them to return, up to the mutation timeout, before refusing.
+            deadline = time.monotonic() + manager._mutation_timeout_seconds
+            with manager._store_condition:
+                while manager._store_borrowers and (remaining := deadline - time.monotonic()) > 0:
+                    manager._store_condition.wait(min(0.05, remaining))
                 if manager._store_borrowers:
                     raise CollectionStoreError("COLLECTION_STORE_BUSY", "another checkout still borrows the store")
             handle.require_write_authority()

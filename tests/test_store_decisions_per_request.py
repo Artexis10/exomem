@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -426,3 +427,37 @@ def test_a_write_that_holds_the_store_thread_does_not_withhold_the_owners_store_
     assert "collection_store" not in served["generation"], "recall reported the store unavailable"
     assert set(_refs(served)) & {_store_ref(index) for index in range(PAGE_COUNT)}, "recall withheld the store pages"
     assert set(pages) <= found and "collection_store" not in warming
+
+
+@pytest.mark.timeout(180)
+def test_a_store_handoff_delays_the_owners_recall_instead_of_withholding_it(
+    service, monkeypatch: pytest.MonkeyPatch  # noqa: F811
+) -> None:
+    """A portability-export flush hands the store off for a moment; recall waits it out and stays whole.
+
+    A handoff refuses every store checkout until it ends. A release decision that met that refusal
+    withheld every store page and reported the store unavailable, although the store was back a
+    second later.
+    """
+    root, manager = service.root, service.manager
+    pages = _seed(root, "owner")
+    flushing = threading.Event()
+    real_flush = runtime.CollectionStoreRuntime.flush
+
+    def slow_flush(self, *args, **kwargs):
+        flushing.set()
+        time.sleep(1.5)
+        return real_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(runtime.CollectionStoreRuntime, "flush", slow_flush)
+    exporter = threading.Thread(target=lambda: manager._release_collection_store(
+        manager._fencing_token, deadline=time.monotonic() + 30, release=False))
+    exporter.start()
+    try:
+        assert flushing.wait(30), "the export flush never started"
+        found, warming = _ask(root, OWNER)
+    finally:
+        exporter.join(60)
+
+    assert set(pages) <= found, "recall withheld the store pages during the handoff"
+    assert "collection_store" not in warming

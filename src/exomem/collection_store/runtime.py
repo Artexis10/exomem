@@ -1717,6 +1717,11 @@ class StoreServer:
         from .preview import preview_store
 
         manager, runtime = self.manager, self.runtime
+        if queue:
+            # A store handoff, such as an idle release, refuses every checkout until it ends. A read that
+            # may queue waits it out here, holding nothing, up to the deadline that `call` uses.
+            with foreground_priority.foreground(), call_spans.span("store.admission_wait"):
+                manager.await_store_admission(time.monotonic() + manager._mutation_timeout_seconds)
         with ExitStack() as scope:
             handle = None
             # A service's runtime that is not yet reporting resolves its takeover in a checkout on the store thread.

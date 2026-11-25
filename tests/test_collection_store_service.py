@@ -3151,3 +3151,47 @@ def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(ser
     published = working_set_index.published_collection_manifests(service.root, 1)
     assert CID in {manifest.collection_id for manifest in found}
     assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def test_a_write_that_records_source_dependencies_waits_for_a_read_beside_the_store_thread(original_service, monkeypatch):
+    """A read beside the store thread borrows the store while it reads; a Source write waits for it to return.
+
+    Release decisions read beside the thread on most turns that touch store pages. A write that records
+    Source dependencies refused as busy whenever one was still reading.
+    """
+    from exomem import provenance
+    from exomem.collection_store import preview
+
+    service, reference, _original, expected, _source_path = original_service
+    root, server = service.root, runtime._server(service.root)
+    at_metadata, reading = threading.Event(), threading.Event()
+    real_metadata = preview._PreviewPhase.source_metadata
+
+    asked = []
+
+    def observed(self):
+        asked.append(threading.current_thread() is not reader)
+        at_metadata.set()
+        return real_metadata(self)
+
+    def read():
+        reading.set()
+        assert at_metadata.wait(60), "the write never reached its Source metadata"
+        time.sleep(0.3)  # still reading when the write asks for the store
+
+    monkeypatch.setattr(preview._PreviewPhase, "source_metadata", observed)
+    reader = threading.Thread(target=lambda: server.read_beside(read, initial=None, progress=False))
+    reader.start()
+    assert reading.wait(20)
+    body = provenance.encode_origin({"inputs": {"original": {"representation": "original",
+        "reference": reference, "version": hashlib.sha256(expected).hexdigest(), "size": len(expected)}},
+        "assessments": [], "bindings": []}) + "\nRetain the observation.\n"
+    try:
+        result = call(root, "record_memory", action="append", collection=CID, item={"title": "Acquired"}, body=body,
+                      why="retain the acquired observation", response_detail="full")
+    finally:
+        at_metadata.set()
+        reader.join(60)
+
+    assert asked and all(asked), "the write never asked for its Source metadata"
+    assert result["outcome"] == "committed"
