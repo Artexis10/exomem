@@ -919,6 +919,11 @@ def op_bootstrap(
         from . import activity as activity_module
 
         return activity_module.payload(vault_root)
+    if section == bootstrap_core_module.WHATS_NEW_SECTION:
+        # The release notes of the running image for Home: no vault content, no reference payload.
+        from . import release_notes as release_notes_module
+
+        return release_notes_module.payload()
 
     session_requested = profile == "session"
     session_unavailable: str | None = None

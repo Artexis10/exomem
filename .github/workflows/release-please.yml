@@ -581,9 +581,14 @@ jobs:
       IMAGES: ${{ needs.plan.outputs.images }}
       DRY_RUN: ${{ needs.plan.outputs.dry_run }}
     steps:
+      # The full history and the version tags, without file contents: the user notes of each release
+      # are found from the tags (scripts/user_notes.py generate).
       - uses: actions/checkout@v4
         with:
           ref: refs/tags/${{ needs.plan.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+          filter: blob:none
 
       - name: Check out publication tools from the workflow revision
         uses: actions/checkout@v4
@@ -593,6 +598,7 @@ jobs:
           sparse-checkout: |
             infra/scripts
             scripts/image-licences
+            scripts/user_notes.py
 
       - name: Install distribution filename parser
         run: python3 -m pip install packaging
@@ -639,6 +645,16 @@ jobs:
           [[ "$DRY_RUN" == true ]] && arguments+=(--dry-run)
           images=$(python3 .release-tools/infra/scripts/release_recovery.py images --tag "$TAG" --directory image-evidence "${arguments[@]}")
           echo "IMAGES=$images" >> "$GITHUB_ENV"
+
+      # The notes of this release and every older one, as package data: the image then carries exactly the
+      # notes of the release it runs. A failure leaves no file, which a cell serves as an empty list, and a
+      # later release carries the same notes again, so a failed run must not block the release.
+      - name: Write the release notes into the cloud image
+        if: ${{ !cancelled() && steps.recover.outcome == 'success' && fromJSON(env.IMAGES).cloud.publish }}
+        continue-on-error: true
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: python3 .release-tools/scripts/user_notes.py generate --version "$VERSION" --output src/exomem/user_release_notes.json
 
       - name: Build and push native cloud image
         id: cloud-build
