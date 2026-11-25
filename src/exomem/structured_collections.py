@@ -3632,7 +3632,8 @@ def _validate_field_value(name: str, value: Any, spec: FieldSpec, non_null: bool
     if spec.enum and not any(
         type(value) is type(option) and value == option for option in spec.enum
     ):
-        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}")
+        allowed = listed_within(option if isinstance(option, str) else json.dumps(option) for option in spec.enum)
+        raise CollectionError("SCHEMA_ENUM", f"field is outside its enum: {name}; allowed: {allowed}")
 
 
 def validate_field_value(name: str, value: Any, spec: FieldSpec, *, non_null: bool = False) -> None:

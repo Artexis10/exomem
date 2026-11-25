@@ -247,6 +247,8 @@ def test_manifest_nested_data_is_deeply_immutable_and_schema_values_are_strict(
             {"occurred_on": "2026-07-01", "status": "invented", "metadata": {}}
         )
     assert excinfo.value.code == "SCHEMA_ENUM"
+    # An agent that sent a value outside the enum learns the values it may send instead.
+    assert str(excinfo.value).endswith("field is outside its enum: status; allowed: completed, partial")
     with pytest.raises(collections.CollectionError) as excinfo:
         manifest.schema.validate(
             {
