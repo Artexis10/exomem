@@ -6388,25 +6388,27 @@ def batch_atomic_write(
         from .vault_store import availability
         from .vault_store import batch as store_batch
 
+        # The native writer below reads the batch again when the store hands it back.
         writes = list(writes)
         writer = availability.page_writer(Path(vault_root))
-        # A batch with no page, binary or Markdown file has no change for the store, which refuses
-        # an empty one. Such files (a curation run's JSON) are file-mode's, so the native writer
-        # below commits them, as it does in a file-mode vault.
-        if writer is not None and not store_batch.names_only_other_files(Path(vault_root), writes):
+        if writer is not None:
             if _payload_custody is not None:
                 # A file-owner contract cannot silently lose its custody in another persistence owner.
                 raise ValueError("file payload custody requires its native writer")
-            return store_batch.commit_batch(
-                writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
-                completion_guards=completion_guards, index_reports=index_reports,
-                post_commit_fanout=post_commit_fanout, commit_point=commit_point,
-                defer_graph_completion=defer_graph_completion,
-                vocabulary_auxiliaries=_vocabulary_auxiliaries,
-                validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
-                publish_originals=_publish_originals, retained_original=_retained_original,
-                file_commit_witness=_file_commit_witness,
-            )
+            try:
+                return store_batch.commit_batch(
+                    writer, writes, vault_root=Path(vault_root), required_guards=required_guards,
+                    completion_guards=completion_guards, index_reports=index_reports,
+                    post_commit_fanout=post_commit_fanout, commit_point=commit_point,
+                    defer_graph_completion=defer_graph_completion,
+                    vocabulary_auxiliaries=_vocabulary_auxiliaries,
+                    validate_prepared_bindings=_validate_prepared_bindings, prepare=_prepare,
+                    publish_originals=_publish_originals, retained_original=_retained_original,
+                    file_commit_witness=_file_commit_witness,
+                )
+            except store_batch.NoStoreChange:
+                # Only files that the store does not hold (a curation run's JSON): file-mode's.
+                pass
     if _retained_original is not None:
         raise ValueError("retained import original requires its canonical store writer")
     with _BATCH_COMMIT_LOCK, ExitStack() as custody_stack:

@@ -433,7 +433,10 @@ def _error(code: str, reason: str) -> CurationError:
 
 def _write_refusal(error: Exception, what: str) -> CurationError:
     """The refusal for an artifact write that did not land: a collision only where a create-only
-    target already exists, else the write's own code and the cause, which never names a path."""
+    target already exists, else the write's own code and the cause. The cause is the batch writer's
+    message, the system's error text or an exception class name; a plain `ValueError` brings its
+    own fixed text, and the batch access check's `WRITE_REFUSED` text names the artifact's
+    vault-relative path."""
     if isinstance(error, CreateOnlyConflict):
         return _error("CURATION_PLAN_COLLISION", f"{what} already exists")
     if isinstance(error, BatchWriteError):

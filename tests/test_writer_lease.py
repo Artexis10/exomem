@@ -3011,6 +3011,55 @@ def test_identical_inflight_retry_waits_for_original_terminal_result(
     assert calls == [1]
 
 
+def test_a_retry_that_finds_the_canonical_commit_before_the_completed_row_reads_as_a_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The original call has committed but not completed: its retry answers it without the leaf."""
+    canonical_committed = threading.Event()
+    retry_returned = threading.Event()
+    calls: list[int] = []
+    outcomes: dict[str, object] = {}
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    manager = LeaseManager(
+        LeaseConfig(state_dir=tmp_path), mutation_timeout_seconds=0, idempotency_wait_seconds=2
+    )
+    command = _command(
+        writes=True, leaf=lambda _vault, value: calls.append(value) or {"committed": True, "value": value}
+    )
+    release_attempt = manager.idempotency._release_attempt
+
+    def held_release(key: str, attempt: object) -> None:
+        # The first release is the original call's, right after its canonical commit.
+        if not canonical_committed.is_set():
+            canonical_committed.set()
+            assert retry_returned.wait(_HOLD_SECONDS)
+        release_attempt(key, attempt)
+
+    monkeypatch.setattr(manager.idempotency, "_release_attempt", held_release)
+
+    def invoke(name: str) -> None:
+        try:
+            outcomes[name] = manager.invoke(
+                command, (vault,), {"value": 1}, implicit_idempotency_scope="principal:alice"
+            )
+        except BaseException as error:  # noqa: BLE001 - assert thread outcome below
+            outcomes[name] = error
+
+    original = threading.Thread(target=invoke, args=("original",), daemon=True)
+    original.start()
+    assert canonical_committed.wait(_OBSERVE_SECONDS)
+    retry = threading.Thread(target=invoke, args=("retry",), daemon=True)
+    retry.start()
+    retry.join(timeout=_HOLD_SECONDS)
+    retry_returned.set()
+    original.join(timeout=_HOLD_SECONDS)
+
+    expected = {"committed": True, "value": 1}
+    assert outcomes == {"original": expected, "retry": {**expected, "replayed": True}}
+    assert calls == [1]
+
+
 def test_terminal_receipt_survives_acknowledgement_cancellation(tmp_path: Path) -> None:
     calls: list[int] = []
     interrupt = True
@@ -6032,7 +6081,7 @@ def test_startup_sweep_leaves_an_executing_row_for_its_evidence_bearing_retry(
         resume_canonically_committed=lambda _stored: {"canonical": "resumed"},
     )
 
-    assert replayed == {"canonical": "resumed"}
+    assert replayed == {"canonical": "resumed", "replayed": True}
     assert _row_state(database, "proved:one")[0] == "completed"
 
 

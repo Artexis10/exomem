@@ -1108,6 +1108,36 @@ def test_a_retry_of_one_call_replays_its_reply_and_says_so(
     assert retry == {**first, "replayed": True}
 
 
+def test_a_retry_keeps_the_replayed_field_that_the_reply_defines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The episode resume reply lists its replayed leaves in `replayed`: the marker must not overwrite it."""
+    from exomem import episode_workflow
+
+    command = SimpleNamespace(
+        name="maintain_memory",
+        leaf=lambda vault, **kwargs: episode_workflow._refused("episode-1"),  # noqa: ARG005
+        read_only=False,
+        executor="cell",
+    )
+    (tmp_path / "vault" / "Knowledge Base").mkdir(parents=True)
+    manager = writer_lease.LeaseManager(writer_lease.LeaseConfig(state_dir=tmp_path / "state"))
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+
+    first, retry = (
+        writer_lease.invoke_command(
+            command,
+            tmp_path / "vault",
+            implicit_idempotency_scope="session:test",
+            mutation_request_id="one-call",
+        )
+        for _ in range(2)
+    )
+
+    assert first["replayed"] == []
+    assert retry == first
+
+
 def test_maintain_audit_is_read_only_for_common_invocation_boundary() -> None:
     from exomem.commands import invocation_is_read_only, product_commands_for
 

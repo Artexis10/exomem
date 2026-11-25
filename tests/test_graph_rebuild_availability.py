@@ -2980,10 +2980,10 @@ def test_canonical_handoff_is_non_owned_until_off_boundary_graph_work_completes(
     owner.join(_HOLD_SECONDS)
     replay.join(_HOLD_SECONDS)
 
-    # Whether the second caller reads a replay or the resumed result depends on when it arrives.
-    assert [{key: value for key, value in item.items() if key != "replayed"} for item in result] == [
+    # The owner's own reply is unmarked; the retry answers the owner's call, whichever way it arrives.
+    assert sorted(result, key=lambda reply: "replayed" in reply) == [
         {"state": "committed", "graph_sync": "completed"},
-        {"state": "committed", "graph_sync": "completed"},
+        {"state": "committed", "graph_sync": "completed", "replayed": True},
     ]
 
 
@@ -3028,7 +3028,7 @@ def test_dead_graph_pending_owner_resumes_only_derived_graph_work(
         ),
     )
 
-    assert resumed == {"state": "committed", "graph_sync": "completed"}
+    assert resumed == {"state": "committed", "graph_sync": "completed", "replayed": True}
 
 
 def test_dead_pending_without_an_exact_receipt_is_outcome_unknown(tmp_path: Path) -> None:
@@ -3070,7 +3070,7 @@ def test_crash_after_canonical_terminal_persistence_never_replays_the_write(tmp_
         lambda: (_ for _ in ()).throw(AssertionError("canonical write replayed")),
         resume_canonically_committed=lambda result: {**result, "graph_sync": "completed"},
     )
-    assert replayed == {"state": "committed", "graph_sync": "completed"}
+    assert replayed == {"state": "committed", "graph_sync": "completed", "replayed": True}
 
 
 def test_wal_publication_keeps_an_open_reader_on_the_previous_snapshot(

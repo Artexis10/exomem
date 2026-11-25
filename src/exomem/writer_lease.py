@@ -3852,7 +3852,9 @@ class IdempotencyStore:
                     raise _PostCommitOutcomeUncertain() from storage_error
                 self._notify_waiters()
                 self._after_terminal_persisted()
-                return terminal_result
+                # The leaf did not run in this call: the original call, or the one that died after
+                # its canonical commit, ran it. This call answers that call's retry, as a replay.
+                return self._replay("completed", terminal_result, on_replay)
             if disposition == "outcome_unknown":
                 raise _mutation_outcome_unknown_error()
             return self._replay(disposition, stored, on_replay)

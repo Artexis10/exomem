@@ -2251,9 +2251,10 @@ def as_replay(stored: Any) -> Any:
     `mutated`, `request_id` and `receipt_id` stay those of the commit it replays: the egress
     filter binds a unit write's parent on `mutated`, so a replay must not change it. A leaf reply
     that no commit wrapped (a paused preparation) carries the same marker. A value that is not a
-    mapping passes through.
+    mapping passes through, and so does a reply that defines its own `replayed` field (the
+    episode resume reply lists the leaves it replayed): the marker never overwrites it.
     """
-    if not isinstance(stored, Mapping):
+    if not isinstance(stored, Mapping) or "replayed" in stored:
         return stored
     return source_result_attribution.carry(stored, {**stored, "replayed": True})
 
