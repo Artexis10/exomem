@@ -30,7 +30,7 @@ from .reconcile import ClusterConfig, SecretsConfig, run_loop
 from .restic_verification import VerificationConfig
 from .storage.b2 import B2Config, B2ObjectStorage
 from .storage.hetzner import HetznerVolumeProvider
-from .storage_config import DEFAULT_STORAGE, LEGACY_CLASS, LocalStorage, StorageConfig
+from .storage_config import StorageConfig, parse_storage_config
 from .upgrade_window import WindowConfig, check_default_range
 
 # cellctl's own cell resources when CELLCTL_CELL_* is unset (the chart always
@@ -188,24 +188,7 @@ def _retention_sources() -> tuple[object, ...]:
 def build_storage_config() -> StorageConfig:
     """Read the shared cap and optional local class; accept the earlier nested cap."""
 
-    raw = os.environ.get("CELLCTL_CELL_STORAGE")
-    if not raw:
-        return DEFAULT_STORAGE
-    value = json.loads(raw)
-    # These are the closed keys of the controller's storage configuration schema.
-    if not isinstance(value, dict) or not set(value) <= {"domain", "local", "max_cell_gib", "per_cell_class"}:
-        raise ValueError("cell storage must be a JSON object with optional domain, local and max_cell_gib")
-    local = value.get("local")
-    if local is not None and not isinstance(local, dict):
-        raise ValueError("cell storage local must be an object")
-    local = dict(local) if local is not None else None
-    legacy_cap = local.pop("max_cell_gib", None) if local is not None else None
-    cap = value.get("max_cell_gib", legacy_cap if legacy_cap is not None else DEFAULT_STORAGE.max_cell_gib)
-    if legacy_cap is not None and cap != legacy_cap:
-        raise ValueError("max_cell_gib and local.max_cell_gib must agree")
-    return StorageConfig(domain=value.get("domain", LEGACY_CLASS),
-                         local=LocalStorage(**local) if local is not None else None, max_cell_gib=cap,
-                         per_cell_class=value.get("per_cell_class"))
+    return parse_storage_config(os.environ.get("CELLCTL_CELL_STORAGE"))
 
 
 def build_alert_delivery_secret() -> tuple[str, str, str] | None:
