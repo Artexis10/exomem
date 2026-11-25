@@ -1450,8 +1450,8 @@ def argument_refusal(arguments: Mapping[str, Any]) -> ObserveMemoryError | None:
     return _compact_metadata_refusal(passed=passed, kinds=_core_kinds_remediation())
 
 
-def _compact_names_passed(arguments: Mapping[str, Any]):
-    """The governed names a compact unit would carry, when the arguments alone select the compact form.
+def _compact_names_passed(arguments: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The governed names a compact unit would carry, when the arguments alone pick compact.
 
     The one rule that both the busy intake and the direct path apply before reading a page.
     """
@@ -1496,9 +1496,9 @@ def refusal_before_page(
     `observe_memory` reaches this refusal only after it has found and read the page, and finding a
     page by memory ref can walk the whole vault. A new unit's kind and governed fields are all in
     the arguments, so the caller refuses before it looks the page up. Only an add qualifies: an
-    update keeps the unit's own kind and form, which only the page knows. A call whose category or
-    dates `observe_memory` would refuse is left to it, so that refusal still wins; one decided by the
-    page (a missing path, an unknown reference, a stale hash) comes after this one.
+    update keeps the unit's own kind and form, which only the page knows. A call whose category,
+    dates or date order `observe_memory` would refuse is left to it, so that refusal still wins; one
+    decided by the page (a missing path, an unknown reference, a stale hash) comes after this one.
 
     `page` names the page when it can do so without walking the vault, else None. Only the
     remediation reads the page, to list the rich kinds it admits; a page that `page` cannot name,
@@ -1525,11 +1525,15 @@ def refusal_before_page(
     try:
         # Argument checks that `observe_memory` makes before this refusal keep winning.
         _canonical_category(str(category))
-        for key, value in (("as_of", as_of), ("until", until), ("check_by", check_by)):
-            if value is not None and str(value).strip():
-                _canonical_date(str(value), key)
+        dates = {
+            key: _canonical_date(str(value), key)
+            for key, value in (("as_of", as_of), ("until", until), ("check_by", check_by))
+            if value is not None and str(value).strip()
+        }
     except (ObserveMemoryError, ValueError):
         return None
+    if "as_of" in dates and "until" in dates and dates["until"] < dates["as_of"]:
+        return None  # INVALID_SEMANTIC_DATE_ORDER wins, as `observe_memory` checks order first
     rel_path = page()
     kinds = None if rel_path is None else _page_kinds_remediation(vault_root, rel_path, category)
     return _compact_metadata_refusal(passed=passed, kinds=kinds or _core_kinds_remediation())

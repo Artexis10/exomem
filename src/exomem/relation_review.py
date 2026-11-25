@@ -3476,11 +3476,17 @@ def _occupied_destination_refusal(
     id_paths = semantic_contract.current_identity_paths(root, identity)
     if id_paths is None:
         return None
-    return _occupancy_refusal(id_paths, artifact=artifact, destination_exists=True, exact_destination=False)
+    return _occupancy_refusal(
+        id_paths, artifact=artifact, destination_exists=True, exact_destination=False
+    )
 
 
 def _occupancy_refusal(
-    id_paths, *, artifact: RelationReviewRecord | None, destination_exists: bool, exact_destination: bool
+    id_paths: tuple[str, ...],
+    *,
+    artifact: RelationReviewRecord | None,
+    destination_exists: bool,
+    exact_destination: bool,
 ) -> RelationReviewError | None:
     """Which draft refusal an occupied identity or destination gets; the one rule both checks apply."""
     if exact_destination:
@@ -3623,7 +3629,10 @@ def _attempt(
             and state.source_hash == vault.content_hash(normalized)
         )
     refusal = _occupancy_refusal(
-        id_paths, artifact=artifact, destination_exists=destination_exists, exact_destination=exact_destination
+        id_paths,
+        artifact=artifact,
+        destination_exists=destination_exists,
+        exact_destination=exact_destination,
     )
     if refusal is not None:
         raise refusal
