@@ -694,6 +694,7 @@ def query(
                     {"path": version.path, "hash": version.hash} for version in source_versions
                 ],
                 "view": result.view,
+                "unresolved_links": list(result.unresolved_links) or None,
                 "hierarchy": hierarchy,
                 "agent_history": (
                     records.agent_audit_history(vault_root, manifest, authorize_path=adapter_authorize_path)
@@ -746,6 +747,8 @@ _QUERY_EGRESS_KEYS = frozenset(
         "view",
         "hierarchy",
         "agent_history",
+        # The link fields whose values a query left out unchecked (`RecordQueryResult.unresolved_links`), else null.
+        "unresolved_links",
     }
 )
 _QUERY_DESCRIPTOR_KEYS = frozenset(
@@ -774,6 +777,11 @@ def _valid_query_payload(
     payload: Mapping[str, Any], manifest: collections.CollectionManifest
 ) -> bool:
     if set(payload) != _QUERY_EGRESS_KEYS:
+        return False
+    unresolved = payload["unresolved_links"]
+    if unresolved is not None and (
+        not isinstance(unresolved, list) or not set(unresolved) <= set(record_governance._link_fields(manifest))
+    ):
         return False
     if (
         payload["collection_id"] != manifest.collection_id

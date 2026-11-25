@@ -52,6 +52,7 @@ from exomem import __main__ as cli
 from exomem import (
     capabilities,
     commands,
+    memory_refs,
     record_governance,
     records,
     reserved_paths,
@@ -3151,3 +3152,52 @@ def test_a_cold_manifest_registry_offers_and_publishes_the_store_collections(ser
     published = working_set_index.published_collection_manifests(service.root, 1)
     assert CID in {manifest.collection_id for manifest in found}
     assert published is not None and CID in {manifest.collection_id for manifest in published}
+
+
+def test_a_records_query_answers_from_its_rows_without_walking_the_vault_for_links(service, monkeypatch):
+    """A query borrows the published link index or goes without it; it never walks the vault for one.
+
+    No link index is published here, as on a service whose corpus rebuild is still running. A walk
+    on the query's thread took most of the Records budget on a large vault, for every page and
+    aggregate, even one that returns no link field. A link field the query returns is named in
+    `unresolved_links`, so a reference left out is never mistaken for an empty field.
+    """
+    linked = "77777777-7777-4777-8777-777777777777"
+    text = sqlite_text(manifest_text().replace(CID, linked).replace("title: Work", "title: Linked").replace(
+        "    count: {type: integer}\n", "    status: {type: string}\n    related: {type: array, items: {type: link}}\n"))
+    assert call(service.root, "record_memory", action="create", manifest_path=manifest_path().replace("Work", "Linked"),
+                manifest_text=text, why="rows with links")
+    reference = memory_refs.memory_ref(memory_refs.new_id())
+    assert call(service.root, "record_memory", action="append", collection=linked,
+                item={"title": "Lead", "status": "open", "related": [reference]}, why="row with a link")["outcome"] == "committed"
+    # The service runs a query on its store thread, beside a graph rebuild that walks on its own.
+    querying, walks_inside_a_query = threading.local(), []
+    real_query, real_walk = record_governance.query_collection, vault.walk_vault_md
+
+    def query(*args, **kwargs):
+        querying.active = True
+        try:
+            return real_query(*args, **kwargs)
+        finally:
+            querying.active = False
+
+    def walk(root):
+        if getattr(querying, "active", False):
+            walks_inside_a_query.append(root)
+        return real_walk(root)
+
+    monkeypatch.setattr(record_governance, "query_collection", query)
+    monkeypatch.setattr(vault, "walk_vault_md", walk)
+
+    status = call(service.root, "record_memory", action="query", collection=linked, columns=["status"])
+    default = call(service.root, "record_memory", action="query", collection=linked)
+    distinct = call(service.root, "record_memory", action="query", collection=linked, aggregate="distinct:status")
+
+    assert walks_inside_a_query == []
+    assert [row["status"] for row in status["rows"]] == ["open"]
+    assert "unresolved_links" not in status
+    assert distinct["aggregate"]["distinct"] == ["open"]
+    assert "unresolved_links" not in distinct
+    assert [row["title"] for row in default["rows"]] == ["Lead"]
+    assert "related" not in default["rows"][0]
+    assert default["unresolved_links"] == ["related"]

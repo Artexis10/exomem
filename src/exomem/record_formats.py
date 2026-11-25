@@ -2008,6 +2008,9 @@ class RecordQueryResult:
     source_versions: tuple[collections.SourceVersion, ...] = ()
     columns: tuple[str, ...] = ()
     view: Mapping[str, Any] | None = None
+    # The returned link fields whose memory references and bare titles were left out unchecked,
+    # because no published link index could be borrowed for this query.
+    unresolved_links: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2646,7 +2649,8 @@ def _selected_query(
                 parsed, _ = rows_of(())
                 result = selection.aggregate
                 if selection.latest_row_id is not None:
-                    result = {**result, "row": rows_of((selection.latest_row_id,))[1][0]}
+                    row = rows_of((selection.latest_row_id,))[1][0]
+                    result = {**result, "row": row if staged_projector is None else staged_projector(row)}
                 return parsed, offset, query_data.present_aggregate(result, columns=cols, **common)
             parsed, rows = rows_of(selection.row_ids)
             return parsed, offset, query_data.present_rows(
@@ -2911,7 +2915,7 @@ def query_collection(
         )
         if stage_store_projection and not late_link_projection and project_values is not None else None
     )
-    use_staged_projection = roots is not None and aggregate is None
+    use_staged_projection = roots is not None
     adapter = load_adapter(
         vault_root,
         manifest,

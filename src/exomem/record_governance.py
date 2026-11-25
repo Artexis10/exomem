@@ -7,7 +7,7 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from dataclasses import field as dataclass_field
 from math import isfinite
 from pathlib import Path
@@ -958,6 +958,7 @@ egress.register_projector(
         "source_versions",
         "view",
         "agent_history",
+        "unresolved_links",
     ),
 )
 egress.register_projector(
@@ -1624,9 +1625,12 @@ def query_collection(
     no public tool surface declares it, so nothing in a caller's input can
     ever set it. It only ever comes from an internal caller such as the
     current-state lookup, and it asks `record_formats.query_collection` to
-    defer link governance until after the row limit and to skip a cold
-    vault-wide candidate-index build meanwhile; see its docstring for the
+    defer link governance until after the row limit; see its docstring for the
     preconditions that must hold before that request is actually honoured.
+
+    No query walks the vault for its link index. Without a published one to borrow,
+    a returned link field's memory references and bare titles are left out, and the
+    result names that field in `unresolved_links`.
     """
     root = Path(vault_root)
     writer = selected_writer(root, collection)
@@ -1665,8 +1669,10 @@ def query_collection(
                 )
             if writer is None and not authorize_path(manifest.storage.source):
                 raise collections.CollectionError("COLLECTION_NOT_FOUND", "collection was not found")
+            # A query borrows the published link index or goes without it: a vault walk inside the
+            # query deadline outran the Records budget on vaults the walk's cap admits.
             links = _LinkProjector.create(
-                root, manifest, policy=policy, allow_cold_index=not late_link_projection,
+                root, manifest, policy=policy, allow_cold_index=False,
                 authorize_path=authorize_path, visible_path=visible_path,
             )
             # Without a store there is no field plan: a collection released to the caller is read whole.
@@ -1692,8 +1698,36 @@ def query_collection(
                 if error.code != "INVALID_RECORD_QUERY_FIELD":
                     raise
                 raise _with_readable_columns(error, readable, kwargs) from error
+            returned = _returned_link_fields(result, readable)
+            # Asked of the returned fields, never of their values, so the answer tells a reader nothing of a withheld link.
+            if returned and not links.index_available():
+                result = replace(result, unresolved_links=returned)
         egress.emit_boundary_receipt(collector)
         return result
+
+
+def _link_fields(manifest: collections.CollectionManifest) -> tuple[str, ...]:
+    """The top-level fields whose values link projection can withhold, in manifest order."""
+    children = {table.field for table in manifest.child_tables if any(column.type == "link" for column in table.columns)}
+    return tuple(name for name, spec in manifest.schema.fields.items()
+                 if _LinkProjector.carries_links(spec) or name in children)
+
+
+def _returned_link_fields(
+    result: record_formats.RecordQueryResult, manifest: collections.CollectionManifest
+) -> tuple[str, ...]:
+    """The link fields whose values `result` returns: its columns' own, every one for a whole row, else none."""
+    if result.aggregate is not None:
+        # Only a `latest` answer returns a row; the other aggregates return no field value.
+        carries_row = isinstance(result.aggregate, Mapping) and result.aggregate.get("row") is not None
+        return _link_fields(manifest) if carries_row else ()
+    if not result.rows:
+        return ()
+    columns = result.query.get("columns")
+    if not columns:
+        return _link_fields(manifest)
+    roots = {str(column).split(".", 1)[0] for column in columns}
+    return tuple(name for name in _link_fields(manifest) if name in roots)
 
 
 def _with_readable_columns(
@@ -2838,6 +2872,8 @@ def project_query_result(
         or not _valid_saved_view(result.view, manifest)
         or not _valid_agent_history(agent_history)
         or (result.continuation is not None and type(result.continuation) is not str)
+        or not isinstance(result.unresolved_links, tuple)
+        or not set(result.unresolved_links) <= set(_link_fields(manifest))
         or (
             isinstance(result.continuation, str)
             and not record_formats.validate_continuation(
@@ -2890,6 +2926,7 @@ def project_query_result(
         source_versions=source_versions,
         columns=columns,
         view=dict(result.view) if isinstance(result.view, Mapping) else None,
+        unresolved_links=result.unresolved_links,
     )
     try:
         rendered = record_formats.render_query_result(typed, output_format=output_format)
@@ -2915,6 +2952,7 @@ def project_query_result(
             ],
             "view": typed.view,
             **({"agent_history": dict(agent_history)} if agent_history is not None else {}),
+            **({"unresolved_links": list(typed.unresolved_links)} if typed.unresolved_links else {}),
             "rendered": rendered,
         }
     )

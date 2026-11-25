@@ -46,7 +46,7 @@ from test_collection_store_writer import store as store
 from test_governance_egress import _external, write_rule, write_scope
 
 import exomem
-from exomem import commands, records, server, vault
+from exomem import commands, freshness, records, semantic_contract, server, vault
 from exomem.cli_ops import OpError
 from exomem.collection_store import authority
 from exomem.collection_store.preview import preview_store
@@ -310,10 +310,13 @@ def test_sealed_collection_under_a_routing_marker_refuses_like_an_absent_one(sto
         assert len(answers) == 1 and "COLLECTION_NOT_FOUND" in answers.pop(), call["action"]
 
 
-def test_a_link_to_a_page_the_caller_cannot_read_never_shows_and_cannot_filter_or_sort(store):
+def test_a_link_to_a_page_the_caller_cannot_read_never_shows_and_cannot_filter_or_sort(store, corpus_cache_on):
     """A typed row or group label naming a page the caller cannot read, for another audience or for the
     owner under an access exclusion; a visible bare-title link dropped where the legacy query shows it;
-    or a filter or sort on stored link values that recovers what a row omits."""
+    or a filter or sort on stored link values that recovers what a row omits.
+
+    Both routes read bare titles from the published corpus: without one, the legacy query leaves a
+    bare title out instead of walking the vault."""
     link, bare = "[[Private/Secret Plan]]", "[[Open Page]]"
     fields = {"id": "{type: string, required: true}", "count": "{type: integer, sortable: true}",
               "related": "{type: link, sortable: true}"}
@@ -325,6 +328,8 @@ def test_a_link_to_a_page_the_caller_cannot_read_never_shows_and_cannot_filter_o
     for key, item in ((KEY, {"id": "linked", "count": 1, "related": link}), (OTHER, {"id": "unlinked", "count": 2}),
                       ("33333333-3333-4333-8333-333333333333", {"id": "bare", "count": 3, "related": bare})):
         store.append_record(SUMMARY_CID, item=item, item_key=key, why="observe")
+    freshness.rebaseline(store.root)
+    semantic_contract.build_corpus_context(store.root)
     rows = {"version": 1, "select": ["id", "related"], "order_by": [{"field": "count"}]}
     by_link = {"version": 1, "group_by": [{"field": "related"}], "aggregates": {"rows": {"op": "count"}}}
 

@@ -1798,10 +1798,12 @@ def test_missing_and_withheld_link_targets_have_identical_public_query_state(tmp
     )
 
 
-def test_query_requesting_a_link_field_still_resolves_and_withholds_it(tmp_path: Path) -> None:
+def test_query_requesting_a_link_field_still_resolves_and_withholds_it(
+    tmp_path: Path, corpus_cache_on: None
+) -> None:
     """G1: an ordinary query (no `late_link_projection` opt-in -- nothing in
     the public surface can set it, see the guard test below) keeps full,
-    eager link governance exactly as on base: an authorized bare-title
+    eager link governance over the published corpus: an authorized bare-title
     target still resolves and an unauthorized (here, missing) one is still
     withheld from the row.
     """
@@ -1821,6 +1823,7 @@ def test_query_requesting_a_link_field_still_resolves_and_withholds_it(tmp_path:
         "---\n",
         encoding="utf-8",
     )
+    _publish_corpus(tmp_path)
 
     result = record_governance.query_collection(
         tmp_path,
@@ -3739,7 +3742,7 @@ def test_a_link_query_answers_while_pending_custody_is_unreadable(
         assert value in values
 
 
-def test_a_cold_link_query_receipts_only_released_targets(tmp_path: Path) -> None:
+def test_a_link_query_receipts_only_released_targets(tmp_path: Path, corpus_cache_on: None) -> None:
     """A receipt must not claim pages consulted only to resolve a title link."""
     fixture = copy_vehicle_maintenance_fixture(tmp_path)
     manifest = collections.load_manifest(tmp_path, fixture / "_collection.md")
@@ -3755,6 +3758,7 @@ def test_a_cold_link_query_receipts_only_released_targets(tmp_path: Path) -> Non
     _write_md(tmp_path, "Knowledge Base/Notes/Target.md", target)
     _write_md(tmp_path, "Knowledge Base/Notes/Other.md", consulted)
     _write_l6_rule(tmp_path, ceiling=6, paths="Records/**")
+    _publish_corpus(tmp_path)
 
     with request_scope(RequestPrincipal(audience_id=EXTERNAL, surface="mcp")):
         result = record_governance.query_collection(tmp_path, manifest, limit=10)
