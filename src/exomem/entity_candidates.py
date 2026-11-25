@@ -137,7 +137,8 @@ def claim_set_fingerprint(
 def _aliases(value: object) -> tuple[str, ...]:
     if isinstance(value, str):
         return (value,)
-    if isinstance(value, list):
+    # A page state's frozen frontmatter holds a list as a tuple, so both shapes are the same list.
+    if isinstance(value, (list, tuple)):
         return tuple(item for item in value if isinstance(item, str))
     return ()
 

@@ -2,7 +2,9 @@
 
 markdown-it owns code: fenced and indented blocks and inline code spans, at
 exact original offsets. It is used only to say where code is; wikilink
-scanning keeps its own line-regex masker on every page.
+scanning keeps its own line-regex masker on every page. `inert_spans` widens
+the same locations to links, images and HTML, for a reader of prose that must
+leave all of those alone.
 
 `outside` is the one rule for "not code and not backslash-escaped". Origin
 carriers apply it to each reserved opener directly (see `provenance`), so no
@@ -15,11 +17,12 @@ from __future__ import annotations
 import re
 from bisect import bisect_right
 from dataclasses import dataclass
+from functools import partial
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
 from markdown_it.parser_inline import ParserInline
-from markdown_it.rules_inline import backtick, image
+from markdown_it.rules_inline import autolink, backtick, html_inline, image, link
 
 Span = tuple[int, int]
 
@@ -53,10 +56,14 @@ def _may_have_code(text: str) -> bool:
 
 
 class _Locations:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, every_inline: bool = False) -> None:
         self.text = text
+        # `every_inline` binds positions in all inline content, not only content with a code span,
+        # for the parse that also locates links.
+        self.every_inline = every_inline
         self.starts, self.ends = line_bounds(text)
         self.code: list[Span] = []
+        self.inert: list[Span] = []
         self.offsets: tuple[Span, ...] | None = None
         self.inline_views = iter(())
         self.images: list[tuple[str, int, tuple[Span, ...] | None]] = []
@@ -103,28 +110,34 @@ class _Locations:
         return self.offsets[start][0], self.offsets[end - 1][1]
 
 
-def _record_code(rule):
+def _recorded(rule, token_types: frozenset[str], sink: str):
+    """`rule`, noting the original span of what it parsed in `Locations.<sink>` when it made one of `token_types`."""
+
     def wrapped(state, silent):
         start, count = state.pos, len(state.tokens)
         matched = rule(state, silent)
-        if (
-            matched
-            and not silent
-            and any(token.type == "code_inline" for token in state.tokens[count:])
-        ):
-            state.env["locations"].code.append(state.env["locations"].span(start, state.pos))
+        if matched and not silent and any(token.type in token_types for token in state.tokens[count:]):
+            locations = state.env["locations"]
+            getattr(locations, sink).append(locations.span(start, state.pos))
         return matched
 
     return wrapped
 
 
+_record_code = partial(_recorded, token_types=frozenset({"code_inline"}), sink="code")
+
+
 def _record_image(state, silent):
     locations = state.env["locations"]
+    start = state.pos
     locations.images.append((state.src, state.pos + 2, locations.offsets))
     try:
-        return image(state, silent)
+        matched = image(state, silent)
     finally:
         locations.images.pop()
+    if matched and not silent and locations.every_inline:
+        locations.inert.append(locations.span(start, state.pos))
+    return matched
 
 
 class _RegionInline(ParserInline):
@@ -147,22 +160,26 @@ class _RegionInline(ParserInline):
             locations.offsets = previous
 
 
+def _block_span(locations: _Locations, token) -> Span:
+    if token.map is None:
+        raise MarkdownPositionError("block has no source lines")
+    start, end = token.map
+    return (
+        locations.starts[start],
+        locations.starts[end] if end < len(locations.starts) else len(locations.text),
+    )
+
+
 def _prepare_regions(state) -> None:
     locations = state.env["locations"]
     views = []
     for token in state.tokens:
         if token.type in {"code_block", "fence"}:
-            if token.map is None:
-                raise MarkdownPositionError("code block has no source lines")
-            start, end = token.map
-            locations.code.append(
-                (
-                    locations.starts[start],
-                    locations.starts[end] if end < len(locations.starts) else len(locations.text),
-                )
-            )
+            locations.code.append(_block_span(locations, token))
+        elif token.type in {"html_block", "heading_open"} and locations.every_inline:
+            locations.inert.append(_block_span(locations, token))
         elif token.type == "inline":
-            if "`" in token.content:
+            if locations.every_inline or "`" in token.content:
                 if token.map is None:
                     raise MarkdownPositionError("inline content has no source lines")
                 views.append(locations.content_offsets(token.content, token.map))
@@ -171,17 +188,25 @@ def _prepare_regions(state) -> None:
     locations.inline_views = iter(views)
 
 
-def _parser() -> MarkdownIt:
+def _parser(*, links: bool = False) -> MarkdownIt:
     parser = MarkdownIt("commonmark", {"html": True})
     parser.inline = _RegionInline()
     parser.inline.ruler.at("backticks", _record_code(backtick))
     parser.inline.ruler.at("image", _record_image)
+    if links:
+        for name, rule, kinds in (
+            ("link", link, {"link_open"}),
+            ("autolink", autolink, {"link_open"}),
+            ("html_inline", html_inline, {"html_inline"}),
+        ):
+            parser.inline.ruler.at(name, _recorded(rule, frozenset(kinds), "inert"))
     parser.core.ruler.before("inline", "regions", _prepare_regions)
     parser.core.ruler.disable("text_join")
     return parser
 
 
 _PARSER = _parser()
+_SPAN_PARSER = _parser(links=True)
 
 
 def _merge(spans: list[Span]) -> tuple[Span, ...]:
@@ -208,6 +233,23 @@ def code_spans(text: str) -> tuple[Span, ...]:
     locations = _Locations(text)
     _PARSER.parse(text, {"locations": locations})
     return _merge(locations.code)
+
+
+def inert_spans(text: str) -> tuple[Span, ...]:
+    """Where `text` is not prose: code, links, images, HTML, headings and comments, at exact original offsets.
+
+    markdown-it owns what each of those is, so a reader that must leave them alone follows
+    CommonMark. A link's span covers its visible text and its destination; a heading's covers its
+    line, because a heading is the page's structure. Raises
+    `MarkdownPositionError` when a parser position cannot be bound to the original text.
+    """
+    if not text.strip():
+        return ()
+    locations = _Locations(text, every_inline=True)
+    _SPAN_PARSER.parse(text, {"locations": locations})
+    code = _merge(locations.code)
+    comments = _comments(text, code) if "<!--" in text else ()
+    return _merge([*code, *locations.inert, *comments])
 
 
 def outside(text: str, index: int, code: tuple[Span, ...]) -> bool:

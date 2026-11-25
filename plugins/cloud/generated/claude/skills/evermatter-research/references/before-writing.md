@@ -27,7 +27,9 @@ create the Entity in the same turn, within your confirmation rules. When a write
 returns `entity_candidate`, resolve before you create, and hydrate an existing
 Entity before you make a second one. When it returns `undeclared_referents`, create
 the Entity from the returned route only for a durable referent (see
-[mutation-results](mutation-results.md)).
+[mutation-results](mutation-results.md)). When it returns `unlinked_mentions`, send a
+page's `call` to link the Entities listed, or dismiss one by its review ref when the
+name should stay plain.
 
 Write a name as its source spells it. Keep the diacritics, the case and the
 punctuation, and never transliterate or "correct" a name to an ASCII form. The

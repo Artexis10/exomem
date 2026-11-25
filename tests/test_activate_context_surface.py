@@ -430,6 +430,68 @@ def test_mcp_due_omission_reaches_the_response_and_final_observation(
     assert "relevant_due_refs" not in json.dumps(ledger + activation)
 
 
+@pytest.mark.usefixtures("anchors_packet")  # relevant-due advice is anchors-only until the maps packet carries turn-relevant material; see Amendment 12
+def test_the_ledger_row_shows_whether_activation_attached_a_due_candidate_and_its_category(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server half of checking relevant-due delivery: the call ledger, not the packet, shows what went out."""
+    from fastmcp import Client
+    from test_working_set_index import _seed_planning, _seed_structure
+
+    from exomem import call_ledger, due_state, lexstore, query_log
+
+    mcp = _surface_server(monkeypatch)
+    _seed_structure(vault)
+    _seed_planning(vault)
+    page = "Knowledge Base/Products/Cargo Sled.md"
+    target = vault / page
+    target.write_text(
+        target.read_text(encoding="utf-8")
+        + "\n## Prediction\n\n- id: capacity-check\n- check_by: "
+        + (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        + "\n\nThe runners withstand the planned load.\n",
+        encoding="utf-8",
+    )
+    due_state.reconcile(vault)
+    lexstore.ensure_fresh(vault)
+    working_set_runtime.reset_caches_for_tests()
+    working_set_index.WorkingSetIndex(vault).rebuild()
+    row = next(row for row in due_state.served_entries(vault) if row["path"] == page)
+    logs = tmp_path / "logs"
+    monkeypatch.setenv("EXOMEM_CALL_LEDGER_DIR", str(logs))
+    monkeypatch.setenv("EXOMEM_LOG_DIR", str(logs))
+    monkeypatch.delenv("EXOMEM_DISABLE_CALL_LEDGER", raising=False)
+    monkeypatch.setattr(query_log, "_disabled", lambda: False)
+    call_ledger.reset_chain_cache()
+
+    async def activate() -> dict:
+        async with Client(mcp) as client:
+            result = await client.call_tool(*public_call("activate_context", {"turn": TURN, "anchor": page}))
+            return result.structured_content
+
+    def relevant_due_fields() -> dict | None:
+        rows = [json.loads(line) for line in (logs / "ledger.jsonl").read_text().splitlines()]
+        spans = [span for span in rows[-1].get("spans", []) if span["name"] == "working_set.relevant_due"]
+        assert len(spans) == 1, "the span is recorded whether or not a candidate went out"
+        return spans[0].get("fields")
+
+    try:
+        attached = asyncio.run(activate())
+        with_candidate = relevant_due_fields()
+        monkeypatch.setattr(due_state, "served_entries", lambda *args, **kwargs: [])
+        withheld = asyncio.run(activate())
+        without_candidate = relevant_due_fields()
+    finally:
+        call_ledger.reset_chain_cache()
+
+    assert [item["ref"] for item in attached["relevant_due_refs"]] == [row["ref"]]
+    category_key = "attached_" + row["category"].replace("-", "_")
+    assert with_candidate["attached"] == 1 and with_candidate[category_key] == 1
+    assert "relevant_due_refs" not in withheld
+    assert "attached" not in without_candidate and not any(key.startswith("attached_") for key in without_candidate)
+    assert call_ledger.verify(logs / "ledger.jsonl") == []
+
+
 def test_the_long_cli_name_reaches_the_same_leaf(
     activation_vault: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

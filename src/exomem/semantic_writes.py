@@ -1064,6 +1064,9 @@ class CreationCommit:
     # page or entity answers to (`undeclared_referents`), the 0 -> 1 step before
     # `entity_candidate`'s 1 -> 2.
     undeclared_referents: dict[str, Any] | None = None
+    # A SIXTH kind: the existing Entities this write's prose names without a link, with the
+    # edits that link them (`unlinked_mentions`).
+    unlinked_mentions: dict[str, Any] | None = None
     # Server-internal point-lookup context. The mutation terminal consumes and
     # strips it; no response detail exposes a local vault path.
     relation_advisory_context: dict[str, Any] | None = None
@@ -1103,6 +1106,8 @@ class CreationCommit:
             value["entity_candidate"] = self.entity_candidate
         if self.undeclared_referents is not None:
             value["undeclared_referents"] = self.undeclared_referents
+        if self.unlinked_mentions is not None:
+            value["unlinked_mentions"] = self.unlinked_mentions
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.vocabulary_resolution is not None:
@@ -1213,6 +1218,8 @@ class ExistingCommit:
     entity_candidate: dict[str, Any] | None = None
     # A FIFTH kind, as in `CreationResult`: the names this write newly links with no page behind them.
     undeclared_referents: dict[str, Any] | None = None
+    # A SIXTH kind: the existing Entities this write's prose names without a link.
+    unlinked_mentions: dict[str, Any] | None = None
     relation_advisory_context: dict[str, Any] | None = None
     # Exact canonical write bytes, not the normalized semantic source hash.
     # Absent on legacy/replay results without an exact byte proof.
@@ -1243,6 +1250,8 @@ class ExistingCommit:
             value["entity_candidate"] = self.entity_candidate
         if self.undeclared_referents is not None:
             value["undeclared_referents"] = self.undeclared_referents
+        if self.unlinked_mentions is not None:
+            value["unlinked_mentions"] = self.unlinked_mentions
         if self.relation_advisory_context is not None:
             value["_relation_advisory_context"] = self.relation_advisory_context
         if self.after_hash is not None:
@@ -3218,6 +3227,39 @@ def _undeclared_referents_block(
         return None
 
 
+@call_spans.timed("post_commit.unlinked_mentions")
+def _unlinked_mentions_block(
+    vault_root: Path,
+    state: Any,
+    corpus: semantic_contract.SemanticCorpusContext | None,
+    *,
+    previous_state: Any = None,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    """The `unlinked_mentions` advisory this write may carry.
+
+    Shares `_undeclared_referents_block`'s placement, cost profile and fail-open guard: it reads the
+    page state and corpus the preflight built and the review-state file, never the vault.
+    `previous_state` is the page's pre-write state (the predecessor's, for a successor page) or
+    `None`; `source` is the page as written, in which each edit's anchor must be unique.
+
+    A fault here costs the caller an offer, never the write.
+    """
+    try:
+        from . import capture_sweep
+
+        return capture_sweep.unlinked_mentions(
+            vault_root,
+            page_state=state,
+            corpus=corpus,
+            previous_page_state=previous_state,
+            source=source,
+        )
+    except Exception:  # noqa: BLE001 — an offer never breaks a commit
+        log.debug("unlinked-mentions advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
 def _relation_advisory_context(vault_root: Path, state: Any) -> dict[str, Any]:
     """What the mutation terminal needs to build a write's `relation_advisory`."""
     return {
@@ -3308,6 +3350,13 @@ def commit_existing(
             previous_state=preflight.before,
             candidate=candidate,
         )
+        unlinked = _unlinked_mentions_block(
+            vault_root,
+            preflight.after,
+            preflight.after_corpus,
+            previous_state=preflight.before,
+            source=preflight.after_source,
+        )
     context = _relation_advisory_context(vault_root, preflight.after)
     return replace(
         committed,
@@ -3317,6 +3366,7 @@ def commit_existing(
         capture_sweep=sweep,
         entity_candidate=candidate,
         undeclared_referents=referents,
+        unlinked_mentions=unlinked,
         relation_advisory_context=context,
     )
 
@@ -5766,6 +5816,13 @@ def _creation_post_commit(
             previous_state=_predecessor_state(preflight.corpus, predecessor_path),
             candidate=candidate,
         )
+        unlinked = _unlinked_mentions_block(
+            vault_root,
+            preflight.semantic_state,
+            preflight.corpus,
+            previous_state=_predecessor_state(preflight.corpus, predecessor_path),
+            source=preflight.source,
+        )
     context = _relation_advisory_context(vault_root, preflight.semantic_state)
     return replace(
         committed,
@@ -5776,6 +5833,7 @@ def _creation_post_commit(
         capture_sweep=sweep,
         entity_candidate=candidate,
         undeclared_referents=referents,
+        unlinked_mentions=unlinked,
         relation_advisory_context=context,
         vocabulary_resolution=(
             preflight.vocabulary_binding.as_dict()

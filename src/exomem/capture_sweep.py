@@ -47,7 +47,7 @@ import logging
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -91,6 +91,14 @@ MAX_DEPENDENCY_ROWS = 16
 #: (`write-time-identity-candidates` spec, "A write names its undeclared referents").
 REFERENTS_FAMILY = "undeclared_referents"
 MAX_UNDECLARED_REFERENTS = 3
+
+#: The family of the write-time `unlinked_mentions` block (`write-time-identity-candidates` spec, "A
+#: write offers links for the existing Entities it names"), the most Entities one block lists, and the
+#: longest name and anchor (`old_text`) it carries. A dismissal names one Entity on one page.
+UNLINKED_FAMILY = "unlinked_mentions"
+MAX_UNLINKED_MENTIONS = 5
+MAX_UNLINKED_NAME_CHARS = 120
+MAX_UNLINKED_ANCHOR_CHARS = 400
 
 #: The one fixed sentence of guidance the `entity_candidate` block itself
 #: carries (`write-time-identity-candidates` spec, task 2.4; design D2's
@@ -506,21 +514,23 @@ def _unpaged_links(
         yield identity, link
 
 
-def referent_review(identity: str) -> tuple[str, str]:
-    """`(review id, fingerprint)` of one name, for the write-advisory dismissal door.
+def write_advisory_review(family: str, subject: str) -> tuple[str, str]:
+    """`(review id, fingerprint)` of one subject of a write-advisory family, for the dismissal door.
 
-    Both depend on the name alone. A dismissal therefore follows the name to every page
-    that links it, and no later edit or inbound link reopens it.
+    Both depend on the family and the subject alone, so no later edit reopens a dismissal.
     """
     from . import review_state
 
-    target = f"{REFERENTS_FAMILY}:{identity}"
+    target = f"{family}:{subject}"
     return (
         review_state.item_id(target),
-        review_state.fingerprint(
-            target_ref=target, categories=[REFERENTS_FAMILY], reasons=[], related_refs=[]
-        ),
+        review_state.fingerprint(target_ref=target, categories=[family], reasons=[], related_refs=[]),
     )
+
+
+def referent_review(identity: str) -> tuple[str, str]:
+    """The review identity of one undeclared name: it follows the name to every page that links it."""
+    return write_advisory_review(REFERENTS_FAMILY, identity)
 
 
 def _dismissed_referents(root: Path, identities: list[str]) -> set[str]:
@@ -600,8 +610,8 @@ def undeclared_referents(
             from . import due_state
 
             for identity, entry in entries:
-                due_state.note_batch_referent(
-                    root, identity, entry, limit=MAX_UNDECLARED_REFERENTS
+                due_state.note_batch_hold(
+                    root, REFERENTS_FAMILY, identity, entry, limit=MAX_UNDECLARED_REFERENTS
                 )
             return None
         return _referent_block(root, [entry for _identity, entry in entries])
@@ -615,65 +625,266 @@ def batch_referents(vault_root: Path) -> dict[str, Any] | None:
     try:
         from . import due_state
 
-        return _referent_block(Path(vault_root), due_state.take_batch_referents(vault_root))
+        return _referent_block(Path(vault_root), due_state.take_batch_holds(vault_root, REFERENTS_FAMILY))
     except Exception:  # noqa: BLE001 -- an advisory never breaks a committed batch
         log.debug("undeclared-referents batch block failed (non-fatal)", exc_info=True)
         return None
 
 
+def unlinked_mentions(
+    vault_root: Path | None,
+    *,
+    page_state: Any = None,
+    corpus: Any = None,
+    previous_page_state: Any = None,
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    """The write-time `unlinked_mentions` block this write may carry, or None.
+
+    (`write-time-identity-candidates` spec, "A write offers links for the existing Entities it
+    names".) Up to `MAX_UNLINKED_MENTIONS` active Entities, in the writer's own view, that the page's
+    prose names by exact title or alias without linking, where this write raised the page's count of
+    mentions. Each is listed with the name as written and its link target, and the page's group
+    carries the `replace_text` edits that link them; the server links nothing. The name index is built
+    from the preflight corpus's registry entries, so there is no vault walk and no model call.
+
+    `source` is the page as written, which an edit's anchor must be unique in. Gates, dismissal and the
+    batch hold are those of `undeclared_referents`. Inside a batch scope the page's group replaces
+    what the batch held for that page, and `batch_unlinked_mentions` carries it.
+
+    Never raises: a fault here costs the caller an offer, never the write.
+    """
+    if vault_root is None or page_state is None or corpus is None:
+        return None
+    try:
+        from . import envelope
+
+        active = envelope.active()
+        if active.get("structural_suggestions") == "off" or active.get("proactive_capture") == "off":
+            return None
+        body = str(getattr(page_state, "body", "") or "")
+        previous = getattr(previous_page_state, "body", None)
+        if not body.strip() or previous == body:
+            return None
+        root = Path(vault_root)
+        page = str(getattr(page_state, "path", "") or "")
+        return _deliver_unlinked(
+            root, page, _unlinked_group(root, page, body, previous, corpus, source)
+        )
+    except Exception:  # noqa: BLE001 -- an offer never breaks a commit or a block
+        log.debug("unlinked-mentions advisory failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _unlinked_group(
+    root: Path, page: str, body: str, previous: str | None, corpus: Any, source: str | None
+) -> dict[str, Any] | None:
+    """One page's offer: `{"note", "mentions", "edits"}`, or None when nothing is raised and still open."""
+    from collections import Counter
+
+    from . import name_mentions
+    from .vault import writer_link_visibility
+
+    visible = writer_link_visibility(root)
+    registry = _registry_index(corpus, visible)
+    if registry is None or not registry.entries:
+        return None
+    index = name_mentions.build_index(registry.entries)
+    mask = name_mentions.prose_mask(body)
+    mentions = name_mentions.find_mentions(body, index, mask)
+    if not mentions:
+        return None
+    first: dict[str, Any] = {}
+    for mention in mentions:
+        first.setdefault(mention.path, mention)
+    after = Counter(mention.path for mention in mentions)
+    before = Counter(
+        mention.path
+        for mention in (
+            name_mentions.find_mentions(previous, index, name_mentions.prose_mask(previous)) if previous else ()
+        )
+    )
+    # The page's own Entity is never offered to itself.
+    raised = {path for path in first if path != page and after[path] > before[path]}
+    raised -= _linked_paths(corpus, visible, body, raised)
+    candidates = []
+    for path in raised:
+        written = first[path].written
+        link = _link_text(root, path, written) if len(written) <= MAX_UNLINKED_NAME_CHARS else None
+        if link is not None:
+            candidates.append((first[path], link))
+    # Longer names first: they are the least likely to be a common word.
+    candidates.sort(key=lambda item: (-item[0].words, -len(item[0].written), item[0].start))
+    offered = _offered(
+        root,
+        UNLINKED_FAMILY,
+        [
+            (*write_advisory_review(UNLINKED_FAMILY, f"{page}|{mention.path}"), mention.path,
+             {"name": mention.written, "link": link[0]})
+            for mention, link in candidates
+        ],
+        MAX_UNLINKED_MENTIONS,
+    )
+    if not offered:
+        return None
+    by_path = {mention.path: (mention, link) for mention, link in candidates}
+    chosen = [by_path[path] for path, _entry in offered]
+    edits = name_mentions.edits_for(
+        body,
+        source if source is not None else body,
+        [mention for mention, _link in chosen],
+        [link[1] for _mention, link in chosen],
+        mask,
+        max_chars=MAX_UNLINKED_ANCHOR_CHARS,
+    )
+    # An Entity whose name has no unique anchor within bounds is not listed: the page's call must link
+    # exactly the Entities its block lists.
+    anchored = {at for at, _edit in edits}
+    listed = [entry for at, (_path, entry) in enumerate(offered) if at in anchored]
+    if not listed:
+        return None
+    return {
+        "note": page,
+        "mentions": listed,
+        "edits": [{"old": edit.old, "new": edit.new} for _at, edit in edits],
+    }
+
+
+def _linked_paths(
+    corpus: Any, visible: Callable[[str], bool] | None, body: str, wanted: set[str]
+) -> set[str]:
+    """Which of the `wanted` page paths the body links anywhere, relation rows included, in the writer's view."""
+    from . import semantic_contract, vault
+
+    linked: set[str] = set()
+    seen: set[str] = set()
+    for match in vault.find_body_wikilinks(body):
+        target = match.group(1).strip()
+        if target in seen:
+            continue
+        seen.add(target)
+        resolution = semantic_contract._resolve_reference_wikilink_from_context(corpus, target, visible)
+        if resolution.status == "resolved" and resolution.path in wanted:
+            linked.add(resolution.path)
+            if linked >= wanted:
+                break
+    return linked
+
+
+def _link_text(root: Path, path: str, written: str) -> tuple[str, str] | None:
+    """`(link target, wikilink text)` that shows `written` and opens this Entity, or None when it cannot be written."""
+    from . import vault
+
+    stem = path.removesuffix(".md")
+    if not vault.LINK_FILENAME_REFUSED.isdisjoint(stem.rsplit("/", 1)[-1]):
+        return None
+    target = vault.render_wikilink_target(stem, root)
+    text = f"[[{target}|{written}]]"
+    # The link grammar decides whether the name can be an alias: a bracket or bar would end the link early.
+    if [found.group(0) for found in vault.find_body_wikilinks(text)] != [text]:
+        return None
+    return target, text
+
+
+def _deliver_unlinked(root: Path, page: str, group: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return this page's block, or inside a batch hold the page's group for the carrier and return None."""
+    if _batch_active(root):
+        from . import due_state
+
+        due_state.note_batch_hold(root, UNLINKED_FAMILY, page, group, replace=True)
+        return None
+    return _unlinked_block(root, [group]) if group else None
+
+
+def batch_unlinked_mentions(vault_root: Path) -> dict[str, Any] | None:
+    """The `unlinked_mentions` block a finished batch carries, once, or None."""
+    try:
+        from . import due_state
+
+        return _unlinked_block(Path(vault_root), due_state.take_batch_holds(vault_root, UNLINKED_FAMILY))
+    except Exception:  # noqa: BLE001 -- an advisory never breaks a committed batch
+        log.debug("unlinked-mentions batch block failed (non-fatal)", exc_info=True)
+        return None
+
+
+def _unlinked_block(root: Path, groups: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The block for these page groups, whole pages in order up to `MAX_UNLINKED_MENTIONS` Entities.
+
+    A page is carried whole or not at all: its edits were counted against one another, so a page cut
+    to fewer Entities would carry edits that no longer prove their anchors.
+    """
+    pages: list[dict[str, Any]] = []
+    total = 0
+    for group in groups:
+        if pages and total + len(group["mentions"]) > MAX_UNLINKED_MENTIONS:
+            break
+        pages.append(group)
+        total += len(group["mentions"])
+    if not pages:
+        return None
+    _stamp_surfaced(root, UNLINKED_FAMILY, (entry for group in pages for entry in group["mentions"]))
+    return {"pages": pages}
+
+
 def _referent_entries(
     root: Path, found: list[tuple[str, Any]], origin: str
 ) -> list[tuple[str, dict[str, Any]]]:
-    """`(identity, entry)` for each name still offered: not dismissed, not snoozed, family not quieted.
+    """`(identity, entry)` for each name still offered: not dismissed, not snoozed, family not quieted."""
+    return _offered(
+        root,
+        REFERENTS_FAMILY,
+        [(*referent_review(identity), identity, {"name": link.name, "origin": origin}) for identity, link in found],
+        MAX_UNDECLARED_REFERENTS,
+    )
 
-    Unlike `_dismissed_referents` this fails closed on an unreadable store (the caller's
-    outer guard returns no block): the block asks the agent to act, and a store that
-    cannot be read cannot say the agent did not already decline.
+
+def _offered(
+    root: Path, family: str, candidates: Iterable[tuple[str, str, str, dict[str, Any]]], limit: int
+) -> list[tuple[str, dict[str, Any]]]:
+    """`(subject, entry)` for the first `limit` `(review id, fingerprint, subject, entry)` candidates still open.
+
+    The entry gains the write-advisory handle and fingerprint that dismiss it. Unlike
+    `_dismissed_referents` this fails closed on an unreadable store (the caller's outer guard
+    returns no block): a block asks the agent to act, and a store that cannot be read cannot say
+    the agent did not already decline. A quieted family offers nothing.
     """
     from . import corpus_aware, review_state
 
     store = review_state.ReviewStateStore(root)
     payload = store.load()
-    if review_state.disposition_for(REFERENTS_FAMILY, payload=payload) != "normal":
+    if review_state.disposition_for(family, payload=payload) != "normal":
         return []
-    entries: list[tuple[str, dict[str, Any]]] = []
-    for identity, link in found:
-        review_id, fingerprint = referent_review(identity)
-        # Only an open name is raised; a dismissed or snoozed one stays quiet.
+    offered: list[tuple[str, dict[str, Any]]] = []
+    for review_id, fingerprint, subject, entry in candidates:
+        # Only an open subject is raised; a dismissed or snoozed one stays quiet.
         if store.effective_state(review_id, fingerprint, payload=payload)[0] != "open":
             continue
-        entries.append(
-            (
-                identity,
-                {
-                    "name": link.name,
-                    "origin": origin,
-                    "review": corpus_aware.write_advisory_ref(review_id),
-                    "fingerprint": fingerprint,
-                },
-            )
+        offered.append(
+            (subject, {**entry, "review": corpus_aware.write_advisory_ref(review_id), "fingerprint": fingerprint})
         )
-        if len(entries) == MAX_UNDECLARED_REFERENTS:
+        if len(offered) == limit:
             break
-    return entries
+    return offered
 
 
-def _referent_block(root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """The block for these entries, after stamping their first surfacing.
-
-    The stamp is what lets a dismissal through the write-advisory door name the family.
-    """
-    if not entries:
-        return None
+def _stamp_surfaced(root: Path, family: str, entries: Iterable[dict[str, Any]]) -> None:
+    """Stamp the first surfacing of each entry, which lets a dismissal through the write-advisory door name its family."""
     from . import corpus_aware, review_state
 
     stamps = [
-        (corpus_aware.parse_write_advisory_ref(entry["review"]), entry["fingerprint"], REFERENTS_FAMILY)
+        (corpus_aware.parse_write_advisory_ref(entry["review"]), entry["fingerprint"], family)
         for entry in entries
     ]
     review_state.record_surfaced(
         root, stamps, surface="write", known=review_state.ReviewStateStore(root).load()
     )
+
+
+def _referent_block(root: Path, entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The block for these entries, after stamping their first surfacing."""
+    if not entries:
+        return None
+    _stamp_surfaced(root, REFERENTS_FAMILY, entries)
     return {"names": entries[:MAX_UNDECLARED_REFERENTS]}
 
 
