@@ -123,7 +123,7 @@ Each move of a split merge SHALL keep the file's bytes, rewrite the links to it,
 
 - **WHEN** the owner applies a batch that moves `Evidence/garden/seed.txt` into `Evidence/Garden/`
 - **THEN** `Evidence/Garden/seed.txt` holds the same bytes
-- **AND** its page's lineage names `Evidence/garden/seed.txt`
+- **AND** its page's lineage names the page's old path under `Evidence/garden/`
 
 ### Requirement: The preview's apply removes empty variant folders
 
