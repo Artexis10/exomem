@@ -56,6 +56,8 @@ carries the hooked edition's hooks and skills and a server at the reserved origi
 `https://server.invalid`. A self-hosted server with `EXOMEM_BASE_URL` serves it at
 `/claude-plugin.zip`, with its own origin in place of the placeholder and a plugin
 name derived from its host, so its user installs everything in one upload.
+The template keeps the release placeholder in its skills and manifest, and the
+server fills in its installed release, so a release cut leaves it unchanged.
 `scripts/cloud-plugin.py check` compares the packaged template with a fresh build.
 
 The two marketplace editions name themselves in `plugins/cloud/definition.json`

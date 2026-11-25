@@ -11,7 +11,7 @@ import pytest
 from fastmcp import FastMCP
 from starlette.testclient import TestClient
 
-from exomem import self_hosted_plugin
+from exomem import package_skills, self_hosted_plugin
 from exomem.cloud_plugins import _validate_claude_manifest, server_plugin_name
 from exomem.server_assets import register_claude_plugin_route
 
@@ -34,8 +34,10 @@ def test_plugin_connects_to_the_server_and_carries_the_hooked_edition() -> None:
     assert manifest["description"].startswith("For your own Evermatter server at kb.example.com:")
     readme = built.read("README.md").decode("utf-8")
     assert "kb.example.com" in readme and "Connectors tab" in readme
+    assert manifest["version"] == package_skills.release_version()
     for name in built.namelist():
         assert b".invalid" not in built.read(name), name
+        assert package_skills.RELEASE_PLACEHOLDER.encode() not in built.read(name), name
     carried = [name for name in hooked.namelist() if name.startswith(("hooks/", "skills/"))]
     assert any(name.startswith("hooks/") for name in carried)
     assert any(name.startswith("skills/") for name in carried)
@@ -70,8 +72,15 @@ def test_server_serves_the_plugin_for_its_public_origin_only() -> None:
     assert 'filename="evermatter-kb-example-com.zip"' in response.headers["content-disposition"]
     assert ".mcp.json" in zipfile.ZipFile(io.BytesIO(response.content)).namelist()
 
-    for base_url in ("", "https://" + "a" * 200 + ".example.com"):
-        unserved = FastMCP("unserved")
-        register_claude_plugin_route(unserved, base_url=base_url)
-        with TestClient(unserved.http_app()) as client:
-            assert client.get("/claude-plugin.zip").status_code == 404
+    private = FastMCP("private")
+    register_claude_plugin_route(private, base_url="")
+    with TestClient(private.http_app()) as client:
+        assert client.get("/claude-plugin.zip").status_code == 404
+
+    # An origin too long for claude.ai's description limit says where the cause is.
+    oversized = FastMCP("oversized")
+    register_claude_plugin_route(oversized, base_url="https://" + "a" * 200 + ".example.com")
+    with TestClient(oversized.http_app()) as client:
+        response = client.get("/claude-plugin.zip")
+    assert response.status_code == 503
+    assert "log" in response.json()["error"]

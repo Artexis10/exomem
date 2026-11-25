@@ -2,8 +2,9 @@
 
 claude.ai cannot ask a plugin for a server address, so each self-hosted server
 serves its own plugin. The generator packages a server edition whose connection
-points at a placeholder origin; this module replaces that origin with the
-server's own and names the plugin after its host.
+points at a placeholder origin and whose release is a placeholder; this module
+fills in the server's origin and installed release and names the plugin after
+its host.
 """
 
 from __future__ import annotations
@@ -20,13 +21,13 @@ from .cloud_plugins import (
     _validate_claude_manifest,
     server_plugin_name,
 )
+from .package_skills import RELEASE_PLACEHOLDER, release_version
 
 ROUTE = "/claude-plugin.zip"
 _TEMPLATE = PACKAGED_EDITION_DIR / "claude-server.zip"
 _MANIFEST = ".claude-plugin/plugin.json"
 _CONNECTION = ".mcp.json"
-# The entries that name the server; every other entry is copied byte for byte.
-_PERSONALISED = (_MANIFEST, _CONNECTION, "README.md")
+_README = "README.md"
 
 
 def _origin(base_url: str) -> str:
@@ -50,42 +51,39 @@ def archive_filename(base_url: str) -> str:
     return f"{server_plugin_name(_origin(base_url))}.zip"
 
 
-def check(base_url: str) -> None:
-    """Raise when this server cannot serve its plugin, so the route is never a dead link."""
-    build(base_url)
-
-
 def build(base_url: str) -> bytes:
     """Return the plugin archive that connects Claude to the server at ``base_url``."""
     stat = _TEMPLATE.stat()
-    return _build(_origin(base_url), stat.st_mtime_ns, stat.st_size)
+    return _build(_origin(base_url), release_version(), stat.st_mtime_ns, stat.st_size)
 
 
-# The archive depends only on the origin and the installed template; an upgrade changes
-# the template's mtime or size, which are part of the key.
+# The archive depends only on the origin, the release and the installed template; an
+# upgrade changes the template's mtime or size, which are part of the key.
 @functools.lru_cache(maxsize=4)
-def _build(origin: str, mtime_ns: int, size: int) -> bytes:  # noqa: ARG001
+def _build(origin: str, release: str, mtime_ns: int, size: int) -> bytes:  # noqa: ARG001
+    host = urlsplit(origin).netloc
     with zipfile.ZipFile(_TEMPLATE) as template:
-        (server,) = json.loads(template.read(_CONNECTION))["mcpServers"].values()
-        placeholder = server["url"].removesuffix("/mcp")
-        replacements = (
-            (placeholder, origin),
-            (urlsplit(placeholder).netloc, urlsplit(origin).netloc),
+        connection = json.loads(template.read(_CONNECTION))
+        (server,) = connection["mcpServers"].values()
+        placeholder = urlsplit(server["url"]).netloc
+        server["url"] = f"{origin}/mcp"
+        manifest = json.loads(template.read(_MANIFEST))
+        manifest.update(
+            name=server_plugin_name(origin),
+            version=release,
+            description=manifest["description"].replace(placeholder, host),
         )
-        personalised = {}
-        for name in _PERSONALISED:
-            text = template.read(name).decode("utf-8")
-            for old, new in replacements:
-                text = text.replace(old, new)
-            personalised[name] = text.encode()
-        # An origin that JSON would have to escape fails here instead of shipping broken.
-        json.loads(personalised[_CONNECTION])
-        manifest = json.loads(personalised[_MANIFEST])
-        manifest["name"] = server_plugin_name(origin)
         _validate_claude_manifest(manifest)
-        personalised[_MANIFEST] = _json_bytes(manifest)
+        personalised = {
+            _CONNECTION: _json_bytes(connection),
+            _MANIFEST: _json_bytes(manifest),
+            _README: template.read(_README).decode("utf-8").replace(placeholder, host).encode(),
+        }
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for info in template.infolist():
-                archive.writestr(info, personalised.get(info.filename) or template.read(info))
+                data = personalised.get(info.filename) or template.read(info)
+                if info.filename.startswith("skills/") and info.filename.endswith(".md"):
+                    data = data.decode("utf-8").replace(RELEASE_PLACEHOLDER, release).encode()
+                archive.writestr(info, data)
     return output.getvalue()

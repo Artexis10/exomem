@@ -567,11 +567,6 @@ def register_claude_plugin_route(mcp_app: FastMCP, *, base_url: str) -> None:
 
     if not base_url:
         return
-    try:
-        self_hosted_plugin.check(base_url)
-    except (OSError, ValueError) as error:
-        log.warning("not serving %s: %s", self_hosted_plugin.ROUTE, error)
-        return
 
     @mcp_app.custom_route(self_hosted_plugin.ROUTE, methods=["GET"])
     async def _claude_plugin(request: Request):  # noqa: ARG001

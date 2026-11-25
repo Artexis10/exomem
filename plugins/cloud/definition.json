@@ -30,7 +30,7 @@
     "claude-server": {
       "name": "evermatter-server-invalid",
       "display_name": "Evermatter",
-      "listed": false,
+      "packaged": true,
       "server_key": "evermatter",
       "resource": "https://server.invalid/mcp",
       "lead": "For your own Evermatter server at server.invalid: connects Claude to it and adds automatic recall and capture.",

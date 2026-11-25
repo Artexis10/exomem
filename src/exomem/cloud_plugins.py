@@ -35,9 +35,11 @@ _EDITIONS = {
     "claude-server": ("claude", True, True),
     "openai": ("openai", False, True),
 }
-# Editions that ship inside the Python package rather than beside the definition; the
-# wheel, the sdist and the container images all take `src/` as their package input.
-_PACKAGED_EDITIONS = frozenset(("claude-server",))
+# An edition whose definition says `packaged` ships inside the Python package, because
+# the wheel, the sdist and the container images take only `src/` as input. It is outside
+# the marketplace, and it keeps the release placeholder in its skills and manifest so a
+# release cut does not change it; the installed server fills in its own release.
+_PACKAGED_SOURCE = Path("src/exomem/_plugins")
 PACKAGED_EDITION_DIR = Path(__file__).parent / "_plugins"
 # Claude's directory policy fixes this closed set of admitted file types; a licence,
 # readme and .gitignore are admitted by name. ICO is omitted: the published checklist
@@ -237,9 +239,7 @@ def build_packages(
     destination = Path(output) if output is not None else root / "plugins/cloud/generated"
     destination.mkdir(parents=True, exist_ok=True)
     if package_output is None:
-        package_output = (
-            root / "src/exomem/_plugins" if output is None else destination / "package"
-        )
+        package_output = root / _PACKAGED_SOURCE if output is None else destination / "package"
     package_output = Path(package_output)
     package_output.mkdir(parents=True, exist_ok=True)
     staging = tempfile.TemporaryDirectory(prefix="exomem-packaged-edition-")
@@ -249,7 +249,8 @@ def build_packages(
     for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
         # An edition listed as its own marketplace plugin names itself in the definition.
         identity_override = definition.get("edition_identities", {}).get(edition, {})
-        packaged = edition in _PACKAGED_EDITIONS
+        packaged = bool(identity_override.get("packaged"))
+        release = package_skills.RELEASE_PLACEHOLDER if packaged else None
         target = (Path(staging.name) if packaged else destination) / edition
         if target.exists():
             shutil.rmtree(target)
@@ -259,7 +260,7 @@ def build_packages(
             workflow_skills.CORE_SKILL_NAME,
             *(str(item["name"]) for item in workflow_skills.list_skills()),
         ):
-            for relative, content in package_skills.skill_payload(name).items():
+            for relative, content in package_skills.skill_payload(name, release=release).items():
                 path = skills / name / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8", newline="\n")
@@ -344,13 +345,13 @@ def build_packages(
         if hooked:
             _claude_hooks(root, target)
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
-                # An edition outside the marketplace (the server template) has no install line.
+                # A packaged edition is outside the marketplace, so it has no install line.
                 install = (
-                    "To install this plugin in Claude Code, run "
+                    ""
+                    if packaged
+                    else "To install this plugin in Claude Code, run "
                     f"`/plugin install {identity_override.get('name', definition['name'])} "
                     f"--marketplace {repository}`. "
-                    if identity_override.get("listed", True)
-                    else ""
                 )
                 stream.write(
                     "\n## Claude lifecycle hooks\n\n"
@@ -377,7 +378,7 @@ def build_packages(
                 "name": identity_override.get("name", definition["name"]),
                 "displayName": display_name,
                 "description": description,
-                "version": identity["version"],
+                "version": release or identity["version"],
                 "author": definition["author"],
                 "homepage": definition["homepage"],
                 "repository": definition["repository"],
@@ -483,7 +484,7 @@ def check_packages(root: Path, output: Path | None = None) -> dict:
     issues: list[str] = []
     # A custom output keeps packaged editions in its `package/` folder, which the tree
     # comparison covers; the repository keeps them in the package source.
-    actual_package = root / "src/exomem/_plugins" if output is None else None
+    actual_package = root / _PACKAGED_SOURCE if output is None else None
     with tempfile.TemporaryDirectory(prefix="exomem-cloud-check-") as temporary:
         expected = Path(temporary) / "generated"
         expected_package = Path(temporary) / "package"
@@ -519,7 +520,12 @@ def check_packages(root: Path, output: Path | None = None) -> dict:
                 issues.append(f"extra: {name}")
             elif actual_files[name].read_bytes() != expected_files[name].read_bytes():
                 issues.append(f"drift: {name}")
-        for edition in sorted(_PACKAGED_EDITIONS) if actual_package else ():
+        packaged = sorted(
+            edition
+            for edition, identity in _definition(root).get("edition_identities", {}).items()
+            if identity.get("packaged")
+        )
+        for edition in packaged if actual_package else ():
             built = actual_package / f"{edition}.zip"
             if not built.is_file():
                 issues.append(f"missing: {built.relative_to(root).as_posix()}")
