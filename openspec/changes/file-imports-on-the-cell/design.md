@@ -39,6 +39,7 @@ The filer runs `file` through `writer_lease.invoke_command`, under the principal
 | Free space | Park. Wake on a `file` call, a restart or an hourly space check. |
 | `IMPORT_RECOVERY_UNRESOLVED` | Park with a `person` need. Only an operator or agent action resumes it. |
 | `MUTATION_BUSY`, acknowledgement pending | Back off with a bounded exponential delay, at most 5 tries per hour, then park until the next start or `file` call. |
+| `KB_NOT_INITIALIZED` | The vault has no Knowledge Base yet, and no one is present to create it. Make one `start` call with `initialize_kb`, under its own identity, then carry on with `file`. |
 | Any other error | Record the code and reason; park. |
 | A discard of the stage | On the next start the residual exists; record `discarded`; leave the list. |
 

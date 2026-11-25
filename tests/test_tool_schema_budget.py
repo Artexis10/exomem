@@ -110,10 +110,11 @@ TOOL_CEILINGS: dict[str, int] = {
 #: A Cloud cell serves the local surface minus the tools it withholds plus the Cloud-only
 #: control-plane tools, so its budget is the local one re-based on exactly those differences.
 #: The only new numbers are the ceilings of the two tools that no other surface lists.
-# observe_transfer step 3 names the `file` call and the older-server fallback, so it measures 1,959 B and its
-# ceiling rounds to 2,000 B.
+# observe_transfer step 3 names the `file` call and the older-server fallback, so it measured 1,959 B. It adds the
+# filing view that reports a stage the cell files by itself (file-imports-on-the-cell), 138 B, so it measures
+# 2,097 B and its ceiling rounds to 2,100 B.
 CLOUD_ONLY_CEILINGS: dict[str, int] = {
-    "observe_transfer": 2000,
+    "observe_transfer": 2100,
     "transfer_memory": 1650,
 }
 

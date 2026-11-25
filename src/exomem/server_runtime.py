@@ -150,6 +150,7 @@ class LocalRuntimeActivation:
         self.vault_projector: Any | None = None
         self.derived_drain: Any | None = None
         self.write_intake: Any | None = None
+        self.import_filer: Any | None = None
         self.semantic_drain: Any | None = None
         self.vocabulary_recovery: Any | None = None
         self.catalogue_recovery: threading.Thread | None = None
@@ -327,6 +328,7 @@ class LocalRuntimeActivation:
             ("media replicas", self._start_media_replicas),
             ("review pass", self._start_review_pass),
             ("vault backup", self._start_vault_backup),
+            ("import filer", self._start_import_filer),
             # Last: upkeep is the least important background work and must
             # never contend with admission, the watcher or graph convergence.
             ("dreamer", self._start_dreamer),
@@ -475,11 +477,13 @@ class LocalRuntimeActivation:
 
     def _stop_background_workers(self) -> None:
         """Stop workers already owned by this activation during shutdown."""
-        from . import maintenance_jobs, working_set_runtime, write_intake
+        from . import import_filing, maintenance_jobs, working_set_runtime, write_intake
 
         # First, so no queued save starts a replay while the workers below stop; a replay in
         # flight is claimed by this process and re-claimed after the restart.
         write_intake.stop(self.vault_root)
+        # Next, so no new filing call starts; a call in flight finishes and is repeated under its identity after a restart.
+        import_filing.stop(self.vault_root)
         working_set_runtime.stop_builds(self.vault_root)
         # Jobs commit in chunks, so each stops at its next checkpoint and a restart can plan the rest again.
         maintenance_jobs.stop_all(self.vault_root)
@@ -544,6 +548,9 @@ class LocalRuntimeActivation:
         if self.write_intake is not None and self.write_intake.alive:
             # A replay still running may commit, so the lease stays with this process.
             raise RuntimeError("write intake is still running during shutdown")
+        if self.import_filer is not None and self.import_filer.alive:
+            # A filing call still running may commit, so the lease stays with this process.
+            raise RuntimeError("import filer is still running during shutdown")
         if semantic_failure is not None:
             raise RuntimeError("semantic drain is still running during shutdown") from semantic_failure
 
@@ -650,6 +657,17 @@ class LocalRuntimeActivation:
         from . import write_intake
 
         self.write_intake = write_intake.start(vault_root)
+
+    def _start_import_filer(self, vault_root: Path) -> None:
+        """Finish the import stages that the cell was asked to file, in the serving HTTP runtime only.
+
+        A local agent session drives `file` itself, and two serving processes never share one vault.
+        """
+        if not self.serves_upload_sessions:
+            return
+        from . import import_filing
+
+        self.import_filer = import_filing.start(vault_root)
 
     def _recover_maintenance_jobs(self, vault_root: Path) -> None:
         """Record the jobs that a previous process left running as interrupted."""

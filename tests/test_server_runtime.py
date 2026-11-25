@@ -1561,6 +1561,30 @@ def test_a_save_during_a_long_startup_wait_finds_the_write_intake_running(
         readiness.reset()
 
 
+@pytest.mark.parametrize(("serves_upload_sessions", "runs"), [(True, True), (False, False)])
+def test_the_import_filer_runs_in_the_http_serving_runtime_only_and_stops_with_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, serves_upload_sessions: bool, runs: bool
+) -> None:
+    """Defect: a stdio session also filing a stage its agent drives, or a filer left running after shutdown."""
+    from exomem import import_filing
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _quiet_starters(monkeypatch, [])
+    activation = server_runtime.LocalRuntimeActivation(vault)
+    activation.serves_upload_sessions = serves_upload_sessions
+    try:
+        activation.start()
+        activation._thread.join(10)
+        assert (import_filing.filer_for(vault) is not None) is runs
+        assert (activation.import_filer is not None) is runs
+    finally:
+        activation._stop_background_workers()
+        readiness.reset()
+    assert import_filing.filer_for(vault) is None
+    assert activation.import_filer is None or activation.import_filer.alive is False
+
+
 def test_original_fixity_runs_its_own_pass_where_media_extraction_is_off(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

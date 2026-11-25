@@ -26,6 +26,7 @@ from . import (
     held_fs,
     indexes,
     knowledge_packs,
+    page_fields,
     reserved_paths,
     semantic_census,
     source_taxonomy,
@@ -402,7 +403,31 @@ def _links_section(planned: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def _provenance_lines(planned: Mapping[str, Any], collection: str | None) -> list[str]:
+def _origin_lines(planned: Mapping[str, Any], provenance: Sequence[page_fields.ProvenanceField]) -> list[str]:
+    """The provenance fields of a Source whose stage states an origin: one line for each active entry that has a value.
+
+    The entry says where its value comes from. This branches on that closed `source` and never on the field's key,
+    so a vault that retires an entry stops it being written, and a new entry needs no code.
+    """
+    origin = planned.get("origin")
+    if not origin:
+        return []
+    lines = []
+    for entry in provenance:
+        if entry.source == page_fields.SOURCE_ENVELOPE:
+            value = origin.get(entry.envelope)
+        elif entry.source == page_fields.SOURCE_MEMBER_TIME:
+            value = planned.get("file_modified")
+        else:
+            value = None
+        if value:
+            lines.append(f"{entry.field}: {yaml_scalar(value)}")
+    return lines
+
+
+def _provenance_lines(
+    planned: Mapping[str, Any], collection: str | None, provenance: Sequence[page_fields.ProvenanceField] = ()
+) -> list[str]:
     """Front-matter lines that say where an imported Source came from."""
     lines = [f"imported_from: {yaml_scalar(planned['original_path'])}"]
     if collection is not None:
@@ -414,6 +439,7 @@ def _provenance_lines(planned: Mapping[str, Any], collection: str | None) -> lis
         lines.append(f"previous_import: {yaml_scalar(planned['previous_import'])}")
     if planned.get("previous_note"):
         lines.append(f"previous_note: {yaml_scalar(context_refs.vault_ref(planned['previous_note']))}")
+    lines.extend(_origin_lines(planned, provenance))
     return lines
 
 
@@ -426,7 +452,8 @@ def _kind_lines(planned: Mapping[str, Any]) -> tuple[str, list[str]]:
 
 
 def render_text_source(
-    planned: Mapping[str, Any], text: str, *, date_iso: str, collection: str | None
+    planned: Mapping[str, Any], text: str, *, date_iso: str, collection: str | None,
+    provenance: Sequence[page_fields.ProvenanceField] = (),
 ) -> str:
     """The imported-Source page of a text original.
 
@@ -444,7 +471,7 @@ def render_text_source(
         f"source_type: {kind}",
         *domain_lines,
         f"captured: {date_iso}",
-        *_provenance_lines(planned, collection),
+        *_provenance_lines(planned, collection, provenance),
     ]
     if planned.get("aliases"):
         lines.append("aliases: [" + ", ".join(yaml_scalar(a) for a in planned["aliases"]) + "]")
@@ -477,7 +504,7 @@ text_source_body = fenced_capture  # the name that callers and tests read from h
 
 def render_artifact_source(
     planned: Mapping[str, Any], *, date_iso: str, collection: str | None,
-    source_id: str | None = None,
+    source_id: str | None = None, provenance: Sequence[page_fields.ProvenanceField] = (),
 ) -> str:
     """The Source page of an artifact original, in capture's own page format."""
     from . import add as add_module
@@ -505,7 +532,7 @@ def render_artifact_source(
         artifact_rel=planned["artifact_path"],
         artifact_digest=planned["original_sha256"],
         artifact_size=planned["original_bytes"],
-        extra_lines=_provenance_lines(planned, collection),
+        extra_lines=_provenance_lines(planned, collection, provenance),
     )
 
 
@@ -772,8 +799,11 @@ def import_item(
 ) -> ImportItem:
     """Render one plan item. ``text`` is the verified original for a text item."""
     artifact = None
+    # The registry is read only for an item whose stage stated an origin: the other items write no origin field.
+    provenance = page_fields.provenance_fields(root) if planned.get("origin") else ()
     if planned["form"] == "artifact":
-        content = render_artifact_source(planned, date_iso=date_iso, collection=collection, source_id=source_id)
+        content = render_artifact_source(
+            planned, date_iso=date_iso, collection=collection, source_id=source_id, provenance=provenance)
         artifact = ImportArtifact(
             target=root / planned["artifact_path"],
             digest=planned["original_sha256"],
@@ -781,7 +811,8 @@ def import_item(
         )
     else:
         assert text is not None
-        content = render_text_source(planned, text, date_iso=date_iso, collection=collection)
+        content = render_text_source(
+            planned, text, date_iso=date_iso, collection=collection, provenance=provenance)
     return ImportItem(
         original_path=planned["original_path"],
         target_rel=planned["target_path"],

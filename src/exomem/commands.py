@@ -100,6 +100,7 @@ from . import find as find_module
 from . import freshness as freshness_module
 from . import get_page as get_page_module
 from . import held_operation as held_operation_module
+from . import import_filing as import_filing_module
 from . import import_windows as import_windows_module
 from . import install_info as install_info_module
 from . import knowledge_packs as knowledge_packs_module
@@ -12484,7 +12485,8 @@ def op_adoption_studio(
     Status/work-item read; others write. Apply commits the previewed plan or refuses.
 
     file imports a staged folder in one repeatable call: repeat it with the
-    `continuation` it returns until `filing` is not `working`. An archive sent
+    `continuation` it returns until `filing` is not `working`. A serving cell also
+    finishes a stage it was asked to file: read it with status `view="filing"`. An archive sent
     with upload_files (lane import) is filed with `upload`. Other actions are
     the step path. start scans; select chooses; plan previews; apply copies into
     Sources and drafts notes under own-note rules; cancel closes pre-apply; finish
@@ -12530,6 +12532,8 @@ def op_adoption_studio(
             with none is refused.
         view: For run `status`, summary by default; inventory, selection, plan,
             outcomes or stale pages. Full is the explicit browser compatibility view.
+            `filing` takes the staged `path` and no run_id: state, progress, stop, person and
+            rate of the cell's own filing; `unknown` is not zero.
         offset: For status pages, a zero-based row offset.
         limit: For status pages, from 1 to 100 rows, also bounded by response bytes.
         revision: For status pages, the preceding summary's revision; restart paging if it changed.
@@ -12554,7 +12558,7 @@ def op_adoption_studio(
                     "IMPORT_REQUEST_INVALID", "status of one run takes no after, series_id or next_window_bytes")
             listing = adoption_run_module.status(
                 vault_root, run_id=run_id, path=path, view=view, offset=offset, limit=limit, revision=revision)
-            if run_id:
+            if run_id or view == "filing":
                 return listing
             return {**listing, **import_windows_module.report(
                 vault_root, after=after, series_id=series_id, next_window_bytes=next_window_bytes)}
@@ -12600,6 +12604,8 @@ def op_adoption_studio(
                 if staged.stopped is not None:
                     return {"path": staged.path, **staged.stopped}
                 path = staged.path
+            # The cell finishes the stage after this call: a serving runtime registers it with its import filer.
+            import_filing_module.note_file_call(vault_root, path, collection)
             # Like `apply`, one call commits a bounded share of the import, so it is one batch at its terminal.
             with due_state_module.batch_scope(vault_root), state_paths_module.resolution_scope():
                 filed = adoption_run_module.file(
@@ -12675,7 +12681,8 @@ def op_observe_transfer(
     2. status: the latest import (or import_id) and the export; poll until an adopt import
        is `done`.
     3. File it: manage_memory `imports.file` on the `next` path (`_Imports/<id>`), repeated with its
-       `continuation` until `filing` is not `working`. An older server refuses it: `imports.start` on
+       `continuation` until `filing` is not `working`. A cell asked to file finishes the stage itself:
+       poll imports.status `view="filing"` on that path until `state` is `done`. An older server refuses it: `imports.start` on
        the path, and again with `next_after`; select, plan and apply (at `apply_stop`, stop
        until space is free); finish.
     4. Review the residual with the person; discard with transfer_memory.
