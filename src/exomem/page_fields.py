@@ -41,12 +41,14 @@ SOURCE_ITEM_TIME = "item-time"
 SOURCES = frozenset({SOURCE_ENVELOPE, SOURCE_MEMBER_TIME, SOURCE_ITEM_TIME})
 #: The closed `writer` values: the operation that alone writes a pointer field on a captured
 #: page, because it checks what a plain correction cannot (a relocation and its classification
-#: history, the raw file's identity, or the citing page's `sources:`).
+#: history, the raw file's identity, the citing page's `sources:`, or the registered sensitivity
+#: classes).
 WRITER_RECLASSIFY = "reclassify"
 WRITER_CUSTODY = "custody"
 WRITER_CLOSURE = "closure"
+WRITER_CLASSIFY = "classify"
 # nosemgrep: ep-word-set -- The closed attribute values that the registry schema fixes, not vocabulary.
-WRITERS = frozenset({WRITER_RECLASSIFY, WRITER_CUSTODY, WRITER_CLOSURE})
+WRITERS = frozenset({WRITER_RECLASSIFY, WRITER_CUSTODY, WRITER_CLOSURE, WRITER_CLASSIFY})
 #: The closed `carries` value of a field whose values are project keys: a value it gains registers
 #: that key, and a relocation rewrites it.
 CARRIES_PROJECT_KEY = "project-key"

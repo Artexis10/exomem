@@ -1,0 +1,20 @@
+schema_version: 1
+registry: sensitivity-classes
+# What kinds of sensitive material a page holds. A class is a label an agent records beside the
+# page; it never leaves the material out. `default_disclosure` says who a later disclosure rule
+# lets read a page of that class when no rule says otherwise: `owner-only` keeps it to the owner,
+# `vault-default` leaves it to the vault's own policy. A vault adds a class in
+# `_Schema/sensitivity-classes.yaml`; promoting one is a proposal, because a class carries behaviour.
+entries:
+  identity:
+    label: Identity
+    description: an identity document or a government identifier, such as a passport, an ID card, a licence or a tax number
+    attributes: {default_disclosure: owner-only}
+  health:
+    label: Health
+    description: a medical or health record, such as a diagnosis, a prescription or a test result
+    attributes: {default_disclosure: owner-only}
+  financial:
+    label: Financial
+    description: a financial statement or account record, such as a bank statement, a tax return or an invoice
+    attributes: {default_disclosure: owner-only}

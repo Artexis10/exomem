@@ -1,0 +1,160 @@
+"""A sensitivity class is metadata beside a kept page, and classifying one rewrites nothing else.
+
+Each test names the failure it catches. The fixture vault is the canonical file-mode vault, and the
+document number below is synthetic.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from exomem import (
+    classify_page,
+    page_fields,
+    pointer_write,
+    sensitivity_classes,
+    set_frontmatter_field,
+)
+from exomem.vocabulary import registry
+
+SOURCE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
+
+
+def _overlay(vault: Path, text: str) -> None:
+    sensitivity_classes.registry_path(vault).write_text(text, encoding="utf-8")
+    registry.invalidate(vault)
+
+
+def test_an_overlay_class_is_one_a_capture_may_declare_and_a_class_without_its_attribute_is_not(
+    vault: Path,
+) -> None:
+    """A vault class that the registry never reads, or an entry without `default_disclosure`
+    that a page may still carry."""
+    _overlay(vault, "schema_version: 1\nentries:\n  legal:\n    label: Legal\n"
+                    "    attributes: {default_disclosure: owner-only}\n")
+    assert sensitivity_classes.validated(vault, ["legal", "Identity"]) == ("legal", "identity")
+
+    _overlay(vault, "schema_version: 1\nentries:\n  legal:\n    label: Legal\n"
+                    "    attributes: {default_disclosure: everyone}\n")
+    snapshot = registry.load(sensitivity_classes.SPEC, vault)
+
+    assert [finding["code"] for finding in snapshot.findings] == ["invalid_registry_overlay"]
+    with pytest.raises(sensitivity_classes.SensitivityError) as unknown:
+        sensitivity_classes.validated(vault, ["legal"])
+    assert str(unknown.value).startswith(sensitivity_classes.UNKNOWN_CODE)
+    assert "identity, health, financial" in str(unknown.value)
+
+
+def test_classifying_a_source_changes_only_its_sensitivity_field_and_a_revert_restores_every_byte(
+    vault: Path,
+) -> None:
+    """A classification that moves the page, rewrites its body or other frontmatter, or whose
+    revert returns different bytes than the page held before."""
+    path = vault / SOURCE
+    before = path.read_bytes()
+
+    preview = classify_page.classify(
+        vault, path=SOURCE, sensitivity=["identity"], reason="an identity card scan", validate_only=True
+    )
+    assert path.read_bytes() == before and preview["validate_only"]
+
+    done = classify_page.classify(
+        vault, path=SOURCE, sensitivity=["identity"], reason="an identity card scan"
+    )
+    after = path.read_text(encoding="utf-8")
+
+    assert done["sensitivity"]["classes"] == ["identity"] and done["sensitivity"]["basis"] == "declared"
+    assert after == before.decode("utf-8").replace(
+        "ingested_into: []\n", "ingested_into: []\nsensitivity: [identity]\n"
+    )
+    assert (vault / done["path"]).exists()
+
+    reverted = classify_page.classify(
+        vault, path=SOURCE, reason="classified the wrong page", revert_record=done["pointer_write"]
+    )
+
+    assert path.read_bytes() == before
+    assert reverted["sensitivity"]["classes"] == []
+
+
+def test_clearing_a_class_is_a_recorded_change_that_a_revert_undoes(vault: Path) -> None:
+    """A clear that deletes the field, which a pointer write cannot revert, so the owner loses
+    the class when they reverse a mistaken clear."""
+    path = vault / SOURCE
+    first = classify_page.classify(vault, path=SOURCE, sensitivity=["health"], reason="a lab result")
+    classified = path.read_bytes()
+    cleared = classify_page.classify(vault, path=SOURCE, sensitivity=[], reason="it was a newsletter")
+
+    assert cleared["sensitivity"]["classes"] == [] and cleared["sensitivity"]["basis"] == "none"
+    classify_page.classify(
+        vault, path=SOURCE, reason="the clear was a mistake", revert_record=cleared["pointer_write"]
+    )
+    assert path.read_bytes() == classified
+    assert first["pointer_write"] != cleared["pointer_write"]
+
+
+def test_an_unknown_class_refuses_naming_the_registered_keys_and_writes_nothing(vault: Path) -> None:
+    """A free-text class that lands on a Source, or a refusal that does not tell the agent which
+    keys exist."""
+    before = (vault / SOURCE).read_bytes()
+
+    with pytest.raises(classify_page.ClassifyError) as refused:
+        classify_page.classify(vault, path=SOURCE, sensitivity=["secret-stuff"], reason="guess")
+
+    assert refused.value.code == sensitivity_classes.UNKNOWN_CODE
+    assert "identity" in refused.value.reason and "financial" in refused.value.reason
+    assert (vault / SOURCE).read_bytes() == before
+
+
+def test_a_plain_edit_cannot_change_the_class_of_a_source_and_names_the_classify_route(
+    vault: Path,
+) -> None:
+    """A correction that rewrites `sensitivity` on a captured Source without the registry check
+    and the reason record of the classify operation."""
+    classify_page.classify(vault, path=SOURCE, sensitivity=["identity"], reason="a card")
+    before = (vault / SOURCE).read_bytes()
+
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as plain:
+        set_frontmatter_field.set_frontmatter_field(
+            vault, path=SOURCE, field="sensitivity", value=[], why="drop it",
+        )
+    with pytest.raises(set_frontmatter_field.SetFrontmatterError) as pointer:
+        set_frontmatter_field.set_pointer_field(
+            vault, path=SOURCE, field="sensitivity", value=[], why="drop it", expected_hash=None,
+        )
+
+    assert plain.value.code == "APPEND_ONLY" and "classify" in plain.value.reason
+    assert pointer.value.code == "POINTER_FIELD_OWNED" and "classify" in pointer.value.reason
+    assert (vault / SOURCE).read_bytes() == before
+
+
+def test_a_revert_record_of_another_operation_is_not_a_classify_revert(vault: Path) -> None:
+    """A classify revert that replays a project correction's record, so one operation undoes
+    another's write."""
+    path = vault / SOURCE
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "ingested_into: []\n", "ingested_into: []\nproject: harbour-survey\n"
+        ),
+        encoding="utf-8",
+    )
+    other = set_frontmatter_field.set_pointer_field(
+        vault, path=SOURCE, field="project", value="coastal-survey", why="merged", expected_hash=None,
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(classify_page.ClassifyError) as refused:
+        classify_page.classify(vault, path=SOURCE, reason="undo", revert_record=other.pointer_write)
+
+    assert refused.value.code == "POINTER_RECORD_UNKNOWN"
+    assert path.read_bytes() == before
+    assert pointer_write.load_record(vault, other.pointer_write)["page"] == SOURCE
+
+
+def test_the_page_field_registry_declares_sensitivity_as_a_classify_owned_list() -> None:
+    """A pack entry whose writer or shape drifts, which would let a plain write change the
+    field or store one class as a string."""
+    assert page_fields.writers(None)["sensitivity"] == page_fields.WRITER_CLASSIFY
+    assert "sensitivity" in page_fields.list_fields(None)
