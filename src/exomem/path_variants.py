@@ -75,18 +75,29 @@ def _exported(rel: str) -> bool:
 def sibling_names(root: Path, view: Any = None) -> Iterator[tuple[str, list[str], list[str]]]:
     """Each folder of the vault as an export sees it: `(parent, its folders, every name in it)`.
 
-    The names are its folders and the files an export keeps, plus, in store mode, the stored pages
-    and folders below it. The `path_variants` audit and the merge both group these names.
+    The names are the files an export keeps and the folders that hold one, plus, in store mode,
+    the stored pages and folders below it. A folder that holds only files the export drops (a
+    repository's objects, an editor's cache) is no name here, so its splits are not reported or
+    merged. The `path_variants` audit and the merge both group these names.
     """
+    folders: list[tuple[str, list[str], list[str]]] = []
+    live: set[str] = set()
     for directory, subdirs, files in os.walk(root):
         request_budget.checkpoint()
         subdirs.sort()
         parent = Path(directory).relative_to(root).as_posix()
         parent = "" if parent == "." else parent
-        names = {*subdirs, *(name for name in files if _exported(f"{parent}/{name}" if parent else name))}
+        kept = [name for name in files if _exported(f"{parent}/{name}" if parent else name)]
+        if kept and parent:
+            # Every folder above a kept file holds it.
+            parts = parent.split("/")
+            live.update("/".join(parts[:index]) for index in range(1, len(parts) + 1))
+        folders.append((parent, list(subdirs), kept))
+    for parent, subdirs, kept in folders:
+        names = {*kept, *(name for name in subdirs if (f"{parent}/{name}" if parent else name) in live)}
         if view is not None:
             names.update(child.name for child in view.children(parent))
-        yield parent, list(subdirs), sorted(names)
+        yield parent, subdirs, sorted(names)
 
 
 def _splits(root: Path, view: Any) -> list[_Split]:
@@ -118,12 +129,15 @@ def _entries_reader(root: Path, view: Any, parent: str) -> Callable[[str], set[s
 
 
 def _files_under(root: Path, view: Any, folder: str) -> list[str]:
-    """Every file below `folder`, hidden ones included, from the disk and the store."""
+    """Every file below `folder` that an export keeps, hidden ones included, from the disk and the store.
+
+    A file the export drops is never moved, so a folder that holds one is never emptied.
+    """
     files: set[str] = set()
     for directory, _subdirs, names in os.walk(root / folder):
         request_budget.checkpoint()
         base = Path(directory).relative_to(root).as_posix()
-        files.update(f"{base}/{name}" for name in names)
+        files.update(rel for name in names if _exported(rel := f"{base}/{name}"))
     if view is not None:
         files.update(page.path for page in view.pages(f"{folder}/"))
     return sorted(files)
@@ -176,7 +190,7 @@ def _destination(root: Path, view: Any, split: _Split, name: str, rel: str, plan
 
 def _empty_tree(root: Path, view: Any, folder: str) -> list[str] | None:
     """Every folder of a tree that holds no file, deepest first, or None when it holds one."""
-    if _files_under(root, view, folder):
+    if _files_under(root, view, folder) or any(files for _directory, _subdirs, files in os.walk(root / folder)):
         return None
     folders = [
         Path(directory).relative_to(root).as_posix() for directory, _subdirs, _files in os.walk(root / folder)

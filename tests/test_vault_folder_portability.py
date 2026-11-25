@@ -288,22 +288,43 @@ def test_a_capture_into_a_split_category_folder_lands_in_the_fuller_spelling(vau
     assert sorted(p.name for p in (evidence / "shared").iterdir()) == ["d.md"]
 
 
+def test_a_split_among_files_the_export_drops_is_left_alone(vault: Path) -> None:
+    """Defect: the merge renames a repository branch folder that no export carries, one-way."""
+    from exomem import path_variants
+
+    refs = vault / ".git" / "refs" / "heads"
+    for folder, name in (("Foo", "a"), ("foo", "b")):
+        (refs / folder).mkdir(parents=True)
+        (refs / folder / name).write_text("0" * 40)
+    vault_portability.check_path_collisions(
+        member.path for member in vault_portability.iter_archive_members(vault)
+    )
+
+    preview = path_variants.preview(vault)
+    findings = audit_module.audit(vault, categories=["path_variants"]).findings
+
+    assert preview["split_count"] == 0 and preview["move_count"] == 0
+    assert not [finding for finding in findings if finding.path.startswith(".git/")]
+    assert (refs / "foo" / "b").is_file()
+
+
 def test_a_file_that_arrives_after_the_preview_stops_the_merge(vault: Path) -> None:
     """Defect: a folder that gained a file after the preview is merged or removed without the owner seeing it."""
     from exomem import path_variants
     from exomem.cli_ops import OpError
 
     evidence = vault / "Knowledge Base" / "Evidence"
-    _page(evidence / "Garden" / "a.md")
-    (evidence / "garden").mkdir(parents=True)
+    for name in ("a", "b"):
+        _page(evidence / "Garden" / f"{name}.md")
+    _page(evidence / "garden" / "c.md")
     preview = path_variants.preview(vault)
-    assert preview["folders"] == ["Knowledge Base/Evidence/garden"] and preview["move_count"] == 0
+    assert preview["folders"] == ["Knowledge Base/Evidence/garden"] and preview["move_count"] == 1
     (evidence / "garden" / "late.txt").write_text("late")
 
     with pytest.raises(OpError) as refused:
-        path_variants.apply(vault, plan_id=preview["plan_id"], why="remove emptied spelling")
+        path_variants.apply(vault, plan_id=preview["plan_id"], why="merge the garden split")
     assert refused.value.code == "STALE_MAINTENANCE_PLAN"
-    assert (evidence / "garden" / "late.txt").exists()
+    assert sorted(p.name for p in (evidence / "garden").iterdir()) == ["c.md", "late.txt"]
 
 
 def test_deleting_one_side_of_a_split_keeps_the_other_page_reference(vault: Path) -> None:
