@@ -73,6 +73,18 @@ resource "cloudflare_dns_record" "gateway" {
   comment = "Evermatter Cloud MCP direct TLS ingress"
 }
 
+resource "cloudflare_dns_record" "gateway_additional" {
+  for_each = var.gateway_additional_hostnames
+
+  zone_id = each.value
+  name    = each.key
+  type    = "A"
+  content = hcloud_primary_ip.node.ip_address
+  proxied = false
+  ttl     = 300
+  comment = "Evermatter Cloud MCP direct TLS ingress (additional hostname)"
+}
+
 resource "cloudflare_dns_record" "status" {
   zone_id = var.cloudflare_zone_id
   name    = "status.substratesystems.io"

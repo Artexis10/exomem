@@ -25,7 +25,7 @@ variable "control_hostname" {
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.control_hostname))
+    condition     = can(regex(local.dns_name_pattern, var.control_hostname))
     error_message = "control_hostname must be a lowercase ASCII DNS name."
   }
 }
@@ -36,7 +36,7 @@ variable "transfer_hostname" {
 
   validation {
     condition = (
-      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.transfer_hostname)) &&
+      can(regex(local.dns_name_pattern, var.transfer_hostname)) &&
       var.transfer_hostname != var.control_hostname
     )
     error_message = "transfer_hostname must be a distinct lowercase ASCII DNS name."
@@ -50,11 +50,29 @@ variable "gateway_hostname" {
 
   validation {
     condition = var.gateway_hostname == "" || (
-      can(regex("^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$", var.gateway_hostname)) &&
+      can(regex(local.dns_name_pattern, var.gateway_hostname)) &&
       var.gateway_hostname != var.control_hostname &&
       var.gateway_hostname != var.transfer_hostname
     )
     error_message = "gateway_hostname must be empty or a distinct lowercase ASCII DNS name."
+  }
+}
+
+variable "gateway_additional_hostnames" {
+  description = "Further Cloud MCP hostnames, each mapped to the 32-character ID of the Cloudflare zone that holds it. Each resolves to the fleet node like gateway_hostname. Together, gateway_hostname and these names list every name the chart serves. DNS has no primary: when the chart swaps cloudGateway.hostname and additionalHostnames at a cutover, leave this map and gateway_hostname unchanged, because each name keeps its record address for life."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = length(var.gateway_additional_hostnames) == 0 || (
+      var.gateway_hostname != "" && alltrue([
+        for hostname, zone_id in var.gateway_additional_hostnames :
+        can(regex(local.dns_name_pattern, hostname)) &&
+        !contains([var.gateway_hostname, var.control_hostname, var.transfer_hostname], hostname) &&
+        can(regex("^[0-9a-f]{32}$", zone_id))
+      ])
+    )
+    error_message = "gateway_additional_hostnames needs gateway_hostname set, and maps distinct lowercase ASCII DNS names to 32-character hex zone IDs."
   }
 }
 
