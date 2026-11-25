@@ -24,13 +24,20 @@ _SPELLED = frozenset({"filters", "columns", "sort_by", "descending", "limit", "c
 
 
 def _leaf(predicate: Mapping[str, Any]) -> dict[str, Any]:
-    """One legacy filter as a typed predicate leaf."""
+    """One legacy filter as a typed predicate.
+
+    The legacy dialect counts a missing cell as unequal to every value, and the typed engine lets
+    a missing cell satisfy no comparison, so a negation also takes the rows that lack the field.
+    """
     from ..query_engine.ir import PRESENCE_OPS
 
     op = predicate.get("op", DEFAULT_OP)
     # A presence test takes no value in the typed grammar, and the legacy one ignores it.
     value = {} if op in PRESENCE_OPS or "value" not in predicate else {"value": predicate["value"]}
-    return {"field": predicate["column"], "op": op, **value}
+    leaf = {"field": predicate["column"], "op": op, **value}
+    if op in ("ne", "nin"):
+        return {"any": [leaf, {"field": predicate["column"], "op": "missing"}]}
+    return leaf
 
 
 def typed_query(manifest, item_key: object, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -42,7 +49,9 @@ def typed_query(manifest, item_key: object, arguments: Mapping[str, Any]) -> dic
     """
     from ..query_engine import legacy
 
-    unspelled = sorted(name for name in arguments if name not in _SPELLED)
+    # An argument left at its default asks nothing the typed answer lacks, so only a set one refuses.
+    unspelled = sorted(name for name, value in arguments.items() if name not in _SPELLED
+                       and value not in (None, False) and not (name == "output_format" and value == "json"))
     if item_key is not None:
         unspelled.append("item_key")
     shaped = legacy.normalize(

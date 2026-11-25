@@ -594,6 +594,19 @@ def test_the_legacy_query_arguments_read_a_derived_collection_through_the_typed_
         ("2026-11-02", 0), ("2026-11-02", 1), ("2026-11-02", 2)]
 
 
+def test_a_legacy_negation_on_a_derived_collection_keeps_the_rows_that_lack_the_field(derived):
+    """Defect: the typed engine lets a missing cell satisfy no comparison, so `ne` and `nin` on a derived
+    collection dropped every row without the field, which the same filter on a stored collection returns."""
+    writer, job = derived("legacy-negation", {"samples/mixed.json": MIXED_DOCUMENT},
+                          text=_mixed_manifest(location_key=False), mapping=MIXED_MAPPING)
+    finish(writer, job)
+    expected = sorted(row["position"] for row in _mixed_source() if row.get("numeric") != 7)
+
+    for op, value in (("ne", 7), ("nin", [7])):
+        found = _legacy_read(writer, filters=[{"column": "numeric", "op": op, "value": value}], columns=["position"])
+        assert sorted(row["position"] for row in found["rows"]) == expected
+
+
 def test_a_legacy_continuation_pages_a_derived_collection_to_its_last_row(derived):
     """Defect: a legacy query that names a continuation on a derived collection cannot resume, so a read of more
     rows than one page holds stops at the first page or repeats it. The pages must hold every row once."""
