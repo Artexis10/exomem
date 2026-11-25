@@ -94,8 +94,24 @@ class Lane:
             return error.code, b""
 
 
+def _names(name: str) -> tuple[str, str]:
+    """`name`, then its EVERMATTER_ form. Mirrors `exomem.env_compat`, which this hook cannot import.
+
+    Inside one source (the environment, a file) the EXOMEM_ name wins and the
+    EVERMATTER_ name fills it when unset.
+    """
+    return name, "EVERMATTER_" + name[len("EXOMEM_") :]
+
+
+def env_value(name: str) -> str:
+    for candidate in _names(name):
+        if candidate in os.environ:
+            return os.environ[candidate].strip()
+    return ""
+
+
 def service_env_path() -> Path | None:
-    explicit = os.environ.get("EXOMEM_SERVICE_ENV", "").strip()
+    explicit = env_value("EXOMEM_SERVICE_ENV")
     if explicit:
         return Path(explicit).expanduser()
     if os.name == "nt":
@@ -114,22 +130,23 @@ def service_env_value(name: str, path: Path | None) -> str:
         text = path.read_text(encoding="utf-8").lstrip("\ufeff")
     except Exception:  # noqa: BLE001 — hooks must fail softly
         return ""
-    for line in text.splitlines():
-        match = re.match(rf"^\s*{re.escape(name)}\s*=\s*(.*)$", line)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if len(value) >= 2 and value[0] == value[-1] == '"':
-            value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-        elif len(value) >= 2 and value[0] == value[-1] == "'":
-            value = value[1:-1]
-        return value.strip()
+    for candidate in _names(name):
+        for line in text.splitlines():
+            match = re.match(rf"^\s*{re.escape(candidate)}\s*=\s*(.*)$", line)
+            if not match:
+                continue
+            value = match.group(1).strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+            elif len(value) >= 2 and value[0] == value[-1] == "'":
+                value = value[1:-1]
+            return value.strip()
     return ""
 
 
 def rest_key() -> tuple[str, str]:
     """Return the key and its origin without logging either."""
-    key = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
+    key = env_value("EXOMEM_REST_API_KEY")
     if key:
         return key, "env"
     key = service_env_value("EXOMEM_REST_API_KEY", service_env_path())
@@ -138,7 +155,7 @@ def rest_key() -> tuple[str, str]:
 
 def local_port() -> int | None:
     """The managed service's local listener port: this env, else `service.env`."""
-    value = os.environ.get("EXOMEM_LOCAL_PORT", "").strip() or service_env_value(
+    value = env_value("EXOMEM_LOCAL_PORT") or service_env_value(
         "EXOMEM_LOCAL_PORT", service_env_path()
     )
     if not value.isascii() or not value.isdigit():
@@ -149,7 +166,7 @@ def local_port() -> int | None:
 
 def local_credential() -> tuple[str, int | None]:
     """Read the explicitly issued loopback token, never a provider OAuth token."""
-    path = os.environ.get("EXOMEM_LOCAL_TOKEN_FILE", "").strip()
+    path = env_value("EXOMEM_LOCAL_TOKEN_FILE")
     if not path:
         return "", None
     try:

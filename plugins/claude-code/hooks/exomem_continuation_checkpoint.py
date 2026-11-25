@@ -4442,6 +4442,18 @@ def _read_metadata_lines(root_handle: _SecureDirectory) -> list[bytes]:
     return lines
 
 
+def _with_product_prefix(environ: Mapping[str, str]) -> dict[str, str]:
+    """`environ` with each unset EXOMEM_X filled from EVERMATTER_X (EXOMEM_X wins if set).
+
+    Mirrors `exomem.env_compat.canonical_settings`, which this standalone hook cannot import.
+    """
+    mapped = dict(environ)
+    for name, value in environ.items():
+        if name.startswith("EVERMATTER_"):
+            mapped.setdefault("EXOMEM_" + name[len("EVERMATTER_") :], value)
+    return mapped
+
+
 def _disabled(environ: Mapping[str, str]) -> bool:
     return environ.get("EXOMEM_CONTINUATION_DISABLE", "").strip().lower() in {
         "1",
@@ -4657,7 +4669,7 @@ def dispatch_event(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
-    env = os.environ if environ is None else environ
+    env = _with_product_prefix(os.environ if environ is None else environ)
     event = normalize_event(client, payload)
     if event is None or _disabled(env):
         return None

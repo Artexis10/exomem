@@ -171,9 +171,14 @@ def test_a_dotenv_that_sets_only_evermatter_beats_an_exported_value_like_its_own
     assert os.environ["EXOMEM_RENAME_PROBE7"] == "dotenv-value"
 
 
-def test_the_standalone_hooks_map_the_prefix_like_env_compat(monkeypatch) -> None:
+def test_the_standalone_hooks_map_the_prefix_like_env_compat(monkeypatch, tmp_path) -> None:
     """A hook cannot import env_compat, so it carries a copy of the EVERMATTER_ rule."""
-    from exomem._hooks import exomem_capture_nudge, exomem_retrieve_nudge
+    from exomem._hooks import (
+        exomem_capture_nudge,
+        exomem_continuation_checkpoint,
+        exomem_local_credentials,
+        exomem_retrieve_nudge,
+    )
 
     sample = {
         "EVERMATTER_ONLY": "from-product-prefix",
@@ -200,3 +205,29 @@ def test_the_standalone_hooks_map_the_prefix_like_env_compat(monkeypatch) -> Non
             if name.startswith(env_compat.CANONICAL_PREFIX)
         }
         assert produced == expected, hook.__name__
+
+    mapped = exomem_continuation_checkpoint._with_product_prefix(sample)
+    assert {n: v for n, v in mapped.items() if n.startswith("EXOMEM_")} == expected
+
+    # The credential hook reads single names, from the environment and from a file; the file lists
+    # the alias first to show that line order does not decide between the two names.
+    service_env = tmp_path / "service.env"
+    service_env.write_text("".join(f"{name}={value}\n" for name, value in sample.items()))
+    monkeypatch.setattr(os, "environ", dict(sample))
+    for name, value in expected.items():
+        assert exomem_local_credentials.env_value(name) == value, name
+        assert exomem_local_credentials.service_env_value(name, service_env) == value, name
+
+
+def test_the_credential_hook_finds_a_key_that_service_env_names_with_the_product_prefix(
+    monkeypatch, tmp_path
+) -> None:
+    from exomem._hooks import exomem_local_credentials
+
+    service_env = tmp_path / "service.env"
+    service_env.write_text("EVERMATTER_REST_API_KEY=synthetic-key\n")
+    monkeypatch.delenv("EXOMEM_REST_API_KEY", raising=False)
+    monkeypatch.delenv("EVERMATTER_REST_API_KEY", raising=False)
+    monkeypatch.setenv("EXOMEM_SERVICE_ENV", str(service_env))
+
+    assert exomem_local_credentials.rest_key() == ("synthetic-key", "file")
