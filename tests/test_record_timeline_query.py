@@ -1,4 +1,4 @@
-"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1).
+"""`query_records` with `timeline`: one field's spans over effective time (OpenSpec record-value-timeline 5.1-5.2).
 
 Each case names the failure only it catches. Store collections run on the real CollectionWriter, in the JSON
 encoding (one view file per row) and the typed one (a summary view). The lamps, shelves and dates are invented,
@@ -31,6 +31,21 @@ from exomem.record_memory import record_memory
 LAMPS_PATH = "Knowledge Base/Records/Lamps/_collection.md"
 SOURCE = "Knowledge Base/Sources/inventory.md"
 OWNER = owner_principal(surface="mcp")
+L17 = {"column": "asset_tag", "op": "eq", "value": "L-17"}
+L18 = {"column": "asset_tag", "op": "eq", "value": "L-18"}
+MARCH_CHANGES = {"field": "location", "from": "2026-03-01", "to": "2026-03-31", "changes": True}
+#: The queries of task 5.2, by name; the index must answer each exactly as the versions do.
+QUERIES = {
+    "one row": {"filters": [L17], "timeline": {"field": "location"}},
+    "at an instant": {"timeline": {"field": "location", "at": "2026-03-02T00:00:00Z"}},
+    "at a date": {"timeline": {"field": "location", "value": {"op": "eq", "value": "Shelf A"}, "at": "2026-03-01"}},
+    "a range": {"timeline": {"field": "location", "from": "2026-03-05", "to": "2026-03-08"}},
+    "changes": {"timeline": MARCH_CHANGES},
+    "newest first": {"timeline": MARCH_CHANGES, "descending": True},
+    "with columns": {"filters": [L18], "timeline": {"field": "location"}, "columns": ["status"]},
+    "a page": {"timeline": MARCH_CHANGES, "limit": 2},
+    "every span": {"timeline": {"field": "location"}},
+}
 
 
 def manifest(encoding):
@@ -68,6 +83,13 @@ def stocked(tmp_path, encoding, *, text=None):
 @pytest.fixture(params=["json-v1", "typed"])
 def lamps(request, tmp_path):
     with stocked(tmp_path, request.param) as writer:
+        yield writer
+
+
+@pytest.fixture
+def typed_lamps(tmp_path):
+    """The stocked lamps in a collection that can retract a row: a typed one with a summary view."""
+    with stocked(tmp_path, "typed") as writer:
         yield writer
 
 
@@ -161,3 +183,121 @@ def test_an_undeclared_field_is_refused_with_the_fields_it_can_name(lamps):
 
     assert error.code == "QUERY_FIELD_UNKNOWN"
     assert error.details["allowed"] == ["asset_tag", "location", "status"]
+
+
+# --- 5.2 answers from the versions ----------------------------------------------------------------------------
+
+
+def test_one_rows_timeline_lists_every_span_with_its_times(lamps):
+    reply = query(lamps, **QUERIES["one row"])
+
+    assert reply["timeline"] == {"field": "location", "window": None, "source": "versions"}
+    assert (reply["returned"], reply["total_matched"], reply["truncated"], reply["continuation"]) == (3, 3, False, None)
+    first, moved, last = reply["spans"]
+    assert spans(lamps, reply) == [("L-17", "Shelf A", "2026-03-01", "2026-03-01T14:00:00Z"),
+                                   ("L-17", "Shelf B", "2026-03-01T14:00:00Z", "2026-03-07"),
+                                   ("L-17", "Shelf C", "2026-03-07", None)]
+    assert first["first"] is True and "previous" not in first
+    assert (moved["previous"], last["previous"]) == ("Shelf A", "Shelf B")
+    assert {span["effective_basis"] for span in reply["spans"]} == {"stated"}
+    # The write time is the commit of the write that recorded the span's start.
+    written = [row[0] for row in lamps.connection.execute(
+        "SELECT t.committed_at FROM txns t JOIN audit_effects e ON e.txn_id=t.txn_id JOIN item_rows i "
+        "ON i.row_id=e.row_id WHERE i.item_key=? ORDER BY t.txn_id", (lamps.keys["L-17"],))]
+    assert [span["written_at"] for span in reply["spans"]] == written
+    # An owner reads the whole row, so each span names its write and the reason given for it.
+    assert [span["why"] for span in reply["spans"]] == ["stock", "move", "move"]
+    assert all(span["transition_id"] and span["sources"] == [] for span in reply["spans"])
+
+
+def test_an_instant_returns_the_spans_that_contain_it(lamps):
+    reply = query(lamps, **QUERIES["at an instant"])
+
+    assert spans(lamps, reply) == [("L-18", "Shelf A", "2026-02-20", "2026-03-03"),
+                                   ("L-17", "Shelf B", "2026-03-01T14:00:00Z", "2026-03-07")]
+    assert reply["timeline"]["window"] == {"from": "2026-03-02T00:00:00Z", "to": "2026-03-02T00:00:00.000001Z"}
+
+
+def test_a_date_returns_every_span_that_overlaps_its_utc_day(lamps):
+    """A date read as its first instant would drop the Shelf B span that began that afternoon."""
+    held_shelf_a = query(lamps, **QUERIES["at a date"])
+    one_lamp = query(lamps, filters=[L17], timeline={"field": "location", "at": "2026-03-01"})
+
+    assert spans(lamps, held_shelf_a) == [("L-18", "Shelf A", "2026-02-20", "2026-03-03"),
+                                          ("L-17", "Shelf A", "2026-03-01", "2026-03-01T14:00:00Z")]
+    assert [span[1] for span in spans(lamps, one_lamp)] == ["Shelf A", "Shelf B"]
+    assert one_lamp["timeline"]["window"] == {"from": "2026-03-01T00:00:00Z", "to": "2026-03-02T00:00:00Z"}
+
+
+def test_a_range_returns_the_spans_that_overlap_it_through_its_last_day(lamps):
+    reply = query(lamps, **QUERIES["a range"])
+
+    assert spans(lamps, reply) == [("L-17", "Shelf B", "2026-03-01T14:00:00Z", "2026-03-07"),
+                                   ("L-18", "Shelf D", "2026-03-03", None),
+                                   ("L-17", "Shelf C", "2026-03-07", None)]
+    assert reply["timeline"]["window"] == {"from": "2026-03-05T00:00:00Z", "to": "2026-03-09T00:00:00Z"}
+
+
+def test_changes_list_the_spans_that_started_in_the_window_with_the_value_before(lamps):
+    reply = query(lamps, **QUERIES["changes"])
+
+    assert [(tag, value) for tag, value, _, _ in spans(lamps, reply)] == [
+        ("L-17", "Shelf A"), ("L-17", "Shelf B"), ("L-18", "Shelf D"), ("L-17", "Shelf C"), ("L-19", "Shelf E")]
+    assert [span.get("previous", "first" if span.get("first") else None) for span in reply["spans"]] == [
+        "first", "Shelf A", "Shelf A", "Shelf B", "first"]
+
+
+def test_descending_lists_the_newest_span_first(lamps):
+    oldest_first = spans(lamps, query(lamps, **QUERIES["changes"]))
+
+    assert spans(lamps, query(lamps, **QUERIES["newest first"])) == oldest_first[::-1]
+
+
+def test_columns_add_each_rows_current_values(lamps):
+    """A column is the row's value now, not at the span: L-18 was "in service" when it reached Shelf A."""
+    reply = query(lamps, **QUERIES["with columns"])
+
+    assert [(span["value"], span["columns"]) for span in reply["spans"]] == [
+        ("Shelf A", {"status": "lent"}), ("Shelf D", {"status": "lent"})]
+
+
+def test_a_continuation_resumes_the_same_spans_and_is_refused_after_a_write(lamps):
+    whole = query(lamps, **QUERIES["changes"])["spans"]
+    pages = [query(lamps, **QUERIES["a page"])]
+    while pages[-1]["continuation"] is not None:
+        pages.append(query(lamps, **QUERIES["a page"], continuation=pages[-1]["continuation"]))
+
+    assert [page["returned"] for page in pages] == [2, 2, 1]
+    assert [span for page in pages for span in page["spans"]] == whole
+    assert {page["total_matched"] for page in pages} == {5}
+    edit(lamps, lamps.keys["L-19"], {"status": "lent"})
+    assert refused(lamps, **QUERIES["a page"], continuation=pages[0]["continuation"]).code == "STALE_RECORD_SNAPSHOT"
+
+
+def test_two_moves_stated_on_one_date_both_stay_and_keep_their_order(lamps):
+    """A zero-length span that merged away would hide a move; an order by date alone could split a page twice."""
+    key = add(lamps, {"asset_tag": "L-20", "location": "Shelf A"}, "2026-02-01")
+    edit(lamps, key, {"location": "Shelf B"}, effective_at="2026-03-01")
+    edit(lamps, key, {"location": "Shelf C"}, effective_at="2026-03-01")
+    one_lamp = [{"column": "asset_tag", "op": "eq", "value": "L-20"}]
+
+    every = query(lamps, filters=one_lamp, timeline={"field": "location"})
+    first = query(lamps, filters=one_lamp, timeline=MARCH_CHANGES, limit=1)
+    second = query(lamps, filters=one_lamp, timeline=MARCH_CHANGES, limit=1, continuation=first["continuation"])
+
+    assert spans(lamps, every)[1:] == [("L-20", "Shelf B", "2026-03-01", "2026-03-01"),
+                                       ("L-20", "Shelf C", "2026-03-01", None)]
+    assert [span["value"] for span in (*first["spans"], *second["spans"])] == ["Shelf B", "Shelf C"]
+    assert second["continuation"] is None
+
+
+def test_a_retracted_row_has_no_spans(typed_lamps):
+    """A retracted lamp still on Shelf A in a timeline would contradict every other query, which treats it as absent."""
+    container, version = typed_lamps.current_guards(LAMPS, typed_lamps.keys["L-18"])
+    typed_lamps.retract_record(LAMPS, item_key=typed_lamps.keys["L-18"], expected_container_hash=container,
+                               expected_item_version=version, why="sold")
+
+    reply = query(typed_lamps, **QUERIES["at a date"])
+
+    assert spans(typed_lamps, reply) == [("L-17", "Shelf A", "2026-03-01", "2026-03-01T14:00:00Z")]
+    assert reply["total_matched"] == 1
