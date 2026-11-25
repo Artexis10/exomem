@@ -11,11 +11,11 @@ The requirements that this record serves:
 
 Every count in this file comes from the collected records. No count is typed by hand.
 
-## Status: regenerate at the first FSL release
+## Status: the first FSL release
 
-This record covers the released v0.200.0 images and images built from the current tree. Both predate the first FSL release. The v0.200.0 rows still show the third-party strong-copyleft libraries that the licence work removed. The tree rows show the result of that removal.
+This record covers the published images of the first releases under FSL-1.1-ALv2. The `lean`, `ml` and `cuda` images come from v0.202.0, the first FSL release. v0.202.0 published no `cloud` or `cellctl` image, because its arm64 licence check failed, so those two images come from v0.203.0, the first release that published them. Every platform that each release published is scanned.
 
-Regenerate this record from the published images of the first FSL release. Cover every platform of `lean`, `ml`, `cuda`, `cloud` and `cellctl`. Unmapped and Strong copyleft must be 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` tracks this, and it must finish before the release statement.
+Unmapped and Strong copyleft are 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` required this before the release statement.
 
 ## How to read this record
 
@@ -85,65 +85,56 @@ Steps 7 to 9 are manual checks that the generator does not run. Run them in the 
 8. Run `docker run --rm -i --entrypoint python IMAGE - < probe.py`. The last line must read `loaded: []`.
 9. For each system library that Part C shows as plain `none read`, run `docker run --rm --entrypoint cat IMAGE /usr/share/doc/PACKAGE/copyright | grep -i gpl`. It must print nothing.
 
-Results on 2026-11-23, in the image of `cloud-tree-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
+Results on 2026-11-25, in the image of `cloud-v0.203.0-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
 
 ## Images scanned
 
 | Record | Source | Platform | Tag | Manifest digest | Scanned |
 | --- | --- | --- | --- | --- | --- |
-| `cellctl-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0` | `sha256:800c51f3e7f0280f624ec7b25b817f2ac892e3782c5fb6fe806dfa5be0067d87` | 2026-11-23 (trivy 0.72.0) |
-| `cellctl-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0` | `sha256:373f9343770b9a9930778dba1dccc3f60e49ef608da3f23ffa51798dbbadc13a` | 2026-11-23 (trivy 0.72.0) |
-| `cloud-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `cloud` | `local build, image config digest sha256:a3582f92ec58f1abe3e64e5ea91963253eca474b7c5f2fdd96d8aae8bb1c903c` | 2026-11-23 (trivy 0.72.0) |
-| `cloud-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-cloud` | `sha256:3eb850491e482dba17e1412158861c75b9b25fb579c306600510355644cc090c` | 2026-11-23 (trivy 0.72.0) |
-| `cloud-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0-cloud` | `sha256:e27790e065802c6593d3df6c8e2ada4dc6579a23d60a4d1493d329bde0150e6d` | 2026-11-23 (trivy 0.72.0) |
-| `cuda-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-cuda` | `sha256:779f2285a0eaab35054a02ad3c16340141e51a79aee90850a6778129520876ab` | 2026-11-23 (trivy 0.72.0) |
-| `lean-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `lean` | `local build, image config digest sha256:2611e886c8b97a2b70f70145a18da35a03569ef2024188ec9f7dc52a18305775` | 2026-11-23 (trivy 0.72.0) |
-| `lean-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0` | `sha256:5fe3d53afae3af269ebaedb236932a5f8b5ca9f4d374b1ca343883209dcef9e7` | 2026-11-23 (trivy 0.72.0) |
-| `lean-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0` | `sha256:13c8d7e785dba5c230ce93e9b34308e3bd8eff8c303823ea46558a1b71ee9e80` | 2026-11-23 (trivy 0.72.0) |
-| `ml-tree-amd64` | current tree (3d28e8cf8), built locally | linux/amd64 | `ml` | `local build, image config digest sha256:d86dcb1445f49fc379bb56c996333b5d1c6ed6fc2d69fe8490f25f6d671ef3e3` | 2026-11-23 (trivy 0.72.0) |
-| `ml-v0.200.0-amd64` | released v0.200.0 | linux/amd64 | `0.200.0-ml` | `sha256:6463558b3329a6498348b836f45ac951682f7ce5c3dd151cbd45c81d37cb04b7` | 2026-11-23 (trivy 0.72.0) |
-| `ml-v0.200.0-arm64` | released v0.200.0 | linux/arm64 | `0.200.0-ml` | `sha256:11ba0d2d7285a9d036727756d0a3dbae374c26fbbf07839b339010db3118f67d` | 2026-11-23 (trivy 0.72.0) |
+| `cellctl-v0.203.0-amd64` | released v0.203.0 | linux/amd64 | `0.203.0` | `sha256:d5ff02cd224bd4fb4e7a43e03deccabf936355391d9e460b62e866641c2b389b` | 2026-11-25 (trivy 0.72.0) |
+| `cellctl-v0.203.0-arm64` | released v0.203.0 | linux/arm64 | `0.203.0` | `sha256:bddb6a776da7fa3c078f3875c990a2ba1ee632fdf5bc02c11ca3715f96009c44` | 2026-11-25 (trivy 0.72.0) |
+| `cloud-v0.203.0-amd64` | released v0.203.0 | linux/amd64 | `0.203.0-cloud` | `sha256:a3e28a66eaad00be57a0ec2b6c7ccddd6acdfeb5527fd16f1b5fbfcd383b870a` | 2026-11-25 (trivy 0.72.0) |
+| `cloud-v0.203.0-arm64` | released v0.203.0 | linux/arm64 | `0.203.0-cloud` | `sha256:17db4e0acbec75b18a818a19d6219c7e23ad3f6722938df447e929578075dff5` | 2026-11-25 (trivy 0.72.0) |
+| `cuda-v0.202.0-amd64` | released v0.202.0 | linux/amd64 | `0.202.0-cuda` | `sha256:72138c1e0e3b87a1a8127d773cb9f88a3aa75ccb0f68991282482e0b08be42a4` | 2026-11-24 (trivy 0.72.0) |
+| `lean-v0.202.0-amd64` | released v0.202.0 | linux/amd64 | `0.202.0` | `sha256:e6d98a2e0b58da5e4e1ce1449cd9bfaee75cd9e62994e2fd90e02a08a6f65635` | 2026-11-24 (trivy 0.72.0) |
+| `lean-v0.202.0-arm64` | released v0.202.0 | linux/arm64 | `0.202.0` | `sha256:207d2dd49398c3ea971ae43fae59c8216e133c461712b70676b3265a627e6f59` | 2026-11-24 (trivy 0.72.0) |
+| `ml-v0.202.0-amd64` | released v0.202.0 | linux/amd64 | `0.202.0-ml` | `sha256:f09756c254f964a9132b66c3b3fb0663fa169bef3aa030ff77799cd88fc60e67` | 2026-11-24 (trivy 0.72.0) |
+| `ml-v0.202.0-arm64` | released v0.202.0 | linux/arm64 | `0.202.0-ml` | `sha256:d7f18d853d120b24e7212a013d48ab8c389ef1fc7fd54e2e28dd55bde55282c8` | 2026-11-24 (trivy 0.72.0) |
 
 ## Counts, derived from the records
 
 | Record | OS packages (Part C) | OS system libraries (Part C) | Wheel libraries (Part A) | Other libraries (Part B) | Unmapped (A, B) | Strong copyleft (A, B) | Weak copyleft (A, B) | Linking exception (A, B) | Proprietary (A, B) |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `cellctl-v0.200.0-amd64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
-| `cellctl-v0.200.0-arm64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
-| `cloud-tree-amd64` | 199 | 110 | 35 | 9 | 0 | 0 | 13 | 2 | 0 |
-| `cloud-v0.200.0-amd64` | 198 | 109 | 71 | 2 | 0 | 8 | 19 | 2 | 0 |
-| `cloud-v0.200.0-arm64` | 198 | 109 | 69 | 2 | 0 | 8 | 18 | 2 | 0 |
-| `cuda-v0.200.0-amd64` | 87 | 47 | 119 | 2 | 0 | 1 | 8 | 7 | 59 |
-| `lean-tree-amd64` | 87 | 47 | 4 | 2 | 0 | 0 | 1 | 1 | 0 |
-| `lean-v0.200.0-amd64` | 87 | 47 | 4 | 2 | 0 | 0 | 1 | 1 | 0 |
-| `lean-v0.200.0-arm64` | 87 | 47 | 3 | 2 | 0 | 0 | 0 | 1 | 0 |
-| `ml-tree-amd64` | 87 | 47 | 52 | 2 | 0 | 0 | 8 | 7 | 0 |
-| `ml-v0.200.0-amd64` | 87 | 47 | 53 | 2 | 0 | 1 | 8 | 7 | 0 |
-| `ml-v0.200.0-arm64` | 87 | 47 | 53 | 2 | 0 | 1 | 5 | 7 | 0 |
+| `cellctl-v0.203.0-amd64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
+| `cellctl-v0.203.0-arm64` | 87 | 47 | 0 | 2 | 0 | 0 | 0 | 0 | 0 |
+| `cloud-v0.203.0-amd64` | 199 | 110 | 35 | 9 | 0 | 0 | 13 | 2 | 0 |
+| `cloud-v0.203.0-arm64` | 199 | 110 | 34 | 9 | 0 | 0 | 12 | 2 | 0 |
+| `cuda-v0.202.0-amd64` | 87 | 47 | 118 | 2 | 0 | 0 | 8 | 7 | 59 |
+| `lean-v0.202.0-amd64` | 87 | 47 | 4 | 2 | 0 | 0 | 1 | 1 | 0 |
+| `lean-v0.202.0-arm64` | 87 | 47 | 3 | 2 | 0 | 0 | 0 | 1 | 0 |
+| `ml-v0.202.0-amd64` | 87 | 47 | 52 | 2 | 0 | 0 | 8 | 7 | 0 |
+| `ml-v0.202.0-arm64` | 87 | 47 | 52 | 2 | 0 | 0 | 5 | 7 | 0 |
 
 ## Findings, derived from the records
 
-- `cellctl-v0.200.0-amd64` bundles no library of class strong-copyleft.
-- `cellctl-v0.200.0-arm64` bundles no library of class strong-copyleft.
-- `cloud-tree-amd64` bundles no library of class strong-copyleft.
-- `cloud-v0.200.0-amd64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-5e6b81c2.so.62.28.102, libx264-d6533a8d.so.165, libx265-f5385bb8.so.216; pillow_heif 1.8.1: libx265-4883ecb5.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
-- `cloud-v0.200.0-arm64` bundles strong-copyleft libraries: av 18.1.0: libavcodec-4b81d6e7.so.62.28.102, libx264-fd5179c6.so.165, libx265-9fab7229.so.216; pillow_heif 1.8.1: libx265-f7a03873.so.217; PyMuPDF 1.27.2.3: _extra.so, _mupdf.so, libmupdf.so.27.2, libmupdfcpp.so.27.2.
-- `cuda-v0.200.0-amd64` bundles strong-copyleft libraries: pillow_heif 1.8.1: libx265-4883ecb5.so.217.
-- `lean-tree-amd64` bundles no library of class strong-copyleft.
-- `lean-v0.200.0-amd64` bundles no library of class strong-copyleft.
-- `lean-v0.200.0-arm64` bundles no library of class strong-copyleft.
-- `ml-tree-amd64` bundles no library of class strong-copyleft.
-- `ml-v0.200.0-amd64` bundles strong-copyleft libraries: pillow_heif 1.8.1: libx265-4883ecb5.so.217.
-- `ml-v0.200.0-arm64` bundles strong-copyleft libraries: pillow_heif 1.8.1: libx265-f7a03873.so.217.
+- `cellctl-v0.203.0-amd64` bundles no library of class strong-copyleft.
+- `cellctl-v0.203.0-arm64` bundles no library of class strong-copyleft.
+- `cloud-v0.203.0-amd64` bundles no library of class strong-copyleft.
+- `cloud-v0.203.0-arm64` bundles no library of class strong-copyleft.
+- `cuda-v0.202.0-amd64` bundles no library of class strong-copyleft.
+- `lean-v0.202.0-amd64` bundles no library of class strong-copyleft.
+- `lean-v0.202.0-arm64` bundles no library of class strong-copyleft.
+- `ml-v0.202.0-amd64` bundles no library of class strong-copyleft.
+- `ml-v0.202.0-arm64` bundles no library of class strong-copyleft.
 
-## `cellctl-v0.200.0-amd64`
+## `cellctl-v0.203.0-amd64`
 
-- Reference: `ghcr.io/artexis10/exomem-cellctl`; tag `0.200.0`; source: released v0.200.0.
-- Digests: index `sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961`, platform manifest `sha256:800c51f3e7f0280f624ec7b25b817f2ac892e3782c5fb6fe806dfa5be0067d87`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.200.0-amd64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem-cellctl@sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:19:28.860783211Z; layers: 5; Python distributions: 29.
+- Reference: `ghcr.io/substrate-systems/evermatter-cellctl`; tag `0.203.0`; source: released v0.203.0.
+- Digests: index `sha256:af95c29ffebd18041805f69efe6579126ba1b6511fa56f498a7f3f541d1b736c`, platform manifest `sha256:d5ff02cd224bd4fb4e7a43e03deccabf936355391d9e460b62e866641c2b389b`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.203.0-amd64 --tag 0.203.0 --source 'released v0.203.0' --platform linux/amd64 --registry ghcr.io/substrate-systems/evermatter-cellctl@sha256:af95c29ffebd18041805f69efe6579126ba1b6511fa56f498a7f3f541d1b736c --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-25 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-25T03:51:16.665464462Z; layers: 5; Python distributions: 29.
 
-### Part A: shared libraries inside Python wheels (`cellctl-v0.200.0-amd64`)
+### Part A: shared libraries inside Python wheels (`cellctl-v0.203.0-amd64`)
 
 Wheels that carry shared objects:
 
@@ -157,14 +148,14 @@ Wheels that carry shared objects:
 
 No Python wheel in this image bundles a shared library.
 
-### Part B: other shared libraries, outside any package manager (`cellctl-v0.200.0-amd64`)
+### Part B: other shared libraries, outside any package manager (`cellctl-v0.203.0-amd64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`cellctl-v0.200.0-amd64`): debian 13.7
+### Part C: operating-system layer (`cellctl-v0.203.0-amd64`): debian 13.7
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
@@ -271,14 +262,14 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 
 </details>
 
-## `cellctl-v0.200.0-arm64`
+## `cellctl-v0.203.0-arm64`
 
-- Reference: `ghcr.io/artexis10/exomem-cellctl`; tag `0.200.0`; source: released v0.200.0.
-- Digests: index `sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961`, platform manifest `sha256:373f9343770b9a9930778dba1dccc3f60e49ef608da3f23ffa51798dbbadc13a`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.200.0-arm64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem-cellctl@sha256:cfb12fb45ffeaa972f398501646a93a0402317773fc28745497c8b43510df961 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:12:03.562407451Z; layers: 5; Python distributions: 29.
+- Reference: `ghcr.io/substrate-systems/evermatter-cellctl`; tag `0.203.0`; source: released v0.203.0.
+- Digests: index `sha256:af95c29ffebd18041805f69efe6579126ba1b6511fa56f498a7f3f541d1b736c`, platform manifest `sha256:bddb6a776da7fa3c078f3875c990a2ba1ee632fdf5bc02c11ca3715f96009c44`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cellctl-v0.203.0-arm64 --tag 0.203.0 --source 'released v0.203.0' --platform linux/arm64 --registry ghcr.io/substrate-systems/evermatter-cellctl@sha256:af95c29ffebd18041805f69efe6579126ba1b6511fa56f498a7f3f541d1b736c --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-25 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-25T03:46:49.459649851Z; layers: 5; Python distributions: 29.
 
-### Part A: shared libraries inside Python wheels (`cellctl-v0.200.0-arm64`)
+### Part A: shared libraries inside Python wheels (`cellctl-v0.203.0-arm64`)
 
 Wheels that carry shared objects:
 
@@ -292,27 +283,27 @@ Wheels that carry shared objects:
 
 No Python wheel in this image bundles a shared library.
 
-### Part B: other shared libraries, outside any package manager (`cellctl-v0.200.0-arm64`)
+### Part B: other shared libraries, outside any package manager (`cellctl-v0.203.0-arm64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`cellctl-v0.200.0-arm64`): debian 13.7
+### Part C: operating-system layer (`cellctl-v0.203.0-arm64`): debian 13.7
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cellctl-v0.200.0-amd64`.
+The tables are the same as in Part C of `cellctl-v0.203.0-amd64`.
 
-## `cloud-tree-amd64`
+## `cloud-v0.203.0-amd64`
 
-- Reference: `local build`; tag `cloud`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:a3582f92ec58f1abe3e64e5ea91963253eca474b7c5f2fdd96d8aae8bb1c903c`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-tree-amd64 --tag cloud --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:16:30.11682063Z; layers: 19; Python distributions: 132.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.203.0-cloud`; source: released v0.203.0.
+- Digests: index `sha256:09f98a0d4d4d60051fe9a3ab2a3418f14ecdff2a2651d776531ce8e05b40bcae`, platform manifest `sha256:a3e28a66eaad00be57a0ec2b6c7ccddd6acdfeb5527fd16f1b5fbfcd383b870a`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.203.0-amd64 --tag 0.203.0-cloud --source 'released v0.203.0' --platform linux/amd64 --registry ghcr.io/substrate-systems/evermatter@sha256:09f98a0d4d4d60051fe9a3ab2a3418f14ecdff2a2651d776531ce8e05b40bcae --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-25 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-25T03:41:27.499191517Z; layers: 19; Python distributions: 132.
 
-### Part A: shared libraries inside Python wheels (`cloud-tree-amd64`)
+### Part A: shared libraries inside Python wheels (`cloud-v0.203.0-amd64`)
 
 Wheels that carry shared objects:
 
@@ -387,7 +378,7 @@ Wheels that carry shared objects:
 | `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 
-### Part B: other shared libraries, outside any package manager (`cloud-tree-amd64`)
+### Part B: other shared libraries, outside any package manager (`cloud-v0.203.0-amd64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
@@ -401,7 +392,7 @@ Wheels that carry shared objects:
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`cloud-tree-amd64`): debian 13.7
+### Part C: operating-system layer (`cloud-v0.203.0-amd64`): debian 13.8
 
 199 packages own 461 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
@@ -495,7 +486,7 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 | libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
 | libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
 | libssh2-1t64 | 1.11.1 | BSD-3-Clause (notice), ISC (notice) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| libssl3t64 | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
 | libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
 | libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
 | libtasn1-6 | 4.20.0 | LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted), GPL-3.0-only (forbidden), GFDL-1.3-only (unknown) |
@@ -531,7 +522,7 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 | adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
 | age | 1.2.1 | BSD-3-Clause (notice), MIT (notice), ISC (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
 | apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
+| base-files | 13.8+deb13u8 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
 | base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
 | bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
 | bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
@@ -563,8 +554,8 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 | ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
 | ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
 | netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| openssl | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| openssl-provider-legacy | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
 | passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
 | perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
 | readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
@@ -620,364 +611,21 @@ System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, lib
 
 </details>
 
-## `cloud-v0.200.0-amd64`
+## `cloud-v0.203.0-arm64`
 
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cloud`; source: released v0.200.0.
-- Digests: index `sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f`, platform manifest `sha256:3eb850491e482dba17e1412158861c75b9b25fb579c306600510355644cc090c`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.200.0-amd64 --tag 0.200.0-cloud --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:05:44.411560829Z; layers: 17; Python distributions: 131.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.203.0-cloud`; source: released v0.203.0.
+- Digests: index `sha256:09f98a0d4d4d60051fe9a3ab2a3418f14ecdff2a2651d776531ce8e05b40bcae`, platform manifest `sha256:17db4e0acbec75b18a818a19d6219c7e23ad3f6722938df447e929578075dff5`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.203.0-arm64 --tag 0.203.0-cloud --source 'released v0.203.0' --platform linux/arm64 --registry ghcr.io/substrate-systems/evermatter@sha256:09f98a0d4d4d60051fe9a3ab2a3418f14ecdff2a2651d776531ce8e05b40bcae --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-25 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-25T03:41:42.798310812Z; layers: 19; Python distributions: 132.
 
-### Part A: shared libraries inside Python wheels (`cloud-v0.200.0-amd64`)
-
-Wheels that carry shared objects:
-
-| Wheel | Declared licence | Other files in its `.dist-info` (count: first names) | Bundled libraries | Extension modules |
-| --- | --- | --- | --- | --- |
-| aiohttp 3.14.5 | Apache-2.0 AND MIT | 2: LICENSE.txt, LICENSE | 0 | 4 |
-| av 18.1.0 | BSD-3-Clause | 3: AUTHORS.py, AUTHORS.rst, LICENSE.txt | 32 | 49 |
-| caio 0.12.10 | Apache-2.0 | 1: COPYING | 0 | 3 |
-| cffi 2.0.0 | MIT | 2: AUTHORS, LICENSE | 0 | 1 |
-| charset-normalizer 3.4.7 | MIT | 1: LICENSE | 0 | 3 |
-| cryptography 48.0.1 | Apache-2.0 OR BSD-3-Clause | 3: LICENSE, LICENSE.APACHE, LICENSE.BSD | 0 | 1 |
-| frozenlist 1.8.0 | Apache-2.0 | 1: LICENSE | 0 | 1 |
-| hf-xet 1.8.0 | Apache-2.0 | 1: LICENSE | 0 | 1 |
-| ijson 3.5.1 | BSD-3-Clause AND ISC | 1: LICENSE.txt | 1 | 1 |
-| lxml 6.1.1 | BSD-3-Clause | 2: LICENSE.txt, LICENSES.txt | 0 | 7 |
-| MarkupSafe 3.0.3 | BSD-3-Clause | 1: LICENSE.txt | 0 | 1 |
-| multidict 7.2.1 | Apache-2.0 | 1: LICENSE | 0 | 2 |
-| numpy 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 17: LICENSE.txt, COPYING, LICENSE, dragon4_LICENSE.txt, ... | 3 | 19 |
-| onnxruntime 1.32.0 | MIT License | none | 2 | 1 |
-| pandas 3.0.3 | BSD 3-Clause License; BSD License | 1: LICENSE | 0 | 45 |
-| pillow 12.2.0 | MIT-CMU | 2: LICENSE, zip-safe | 18 | 8 |
-| pillow_heif 1.8.1 | BSD-3-Clause | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 3 | 1 |
-| propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-| protobuf 7.36.2 | 3-Clause BSD License | 1: LICENSE | 0 | 1 |
-| pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
-| PyMuPDF 1.27.2.3 | Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License | 2: COPYING, README.md | 4 | 0 |
-| PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
-| rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
-| SQLAlchemy 2.1.4 | MIT | 2: AUTHORS, LICENSE | 0 | 8 |
-| sqlite-vec 0.1.9 | MIT License, Apache License, Version 2.0 | none | 1 | 0 |
-| tokenizers 0.23.3 | Apache Software License | none | 0 | 1 |
-| watchfiles 1.1.1 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| websockets 16.0 | BSD-3-Clause | 1: LICENSE | 0 | 1 |
-| yarl 1.25.1 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-
-| Library | Wheel | Upstream project | Licence | Class | Evidence: licence file in the wheel |
-| --- | --- | --- | --- | --- | --- |
-| `av.libs/libSvtAv1Enc-9393c086.so.4.1.0` | av 18.1.0 | SVT-AV1 | BSD-3-Clause-Clear | permissive | none shipped |
-| `av.libs/libXau-154567c4.so.6.0.0` | av 18.1.0 | libXau (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libasound-c7818c60.so.2.0.0` | av 18.1.0 | ALSA library | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libavcodec-5e6b81c2.so.62.28.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libx264 and libx265 (GPL-2.0-or-later) | strong-copyleft | none shipped |
-| `av.libs/libavdevice-d91b4e17.so.62.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavfilter-b5da520e.so.11.14.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavformat-4639def2.so.62.12.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavutil-5809ad29.so.60.26.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libdav1d-f4b27961.so.7.0.0` | av 18.1.0 | dav1d | BSD-2-Clause | permissive | none shipped |
-| `av.libs/libdrm-b0291a67.so.2.4.0` | av 18.1.0 | libdrm | MIT | permissive | none shipped |
-| `av.libs/libgmp-8c6c054f.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libgnutls-71454fd1.so.30.42.0` | av 18.1.0 | GnuTLS | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libhogweed-006f41d4.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libmp3lame-8f9e436f.so.0.0.0` | av 18.1.0 | LAME | LGPL-2.0-or-later | weak-copyleft | none shipped |
-| `av.libs/libnettle-71a806b4.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libopencore-amrnb-d72c52e2.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
-| `av.libs/libopencore-amrwb-1b0ca122.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
-| `av.libs/libopus-114e2b1a.so.0.11.1` | av 18.1.0 | Opus | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libsharpyuv-48a062bd.so.0.1.2` | av 18.1.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libswresample-f0bc92fc.so.6.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libswscale-88e9f973.so.9.5.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libunistring-09f6121d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libvpl-e4e9cae8.so.2.16` | av 18.1.0 | oneVPL | MIT | permissive | none shipped |
-| `av.libs/libvpx-edb6de90.so.12.0.0` | av 18.1.0 | libvpx | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libwebp-0c5118d0.so.7.2.0` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libwebpmux-e1880640.so.3.1.2` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libx264-d6533a8d.so.165` | av 18.1.0 | x264 | GPL-2.0-or-later | strong-copyleft | none shipped |
-| `av.libs/libx265-f5385bb8.so.216` | av 18.1.0 | x265 | GPL-2.0-or-later | strong-copyleft | none shipped |
-| `av.libs/libxcb-5ddf6756.so.1.1.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-shape-7716c890.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-shm-0be6dfbf.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-xfixes-6de855b8.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `ijson.libs/libyajl-9393e5bd.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
-| `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
-| `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
-| `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | LICENSE |
-| `pillow.libs/libavif-a883386a.so.16.4.1` | pillow 12.2.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
-| `pillow.libs/libbrotlicommon-785b7a00.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
-| `pillow.libs/libbrotlidec-08d35d18.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
-| `pillow.libs/libfreetype-d2d71ad9.so.6.20.6` | pillow 12.2.0 | FreeType | FTL OR GPL-2.0-or-later (elected: FTL) | permissive | LICENSE |
-| `pillow.libs/libharfbuzz-ef65cc8a.so.0.61321.0` | pillow 12.2.0 | HarfBuzz | MIT | permissive | LICENSE |
-| `pillow.libs/libjpeg-8296d2fa.so.62.4.0` | pillow 12.2.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | LICENSE |
-| `pillow.libs/liblcms2-545f6561.so.2.0.18` | pillow 12.2.0 | Little CMS 2 | MIT | permissive | LICENSE |
-| `pillow.libs/liblzma-3c942967.so.5.8.3` | pillow 12.2.0 | XZ Utils (liblzma) | 0BSD | permissive | LICENSE |
-| `pillow.libs/libopenjp2-f3576751.so.2.5.4` | pillow 12.2.0 | OpenJPEG | BSD-2-Clause | permissive | LICENSE |
-| `pillow.libs/libpng16-65c953c0.so.16.56.0` | pillow 12.2.0 | libpng | libpng-2.0 | permissive | LICENSE |
-| `pillow.libs/libsharpyuv-0bacc318.so.0.1.2` | pillow 12.2.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libtiff-f4bc73ff.so.6.2.0` | pillow 12.2.0 | libtiff | libtiff | permissive | LICENSE |
-| `pillow.libs/libwebp-67ee3789.so.7.2.0` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libwebpdemux-eeb71312.so.2.0.17` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libwebpmux-20a90b09.so.3.1.2` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-bac6ebc8.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
-| `pillow.libs/libzstd-6ea785c0.so.1.5.7` | pillow 12.2.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
-| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
-| `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
-| `rawpy.libs/libjpeg-8995ad9f.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
-| `rawpy.libs/liblcms2-ff8c4a65.so.2.0.10` | rawpy 0.28.0 | Little CMS 2 | MIT | permissive | none shipped |
-| `rawpy/libraw_r.so` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `rawpy/libraw_r.so.25` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
-
-### Part B: other shared libraries, outside any package manager (`cloud-v0.200.0-amd64`)
-
-| Library | Upstream project | Licence | Class | Evidence: file in the image |
-| --- | --- | --- | --- | --- |
-| `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-| `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-
-### Part C: operating-system layer (`cloud-v0.200.0-amd64`): debian 13.7
-
-198 packages own 460 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
-
-System libraries under a linking exception: libatomic1, libgcc-s1, libgomp1, libstdc++6.
-
-<details><summary>System libraries (dpkg section `libs`): 109</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| gcc-14-base | 14.2.0 | GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.2-only (unknown), Artistic-2.0 (notice), LGPL-2.0-or-later (restricted) |
-| libacl1 | 2.3.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libapt-pkg7.0 | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| libarchive13t64 | 3.7.4 | BSD-2-Clause (notice), Apache-2.0 (notice), BSD-4-clause-UCB (unknown), BSD-1-clause-UCB (unknown), MIT (notice), CC0-1.0 (unencumbered), OpenSSL+SSLeay (unknown), BSD-124-clause-UCB (unknown), PD (unknown), BSD-3-clause-UCB (unknown) |
-| libatomic1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libattr1 | 2.5.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted) |
-| libaudit-common | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libaudit1 | 4.0.2 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden) |
-| libblkid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libbrotli1 | 1.1.0 | MIT (notice) |
-| libbsd0 | 0.12.2 | BSD-3-Clause (notice), BSD-3-clause-Regents (unknown), BSD-2-Clause-NetBSD (notice), BSD-3-clause-author (unknown), BSD-3-clause-John-Birrell (unknown), BSD-5-clause-Peter-Wemm (unknown), BSD-2-Clause (notice), BSD-2-clause-verbatim (unknown), BSD-2-clause-author (unknown), ISC (notice), ISC-Original (unknown), MIT (notice), public-domain (unknown), Beerware (unknown) |
-| libbz2-1.0 | 1.0.8 | BSD-3-Clause (notice), GPL-2.0-only (forbidden) |
-| libc-bin | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libc6 | 2.41 | LGPL-2.1-or-later (restricted), LGPL-2.0-or-later (restricted), LGPL-2.1+-with-link-exception (unknown), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-2+-with-link-exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), FSFAP (unknown), Carnegie (unknown), Inner-Net (unknown), MIT-like-Lord (unknown), BSD-like-Spencer (unknown), PCRE (unknown), BSD-3-clause-Carnegie (unknown), Unicode-DFS-2016 (notice), BSL-1.0 (notice), SunPro (unknown), CORE-MATH (unknown), BSD-3-clause-Berkeley (unknown), BSD-3-clause-WIDE (unknown), BSD-2-Clause (notice), BSD-3-clause-Oracle (unknown), DEC (unknown), IBM (unknown), ISC (notice), Univ-Coimbra (unknown), public-domain (unknown), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libcairo2 | 1.18.4 | LGPL-2.1-only (restricted) |
-| libcap-ng0 | 0.8.5 | LGPL-2.1-or-later (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libcap2 | 2.75 | BSD-3-Clause (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libcom-err2 | 1.47.2 | GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden), 0BSD (unencumbered), MIT (notice), BSD-3-Clause-Variant (unknown), BSD-3-Clause (notice), BSD-4-Clause-CMU (unknown), LGPL-2.0-only (restricted), Apache-2.0 (notice), ISC (notice), MIT-US-export (unknown), Kazlib (unknown), Latex2e (unknown), GPL-2+ with Texinfo exception (unknown) |
-| libcrypt1 | 4.4.38 | none read; recorded as LGPL-2.1-or-later (weak-copyleft), evidence /usr/share/doc/libcrypt1/copyright |
-| libcurl4t64 | 8.14.1 | curl (unknown), OLDAP-2.8 (unknown), ISC (notice), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), GPL-2+ with Libtool exception (unknown), BSD-3-Clause (notice), BSD-4-Clause-UC (notice), FSFULLR (unknown), X11 (notice), GPL-2.0-only (forbidden) |
-| libdatrie1 | 0.2.13 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libdb5.3t64 | 5.3.28+dfsg2 | Sleepycat (unknown), BSD-3-Clause (notice), MS-PL (notice), GPL-2.0-or-later (forbidden), Artistic-2.0 (notice), X11 (notice), MIT-old (unknown), TCL-like (unknown), BSD-3-clause-fjord (unknown), GPL-3.0-only (forbidden), Zlib (notice) |
-| libdebconfclient0 | 0.280 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libdeflate0 | 1.23 | MIT (notice) |
-| libexpat1 | 2.9.0 | MIT (notice) |
-| libffi8 | 3.4.8 | MIT (notice), X11 (notice), GPL-2.0-or-later (forbidden), GPL-3.0-or-later (forbidden), MPL-1.1 (reciprocal), LGPL-2.1-or-later (restricted), public-domain (unknown) |
-| libfontconfig1 | 2.15.0 | none read |
-| libfreetype6 | 2.13.3+dfsg | FTL (notice), MIT (notice), BSD-3-Clause (notice), FSFAP (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), Public-Domain (unknown), MIT-SMC (unknown), BSL-1.0 (notice), MIT-Modern-Variant (unknown), Zlib (notice), OpenGroup-MIT (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libfribidi0 | 1.0.16 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted) |
-| libgcc-s1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgdbm6t64 | 1.24 | GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden) |
-| libgif7 | 5.2.2 | MIT (notice), ISC (notice) |
-| libglib2.0-0t64 | 2.84.4 | LGPL-2.1-or-later (restricted), old-glib-tests (unknown), AFL-2.0 (notice), Janik-permissive (unknown), LGPL-2.0-or-later (restricted), CC0-1.0 (unencumbered), FSFULLR (unknown), Iconv-PD (unknown), Mingw-PD (unknown), Unicode-DFS-2016 (notice), MIT (notice), GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), Apache-2.0 with LLVM exception (unknown), Kuchling-PD (unknown), Plumb-PD (unknown), bzip2-1.0.6 (unknown), CC-BY-SA-3.0 (unknown), cmph (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), MPL-1.1 (reciprocal), Apache-2.0 (notice), GPL-2.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libgmp10 | 6.3.0+dfsg | GPL-2.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-3.0-or-later (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libgnutls30t64 | 3.8.9 | LGPL-2.1-only (restricted), LGPL-2.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-3.0-only (forbidden), GFDL-1.3-only (unknown), CC0-1.0 (unencumbered), MIT (notice), Apache-2.0 (notice), LGPL-3.0-or-later (restricted), LGPL-2.1-or-later (restricted), GPL-3.0-or-later (forbidden), BSD-3-Clause (notice), FSFAP (unknown) |
-| libgomp1 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libgraphite2-3 | 1.3.14 | LGPL-2.1-or-later (restricted), MPL-1.1 (reciprocal), GPL-2.0-or-later (forbidden), public-domain (unknown), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), custom-sil-open-font-license (unknown), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libgssapi-krb5-2 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libharfbuzz0b | 10.2.0 | MIT (notice), Unicode (unknown), ISC (notice), Apache-2.0 (notice), OFL-1.1 (unknown), Monotype (unknown), CC0-1.0 (unencumbered), GPL-3.0-or-later (forbidden), GPL-2+ with Font exception (unknown), UFL-1.0 (unknown), FSFULLR (unknown), GPL-2.0-with-autoconf-exception+ (unknown), GPL-3.0-with-autoconf-exception+ (unknown), FSFAP (unknown), LGPL-2.1-or-later (restricted), GPL-2+ with LibTool exception (unknown), FSFUL (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libhogweed6t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libicu76 | 76.1 | MIT (notice), GPL-3.0-only (forbidden) |
-| libidn2-0 | 2.3.8 | GPL-3.0-or-later (forbidden), LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), MIT (notice), Unicode (unknown), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-3.0-only (restricted) |
-| libjbig0 | 2.1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libjpeg62-turbo | 2.1.5 | BSD-BY-LC-NE (unknown), Zlib (notice), BSD-3-Clause (notice), MIT (notice), NTP (unknown) |
-| libk5crypto3 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libkeyutils1 | 1.6.3 | GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), GPL-2.0-only (forbidden), LGPL-2.0-only (restricted) |
-| libkrb5-3 | 1.21.3 | GPL-2.0-only (forbidden) |
-| libkrb5support0 | 1.21.3 | GPL-2.0-only (forbidden) |
-| liblastlog2-2 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libldap2 | 2.6.10+dfsg | OpenLDAP-2.8 (unknown), FSF-unlimited (unknown), GPL-2.0-with-autoconf-exception+ (unknown), GPL-3.0-with-autoconf-exception+ (unknown), GPL-2+ with Libtool exception (unknown), GPL-3+ with Libtool exception (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-or-later (forbidden), UMich (unknown), F5 (unknown), JCG (unknown), MIT-XC (unknown), NeoSoft-permissive (unknown), BSD-3-Clause (notice), Beerware (unknown), public-domain (unknown), BSD-4-clause-California (unknown), BSD-3-clause-variant (unknown), Expat-ISC (unknown), Expat-UNM (unknown), MIT (notice), BSD-3-clause-California (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libleptonica6 | 1.84.1 | none read; recorded as BSD-style redistribution notice (permissive), evidence /usr/share/doc/libleptonica6/copyright |
-| liblerc4 | 4.0.0+ds | Apache-2.0 (notice) |
-| liblz4-1 | 1.10.0 | GPL-2.0-or-later (forbidden), BSD-2-Clause (notice), GPL-2.0-only (forbidden) |
-| liblzma5 | 5.8.1 | 0BSD (unencumbered), GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), FSFULLR (unknown), GPL-3.0-or-later-WITH-Autoconf-exception-macro (unknown), none (unknown), PD (unknown), permissive-nowarranty (unknown), FSFUL (unknown), noderivs (unknown), PD-debian (unknown), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libmd0 | 1.1.0 | BSD-3-Clause (notice), BSD-3-clause-Aaron-D-Gifford (unknown), BSD-2-Clause (notice), BSD-2-Clause-NetBSD (notice), ISC (notice), Beerware (unknown), public-domain-md4 (unknown), public-domain-md5 (unknown), public-domain-sha1 (unknown) |
-| libmount1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libncursesw6 | 6.5+20250216 | none read; recorded as X11 (MIT-style permission notice) (permissive), evidence /usr/share/doc/libtinfo6/copyright |
-| libnettle8t64 | 3.10.1 | LGPL-3.0-or-later (restricted), GPL-2.0-or-later (forbidden), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), MIT (notice), GPL-3.0-with-autoconf-exception+ (unknown), public-domain (unknown), GPL-2.0-only (forbidden), GAP (unknown) |
-| libnghttp2-14 | 1.64.0 | MIT (notice), all-permissive (unknown), GPL-3.0-with-autoconf-exception+ (unknown), BSD-2-Clause (notice), GPL-3.0-only (forbidden) |
-| libnghttp3-9 | 1.8.0 | MIT (notice), FSFULLR (unknown), GPL-3+ with Autoconf generic exception (unknown), FSFUL (unknown), GPL-2+ with Autoconf generic exception (unknown), FSFAP (unknown), GPL-2+ with Libtool Exception (unknown), GPL-3.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden) |
-| libopenjp2-7 | 2.5.3 | BSD-2-Clause (notice), MIT (notice), BSD-3-Clause (notice), Libpng (notice), Zlib (notice), libtiff (unknown), LIBTIFF-PIXAR (unknown), LIBTIFF-GLARSON (unknown) |
-| libp11-kit0 | 0.25.5 | BSD-3-Clause (notice), FSFULLR (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), X11 (notice), ISC (notice), customFSFULLRWD (unknown), LGPL-2.1-or-later (restricted), Apache-2.0 (notice), customFSFUL (unknown), FSFAP (unknown), LGPL-2.1-only (restricted) |
-| libpam0g | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpango-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpangocairo-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpangoft2-1.0-0 | 1.56.3 | LGPL-2.0-or-later (restricted), LGPL-2.1-or-later (restricted), Example (unknown), TCL (unknown), Unicode (unknown), ICU (unknown), Chromium-BSD-style (unknown), Apache-2.0 (notice), Bitstream-Vera (unknown), OFL-1.1 (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libpcre2-8-0 | 10.46 | BSD-3-clause-Cambridge with BINARY LIBRARY-LIKE PACKAGES exception (unknown), BSD-3-Clause (notice), X11 (notice), BSD-2-Clause (notice), public-domain (unknown) |
-| libpixman-1-0 | 0.44.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libpixman-1-0/copyright |
-| libpng16-16t64 | 1.6.48 | Libpng (notice), MIT (notice), GPL-2.0-or-later (forbidden), BSD-like-with-advertising-clause (unknown), libpng OR Apache-2.0 OR BSD-3-clause (notice), Apache-2.0 (notice), GPL-2.0-only (forbidden), BSD-3-Clause (notice) |
-| libpsl5t64 | 0.21.2 | MIT (notice), gnulib (unknown), Chromium (unknown) |
-| libreadline8t64 | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| librtmp1 | 2.4+20151223.gitfa8646d.1 | GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libsasl2-2 | 2.1.28+dfsg1 | BSD-3-Clause-Attribution (notice), BSD-3-Clause (notice), BSD-2-Clause (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), BSD-4-Clause-UC (notice), RSA-MD (unknown), text://BSD-3-Clause-Attribution and IBM-as-is (unknown), BSD-3-clause-JANET (unknown), BSD-3-clause-PADL (unknown), MIT-OpenVision (unknown), OpenLDAP (unknown), FSFULLR (unknown), MIT-CMU (unknown), MIT-Export (unknown), BSD-2.2-clause (unknown), text://IBM-as-is (unknown) |
-| libsasl2-modules-db | 2.1.28+dfsg1 | BSD-3-Clause-Attribution (notice), BSD-3-Clause (notice), BSD-2-Clause (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), BSD-4-Clause-UC (notice), RSA-MD (unknown), text://BSD-3-Clause-Attribution and IBM-as-is (unknown), BSD-3-clause-JANET (unknown), BSD-3-clause-PADL (unknown), MIT-OpenVision (unknown), OpenLDAP (unknown), FSFULLR (unknown), MIT-CMU (unknown), MIT-Export (unknown), BSD-2.2-clause (unknown), text://IBM-as-is (unknown) |
-| libseccomp2 | 2.6.0 | LGPL-2.1-only (restricted) |
-| libselinux1 | 3.8.1 | public-domain (unknown), GPL-2.0-only (forbidden) |
-| libsemanage-common | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsemanage2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden) |
-| libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
-| libsharpyuv0 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssh2-1t64 | 1.11.1 | BSD-3-Clause (notice), ISC (notice) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
-| libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libtasn1-6 | 4.20.0 | LGPL-2.0-or-later (restricted), LGPL-2.1-only (restricted), GPL-3.0-only (forbidden), GFDL-1.3-only (unknown) |
-| libtesseract5 | 5.5.0 | Apache-2.0 (notice), MIT (notice) |
-| libthai-data | 0.1.29 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libthai0 | 0.1.29 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libtiff6 | 4.7.0 | Hylafax (unknown) |
-| libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| libudev1 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| libunistring5 | 1.3 | GPL-3.0-or-later (forbidden), LGPL-3.0-or-later (restricted), LGPL-2.0-or-later (restricted), GFDL-1.3-or-later (unknown), GFDL-1.2-or-later (unknown), LGPL-3.0-only (restricted), LGPL-2.1-or-later (restricted), BSD-3-Clause (notice), ISC (notice), Unicode-DFS-2016 (notice), public-domain (unknown), FreeSoftware (unknown), GPL-2.0-or-later (forbidden), GPL-2+ with distribution exception (unknown), MIT (notice), X11 (notice), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| libuuid1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| libwebp7 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libwebpmux3 | 1.5.0 | BSD-3-Clause (notice), Apache-2.0 (notice) |
-| libx11-6 | 1.8.12 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libx11-6/copyright |
-| libxau6 | 1.0.11 | none read |
-| libxcb-render0 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb-render0/copyright |
-| libxcb-shm0 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb-shm0/copyright |
-| libxcb1 | 1.17.0 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxcb1/copyright |
-| libxdmcp6 | 1.1.5 | none read |
-| libxext6 | 1.3.4 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libxext6/copyright |
-| libxml2 | 2.12.7+dfsg+really2.9.14 | MIT-1 (unknown), ISC (notice) |
-| libxrender1 | 0.9.12 | none read |
-| libxxhash0 | 0.8.3 | BSD-2-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libzstd1 | 1.5.7+dfsg | BSD-3-Clause (notice), GPL-2.0-only (forbidden), Zlib (notice), MIT (notice) |
-| zlib1g | 1.3.dfsg+really1.3.1 | Zlib (notice) |
-
-</details>
-
-<details><summary>Programs and data (every other dpkg section): 89</summary>
-
-| Package | Version | Licences read by trivy (class) |
-| --- | --- | --- |
-| adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| age | 1.2.1 | BSD-3-Clause (notice), MIT (notice), ISC (notice), GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
-| base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
-| bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
-| bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ca-certificates | 20250419+deb13u1 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), MPL-2.0 (reciprocal) |
-| coreutils | 9.7 | GPL-3.0-or-later (forbidden), BSD-4-Clause-UC (notice), GPL-3.0-only (forbidden), ISC (notice), FSFULLR (unknown), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown) |
-| dash | 0.5.12 | BSD-3-Clause (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| debconf | 1.5.91 | BSD-2-Clause (notice) |
-| debian-archive-keyring | 2025.1 | GPL-2.0-or-later (forbidden) |
-| debianutils | 5.23.2 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), public-domain (unknown), SMAIL-GPL (unknown) |
-| diffutils | 3.10 | GPL-3.0-or-later (forbidden), FSFULLR (unknown), LGPL-2.1-or-later (restricted), GPL-3.0-with-autoconf-exception+ (unknown), GPL-3.0-only (forbidden), GPL-3+ with texinfo exception (unknown), LGPL-2.0-or-later (restricted), GPL-2.0-or-later (forbidden), X11 (notice), FSFAP (unknown), GFDL-1.3-no-invariants-only (unknown), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), public-domain (unknown), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), GPL-2.0-only (forbidden), GFDL-1.3-only (unknown) |
-| dpkg | 1.22.22 | GPL-2.0-or-later (forbidden), public-domain-s-s-d (unknown), GPL-2.0-only (forbidden) |
-| findutils | 4.10.0 | GFDL-1.3-no-invariants-or-later (unknown), GPL-3.0-or-later (forbidden), FSFAP (unknown), GPL-2+ with Autoconf-data exception (unknown), GPL-3+ with Autoconf-data exception (unknown), FSFULLR (unknown), GPL-2.0-or-later (forbidden), X11 (notice), public-domain (unknown), LGPL-2.1-or-later (restricted), GPL with automake exception (unknown), LGPL-2.0-or-later (restricted), LGPL-3.0-or-later (restricted), BSD-3-Clause (notice), GPL-3+ with Bison-2.2 exception (unknown), LGPL-3.0-only (restricted), ISC (notice), GFDL-1.3-only (unknown), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted) |
-| fontconfig | 2.15.0 | none read |
-| fontconfig-config | 2.15.0 | none read |
-| fonts-dejavu-core | 2.37 | Bitstream-Vera (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| fonts-dejavu-mono | 2.37 | Bitstream-Vera (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| grep | 3.11 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden) |
-| gzip | 1.13 | GPL-3.0-or-later (forbidden), GFDL-1.3+-no-invariant (unknown), FSF-manpages (unknown), GPL-3.0-only (forbidden), GFDL-3 (unknown) |
-| hostname | 3.25 | GPL-2.0-only (forbidden) |
-| init-system-helpers | 1.69~deb13u1 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libpam-modules | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-modules-bin | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libpam-runtime | 1.7.0 | BSD-3-Clause (notice), GPL-2.0-or-later (forbidden), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), BSD-tcp_wrappers (unknown), LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted), public-domain (unknown), Beerware (unknown) |
-| libx11-data | 1.8.12 | none read; recorded as MIT-style permission notice (permissive), evidence /usr/share/doc/libx11-data/copyright |
-| login | 4.16.0-2+really2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| login.defs | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| mawk | 1.3.4.20250131 | GPL-2.0-only (forbidden), X11 (notice), CC-BY-3.0 (notice) |
-| mount | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-| ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
-| netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
-| readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
-| sed | 4.9 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), X11 (notice), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-only (unknown), ISC (notice), BSD-4-Clause-UC (notice), BSL-1 (unknown), pcre (unknown) |
-| sqv | 1.3.0 | LGPL-2.0-or-later (restricted), LGPL-2.0-only (restricted) |
-| sysvinit-utils | 3.14 | GPL-2.0-or-later (forbidden), LGPL-2.1-or-later (restricted), GPL-3.0-only (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
-| tar | 1.35+dfsg | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), LGPL-3.0-or-later (restricted), LGPL-3.0-only (restricted), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| tesseract-ocr | 5.5.0 | Apache-2.0 (notice), MIT (notice) |
-| tesseract-ocr-eng | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-est | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-jpn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-jpn-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-osd | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-arab | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-armn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-beng | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cans | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cher | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-cyrl | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-deva | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-ethi | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-frak | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-geor | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-grek | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-gujr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-guru | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hang | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hang-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hans | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hans-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hant | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hant-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-hebr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-jpan | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-jpan-vert | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-khmr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-knda | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-laoo | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-latn | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-mlym | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-mymr | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-orya | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-sinh | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-syrc | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-taml | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-telu | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-thaa | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-thai | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-tibt | 4.1.0 | Apache-2.0 (notice) |
-| tesseract-ocr-script-viet | 4.1.0 | Apache-2.0 (notice) |
-| tzdata | 2026f | public-domain (unknown) |
-| util-linux | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
-
-</details>
-
-## `cloud-v0.200.0-arm64`
-
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cloud`; source: released v0.200.0.
-- Digests: index `sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f`, platform manifest `sha256:e27790e065802c6593d3df6c8e2ada4dc6579a23d60a4d1493d329bde0150e6d`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cloud-v0.200.0-arm64 --tag 0.200.0-cloud --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:ed9f04257ce48361dbbb9bcb2465dff314e7b89cc47450e77cd7b91846ea8f1f --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:06:06.689037297Z; layers: 17; Python distributions: 131.
-
-### Part A: shared libraries inside Python wheels (`cloud-v0.200.0-arm64`)
+### Part A: shared libraries inside Python wheels (`cloud-v0.203.0-arm64`)
 
 Wheels that carry shared objects:
 
 | Wheel | Declared licence | Other files in its `.dist-info` (count: first names) | Bundled libraries | Extension modules |
 | --- | --- | --- | --- | --- |
 | aiohttp 3.14.5 | Apache-2.0 AND MIT | 2: LICENSE.txt, LICENSE | 0 | 4 |
-| av 18.1.0 | BSD-3-Clause | 3: AUTHORS.py, AUTHORS.rst, LICENSE.txt | 31 | 49 |
+| av 18.1.0 | BSD-3-Clause | 4: AUTHORS.py, AUTHORS.rst, LICENSE.txt, uv_cache.json | 0 | 49 |
 | caio 0.12.10 | Apache-2.0 | 1: COPYING | 0 | 3 |
 | cffi 2.0.0 | MIT | 2: AUTHORS, LICENSE | 0 | 1 |
 | charset-normalizer 3.4.7 | MIT | 1: LICENSE | 0 | 3 |
@@ -991,12 +639,12 @@ Wheels that carry shared objects:
 | numpy 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 17: LICENSE.txt, COPYING, LICENSE, dragon4_LICENSE.txt, ... | 2 | 19 |
 | onnxruntime 1.32.0 | MIT License | none | 2 | 1 |
 | pandas 3.0.3 | BSD 3-Clause License; BSD License | 1: LICENSE | 0 | 45 |
+| pi_heif 1.4.0 | BSD-3-Clause; GNU Lesser General Public License v3 (LGPLv3) | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 2 | 1 |
 | pillow 12.2.0 | MIT-CMU | 2: LICENSE, zip-safe | 18 | 8 |
-| pillow_heif 1.8.1 | BSD-3-Clause | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 3 | 1 |
 | propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
 | protobuf 7.36.2 | 3-Clause BSD License | 1: LICENSE | 0 | 1 |
 | pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
-| PyMuPDF 1.27.2.3 | Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License | 2: COPYING, README.md | 4 | 0 |
+| pypdfium2 5.15.2 | BSD-3-Clause, Apache-2.0, dependency licenses | 37: Apache-2.0.txt, abseil.txt, agg23.txt, llvm-libc.txt, ... | 1 | 0 |
 | PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
 | rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
 | rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
@@ -1009,42 +657,13 @@ Wheels that carry shared objects:
 
 | Library | Wheel | Upstream project | Licence | Class | Evidence: licence file in the wheel |
 | --- | --- | --- | --- | --- | --- |
-| `av.libs/libSvtAv1Enc-58030e1d.so.4.1.0` | av 18.1.0 | SVT-AV1 | BSD-3-Clause-Clear | permissive | none shipped |
-| `av.libs/libXau-7926f62a.so.6.0.0` | av 18.1.0 | libXau (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libasound-612e92e2.so.2.0.0` | av 18.1.0 | ALSA library | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libavcodec-4b81d6e7.so.62.28.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libx264 and libx265 (GPL-2.0-or-later) | strong-copyleft | none shipped |
-| `av.libs/libavdevice-53515e87.so.62.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavfilter-2e359d35.so.11.14.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavformat-9df08f27.so.62.12.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner; it loads libavcodec and no GPL library of its own | weak-copyleft | none shipped |
-| `av.libs/libavutil-ccca8ed8.so.60.26.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libdav1d-32aec4a5.so.7.0.0` | av 18.1.0 | dav1d | BSD-2-Clause | permissive | none shipped |
-| `av.libs/libdrm-7ea97f77.so.2.4.0` | av 18.1.0 | libdrm | MIT | permissive | none shipped |
-| `av.libs/libgmp-23e3f84b.so.10.5.0` | av 18.1.0 | GMP | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libgnutls-aa1c0a85.so.30.42.0` | av 18.1.0 | GnuTLS | LGPL-2.1-or-later | weak-copyleft | none shipped |
-| `av.libs/libhogweed-272d0244.so.6.11` | av 18.1.0 | Nettle (Hogweed) | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libmp3lame-ee237334.so.0.0.0` | av 18.1.0 | LAME | LGPL-2.0-or-later | weak-copyleft | none shipped |
-| `av.libs/libnettle-3fe2eda7.so.8.11` | av 18.1.0 | Nettle | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libopencore-amrnb-41f6423c.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
-| `av.libs/libopencore-amrwb-6136252c.so.0.0.5` | av 18.1.0 | OpenCORE AMR | Apache-2.0 | permissive | none shipped |
-| `av.libs/libopus-4a9173fa.so.0.11.1` | av 18.1.0 | Opus | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libsharpyuv-67a1cf20.so.0.1.2` | av 18.1.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libswresample-946ca3e6.so.6.3.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libswscale-0dceead9.so.9.5.102` | av 18.1.0 | FFmpeg | LGPL-3.0-or-later by its own banner | weak-copyleft | none shipped |
-| `av.libs/libunistring-0999715d.so.5.2.1` | av 18.1.0 | libunistring | LGPL-3.0-or-later OR GPL-2.0-or-later (elected: LGPL-3.0-or-later) | weak-copyleft | none shipped |
-| `av.libs/libvpx-db4bc8c1.so.12.0.0` | av 18.1.0 | libvpx | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libwebp-df30dee3.so.7.2.0` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libwebpmux-6542e8dd.so.3.1.2` | av 18.1.0 | libwebp | BSD-3-Clause | permissive | none shipped |
-| `av.libs/libx264-fd5179c6.so.165` | av 18.1.0 | x264 | GPL-2.0-or-later | strong-copyleft | none shipped |
-| `av.libs/libx265-9fab7229.so.216` | av 18.1.0 | x265 | GPL-2.0-or-later | strong-copyleft | none shipped |
-| `av.libs/libxcb-8fcfc57e.so.1.1.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-shape-c3b64477.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-shm-1266c612.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
-| `av.libs/libxcb-xfixes-a124fd6b.so.0.0.0` | av 18.1.0 | libxcb (X.Org) | MIT | permissive | none shipped |
 | `ijson.libs/libyajl-bc332733.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
 | `numpy.libs/libgfortran-daac5196-038a5e3c.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-7220728c.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
 | `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
 | `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pi_heif.libs/libde265-784fb6f3.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pi_heif.libs/libheif-9cc4da60.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 12.2.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-ac9db8e8.so.16.4.1` | pillow 12.2.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-832abbb5.so.1.2.0` | pillow 12.2.0 | Brotli | MIT | permissive | LICENSE |
@@ -1063,13 +682,7 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebpmux-123137bf.so.3.1.2` | pillow 12.2.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libxcb-7f570eb0.so.1.1.0` | pillow 12.2.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-ad98d567.so.1.5.7` | pillow 12.2.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libx265-f7a03873.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
-| `pymupdf/_extra.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/_mupdf.so` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/libmupdf.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
-| `pymupdf/libmupdfcpp.so.27.2` | PyMuPDF 1.27.2.3 | PyMuPDF with MuPDF | AGPL-3.0-only OR Artifex Commercial License (elected: AGPL-3.0-only) | strong-copyleft | COPYING |
+| `pypdfium2_raw/libpdfium.so` | pypdfium2 5.15.2 | PDFium (binary build by pdfium-binaries) | BSD-3-Clause AND Apache-2.0 with the dependency licences that the wheel lists in BUILD_LICENSES | permissive | pdfium.txt |
 | `rawpy.libs/libgomp-82b933f3.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-f280bfb6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
 | `rawpy.libs/libjpeg-af58d765.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
@@ -1079,27 +692,34 @@ Wheels that carry shared objects:
 | `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
 | `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
 
-### Part B: other shared libraries, outside any package manager (`cloud-v0.200.0-arm64`)
+### Part B: other shared libraries, outside any package manager (`cloud-v0.203.0-arm64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
+| `/opt/ffmpeg-lgpl/lib/libavcodec.so.62.28.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libavdevice.so.62.3.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libavfilter.so.11.14.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libavformat.so.62.12.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libavutil.so.60.26.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libswresample.so.6.3.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
+| `/opt/ffmpeg-lgpl/lib/libswscale.so.9.5.103` | FFmpeg (built by this image in its LGPL configuration) | LGPL-2.1-or-later | weak-copyleft | /usr/share/doc/ffmpeg-lgpl/COPYING.LGPLv2.1 |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`cloud-v0.200.0-arm64`): debian 13.7
+### Part C: operating-system layer (`cloud-v0.203.0-arm64`): debian 13.8
 
-198 packages own 459 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
+199 packages own 460 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cloud-v0.200.0-amd64`.
+The tables are the same as in Part C of `cloud-v0.203.0-amd64`.
 
-## `cuda-v0.200.0-amd64`
+## `cuda-v0.202.0-amd64`
 
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-cuda`; source: released v0.200.0.
-- Digests: index `sha256:1b540e53f70172ec54b245eaabd3f5cbf471e9aa77ed47394219b416c4a04b2e`, platform manifest `sha256:779f2285a0eaab35054a02ad3c16340141e51a79aee90850a6778129520876ab`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cuda-v0.200.0-amd64 --tag 0.200.0-cuda --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:1b540e53f70172ec54b245eaabd3f5cbf471e9aa77ed47394219b416c4a04b2e --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:34:27.687876491Z; layers: 6; Python distributions: 148.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.202.0-cuda`; source: released v0.202.0.
+- Digests: index `sha256:b15b6ce53c4df159ba7919354878729a394a8aec6ed8ae442102241531e48507`, platform manifest `sha256:72138c1e0e3b87a1a8127d773cb9f88a3aa75ccb0f68991282482e0b08be42a4`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id cuda-v0.202.0-amd64 --tag 0.202.0-cuda --source 'released v0.202.0' --platform linux/amd64 --registry ghcr.io/substrate-systems/evermatter@sha256:b15b6ce53c4df159ba7919354878729a394a8aec6ed8ae442102241531e48507 --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-24 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-24T23:42:44.18286314Z; layers: 6; Python distributions: 148.
 
-### Part A: shared libraries inside Python wheels (`cuda-v0.200.0-amd64`)
+### Part A: shared libraries inside Python wheels (`cuda-v0.202.0-amd64`)
 
 Wheels that carry shared objects:
 
@@ -1134,14 +754,14 @@ Wheels that carry shared objects:
 | nvidia-nvtx 13.2.86 | LicenseRef-NVIDIA-Proprietary | 1: License.txt | 1 | 0 |
 | onnx 1.23.2 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
 | onnxruntime 1.32.0 | MIT License | none | 2 | 1 |
+| pi_heif 1.4.0 | BSD-3-Clause; GNU Lesser General Public License v3 (LGPLv3) | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 2 | 1 |
 | pillow 13.0.0 | MIT-CMU | 1: LICENSE | 18 | 8 |
-| pillow_heif 1.8.1 | BSD-3-Clause | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 3 | 1 |
 | propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
 | protobuf 7.36.2 | 3-Clause BSD License | 1: LICENSE | 0 | 1 |
 | pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
 | PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
 | rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
-| regex 2026.11.19 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
+| regex 2026.11.23 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
 | rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
 | safetensors 0.8.0 | Apache Software License | 1: LICENSE | 0 | 1 |
 | scikit-learn 1.9.1 | BSD-3-Clause | 1: COPYING | 1 | 69 |
@@ -1208,6 +828,8 @@ Wheels that carry shared objects:
 | `nvidia/cu13/lib/libnvtx3interop.so.1` | nvidia-nvtx 13.2.86 | NVIDIA NVTX | LicenseRef-NVIDIA-Proprietary | proprietary | License.txt |
 | `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
 | `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pi_heif.libs/libde265-90fb0ce1.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pi_heif.libs/libheif-7a3e919c.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-c6062d5f.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-53534446.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -1226,9 +848,6 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebpmux-8fb1c9f6.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-40ad5e7e.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
 | `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
 | `rawpy.libs/libjpeg-8995ad9f.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
@@ -1277,14 +896,14 @@ Wheels that carry shared objects:
 | `triton/plugins/libMLIRDialectPlugin.so` | triton 3.9.0 | Triton | MIT | permissive | LICENSE |
 | `triton/plugins/libTritonPluginsTestLib.so` | triton 3.9.0 | Triton | MIT | permissive | LICENSE |
 
-### Part B: other shared libraries, outside any package manager (`cuda-v0.200.0-amd64`)
+### Part B: other shared libraries, outside any package manager (`cuda-v0.202.0-amd64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`cuda-v0.200.0-amd64`): debian 13.7
+### Part C: operating-system layer (`cuda-v0.202.0-amd64`): debian 13.8
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
@@ -1332,7 +951,7 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 | libsepol2 | 3.8.1 | LGPL-2.1-or-later (restricted), LGPL-2.1-only (restricted), Zlib (notice), GPL-2.0-only (forbidden), GPL-2.0-or-later (forbidden) |
 | libsmartcols1 | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
 | libsqlite3-0 | 3.46.1 | public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
-| libssl3t64 | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| libssl3t64 | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
 | libstdc++6 | 14.2.0 | none read; recorded as GPL-3.0-or-later WITH GCC-exception-3.1 (linking-exception), evidence /usr/share/doc/gcc-14-base/copyright |
 | libsystemd0 | 257.13 | LGPL-2.1-or-later (restricted), CC0-1.0 (unencumbered), GPL-2 with Linux-syscall-note exception (unknown), MIT (notice), public-domain (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), LGPL-2.1-only (restricted) |
 | libtinfo6 | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
@@ -1350,7 +969,7 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 | --- | --- | --- |
 | adduser | 3.152 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
 | apt | 3.0.4 | GPL-2.0-or-later (forbidden), curl (unknown), BSD-3-Clause (notice), MIT (notice), GPL-2.0-only (forbidden) |
-| base-files | 13.8+deb13u7 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
+| base-files | 13.8+deb13u8 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), verbatim (unknown) |
 | base-passwd | 3.6.7 | GPL-2.0-only (forbidden), public-domain (unknown) |
 | bash | 5.2.37 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-3+ with Bison exception (unknown), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-only (unknown), GFDL-1.3-only (unknown), Latex2e (unknown), BSD-4-Clause-UC (notice), MIT (notice), permissive (unknown) |
 | bsdutils | 2.41.5 | GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GPL-3.0-or-later (forbidden), LGPL-2.1-or-later (restricted), public-domain (unknown), BSD-4-Clause (notice), MIT (notice), ISC (notice), BSD-3-Clause (notice), BSLA (unknown), LGPL-2.0-or-later (restricted), BSD-2-Clause (notice), LGPL-3.0-or-later (restricted), GPL-3.0-only (forbidden), LGPL-2.0-only (restricted), LGPL-2.1-only (restricted), LGPL-3.0-only (restricted) |
@@ -1377,8 +996,8 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 | ncurses-base | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
 | ncurses-bin | 6.5+20250216 | MIT/X11 (unknown), X11 (notice), BSD-3-Clause (notice) |
 | netbase | 6.5 | GPL-2.0-only (forbidden) |
-| openssl | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
-| openssl-provider-legacy | 3.5.7 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| openssl | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
+| openssl-provider-legacy | 3.5.9 | Apache-2.0 (notice), Artistic-2.0 (notice), GPL-1.0-or-later (forbidden), GPL-1.0-only (forbidden) |
 | passwd | 4.17.4 | BSD-3-Clause (notice), GPL-1.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden) |
 | perl-base | 5.40.1 | GPL-1.0-or-later (forbidden), Artistic-2.0 (notice), MIT (notice), REGCOMP (unknown), GPL-2.0-with-bison-exception+ (unknown), Unicode (unknown), BZIP (unknown), Zlib (notice), GPL-2.0-or-later (forbidden), FSFAP (unknown), BSD-3-clause-with-weird-numbering (unknown), CC0-1.0 (unencumbered), TEXT-TABS (unknown), BSD-4-clause-POWERDOG (unknown), BSD-3-clause-GENERIC (unknown), BSD-3-Clause (notice), SDBM-PUBLIC-DOMAIN (unknown), DONT-CHANGE-THE-GPL (unknown), Artistic-dist (unknown), LGPL-2.1-only (restricted), GPL-1.0-only (forbidden), GPL-2.0-only (forbidden), Artistic-2 (unknown) |
 | readline-common | 8.2 | GPL-3.0-or-later (forbidden), GPL-3.0-only (forbidden), GPL-2.0-or-later (forbidden), GPL-2.0-only (forbidden), GFDL-1.3-no-invariants-or-later (unknown), GFDL-1.3-or-later (unknown), ISC-no-attribution (unknown) |
@@ -1391,66 +1010,14 @@ System libraries under a linking exception: libgcc-s1, libstdc++6.
 
 </details>
 
-## `lean-tree-amd64`
+## `lean-v0.202.0-amd64`
 
-- Reference: `local build`; tag `lean`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:2611e886c8b97a2b70f70145a18da35a03569ef2024188ec9f7dc52a18305775`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-tree-amd64 --tag lean --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:10:07.110724617Z; layers: 6; Python distributions: 97.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.202.0`; source: released v0.202.0.
+- Digests: index `sha256:8b84691d548e17c3af1e3da24f5311bfb167498705e9e6b807225d7aea26a043`, platform manifest `sha256:e6d98a2e0b58da5e4e1ce1449cd9bfaee75cd9e62994e2fd90e02a08a6f65635`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.202.0-amd64 --tag 0.202.0 --source 'released v0.202.0' --platform linux/amd64 --registry ghcr.io/substrate-systems/evermatter@sha256:8b84691d548e17c3af1e3da24f5311bfb167498705e9e6b807225d7aea26a043 --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-24 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-24T23:33:51.352967012Z; layers: 6; Python distributions: 97.
 
-### Part A: shared libraries inside Python wheels (`lean-tree-amd64`)
-
-Wheels that carry shared objects:
-
-| Wheel | Declared licence | Other files in its `.dist-info` (count: first names) | Bundled libraries | Extension modules |
-| --- | --- | --- | --- | --- |
-| aiohttp 3.14.5 | Apache-2.0 AND MIT | 2: LICENSE.txt, LICENSE | 0 | 4 |
-| caio 0.12.10 | Apache-2.0 | 1: COPYING | 0 | 3 |
-| cffi 2.0.0 | MIT | 2: AUTHORS, LICENSE | 0 | 1 |
-| charset-normalizer 3.4.7 | MIT | 1: LICENSE | 0 | 3 |
-| cryptography 48.0.1 | Apache-2.0 OR BSD-3-Clause | 3: LICENSE, LICENSE.APACHE, LICENSE.BSD | 0 | 1 |
-| frozenlist 1.8.0 | Apache-2.0 | 1: LICENSE | 0 | 1 |
-| ijson 3.5.1 | BSD-3-Clause AND ISC | 1: LICENSE.txt | 1 | 1 |
-| MarkupSafe 3.0.3 | BSD-3-Clause | 1: LICENSE.txt | 0 | 1 |
-| multidict 7.2.1 | Apache-2.0 | 1: LICENSE | 0 | 2 |
-| numpy 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 17: LICENSE.txt, COPYING, LICENSE, dragon4_LICENSE.txt, ... | 3 | 19 |
-| propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-| pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
-| PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
-| SQLAlchemy 2.1.4 | MIT | 2: AUTHORS, LICENSE | 0 | 8 |
-| watchfiles 1.1.1 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| websockets 16.0 | BSD-3-Clause | 1: LICENSE | 0 | 1 |
-| yarl 1.25.1 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-
-| Library | Wheel | Upstream project | Licence | Class | Evidence: licence file in the wheel |
-| --- | --- | --- | --- | --- | --- |
-| `ijson.libs/libyajl-9393e5bd.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
-| `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
-| `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
-| `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-
-### Part B: other shared libraries, outside any package manager (`lean-tree-amd64`)
-
-| Library | Upstream project | Licence | Class | Evidence: file in the image |
-| --- | --- | --- | --- | --- |
-| `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-| `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-
-### Part C: operating-system layer (`lean-tree-amd64`): debian 13.7
-
-87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
-
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
-
-## `lean-v0.200.0-amd64`
-
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0`; source: released v0.200.0.
-- Digests: index `sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60`, platform manifest `sha256:5fe3d53afae3af269ebaedb236932a5f8b5ca9f4d374b1ca343883209dcef9e7`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.200.0-amd64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:22:00.13469878Z; layers: 6; Python distributions: 97.
-
-### Part A: shared libraries inside Python wheels (`lean-v0.200.0-amd64`)
+### Part A: shared libraries inside Python wheels (`lean-v0.202.0-amd64`)
 
 Wheels that carry shared objects:
 
@@ -1482,27 +1049,27 @@ Wheels that carry shared objects:
 | `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
 
-### Part B: other shared libraries, outside any package manager (`lean-v0.200.0-amd64`)
+### Part B: other shared libraries, outside any package manager (`lean-v0.202.0-amd64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`lean-v0.200.0-amd64`): debian 13.7
+### Part C: operating-system layer (`lean-v0.202.0-amd64`): debian 13.8
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
+The tables are the same as in Part C of `cuda-v0.202.0-amd64`.
 
-## `lean-v0.200.0-arm64`
+## `lean-v0.202.0-arm64`
 
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0`; source: released v0.200.0.
-- Digests: index `sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60`, platform manifest `sha256:13c8d7e785dba5c230ce93e9b34308e3bd8eff8c303823ea46558a1b71ee9e80`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.200.0-arm64 --tag 0.200.0 --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:db35d35fb1539a7d143cb4e4b91386c0f96f31c93e3d9cba605eca36e6f54e60 --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:22:23.401348869Z; layers: 6; Python distributions: 97.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.202.0`; source: released v0.202.0.
+- Digests: index `sha256:8b84691d548e17c3af1e3da24f5311bfb167498705e9e6b807225d7aea26a043`, platform manifest `sha256:207d2dd49398c3ea971ae43fae59c8216e133c461712b70676b3265a627e6f59`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id lean-v0.202.0-arm64 --tag 0.202.0 --source 'released v0.202.0' --platform linux/arm64 --registry ghcr.io/substrate-systems/evermatter@sha256:8b84691d548e17c3af1e3da24f5311bfb167498705e9e6b807225d7aea26a043 --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-24 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-24T23:34:14.115839728Z; layers: 6; Python distributions: 97.
 
-### Part A: shared libraries inside Python wheels (`lean-v0.200.0-arm64`)
+### Part A: shared libraries inside Python wheels (`lean-v0.202.0-arm64`)
 
 Wheels that carry shared objects:
 
@@ -1533,27 +1100,27 @@ Wheels that carry shared objects:
 | `numpy.libs/libgfortran-daac5196-038a5e3c.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
 | `numpy.libs/libscipy_openblas64_-7220728c.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
 
-### Part B: other shared libraries, outside any package manager (`lean-v0.200.0-arm64`)
+### Part B: other shared libraries, outside any package manager (`lean-v0.202.0-arm64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`lean-v0.200.0-arm64`): debian 13.7
+### Part C: operating-system layer (`lean-v0.202.0-arm64`): debian 13.8
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
+The tables are the same as in Part C of `cuda-v0.202.0-amd64`.
 
-## `ml-tree-amd64`
+## `ml-v0.202.0-amd64`
 
-- Reference: `local build`; tag `ml`; source: current tree (3d28e8cf8), built locally.
-- Digests: local build, image config digest `sha256:d86dcb1445f49fc379bb56c996333b5d1c6ed6fc2d69fe8490f25f6d671ef3e3`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-tree-amd64 --tag ml --source 'current tree (3d28e8cf8), built locally' --platform linux/amd64 --archive IMAGE.tar --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0; image built 2026-11-23T20:10:52.353712125Z; layers: 6; Python distributions: 129.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.202.0-ml`; source: released v0.202.0.
+- Digests: index `sha256:345b95bfac4d059653236830e0b5059b2d03ad665c5b01183514fcc0e63ffa55`, platform manifest `sha256:f09756c254f964a9132b66c3b3fb0663fa169bef3aa030ff77799cd88fc60e67`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.202.0-amd64 --tag 0.202.0-ml --source 'released v0.202.0' --platform linux/amd64 --registry ghcr.io/substrate-systems/evermatter@sha256:345b95bfac4d059653236830e0b5059b2d03ad665c5b01183514fcc0e63ffa55 --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-24 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-24T23:35:51.584567654Z; layers: 6; Python distributions: 129.
 
-### Part A: shared libraries inside Python wheels (`ml-tree-amd64`)
+### Part A: shared libraries inside Python wheels (`ml-v0.202.0-amd64`)
 
 Wheels that carry shared objects:
 
@@ -1580,7 +1147,7 @@ Wheels that carry shared objects:
 | pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
 | PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
 | rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
-| regex 2026.11.19 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
+| regex 2026.11.23 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
 | rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
 | safetensors 0.8.0 | Apache Software License | 1: LICENSE | 0 | 1 |
 | scikit-learn 1.9.1 | BSD-3-Clause | 1: COPYING | 1 | 69 |
@@ -1648,143 +1215,27 @@ Wheels that carry shared objects:
 | `torch/lib/libtorch_python.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libtorchbind_test.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 
-### Part B: other shared libraries, outside any package manager (`ml-tree-amd64`)
+### Part B: other shared libraries, outside any package manager (`ml-v0.202.0-amd64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`ml-tree-amd64`): debian 13.7
+### Part C: operating-system layer (`ml-v0.202.0-amd64`): debian 13.8
 
 87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
+The tables are the same as in Part C of `cuda-v0.202.0-amd64`.
 
-## `ml-v0.200.0-amd64`
+## `ml-v0.202.0-arm64`
 
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-ml`; source: released v0.200.0.
-- Digests: index `sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c`, platform manifest `sha256:6463558b3329a6498348b836f45ac951682f7ce5c3dd151cbd45c81d37cb04b7`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.200.0-amd64 --tag 0.200.0-ml --source 'released v0.200.0' --platform linux/amd64 --registry ghcr.io/artexis10/exomem@sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:24:26.312026558Z; layers: 6; Python distributions: 129.
+- Reference: `ghcr.io/substrate-systems/evermatter`; tag `0.202.0-ml`; source: released v0.202.0.
+- Digests: index `sha256:345b95bfac4d059653236830e0b5059b2d03ad665c5b01183514fcc0e63ffa55`, platform manifest `sha256:d7f18d853d120b24e7212a013d48ab8c389ef1fc7fd54e2e28dd55bde55282c8`.
+- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.202.0-arm64 --tag 0.202.0-ml --source 'released v0.202.0' --platform linux/arm64 --registry ghcr.io/substrate-systems/evermatter@sha256:345b95bfac4d059653236830e0b5059b2d03ad665c5b01183514fcc0e63ffa55 --trivy-cache CACHE --out RECORD.json`.
+- Scanned 2026-11-24 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-24T23:36:28.764125249Z; layers: 6; Python distributions: 129.
 
-### Part A: shared libraries inside Python wheels (`ml-v0.200.0-amd64`)
-
-Wheels that carry shared objects:
-
-| Wheel | Declared licence | Other files in its `.dist-info` (count: first names) | Bundled libraries | Extension modules |
-| --- | --- | --- | --- | --- |
-| aiohttp 3.14.5 | Apache-2.0 AND MIT | 2: LICENSE.txt, LICENSE | 0 | 4 |
-| caio 0.12.10 | Apache-2.0 | 1: COPYING | 0 | 3 |
-| cffi 2.0.0 | MIT | 2: AUTHORS, LICENSE | 0 | 1 |
-| charset-normalizer 3.4.7 | MIT | 1: LICENSE | 0 | 3 |
-| cryptography 48.0.1 | Apache-2.0 OR BSD-3-Clause | 3: LICENSE, LICENSE.APACHE, LICENSE.BSD | 0 | 1 |
-| frozenlist 1.8.0 | Apache-2.0 | 1: LICENSE | 0 | 1 |
-| hf-xet 1.8.0 | Apache-2.0 | 1: LICENSE | 0 | 1 |
-| ijson 3.5.1 | BSD-3-Clause AND ISC | 1: LICENSE.txt | 1 | 1 |
-| MarkupSafe 3.0.3 | BSD-3-Clause | 1: LICENSE.txt | 0 | 1 |
-| ml_dtypes 0.7.0 | Apache-2.0 | 2: LICENSE, LICENSE.eigen | 0 | 1 |
-| multidict 7.2.1 | Apache-2.0 | 1: LICENSE | 0 | 2 |
-| numpy 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 17: LICENSE.txt, COPYING, LICENSE, dragon4_LICENSE.txt, ... | 3 | 19 |
-| onnx 1.23.2 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-| onnxruntime 1.32.0 | MIT License | none | 2 | 1 |
-| pillow 13.0.0 | MIT-CMU | 1: LICENSE | 18 | 8 |
-| pillow_heif 1.8.1 | BSD-3-Clause | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 3 | 1 |
-| propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-| protobuf 7.36.2 | 3-Clause BSD License | 1: LICENSE | 0 | 1 |
-| pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
-| PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
-| regex 2026.11.19 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
-| rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
-| safetensors 0.8.0 | Apache Software License | 1: LICENSE | 0 | 1 |
-| scikit-learn 1.9.1 | BSD-3-Clause | 1: COPYING | 1 | 69 |
-| scipy 1.18.1 | Copyright (c) 2001-2002 Enthought, Inc. 2003, SciPy Developers.; BSD License | 1: LICENSE.txt | 5 | 106 |
-| SQLAlchemy 2.1.4 | MIT | 2: AUTHORS, LICENSE | 0 | 8 |
-| sqlite-vec 0.1.9 | MIT License, Apache License, Version 2.0 | none | 1 | 0 |
-| tokenizers 0.23.3 | Apache Software License | none | 0 | 1 |
-| torch 2.15.0+cpu | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | 61: LICENSE, LICENSE.txt, LICENSE.md, LICENSE-MIT.txt, ... | 12 | 1 |
-| watchfiles 1.1.1 | MIT; MIT License | 1: LICENSE | 0 | 1 |
-| websockets 16.0 | BSD-3-Clause | 1: LICENSE | 0 | 1 |
-| yarl 1.25.1 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
-
-| Library | Wheel | Upstream project | Licence | Class | Evidence: licence file in the wheel |
-| --- | --- | --- | --- | --- | --- |
-| `ijson.libs/libyajl-9393e5bd.so.2.1.1` | ijson 3.5.1 | YAJL | ISC | permissive | LICENSE.txt |
-| `numpy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | numpy 2.4.6 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
-| `numpy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | numpy 2.4.6 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
-| `numpy.libs/libscipy_openblas64_-32a4b2a6.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
-| `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
-| `pillow.libs/libXau-154567c4.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
-| `pillow.libs/libavif-c6062d5f.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
-| `pillow.libs/libbrotlicommon-53534446.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
-| `pillow.libs/libbrotlidec-7e5462ba.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
-| `pillow.libs/libfreetype-57f805ba.so.6.20.6` | pillow 13.0.0 | FreeType | FTL OR GPL-2.0-or-later (elected: FTL) | permissive | LICENSE |
-| `pillow.libs/libharfbuzz-fb49c9fc.so.0.61450.0` | pillow 13.0.0 | HarfBuzz | MIT | permissive | LICENSE |
-| `pillow.libs/libjpeg-6dc8d115.so.62.4.0` | pillow 13.0.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | LICENSE |
-| `pillow.libs/liblcms2-88eaba2f.so.2.0.19` | pillow 13.0.0 | Little CMS 2 | MIT | permissive | LICENSE |
-| `pillow.libs/liblzma-de26b416.so.5.8.4` | pillow 13.0.0 | XZ Utils (liblzma) | 0BSD | permissive | LICENSE |
-| `pillow.libs/libopenjp2-e530e1bf.so.2.5.4` | pillow 13.0.0 | OpenJPEG | BSD-2-Clause | permissive | LICENSE |
-| `pillow.libs/libpng16-1d1ba958.so.16.58.0` | pillow 13.0.0 | libpng | libpng-2.0 | permissive | LICENSE |
-| `pillow.libs/libsharpyuv-0066295b.so.0.1.2` | pillow 13.0.0 | libwebp (libsharpyuv) | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libtiff-20b7e810.so.6.3.0` | pillow 13.0.0 | libtiff | libtiff | permissive | LICENSE |
-| `pillow.libs/libwebp-51b0b3f7.so.7.2.0` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libwebpdemux-9fe2abcc.so.2.0.17` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libwebpmux-8fb1c9f6.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
-| `pillow.libs/libxcb-9065bb12.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
-| `pillow.libs/libzstd-40ad5e7e.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-91206b2b.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-e72ea93c.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libx265-4883ecb5.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
-| `rawpy.libs/libgomp-962b742a.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
-| `rawpy.libs/libjasper-5b68ace6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
-| `rawpy.libs/libjpeg-8995ad9f.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
-| `rawpy.libs/liblcms2-ff8c4a65.so.2.0.10` | rawpy 0.28.0 | Little CMS 2 | MIT | permissive | none shipped |
-| `rawpy/libraw_r.so` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `rawpy/libraw_r.so.25` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `rawpy/libraw_r.so.25.0.0` | rawpy 0.28.0 | LibRaw | LGPL-2.1-only OR CDDL-1.0 (elected: LGPL-2.1-only) | weak-copyleft | LICENSE.LibRaw |
-| `scikit_learn.libs/libgomp-e985bcbb.so.1.0.0` | scikit-learn 1.9.1 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | COPYING |
-| `scipy.libs/libgfortran-040039e1-0352e75f.so.5.0.0` | scipy 1.18.1 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
-| `scipy.libs/libgfortran-83c28eba.so.5.0.0` | scipy 1.18.1 | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | LICENSE.txt |
-| `scipy.libs/libquadmath-2284e583.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
-| `scipy.libs/libquadmath-96973f99-934c22de.so.0.0.0` | scipy 1.18.1 | GCC runtime library (libquadmath) | LGPL-2.1-or-later | weak-copyleft | LICENSE.txt |
-| `scipy.libs/libscipy_openblas-5f890258.so` | scipy 1.18.1 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
-| `sqlite_vec/vec0.so` | sqlite-vec 0.1.9 | sqlite-vec (a SQLite loadable extension) | MIT OR Apache-2.0 (elected: MIT) | permissive | none shipped |
-| `torch/lib/libaoti_custom_ops.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libbackend_with_compiler.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libc10.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libgfortran.so.5` | torch 2.15.0+cpu | GCC runtime library (libgfortran) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
-| `torch/lib/libgomp.so.1` | torch 2.15.0+cpu | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
-| `torch/lib/libjitbackend_test.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libshm.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libtorch.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libtorch_cpu.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libtorch_global_deps.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libtorch_python.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-| `torch/lib/libtorchbind_test.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
-
-### Part B: other shared libraries, outside any package manager (`ml-v0.200.0-amd64`)
-
-| Library | Upstream project | Licence | Class | Evidence: file in the image |
-| --- | --- | --- | --- | --- |
-| `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-| `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
-
-### Part C: operating-system layer (`ml-v0.200.0-amd64`): debian 13.7
-
-87 packages own 385 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
-
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
-
-## `ml-v0.200.0-arm64`
-
-- Reference: `ghcr.io/artexis10/exomem`; tag `0.200.0-ml`; source: released v0.200.0.
-- Digests: index `sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c`, platform manifest `sha256:11ba0d2d7285a9d036727756d0a3dbae374c26fbbf07839b339010db3118f67d`.
-- Regenerate: `uv run --frozen python scripts/image-library-inventory.py collect --id ml-v0.200.0-arm64 --tag 0.200.0-ml --source 'released v0.200.0' --platform linux/arm64 --registry ghcr.io/artexis10/exomem@sha256:3296875fdf567eb03bb471d5e3dc734b939d13d00ef90718da97a14e974ee94c --trivy-cache CACHE --out RECORD.json`.
-- Scanned 2026-11-23 with trivy 0.72.0 and oras 1.3.3; image built 2026-11-23T01:25:07.43600684Z; layers: 6; Python distributions: 129.
-
-### Part A: shared libraries inside Python wheels (`ml-v0.200.0-arm64`)
+### Part A: shared libraries inside Python wheels (`ml-v0.202.0-arm64`)
 
 Wheels that carry shared objects:
 
@@ -1804,14 +1255,14 @@ Wheels that carry shared objects:
 | numpy 2.4.6 | BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0 | 17: LICENSE.txt, COPYING, LICENSE, dragon4_LICENSE.txt, ... | 2 | 19 |
 | onnx 1.23.2 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
 | onnxruntime 1.32.0 | MIT License | none | 2 | 1 |
+| pi_heif 1.4.0 | BSD-3-Clause; GNU Lesser General Public License v3 (LGPLv3) | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 2 | 1 |
 | pillow 13.0.0 | MIT-CMU | 1: LICENSE | 18 | 8 |
-| pillow_heif 1.8.1 | BSD-3-Clause | 3: LICENSE.txt, LICENSES_bundled.txt, zip-safe | 3 | 1 |
 | propcache 0.5.4 | Apache-2.0 | 2: LICENSE, NOTICE | 0 | 1 |
 | protobuf 7.36.2 | 3-Clause BSD License | 1: LICENSE | 0 | 1 |
 | pydantic_core 2.46.4 | MIT | 1: LICENSE | 0 | 1 |
 | PyYAML 6.0.3 | MIT; MIT License | 1: LICENSE | 0 | 1 |
 | rawpy 0.28.0 | MIT | 2: LICENSE, LICENSE.LibRaw | 7 | 1 |
-| regex 2026.11.19 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
+| regex 2026.11.23 | Apache-2.0 AND CNRI-Python | 1: LICENSE.txt | 0 | 1 |
 | rpds-py 0.30.0 | MIT | 1: LICENSE | 0 | 1 |
 | safetensors 0.8.0 | Apache Software License | 1: LICENSE | 0 | 1 |
 | scikit-learn 1.9.1 | BSD-3-Clause | 1: COPYING | 1 | 69 |
@@ -1831,6 +1282,8 @@ Wheels that carry shared objects:
 | `numpy.libs/libscipy_openblas64_-7220728c.so` | numpy 2.4.6 | OpenBLAS with LAPACK | BSD-3-Clause AND BSD-3-Clause-Open-MPI | permissive | LICENSE.txt |
 | `onnxruntime/capi/libonnxruntime.so.1.32.0` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
 | `onnxruntime/capi/libonnxruntime_providers_shared.so` | onnxruntime 1.32.0 | ONNX Runtime | MIT | permissive | LICENSE |
+| `pi_heif.libs/libde265-784fb6f3.so.0.2.0` | pi_heif 1.4.0 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
+| `pi_heif.libs/libheif-9cc4da60.so.1.23.0` | pi_heif 1.4.0 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
 | `pillow.libs/libXau-7926f62a.so.6.0.0` | pillow 13.0.0 | libXau (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libavif-ba04b566.so.16.4.2` | pillow 13.0.0 | libavif (with AOM) | BSD-2-Clause | permissive | LICENSE |
 | `pillow.libs/libbrotlicommon-f79e5820.so.1.2.0` | pillow 13.0.0 | Brotli | MIT | permissive | LICENSE |
@@ -1849,9 +1302,6 @@ Wheels that carry shared objects:
 | `pillow.libs/libwebpmux-fec2c160.so.3.1.2` | pillow 13.0.0 | libwebp | BSD-3-Clause | permissive | LICENSE |
 | `pillow.libs/libxcb-cbbede0a.so.1.1.0` | pillow 13.0.0 | libxcb (X.Org) | MIT | permissive | LICENSE |
 | `pillow.libs/libzstd-79fd2b21.so.1.5.7` | pillow 13.0.0 | Zstandard | BSD-3-Clause OR GPL-2.0-only (elected: BSD-3-Clause) | permissive | LICENSE |
-| `pillow_heif.libs/libde265-2a08167a.so.0.2.3` | pillow_heif 1.8.1 | libde265 | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libheif-f59036f4.so.1.23.6` | pillow_heif 1.8.1 | libheif | LGPL-3.0 (the wheel states LGPLv3) | weak-copyleft | LICENSES_bundled.txt |
-| `pillow_heif.libs/libx265-f7a03873.so.217` | pillow_heif 1.8.1 | x265 | GPL-2.0 (the wheel states GPLv2) | strong-copyleft | LICENSES_bundled.txt |
 | `rawpy.libs/libgomp-82b933f3.so.1.0.0` | rawpy 0.28.0 | GCC runtime library (libgomp) | GPL-3.0-or-later WITH GCC-exception-3.1 | linking-exception | none shipped |
 | `rawpy.libs/libjasper-f280bfb6.so.7.0.0` | rawpy 0.28.0 | JasPer | JasPer-2.0 | permissive | none shipped |
 | `rawpy.libs/libjpeg-af58d765.so.8.3.2` | rawpy 0.28.0 | libjpeg-turbo | IJG AND BSD-3-Clause AND Zlib | permissive | none shipped |
@@ -1880,16 +1330,16 @@ Wheels that carry shared objects:
 | `torch/lib/libtorch_python.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 | `torch/lib/libtorchbind_test.so` | torch 2.15.0+cpu | PyTorch | Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND ISC AND MIT AND Zlib | permissive | LICENSE |
 
-### Part B: other shared libraries, outside any package manager (`ml-v0.200.0-arm64`)
+### Part B: other shared libraries, outside any package manager (`ml-v0.202.0-arm64`)
 
 | Library | Upstream project | Licence | Class | Evidence: file in the image |
 | --- | --- | --- | --- | --- |
 | `/usr/local/lib/libpython3.12.so.1.0` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 | `/usr/local/lib/libpython3.so` | CPython | PSF-2.0 | permissive | /usr/local/lib/python3.12/LICENSE.txt |
 
-### Part C: operating-system layer (`ml-v0.200.0-arm64`): debian 13.7
+### Part C: operating-system layer (`ml-v0.202.0-arm64`): debian 13.8
 
 87 packages own 384 shared objects between them. They are separate programs and system libraries in the image, aggregated with the product and not combined with it. Licence class is trivy's, from the lists in `scripts/image-licences/trivy.yaml`: `forbidden` is GPL and AGPL, `restricted` is LGPL.
 
-The tables are the same as in Part C of `cuda-v0.200.0-amd64`.
+The tables are the same as in Part C of `cuda-v0.202.0-amd64`.
 

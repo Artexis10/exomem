@@ -11,11 +11,11 @@ The requirements that this record serves:
 
 Every count in this file comes from the collected records. No count is typed by hand.
 
-## Status: regenerate at the first FSL release
+## Status: the first FSL release
 
-This record covers the released v0.200.0 images and images built from the current tree. Both predate the first FSL release. The v0.200.0 rows still show the third-party strong-copyleft libraries that the licence work removed. The tree rows show the result of that removal.
+This record covers the published images of the first releases under FSL-1.1-ALv2. The `lean`, `ml` and `cuda` images come from v0.202.0, the first FSL release. v0.202.0 published no `cloud` or `cellctl` image, because its arm64 licence check failed, so those two images come from v0.203.0, the first release that published them. Every platform that each release published is scanned.
 
-Regenerate this record from the published images of the first FSL release. Cover every platform of `lean`, `ml`, `cuda`, `cloud` and `cellctl`. Unmapped and Strong copyleft must be 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` tracks this, and it must finish before the release statement.
+Unmapped and Strong copyleft are 0 in every row. OpenSpec task 3.4 of `adopt-fair-source-licence` required this before the release statement.
 
 ## How to read this record
 
@@ -85,4 +85,4 @@ Steps 7 to 9 are manual checks that the generator does not run. Run them in the 
 8. Run `docker run --rm -i --entrypoint python IMAGE - < probe.py`. The last line must read `loaded: []`.
 9. For each system library that Part C shows as plain `none read`, run `docker run --rm --entrypoint cat IMAGE /usr/share/doc/PACKAGE/copyright | grep -i gpl`. It must print nothing.
 
-Results on 2026-11-23, in the image of `cloud-tree-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
+Results on 2026-11-25, in the image of `cloud-v0.203.0-amd64`: step 8 printed `loaded: []`, and it listed four `exomem.tui` modules that did not import because the image lacks their extra. Step 9 printed nothing for `libfontconfig1`, `libxau6`, `libxdmcp6` and `libxrender1`. Replace this paragraph when you run the steps again.
