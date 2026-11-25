@@ -23,8 +23,8 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Run the scoped tests, ruff, mypy, the OpenSpec strict gate and the privacy gate.
-- [ ] 3.2 One independent review of the finished batch on Opus with the Risk lens for stored data; merge through the queue.
-- [ ] 3.3 Release through the release owner and install on the desktop personal service.
-- [ ] 3.4 Acceptance on the owner's installed service: redo the dogfood correction that motivated this change (see proposal, Why) with `supersede_observation` on the real entity page, confirm that a search for superseded claims on that page returns the old claim, and remove the interim correction prose.
-- [ ] 3.5 Sync the deltas into the canonical specs and archive this change.
+- [x] 3.1 Run the scoped tests, ruff, mypy, the OpenSpec strict gate and the privacy gate.
+- [x] 3.2 One independent review of the finished batch on Opus with the Risk lens for stored data; merge through the queue. (One independent Opus pass approved #3143 with `Risk lens: no`: a change that only touches stored data needs one pass. #3143 merged directly.)
+- [x] 3.3 Release through the release owner and install on the desktop personal service. (Released in v0.202.0; the desktop personal service runs v0.204.0 since 2026-11-25.)
+- [x] 3.4 Acceptance on the owner's installed service: redo the dogfood correction that motivated this change (see proposal, Why) with `supersede_observation` on the real entity page, confirm that a search for superseded claims on that page returns the old claim, and remove the interim correction prose. (2026-11-25 on v0.204.0: a span-targeted `supersede_observation` with `as_of` and an entity link committed on the entity page; `read_page(part="units")` shows both ends; a `search_memory` with `unit.dimension` = `currency` returns the old claim marked replaced; the interim prose is removed.)
+- [x] 3.5 Sync the deltas into the canonical specs and archive this change.
