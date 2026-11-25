@@ -729,8 +729,9 @@ jobs:
   # The standard images build beside the cloud images and push only content
   # addresses; the serialized publisher attests them and owns their aliases.
   build-standard-images:
+    name: build-standard-images (${{ matrix.image }})
     needs: [plan, build-artifacts]
-    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-artifacts.result == 'success' && needs.plan.outputs.publish_images == 'true' && (vars.GHCR_PUBLISH_ENABLED == 'true' || needs.plan.outputs.dry_run == 'true') }}
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.build-artifacts.result == 'success' && needs.plan.outputs.publish_images == 'true' && (fromJSON(needs.plan.outputs.images).lean.publish || fromJSON(needs.plan.outputs.images).ml.publish || fromJSON(needs.plan.outputs.images).cuda.publish) && (vars.GHCR_PUBLISH_ENABLED == 'true' || needs.plan.outputs.dry_run == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -867,8 +868,9 @@ jobs:
   # Joins, attests and tags only the images the plan found missing. A dry run
   # builds every supported image elsewhere and pushes, attests and records nothing.
   publish-image:
-    # Shared floating tags require one publisher across releases. A build can delay
-    # the next release; dry runs have separate groups and never occupy this queue.
+    # Shared floating tags require one publisher across releases. Images build in
+    # other jobs, so a queued publisher waits only for attestation and tagging;
+    # dry runs have separate groups and never occupy this queue.
     concurrency:
       group: ${{ needs.plan.outputs.dry_run == 'true' && format('release-image-dry-run-{0}', github.run_id) || 'release-image-publication' }}
       queue: max
@@ -916,7 +918,6 @@ jobs:
           TAG: ${{ needs.plan.outputs.tag }}
           SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
         run: |
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           # Each attestation names this run's ref and commit, so only a run on
           # the tag itself may publish.
@@ -925,9 +926,6 @@ jobs:
             test "$GITHUB_SHA" = "$SOURCE_COMMIT"
           fi
           echo "source_commit=$SOURCE_COMMIT" >> "$GITHUB_OUTPUT"
-          echo "source_ref=refs/tags/$TAG" >> "$GITHUB_OUTPUT"
-          build_time=$(git show -s --format=%cI HEAD)
-          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Recover original image evidence
         id: recover
