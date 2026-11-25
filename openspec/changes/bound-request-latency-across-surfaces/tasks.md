@@ -165,6 +165,9 @@
   - Verify: on a synthetic 15,600-page corpus of 4.5 million references with about 62,000 units, an activation after a write costs less CPU with the base kept than past the old bound; a corpus past the word bound keeps no base and ranks exactly (`tests/test_working_set_carry_bounds.py`).
 - [x] 3.28 Make a rebuild after a write cost the change, not the vocabulary or the unit corpus: keep ordered counts and their idf sum per introducer, patch the unit merge from the previous build of the same admitted set, and read a changed page's text by its key (design decision 11).
   - Verify: on a synthetic 15,600-page corpus of about 232,000 words and 62,000 units, the request-thread CPU that a write adds to the next activation falls (bench); the idf floor equals `rank_bm25` to the last bit over seeded edits; each seeded unit build equals a store that kept nothing (`tests/test_working_set_carry_bounds.py`, `tests/test_semantic_unit_index_freshness.py`).
+- [x] 3.29 Read only the rows that a write changed: add the catalogue change journal, and patch the kept page rows, page identities and unit revisions from it (design decision 14).
+  - Verify: a patched state equals a whole read after seeded writes, and a gap that the journal cannot vouch for reads every row (`tests/test_catalogue_change_journal.py`); the request-thread CPU that a write adds to the next activation falls on the synthetic 15,600-page corpus (bench).
+- [ ] 3.30 After installation, compare the request-thread CPU of the first recall after a write before and after the change journal, and report the share of `lexical.catalogue_rows` spans that patched (design decision 14).
 
 ## 4. Verify installed behavior and deliver
 
