@@ -19,7 +19,7 @@
 
 ## 4. Proof and delivery
 
-- [ ] 4.1 Run one real-model end-to-end check on a temporary vault with synthetic identity-card images:
+- [x] 4.1 Run one real-model end-to-end check on a temporary vault with synthetic identity-card images:
   - The agent keeps them in full and classifies them without asking for a covered copy.
   - Classify and revert leave the image bytes and the page body unchanged (sha256 before and after).
   - Owner recall returns the synthetic document number.

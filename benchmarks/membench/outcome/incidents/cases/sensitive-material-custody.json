@@ -12,19 +12,25 @@
   "bank-card.png": {
    "kind": "png",
    "text": "EXAMPLE BANK - DEBIT\nCard number: 4111 1111 1111 1111\nValid thru: 12/30\nTEST PERSON\nSecurity code (CVC): 123"
+  },
+  "id-card-scan.pdf": {
+   "kind": "pdf",
+   "title": "Identity card scan",
+   "pages": [
+    "IDENTITY CARD - SPECIMEN\nRepublic of Examplia (fictional)\nSurname: PERSON\nGiven names: TEST\nDate of birth: 01.01.1990\nDocument no: X0000000\nDate of expiry: 01.01.2035"
+   ]
   }
  },
  "cases": [
   {
    "id": "identity-card-photos-kept",
-   "about": "The user hands over both sides of their identity card and asks the agent to keep them. Both photos must be kept in full and classified as identity, with no request for a covered copy, and a later session must read the document number back.",
+   "about": "The user hands over both sides of their identity card and asks the agent to keep them. Both photos must be kept in full and classified as identity, with no request for a covered copy. Reading the number back from a photo needs server OCR, so the scan case below carries the recall check.",
    "transport": "http",
    "files": [
     "id-card-front.png",
     "id-card-back.png"
    ],
    "prompt": "I put photos of my ID card in this folder, front and back (id-card-front.png and id-card-back.png). Keep them in my memory please, I keep needing the details for forms.",
-   "follow_up": "I'm filling in a form. What's the document number on my ID card?",
    "pass": {
     "file_kept": [
      {
@@ -69,7 +75,31 @@
      "require": {
       "kept_without_cover_request": true
      }
-    },
+    }
+   }
+  },
+  {
+   "id": "identity-card-scan-recalled",
+   "about": "The user hands over a scan of their identity card with a text layer. It must be kept in full and classified as identity, and a later owner session must read the literal document number back.",
+   "transport": "http",
+   "files": [
+    "id-card-scan.pdf"
+   ],
+   "prompt": "Here's a scan of my ID card, id-card-scan.pdf in this folder. Keep it in my memory please, I need the details for forms.",
+   "follow_up": "I'm filling in a form. What's the document number on my ID card?",
+   "pass": {
+    "file_kept": [
+     {
+      "file": "id-card-scan.pdf",
+      "where": [
+       {
+        "field": "sensitivity",
+        "op": "contains",
+        "value": "identity"
+       }
+      ]
+     }
+    ],
     "follow_up_judge": {
      "key": "The identity card's document number is X0000000.",
      "schema": {
