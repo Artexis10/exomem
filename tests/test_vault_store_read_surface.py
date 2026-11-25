@@ -213,7 +213,6 @@ SAMPLES = {
     "adopt_vault:scan-only": {"mode": "scan-only", "path": "Knowledge Base/Notes"},
     "adoption_studio:status": {"action": "status", "run_id": "missing"},
     "adoption_studio:work-item": {"action": "work-item", "run_id": "missing"},
-    "adoption_studio:file:False": {"action": "file", "path": "_Imports/missing", "wait": False},
     "maintain_memory:audit": {"mode": "audit"},
     "maintain_memory:fix": {"mode": "fix"},
     "maintain_memory:reconcile": {"mode": "reconcile", "dry_run": True},
@@ -296,7 +295,6 @@ OWNER_REFUSALS = {
     "read_media": "NOT_A_VIDEO:",
     "adoption_studio:status": "RUN_NOT_FOUND:",
     "adoption_studio:work-item": "RUN_NOT_FOUND:",
-    "adoption_studio:file:False": "IMPORT_REQUEST_INVALID:",
     "maintain_memory:curation:preview": "CURATION_RUN_NOT_FOUND:",
     "maintain_memory:curation:status": "CURATION_RUN_NOT_FOUND:",
     "maintain_memory:structured-files": "COLLECTION_NOT_FOUND:",
@@ -317,7 +315,7 @@ class ReadSurfaceViolation(AssertionError):
 def _sub_selector(command_name, selector_value, adapter):
     """A further registry that the classifier reads for one selector value, as (argument path, values).
 
-    `invocation_is_read_only` reads four: governance operations, curation actions, import modes and the filing wake's `wait`.
+    `invocation_is_read_only` reads three: governance operations, curation actions and import modes.
     The classifier does not expose them as data, so a fourth fails
     `test_the_inventory_knows_each_registry_that_the_classifier_reads` until it is listed here.
     """
@@ -325,9 +323,6 @@ def _sub_selector(command_name, selector_value, adapter):
         return ("curation_action",), sorted(curation.READ_ONLY_ACTIONS)
     if adapter == "import-conditional":
         return ("import_request", "mode"), sorted(import_modes.READ_ONLY_MODES)
-    if command_name == "adoption_studio" and selector_value == "file":
-        # `file` with `wait=False` only registers the stage with the cell's filer (session-private bytes).
-        return ("wait",), [False]
     return None
 
 
@@ -416,7 +411,8 @@ ADAPTER_ARGUMENTS = frozenset({"validate_only", "save", "dry_run", "apply", "pat
 
 def test_the_inventory_knows_each_registry_that_the_classifier_reads():
     """A selector value whose classification reads a further argument splits by a registry that
-    the inventory must list, or it samples one of that registry's values and skips the rest."""
+    the inventory must list, or it samples one of that registry's values and skips the rest. An argument
+    that only `invocation_writes_outside_writer` reads selects a write that skips the lease, not a read."""
     selectors = egress.selector_registry()
     for command in (*commands.COMMANDS, *commands.PRODUCT_COMMANDS):
         selector = egress.selector_for_command(command.name)
@@ -425,7 +421,10 @@ def test_the_inventory_knows_each_registry_that_the_classifier_reads():
         for value, adapter in selectors[(command.name, selector)].items():
             arguments = _RecordedArguments({selector: value})
             commands.invocation_is_read_only(command, arguments)
-            further = arguments.read - {selector} - ADAPTER_ARGUMENTS
+            # A write that skips the writer lease is still a write: it is outside the read surface.
+            exempt = _RecordedArguments({selector: value})
+            commands.invocation_writes_outside_writer(command, exempt)
+            further = arguments.read - exempt.read - {selector} - ADAPTER_ARGUMENTS
             listed = _sub_selector(command.name, value, adapter)
             assert further == ({listed[0][0]} if listed else set()), f"{command.name}:{value} reads {further}"
 
