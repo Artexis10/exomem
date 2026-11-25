@@ -17,7 +17,7 @@ These names are interfaces. Clients store them, and hooks and permission rules m
   - `evermatter setup --migrate` moves an existing client configuration to the new key, with a backup.
   - The Cloud plugin moves to the `mcp.evermatter.ai` address in the same release.
 - **Settings accept `EVERMATTER_*` in their own release.** Each source (the process environment, a `.env` file, the standalone hooks) maps the new prefix to the internal one before its own precedence and conflict rules apply. An explicit `EXOMEM_*` value is never overridden after the fact.
-- The marketplace id stays `exomem`, with the display name Evermatter. Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
+- The marketplace id stays `exomem`, and its description names Evermatter (the marketplace schema has no display-name field). Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
 - Stored identifiers keep the internal name:
   - the `exomem_id` frontmatter key;
   - state and config paths;

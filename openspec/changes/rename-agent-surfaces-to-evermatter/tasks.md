@@ -15,7 +15,7 @@
 
 - [ ] 3.1 Operator choice on D6 (Cloud plugin sign-in) recorded in the design.
 - [x] 3.2 Emit the server key and serverInfo name `evermatter`. Rename the skills to `evermatter-*` in the workflow-skill index and the core skill. Regenerate the plugin trees.
-- [ ] 3.3 Add `renames` to `marketplace.json` for `exomem` → `evermatter` and `exomem-cloud` → `evermatter-cloud`. Set the marketplace display name. Run `claude plugin validate .`. Done for the local plugin: `exomem` → `evermatter` is in `renames` and validated. The marketplace schema has no display-name field, so its description says "formerly Exomem". The `exomem-cloud` rename waits for the Cloud plugin (3.4).
+- [ ] 3.3 Add `renames` to `marketplace.json` for `exomem` → `evermatter` and `exomem-cloud` → `evermatter-cloud`. Name Evermatter in the marketplace description. Run `claude plugin validate .`. Done for the local plugin: `exomem` → `evermatter` is in `renames` and validated. The marketplace schema has no display-name field, so its description says "formerly Exomem". The `exomem-cloud` rename waits for the Cloud plugin (3.4).
 - [ ] 3.4 Move the Cloud plugin's address to `mcp.evermatter.ai/mcp` once the Cloud's accepted resource list serves it.
 - [x] 3.5 Add `evermatter setup --migrate` (D5). Make doctor list user-written rules and hooks that still name the old prefix.
 - [x] 3.6 Write the new managed-block markers and the readiness service name `evermatter`.

@@ -55,7 +55,7 @@ Setup's `.env` route lookup and the early resource preload read through the same
 
 ### D4. Plugins move through the marketplace `renames` map; the marketplace id stays
 
-Claude Code documents a top-level `renames` map in `marketplace.json`. It rewrites `enabledPlugins` and `pluginConfigs` to the new plugin name and shows a one-time notice. A git-hosted marketplace needs one `/plugin install` of the new name. Claude Code documents no path for renaming a marketplace, so the marketplace id stays `exomem` and its display name says Evermatter.
+Claude Code documents a top-level `renames` map in `marketplace.json`. It rewrites `enabledPlugins` and `pluginConfigs` to the new plugin name and shows a one-time notice. A git-hosted marketplace needs one `/plugin install` of the new name. Claude Code documents no path for renaming a marketplace, so the marketplace id stays `exomem`. The marketplace schema has no display-name field, so its description names Evermatter.
 
 ### D5. Existing client configurations move only when the user asks
 
