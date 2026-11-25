@@ -1,4 +1,7 @@
 locals {
+  # The one DNS-name shape that every hostname variable validates against.
+  dns_name_pattern = "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"
+
   common_labels = {
     application = "exomem-hosted"
     environment = "private-alpha"

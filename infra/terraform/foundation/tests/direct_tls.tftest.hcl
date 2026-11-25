@@ -67,13 +67,13 @@ run "additional_gateway_hostname_resolves_in_its_own_zone" {
 
   variables {
     gateway_hostname             = "mcp.example.com"
-    gateway_additional_hostnames = { "mcp.example.org" = "mock-zone-2" }
+    gateway_additional_hostnames = { "mcp.example.org" = "0123456789abcdef0123456789abcdef" }
   }
 
   assert {
     condition = (
       length(cloudflare_dns_record.gateway_additional) == 1 &&
-      cloudflare_dns_record.gateway_additional["mcp.example.org"].zone_id == "mock-zone-2" &&
+      cloudflare_dns_record.gateway_additional["mcp.example.org"].zone_id == "0123456789abcdef0123456789abcdef" &&
       cloudflare_dns_record.gateway_additional["mcp.example.org"].type == "A" &&
       cloudflare_dns_record.gateway_additional["mcp.example.org"].content == "192.0.2.20" &&
       cloudflare_dns_record.gateway_additional["mcp.example.org"].proxied == false
@@ -82,11 +82,22 @@ run "additional_gateway_hostname_resolves_in_its_own_zone" {
   }
 }
 
+run "rejects_a_zone_name_in_place_of_a_zone_id" {
+  command = plan
+
+  variables {
+    gateway_hostname             = "mcp.example.com"
+    gateway_additional_hostnames = { "mcp.example.org" = "example.org" }
+  }
+
+  expect_failures = [var.gateway_additional_hostnames]
+}
+
 run "rejects_an_additional_hostname_without_the_primary" {
   command = plan
 
   variables {
-    gateway_additional_hostnames = { "mcp.example.org" = "mock-zone-2" }
+    gateway_additional_hostnames = { "mcp.example.org" = "0123456789abcdef0123456789abcdef" }
   }
 
   expect_failures = [var.gateway_additional_hostnames]

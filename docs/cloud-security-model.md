@@ -54,8 +54,8 @@ encrypted.
   edge moves only ciphertext, and `mediaEdge.enabled` is off by default.
 - [config.yaml.j2](../infra/ansible/roles/k3s/templates/config.yaml.j2#L15) encrypts cluster Secrets.
 - The edge terminates TLS on the cluster
-  ([cloud-ingress.yaml](../infra/helm/platform/templates/cloud-ingress.yaml)). Its optional record
-  `cloudflare_dns_record.gateway` is not proxied, and `gateway_hostname` defaults to empty
+  ([cloud-ingress.yaml](../infra/helm/platform/templates/cloud-ingress.yaml)). Its optional records
+  `cloudflare_dns_record.gateway` and `cloudflare_dns_record.gateway_additional` are not proxied, and `gateway_hostname` defaults to empty
   ([cloudflare.tf](../infra/terraform/foundation/cloudflare.tf#L44-L74)). The control and transfer
   records belong to the retired Hosted platform and carry no Cloud traffic: their tunnel targets that
   platform's edge ([L15-L40](../infra/terraform/foundation/cloudflare.tf#L15-L40)), not the Cloud edge.
