@@ -201,7 +201,7 @@ def test_a_registration_under_the_evermatter_key_counts_as_ours(tmp_path: Path) 
     path = tmp_path / "config.toml"
     path.write_text('[mcp_servers.evermatter]\ncommand = "hand-tuned"\n', encoding="utf-8")
 
-    assert client_config.codex_mcp_exists(path)
+    assert client_config.codex_mcp_name(path) == "evermatter"
     outcome = client_config.merge_codex_mcp(_stdio_block(), path=path)
 
     assert outcome["action"] == "exists"

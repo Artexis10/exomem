@@ -2,23 +2,21 @@
 
 ## Why
 
-The product is now Evermatter. Agents and users still see the old name in the plugins, the skills, the MCP server name and its tool prefix, the managed blocks that setup writes, and the settings prefix. On 2026-11-25 the operator asked that "everything needs to be renamed to every matter". That request supersedes design decision D2 of `rename-to-evermatter`, which kept those identifiers as `exomem`.
+The product is now Evermatter. Agents and users still see the old name in the plugins, the skills, the MCP server name and its tool prefix, the managed blocks that setup writes, and the settings prefix. This change supersedes design decision D2 of `rename-to-evermatter`, which kept those identifiers as `exomem`: agent-facing identifiers take the product name.
 
 These names are interfaces. Clients store them, and hooks and permission rules match them. The rename must therefore leave every existing install working until the user moves, and a move must lose no save.
 
 ## What Changes
 
 - **Release A accepts both names and still emits the old ones.**
-  - Our hooks match the tool prefixes of both server names.
-  - Setup, upgrade, uninstall and doctor recognise both server keys and both managed-block markers.
-  - Settings accept `EVERMATTER_*` beside `EXOMEM_*`.
+  - Setup and doctor recognise both server keys, both managed-block markers and both readiness service names.
 - **Release B emits the new names.**
   - The plugins become `evermatter` and `evermatter-cloud` through the marketplace `renames` map.
   - The server key and the serverInfo name become `evermatter`.
   - The skills become `evermatter-*`.
   - `evermatter setup --migrate` moves an existing client configuration to the new key, with a backup.
   - The Cloud plugin moves to the `mcp.evermatter.ai` address in the same release.
-  - The docs document `EVERMATTER_*`.
+- **Settings accept `EVERMATTER_*` in their own release.** Each source (the process environment, a `.env` file, the standalone hooks) maps the new prefix to the internal one before its own precedence and conflict rules apply. An explicit `EXOMEM_*` value is never overridden after the fact.
 - The marketplace id stays `exomem`, with the display name Evermatter. Claude Code documents no path for renaming a marketplace, so a rename would strand every install.
 - Stored identifiers keep the internal name:
   - the `exomem_id` frontmatter key;

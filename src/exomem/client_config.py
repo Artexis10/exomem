@@ -167,10 +167,6 @@ def codex_mcp_name(path: Path) -> str | None:
     return next((name for name in SERVER_NAMES if name in servers), None)
 
 
-def codex_mcp_exists(path: Path) -> bool:
-    return codex_mcp_name(path) is not None
-
-
 def _toml_string(value: str) -> str:
     """Quote a TOML basic string. Windows paths are full of backslashes, so
     escaping them (rather than emitting a literal string) is the safe choice."""
@@ -226,7 +222,8 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
 
     An existing registration under either accepted server key counts as the
     registration: ``replace=True`` swaps its section, sub-tables included, for
-    ``block`` (which names ``SERVER_NAME``) instead of adding a second server.
+    ``block`` instead of adding a second server. The caller renders ``block`` under
+    the key it means to keep.
 
     Returns {"action": "created"|"added"|"replaced"|"exists", "path": str,
     "diff": str, "backup": str|None}.

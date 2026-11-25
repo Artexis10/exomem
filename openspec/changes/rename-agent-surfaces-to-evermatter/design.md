@@ -2,7 +2,7 @@
 
 ## Context
 
-`rename-to-evermatter` renamed every external surface and kept the identifiers that clients store: the MCP server key `exomem` and the plugin and skill names (its D2). On 2026-11-25 the operator asked for those to be renamed as well.
+`rename-to-evermatter` renamed every external surface and kept the identifiers that clients store: the MCP server key `exomem` and the plugin and skill names (its D2). This change supersedes that decision: agent-facing identifiers take the product name.
 
 These identifiers are interfaces. A client stores the server key it was given and builds tool names from it:
 - a user-scope server's tools are `mcp__<server>__<tool>`;
@@ -42,9 +42,16 @@ Release A teaches every reader both names and changes nothing a user sees. Relea
 
 The accepted server names live in `client_config` beside the emitted `SERVER_NAME`. The readiness service names live beside the readiness payload that emits them. Every reader imports these; no reader keeps its own copy. Release B changes the emitted value and leaves the accepted set unchanged.
 
-### D3. Settings accept `EVERMATTER_*` through the existing promotion
+### D3. Settings accept `EVERMATTER_*` per source, in a release of their own
 
-`env_compat` already promotes `KB_MCP_X` to `EXOMEM_X` at startup. It promotes `EVERMATTER_X` the same way, so code keeps reading `EXOMEM_*` and no other module changes. On a conflict, `EVERMATTER_X` wins: it is the name a user sets on purpose after the rename. This is the opposite of the legacy rule, where the newer `EXOMEM_X` wins over `KB_MCP_X`, and for the same reason.
+Settings are not an identifier that clients store, so they need not ship with Release A. A promotion that copies `EVERMATTER_X` over `EXOMEM_X` after the fact is wrong. It would beat every value our own code forces, a `.env` file sets or an isolation recipe exports. The literal-name conflict checks would also never see a conflict across the two prefixes.
+
+Each source therefore maps the new prefix to the internal name before its own rules apply:
+- the process environment fills `EXOMEM_X` from `EVERMATTER_X` only when `EXOMEM_X` is unset, and logs a conflict;
+- a `.env` load maps its keys before the conflict check and the override;
+- the standalone hooks map the prefix in their own alias normaliser.
+
+Setup's `.env` route lookup and the early resource preload read through the same mapping. One function defines the mapping, and the hooks keep a copy that a test keeps in step, because they cannot import the package.
 
 ### D4. Plugins move through the marketplace `renames` map; the marketplace id stays
 

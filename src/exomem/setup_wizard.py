@@ -385,7 +385,8 @@ def _register_claude(
 
     # A replace keeps the server key the user already holds, so their tool prefix and the
     # rules that match it survive; only an explicit migration renames the key.
-    kept_name = next(iter(dict.fromkeys(name for name, _entry in registrations.values())), None)
+    kept_entry = registrations.get(scope) or next(iter(registrations.values()), None)
+    kept_name = kept_entry[0] if kept_entry else None
     argv = route.claude_add_argv(claude, scope=scope, name=kept_name or client_config.SERVER_NAME)
     if replace:
         paths = (config_path, project_dir / ".mcp.json")

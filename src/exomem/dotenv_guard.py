@@ -18,13 +18,11 @@ import logging
 import os
 from pathlib import Path
 
-from .env_compat import ACCEPTED_PREFIXES
 from .vault import _is_vault
 
 log = logging.getLogger(__name__)
 
-# A `.env` is read before promotion, so every accepted spelling of the vault path counts.
-_VAULT_PATH_ENV = tuple(prefix + "VAULT_PATH" for prefix in ACCEPTED_PREFIXES)
+_VAULT_PATH_ENV = ("EXOMEM_VAULT_PATH", "KB_MCP_VAULT_PATH")
 
 
 def dotenv_load_guard(path: Path, *, vault: Path | None = None) -> Path | None:

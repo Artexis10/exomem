@@ -24,9 +24,9 @@ The MCP server key and serverInfo name, the plugin names, the skill names and th
 
 #### Scenario: Settings accept the new prefix
 
-- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH`, or sets `EXOMEM_VAULT_PATH` only
-- **THEN** the service uses that value
-- **AND** when both are set with different values, `EVERMATTER_VAULT_PATH` wins
+- **WHEN** a deployment sets `EVERMATTER_VAULT_PATH` and no `EXOMEM_VAULT_PATH`
+- **THEN** the service and the hooks use that value
+- **AND** an explicitly set `EXOMEM_VAULT_PATH`, whether exported, forced by the service or read from `.env` under its own precedence, is never overridden by an `EVERMATTER_` value
 
 ### Requirement: Stored Identifiers Keep the Internal Name
 
