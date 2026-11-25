@@ -104,6 +104,8 @@ Both authored tables are `STRICT` and append-only under the same triggers as `it
 
 When `timeline_version` is 1, the transaction's event material gains a `timeline` member: its stated facts, sorted by item key and field, with corrections named by transition id. `history.verify` rebuilds the member from the two tables. A changed, added or removed fact, or a changed marker, changes the hash. Widening the `event_version` check to a version 3 would need a rebuild of `txns`, the chain's main table, for no extra protection, so the marker column is preferred.
 
+**Numbering.** "Schema 21" here means the next store schema after `main` at merge time. Another open change that reshapes collections also adds a migration, and whichever merges second takes the following number. Shipping both in one release breaks rollback once instead of twice.
+
 **Rollback cost.** Every earlier release refuses a schema-21 store. Recovery is to roll forward, or to restore the backup taken before the upgrade, which loses later writes.
 
 ### D5. One `timeline` argument on `query_records`
