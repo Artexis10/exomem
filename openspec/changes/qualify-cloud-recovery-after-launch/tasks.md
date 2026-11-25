@@ -1,6 +1,6 @@
 ## 1. Recovery drills
 
-These tasks moved from `adopt-exomem-cloud-plain-cells` with their evidence limits unchanged. Each names its old number.
+These tasks moved from `adopt-exomem-cloud-plain-cells` with their evidence limits unchanged. Each names its old number. Each drill runs on a QA cell, a copy or approved disposable infrastructure, never on a tenant's live data.
 
 - [ ] 1.1 (was 6.6) Resilience 2: qualify a per-cell historical rollback and return through the existing release API.
   Use an exclusive writer window for the QA cell, a fresh post-write pre-attempt backup S1 and a copied vault plus host state.
@@ -21,16 +21,3 @@ These tasks moved from `adopt-exomem-cloud-plain-cells` with their evidence limi
   Price any rental before obtaining its authority; no rental is authorized by this task record.
 - [ ] 1.4 (was 6.9) Resilience 5: rehearse a server move with the existing backup, stop, volume-release, placement and resume procedures.
   Compare canonical vault and host state, preserve post-backup writes and report downtime after the replacement node exists.
-- [ ] 1.5 (was 6.11) Resilience 7: qualify memory and CPU admission through the existing shared-worker envelope, default off.
-  Measure the worst supported warm peak per slot and select conservative occupancy and fixed reserves.
-  Charge `max(request, qualified peak)` and retain at least 20% node memory headroom; do not introduce a dynamic estimator or ledger.
-  Use selected-empty atomic zero publication, inventory, stop, completed holds, volume release, selection and resume before all-shared promotion.
-  Verify full-capacity refusal preserves the unconsumed invitation and keeps existing access working.
-  A production request change to `512Mi/125m` requires separate operator restart go.
-  If qualification fails, retain `1Gi/250m` for an image-only roll; do not enable shared-node MemoryQoS.
-  The maintained memory profiler preserves and reports the selected Cloud resource policy instead of silently measuring the legacy profile.
-  Its configuration regression test protects that binding; worst-supported warm-peak qualification remains open.
-
-## 2. Close
-
-- [ ] 2.1 Record each qualified path in the runbook index, and report each path still unqualified, with its reason.

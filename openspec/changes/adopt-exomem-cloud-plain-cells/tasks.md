@@ -284,7 +284,7 @@ The original 0.116 qualification and image-only deployment remain historical evi
 They establish no current latency percentile, worst warm peak or full-fleet admission qualification.
 Recorded deployment receipts from 2026-10-17 place the three running cells and fleet default on published 0.124.0.
 The rollout left no per-cell pins and did not change the existing resource profile.
-Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 1.5 of `qualify-cloud-recovery-after-launch` retains memory and CPU qualification.
+Requests remain `1Gi/250m`, with limits of `3Gi/2CPU`; task 3.9 of `add-cloud-service-resource-policy` retains memory and CPU qualification.
 
 Documents and OCR, plus artifact-broker access for every cell, are enabled in the recorded deployment.
 PDF, English OCR and Japanese OCR ingestion and keyword recall passed through the Cloud MCP connector.
@@ -310,7 +310,7 @@ Tasks 6.0, 6.1 and 6.3 retain their specific unreconciled evidence, without repe
   Custody, service authentication and scratch absence checks passed.
   The current top-level wrapper was not invoked; its source wiring, existing tests and maintained-helper recovery establish repeatability.
   This closes repeatable dual-root comparison and deployed-image scratch recovery, without claiming a current-wrapper production run, in-place recovery or historical rollback.
-- Tasks 6.6–6.9 and 6.11, the post-launch recovery drills, moved to `qualify-cloud-recovery-after-launch`.
+- Tasks 6.6–6.9, the post-launch recovery drills, moved to `qualify-cloud-recovery-after-launch`. Task 6.11, memory and CPU admission, is the same work as task 3.9 of `add-cloud-service-resource-policy` and is tracked there.
 - [x] 6.10 Resilience 6: verify control database recovery from pgBackRest and WAL in an isolated environment.
   The 2026-10-08 isolated restore replayed nine WAL segments, matched database lineage and passed `pg_amcheck`.
   Network isolation, no TCP listener, unchanged source processes and scratch removal also passed.
