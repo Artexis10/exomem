@@ -369,6 +369,7 @@ class CreateNote(Wire):
     unlinked_reason: str | None = _UNLINKED
     vocabulary_decision: VocabularyDecision | None = None
     suggest_links: bool | None = Field(default=None, description="Also return pages to link.")
+    sensitivity: list[str] | None = _SENSITIVITY
     review: str | None = _REVIEW
     preview: bool | None = _PREVIEW
     detail: Detail | None = _DETAIL
@@ -384,6 +385,7 @@ def _create_note(wire: dict[str, Any], ctx: Context) -> Translated:
         "title": wire["title"], "content": wire["content"], "note_type": wire.get("type"),
         "project": wire.get("project"), "projects": wire.get("projects"), "sources": wire.get("sources"),
         "tags": wire.get("tags"), "suggestions": wire.get("suggest_links"), "validate_only": wire.get("preview"),
+        "sensitivity": wire.get("sensitivity"),
         "response_detail": wire.get("detail"), **_unlinked(wire), **_vocabulary(wire), **_NO_SLUG,
         **_creation_review(wire),
     }
@@ -780,6 +782,7 @@ class SaveEpisode(Wire):
     said: list[str] | None = Field(default=None, description="Up to three verbatim user statements.")
     about: list[str] | None = Field(default=None, description="Pages this concerns, by title.")
     client: str | None = None
+    sensitivity: list[str] | None = _SENSITIVITY
     detail: Detail | None = _DETAIL
 
 

@@ -34,6 +34,11 @@ BASIS_DECLARED, BASIS_KIND_DEFAULT, BASIS_NONE = "declared", "kind-default", "no
 class SensitivityError(ValueError):
     """A class that no capture or classify call may apply; the message starts with a stable code."""
 
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(f"{code}: {reason}")
+        self.code = code
+        self.reason = reason
+
 
 def registry_path(root: Path) -> Path:
     return kb_root(root) / "_Schema" / "sensitivity-classes.yaml"
@@ -76,14 +81,16 @@ def validated(vault_root: Path | None, supplied: object) -> tuple[str, ...]:
     if supplied is None:
         return ()
     if not isinstance(supplied, Sequence) or isinstance(supplied, str | bytes):
-        raise SensitivityError(f"INVALID_SENSITIVITY: sensitivity is a list of class keys, such as {_example(vault_root)}")
+        raise SensitivityError(
+            "INVALID_SENSITIVITY", f"sensitivity is a list of class keys, such as {_example(vault_root)}")
     known = active_keys(vault_root)
     classes: list[str] = []
     for raw in supplied:
         key = registry.token(raw) if isinstance(raw, str) else ""
         if key not in known:
             raise SensitivityError(
-                f"{UNKNOWN_CODE}: {raw!r} is not a registered sensitivity class. The registered classes are "
+                UNKNOWN_CODE,
+                f"{raw!r} is not a registered sensitivity class. The registered classes are "
                 f"{', '.join(known)}; save a new one with schema_memory(subject='sensitivity-classes') first")
         if key not in classes:
             classes.append(key)

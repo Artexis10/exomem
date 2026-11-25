@@ -14,9 +14,8 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
-from exomem import client_artifacts, commands, sensitivity_classes
+from exomem import client_artifacts, commands, sensitivity_classes, writer_lease
 from exomem import server as server_module
-from exomem import writer_lease
 from exomem.vault import content_hash, parse_frontmatter
 
 CARD = "Test Person\nDocument number: X0000000\nIssued by the Republic of Testland.\n"
@@ -253,3 +252,54 @@ def test_saving_the_same_evidence_again_reports_the_kept_class_and_the_declarati
 
     assert again["sensitivity"]["classes"] == ["identity"]
     assert {"field": "sensitivity", "provided": "health", "kept": "identity"} in again["fields_not_applied"]
+
+
+def test_an_agent_records_a_class_on_a_note_and_an_unknown_class_writes_nothing(
+    vault: Path, agent: Callable[..., dict]
+) -> None:
+    """A note whose page drops the class, a reply that does not name what governs it, or a refusal
+    that leaves a half-written page."""
+    note = {
+        "title": "Card renewal", "type": "insight", "unlinked_reason": "A standalone test note.",
+        "content": "# Card renewal\n\n## Observations\n\n- [finding] Test Person renews card X0000000 #admin\n",
+    }
+    before = sorted(vault.rglob("*"))
+    refused = agent("create_note", {**note, "sensitivity": ["passport-ish"]})
+    assert refused["error"]["code"] == sensitivity_classes.UNKNOWN_CODE
+    assert "identity, health, financial" in refused["error"]["message"]
+    assert sorted(vault.rglob("*")) == before
+
+    saved = agent("create_note", {**note, "sensitivity": ["identity"]})
+
+    assert saved["sensitivity"]["classes"] == ["identity"] and saved["sensitivity"]["basis"] == "declared"
+    assert saved["sensitivity"]["disclosure"]["governance"] == "off"
+    [page] = vault.rglob("Card renewal.md")
+    front, text = _page(vault, page.relative_to(vault).as_posix())
+    assert front["sensitivity"] == ["identity"]
+    assert "renews card X0000000" in text
+
+
+@pytest.mark.usefixtures("owner_scope")
+def test_an_episode_revision_keeps_the_class_and_a_different_declaration_is_refused(
+    vault: Path, source_schema: Any
+) -> None:
+    """An episode revision that drops the class its page holds, or one that rewrites the class
+    without the classify operation's reason record."""
+    episode = "ep-" + "a1" * 16
+
+    def record(**more: Any) -> dict:
+        return commands.op_episode_memory(
+            vault, source_schema, action="record", episode=episode, subject="Card renewal",
+            summary="Filed the card renewal", **more,
+        )
+
+    first = record(worked_on=["Test Person card X0000000"], sensitivity=["identity"])
+    assert first["sensitivity"]["classes"] == ["identity"]
+    assert _page(vault, first["source"]["path"])[0]["sensitivity"] == ["identity"]
+
+    revised = record(worked_on=["Test Person card X0000000", "Posted the form"])
+    with pytest.raises(ValueError, match="EPISODE_INVALID.*already records its sensitivity"):
+        record(worked_on=["Test Person card X0000000", "Posted the form", "Paid"], sensitivity=["health"])
+
+    assert revised["sensitivity"]["classes"] == ["identity"]
+    assert _page(vault, revised["source"]["path"])[0]["sensitivity"] == ["identity"]

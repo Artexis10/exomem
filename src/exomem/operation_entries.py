@@ -759,7 +759,7 @@ _REMAINING = {
         _row("quarantine", "approve_procedure", ("ref",), verb="moved", idempotent=True),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation.
     )),
     "episode_memory": ("action", (
-        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
+        _row("record", "record_episode", ("episode", "subject", "summary", "worked_on", "decided", "open", "said", "about", "client", "sensitivity"), verb="saved"),  # nosemgrep: ep-word-set -- closed tool-schema field names of this operation; only its outcome verb changed.
         _row("input", "record_episode", ("episode", "input_revision", "journal_digest", "materials"), ("episode", "input_revision", "journal_digest", "materials"), verb="saved", queues_when_busy=False),  # nosemgrep: ep-word-set -- closed v1 input-binding wire fields.
         _row("material", "read_episode", ("episode", "input_revision", "material_key"), ("episode", "input_revision", "material_key")),  # nosemgrep: ep-word-set -- closed v1 keyed-read wire fields.
         _row("inspect", "read_episode", ("episode", "subject")),

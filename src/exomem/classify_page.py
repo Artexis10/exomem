@@ -76,8 +76,7 @@ def classify(
     except VaultPathError as error:
         raise ClassifyError(error.code, error.reason) from None
     except sensitivity_classes.SensitivityError as error:
-        code, _, detail = str(error).partition(": ")
-        raise ClassifyError(code, detail) from None
+        raise ClassifyError(error.code, error.reason) from None
     try:
         text, _guard = read_guarded_text(root, root / rel)
     except (OSError, UnicodeError):

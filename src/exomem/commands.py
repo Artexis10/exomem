@@ -5860,6 +5860,7 @@ def op_note(
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
 
@@ -5977,6 +5978,8 @@ def op_note(
         vocabulary_decision: After a vocabulary_preparation response, submit its
             evidence_fingerprint with outcome reuse, create, or defer and the
             reviewed canonical value. The response is bound to that evidence.
+        sensitivity: Sensitivity classes you judge the note to carry, such as identity,
+            health or financial. The reply reports them with what governs the page.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -5985,7 +5988,7 @@ def op_note(
         validation failure, raises a structured error with code=INVALID_NOTE,
         the missing fields, and the reason.
     """
-    return _invoke_note(
+    result = _invoke_note(
         vault_root,
         content=content,
         note_type=note_type,
@@ -6024,7 +6027,14 @@ def op_note(
         vocabulary_decision=vocabulary_decision,
         summary=summary,
         topics=topics,
-    ).as_dict()
+        sensitivity=sensitivity,
+    )
+    payload = result.as_dict()
+    if isinstance(result, note_module.NoteResult):
+        payload["sensitivity"] = sensitivity_classes_module.report(
+            vault_root, sensitivity_classes_module.classify_capture(vault_root, sensitivity), rel_path=result.path,
+        )
+    return payload
 
 
 def _invoke_note(
@@ -9044,6 +9054,7 @@ def op_remember(
     vocabulary_decision: _DomainVocabularyDecisionArgument = None,
     summary: str | None = None,
     topics: str | list[str] | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save a durable conclusion as compiled knowledge.
 
@@ -9077,6 +9088,7 @@ def op_remember(
         relation_review_hash: Draft hash the review covers.
         relation_review_reason: Audit reason for reviewed-none.
         vocabulary_decision: Answers a vocabulary_preparation response.
+        sensitivity: Sensitivity classes you judge the note to carry, such as identity, health or financial.
     """
     return op_note(
         vault_root,
@@ -9117,6 +9129,7 @@ def op_remember(
         vocabulary_decision=vocabulary_decision,
         summary=summary,
         topics=topics,
+        sensitivity=sensitivity,
     )
 
 
@@ -9926,6 +9939,7 @@ def op_episode_memory(
     order: list[str] | None = None,
     max_leaves: int | None = None,
     postcommit: bool | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save a recap for later sessions.
 
@@ -9952,6 +9966,7 @@ def op_episode_memory(
         open: Max 5 items, 200 characters each. One of the three lists is required.
         said: Max 3 verbatim user statements, 300 characters.
         about: Max 3 `exomem://` refs.
+        sensitivity: `record` only: sensitivity classes you judge the recap to carry. A later revision keeps them.
         candidate: Your stable key for one change.
         proposal: For `prepare`; alternatives are up to 8 inspected pages
             {target, scope, version: the `content_hash` you read}. A changed
@@ -9982,6 +9997,7 @@ def op_episode_memory(
         "said": said,
         "about": about,
         "client": client,
+        "sensitivity": sensitivity,
     }
     workflow = {
         "candidate": candidate,
@@ -10043,6 +10059,7 @@ def op_episode_memory(
             said=said,
             about=about,
             client=client,
+            sensitivity=sensitivity,
         )
     if action in {"input", "material"}:
         from .episode_recovery import EpisodeInputOwner
