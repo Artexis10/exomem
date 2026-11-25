@@ -431,12 +431,14 @@ class LocalRuntimeActivation:
 
     def _downgrade_recall_runtime(self) -> None:
         """Revoke an unavailable watcher generation and retain exact fallback."""
-        from . import freshness, readiness
+        from . import freshness, lexstore, readiness
 
         watcher = self.file_watcher
         # Invalidation cancels any replacement walk that is still in flight;
         # if it eventually returns it cannot re-publish an unmaintained map.
         freshness.invalidate(self.vault_root)
+        # Its heal needs both scopes live; a lag repair must not wait for it now.
+        lexstore.forget_adopted_catalog(self.vault_root)
         readiness.unmanage_runtime()
         self.file_watcher = None
         stop = getattr(watcher, "stop", None)

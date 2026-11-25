@@ -2524,6 +2524,11 @@ def heal_adopted_catalog(vault_root: Path) -> bool:
     return get_store(vault_root).heal_adopted_catalog()
 
 
+def forget_adopted_catalog(vault_root: Path) -> None:
+    """Drop an adopted catalogue's owed heal: a runtime without a live registry cannot run it."""
+    get_store(vault_root).forget_adopted_catalog()
+
+
 def full_rebuild_in_flight(vault_root: Path) -> bool:
     """Whether the repair worker is running a whole-catalogue pass for this vault."""
     with _REPAIRS_LOCK:
@@ -2801,7 +2806,8 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     if catch_up is None:
         return False
     try:
-        _heal_adopted_catalog_before_catch_up(vault_root, store)
+        if not _heal_adopted_catalog_before_catch_up(vault_root, store):
+            return True
         if not catch_up():
             # A round that writes outran still advanced the stored checkpoint,
             # which is progress and not a decline: queue a lag-only catch-up for
@@ -2842,7 +2848,7 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
         return _log_catch_up_decline(store, CatchUpDecline.ERROR, error=type(error).__name__)
 
 
-def _heal_adopted_catalog_before_catch_up(vault_root: Path, store) -> None:
+def _heal_adopted_catalog_before_catch_up(vault_root: Path, store) -> bool:
     """Give an adopted standby catalogue this registry's lineage before a catch-up reads it.
 
     A detached build stamps a lineage no registry bridges, so the catch-up
@@ -2851,16 +2857,27 @@ def _heal_adopted_catalog_before_catch_up(vault_root: Path, store) -> None:
     first, and the warm skips the heal while a whole pass runs. With both
     scopes live the same single-use heal blesses the live checkpoints; the
     catch-up then replays any write since and admits.
+
+    Returns False when the catch-up must not run yet: the heal is owed but a
+    scope is still seeding. The warm (or the slow-seed follower) runs that heal
+    once the seed finishes and asks for a lag repair if it cannot admit, so a
+    whole pass now only duplicates it (2026-11-25 rehearsal: decline, then the
+    warm's heal 10 s later). A downgraded runtime drops the adopted rows, and a
+    runtime without event indexes never has live scopes, so neither waits here.
     """
     from . import freshness as freshness_module
 
     if getattr(store, "_adopted_rows", None) is None:
-        return
+        return True
     if not all(
         freshness_module.recall_is_live(vault_root, scope) for scope in freshness_module.SCOPES
     ):
-        return
+        if not freshness_module.event_indexes_enabled():
+            return True
+        log.info("lexical lag left to the adopted catalogue's owed heal; a scope is still seeding")
+        return False
     log.info("adopted lexical catalogue heal before catch-up healed=%s", store.heal_adopted_catalog())
+    return True
 
 
 def _log_catch_up_decline(store, reason: CatchUpDecline, **detail: int | str) -> bool:
@@ -10370,6 +10387,10 @@ class LexicalStore:
                 self._filtered_term_frequency_cache = None
                 self._adopted_rows = dict(detached.rows)
         return published
+
+    def forget_adopted_catalog(self) -> None:
+        with self._lock:
+            self._adopted_rows = None
 
     def heal_adopted_catalog(self) -> bool:
         """Reconcile an adopted detached catalogue with what changed since its build.
