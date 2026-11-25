@@ -108,8 +108,9 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     registration = json.loads(reg[6])
     assert registration["type"] == "stdio"
     assert registration["args"][-2:] == ["--transport", "stdio"]
-    assert registration["env"]["EXOMEM_VAULT_PATH"] == str(vault)
-    assert registration["env"]["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
+    assert registration["env"]["EVERMATTER_VAULT_PATH"] == str(vault)
+    assert registration["env"]["EVERMATTER_DISABLE_EMBEDDINGS"] == "1"
+    assert not [name for name in registration["env"] if name.startswith("EXOMEM_")]
 
 
 def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
@@ -151,6 +152,7 @@ def test_rerun_converges_to_skips(tmp_path: Path) -> None:
         json.dumps(
             {
                 "mcpServers": {
+                    # A registration that an earlier release wrote names its settings EXOMEM_*; it still matches.
                     "exomem": {
                         "command": "uv",
                         "args": setup_wizard._server_command(
@@ -350,7 +352,7 @@ def test_client_route_force_stdio_ignores_configured_service(tmp_path: Path) -> 
 
     assert route.transport == "stdio"
     assert route.command[-2:] == ("--transport", "stdio")
-    assert route.env["EXOMEM_DISABLE_EMBEDDINGS"] == "1"
+    assert route.env["EVERMATTER_DISABLE_EMBEDDINGS"] == "1"
 
 
 def test_present_invalid_dotenv_service_url_fails_instead_of_falling_back(
@@ -871,7 +873,7 @@ def test_codex_is_registered_through_its_cli_when_available(tmp_path: Path) -> N
     assert code == 0
     (reg,) = [c for c in recorder.calls if "add" in c and "codex" in c[0]]
     assert reg[1:4] == ["mcp", "add", "evermatter"]
-    assert f"EXOMEM_VAULT_PATH={vault}" in reg
+    assert f"EVERMATTER_VAULT_PATH={vault}" in reg
     # --transport stdio must be explicit: the server defaults to http.
     assert "--transport" in reg and "stdio" in reg
     assert "[done] registered with Codex" in out

@@ -36,7 +36,7 @@ from . import install_skill as install_module
 from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
-from .env_compat import canonical_settings
+from .env_compat import canonical_settings, emitted_name, rename_settings
 from .governance.principal import library_scope
 from .kbdir import managed_join, managed_root_rel
 from .vault_store import cli_fence
@@ -140,8 +140,16 @@ def _server_command(which_fn) -> list[str]:
 def _registration_matches(route: client_config.McpRoute, server: dict) -> bool:
     if route.transport == "http":
         return server.get("url") == route.url and server.get("type", "http") == "http"
-    desired = route.as_claude_config()
-    return all(server.get(key) == value for key, value in desired.items())
+    for key, value in route.as_claude_config().items():
+        if key == "env":
+            # A route that setup wrote before the settings rename names the same settings as
+            # EXOMEM_X: that is the route the user has, so setup leaves it alone (a replace rewrites it).
+            held = server.get(key)
+            if not isinstance(held, dict) or rename_settings(held)[0] != rename_settings(value)[0]:
+                return False
+        elif server.get(key) != value:
+            return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -258,9 +266,9 @@ def _resolve_client_route(
     vault_path: Path,
     profile: str,
 ) -> client_config.McpRoute:
-    env = {"EXOMEM_VAULT_PATH": str(vault_path)}
+    env = {emitted_name("EXOMEM_VAULT_PATH"): str(vault_path)}
     if profile == "lean":
-        env["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+        env[emitted_name("EXOMEM_DISABLE_EMBEDDINGS")] = "1"
     if force_stdio:
         return client_config.McpRoute.stdio(_server_command(which_fn), env)
 
@@ -1058,7 +1066,7 @@ def run_setup(
     else:
         print_fn("  1. Restart Claude Code so it loads the Evermatter server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
-    print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
+    print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EVERMATTER_VAULT_PATH.")
     print_fn(
         "  4. For foreground work/gaming: exomem mode quiet; inspect with "
         "exomem status --resources --json."
@@ -1086,7 +1094,7 @@ def setup_main(argv: list[str]) -> int:
             "connector setup (claude.ai / iOS), use `exomem setup --remote`."
         ),
     )
-    parser.add_argument("--vault", help="Vault root (default: prompt, or $EXOMEM_VAULT_PATH).")
+    parser.add_argument("--vault", help="Vault root (default: prompt, or $EVERMATTER_VAULT_PATH).")
     parser.add_argument("--yes", action="store_true", help="Non-interactive; requires --vault.")
     profile = parser.add_mutually_exclusive_group()
     profile.add_argument("--lean", action="store_const", const="lean", dest="profile",

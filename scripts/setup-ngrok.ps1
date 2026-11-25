@@ -25,7 +25,7 @@
 #   pwsh -File scripts/setup-ngrok.ps1 -Domain you.ngrok-free.dev
 #   pwsh -File scripts/setup-ngrok.ps1 -Domain you.ngrok-free.dev -Port 8765
 #
-# After this: set EXOMEM_BASE_URL=https://<Domain> in .env, update the GitHub OAuth
+# After this: set EVERMATTER_BASE_URL=https://<Domain> in .env, update the GitHub OAuth
 # App callback to https://<Domain>/auth/callback, restart exomem, re-add the connector.
 
 param(
@@ -133,7 +133,7 @@ Write-Host ""
 Write-Host "Endpoint https://$Domain -> http://127.0.0.1:$Port"
 Write-Host ""
 Write-Host "NEXT (not automated):"
-Write-Host "  1. .env:  EXOMEM_BASE_URL=https://$Domain"
+Write-Host "  1. .env:  EVERMATTER_BASE_URL=https://$Domain"
 Write-Host "  2. GitHub OAuth App: Homepage https://$Domain ; callback https://$Domain/auth/callback"
 Write-Host "  3. Restart exomem:  pwsh -File scripts/restart.ps1"
 Write-Host "  4. claude.ai: re-add the connector at https://$Domain/mcp (redo GitHub OAuth)"

@@ -17,8 +17,8 @@ LABEL="com.exomem"
 SERVICE_NAME="exomem"
 MODE="repo-dev"
 PROFILE="standard"
-BIND_HOST="${EXOMEM_BIND_HOST:-127.0.0.1}"
-PORT="${EXOMEM_PORT:-8765}"
+BIND_HOST=""
+PORT=""
 SERVICE_ROOT=""
 PACKAGE_VERSION=""
 ENV_FILE=""
@@ -33,6 +33,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 . "$SCRIPT_DIR/_service-common.sh"
+
+# The bind host and port may be named under any of their names in the process environment.
+BIND_HOST="$(exomem_process_setting EXOMEM_BIND_HOST)"
+BIND_HOST="${BIND_HOST:-127.0.0.1}"
+PORT="$(exomem_process_setting EXOMEM_PORT)"
+PORT="${PORT:-8765}"
 
 usage() {
     cat <<'EOF'
@@ -325,7 +331,7 @@ if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 ]]; then
     BIND_HOST="$EXISTING_HOST"
 fi
 VAULT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_VAULT_PATH)"
-[[ -n "$VAULT" ]] || die "EXOMEM_VAULT_PATH is required in $ENV_FILE"
+[[ -n "$VAULT" ]] || die "EVERMATTER_VAULT_PATH is required in $ENV_FILE"
 
 # The vault path is the cell's identity: its state root, index and graph are
 # all derived from it. A re-render that moves it points a running service at a
@@ -346,14 +352,15 @@ DOTENV_STATE_ROOT="$(exomem_dotenv_file_value "$ENV_FILE" EXOMEM_STATE_ROOT)"
 PROCESS_STATE_ROOT="$(exomem_process_setting EXOMEM_STATE_ROOT)"
 PREFERRED_STATE_ROOT="${PROCESS_STATE_ROOT:-${DOTENV_STATE_ROOT:-$(exomem_platform_state_root)}}"
 [[ "$PREFERRED_STATE_ROOT" == /* ]] \
-    || die "managed EXOMEM_STATE_ROOT must be absolute"
+    || die "managed EVERMATTER_STATE_ROOT must be absolute"
 PERSISTED_STATE_ROOT="$(exomem_dotenv_file_value "$SERVICE_ENV_FILE" EXOMEM_STATE_ROOT)"
+exomem_refuse_hosted_state_root_conflicts "$ENV_FILE" "$SERVICE_ENV_FILE"
 if [[ "$SEAMLESS" == 1 && "$EXISTING_SERVICE" == 1 && -z "$PERSISTED_STATE_ROOT" ]]; then
     die "--seamless bootstrap requires the installed service.env state-root binding"
 fi
 if [[ -n "$PERSISTED_STATE_ROOT" ]]; then
     [[ "$PERSISTED_STATE_ROOT" == /* ]] \
-        || die "managed EXOMEM_STATE_ROOT must be absolute"
+        || die "managed EVERMATTER_STATE_ROOT must be absolute"
 fi
 WORKER_BEFORE=0
 WORKER_AFTER=0
@@ -518,7 +525,7 @@ persist_fresh_state_root_binding() {
     staged="$(mktemp "$CONFIG_ROOT/installer-state-root.XXXXXX")"
     rendered="${MANAGED_STATE_ROOT//\\/\\\\}"
     rendered="${rendered//\"/\\\"}"
-    printf 'EXOMEM_STATE_ROOT="%s"\n' "$rendered" > "$staged"
+    printf 'EVERMATTER_STATE_ROOT="%s"\n' "$rendered" > "$staged"
     durable_publish_service_env "$staged"
     rm -f "$staged"
 }
@@ -668,27 +675,29 @@ for key, value in values.items():
     if "\n" in value or "\r" in value:
         raise SystemExit(f"multiline service environment values are not supported: {key}")
 
-# A setting may carry the product prefix or the pre-rename one in the dotenv. The
-# shell has already refused an EXOMEM_/EVERMATTER_ vault or state-root conflict, so
-# here a value is written under the names the dotenv already uses, never as an
-# EXOMEM_ line beside an EVERMATTER_ line that would then differ from it.
+# A setting may carry any of its three names in the dotenv. The shell has already refused an
+# EXOMEM_/EVERMATTER_ vault, state-root or hosted-state-root conflict. The published files below
+# name every setting EVERMATTER_X, with the value that the package would read (EXOMEM_X, else
+# EVERMATTER_X, else KB_MCP_X), so the unit never holds two names for one setting.
 NAME_PREFIXES = ("EXOMEM_", "EVERMATTER_", "KB_MCP_")
+PUBLISHED_PREFIX = "EVERMATTER_"
 
 def names(suffix: str) -> list[str]:
     return [prefix + suffix for prefix in NAME_PREFIXES]
 
 def set_value(suffix: str, value: str) -> None:
-    for name in [n for n in names(suffix) if n in values] or names(suffix)[:1]:
-        values[name] = value
+    for name in names(suffix):
+        values.pop(name, None)
+    values[PUBLISHED_PREFIX + suffix] = value
 
 def set_default(suffix: str, value: str) -> None:
     if not any(name in values for name in names(suffix)):
-        values[names(suffix)[0]] = value
+        values[PUBLISHED_PREFIX + suffix] = value
 
 if not any(values.get(name, "").strip() for name in names("VAULT_PATH")):
-    raise SystemExit(f"EXOMEM_VAULT_PATH is required in {env_path}")
+    raise SystemExit(f"EVERMATTER_VAULT_PATH is required in {env_path}")
 if not state_root_default or not Path(state_root_default).is_absolute():
-    raise SystemExit("managed EXOMEM_STATE_ROOT default must be absolute")
+    raise SystemExit("managed EVERMATTER_STATE_ROOT default must be absolute")
 set_value("STATE_ROOT", state_root_default)
 set_default("LOG_DIR", log_dir)
 # A default, not an assignment: an explicit choice in the dotenv outranks the
@@ -698,33 +707,41 @@ if embed_backend:
 if os.environ.get("PATH"):
     values.setdefault("PATH", os.environ["PATH"])
 
+# What the service reads: each setting once, under its published name.
+published = {}
+chosen = {}
+for key, value in values.items():
+    prefix = next((p for p in NAME_PREFIXES if key.startswith(p)), None)
+    if prefix is None:
+        published[key] = value
+    elif key[len(prefix):] not in chosen:
+        suffix = key[len(prefix):]
+        chosen[suffix] = next(values[name] for name in names(suffix) if name in values)
+        published[PUBLISHED_PREFIX + suffix] = chosen[suffix]
+
 def systemd_quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 Path(systemd_path).write_bytes(
-    "".join(f"{key}={systemd_quote(value)}\n" for key, value in values.items()).encode(
+    "".join(f"{key}={systemd_quote(value)}\n" for key, value in published.items()).encode(
         "utf-8"
     )
 )
 # The process file is sourced by the installer's own shell, which then runs `exomem` commands.
-# Each setting lands there under its EXOMEM_ name (EXOMEM_, else EVERMATTER_, else KB_MCP_) with
-# its other spellings removed, so a value the dotenv names replaces what the shell inherited and
-# a command started from that shell never sees two names for it. The published service.env above
-# keeps the dotenv's own names.
+# It is deleted after that and is never published, so it follows the rule for a script that
+# forces a value on the commands it starts: each setting lands as EXOMEM_X with its other
+# spellings removed (exomem_export_setting). A value the dotenv names then replaces what the
+# shell inherited, and a command started from that shell never sees two names for it.
 process_lines = []
-loaded = set()
 for key, value in values.items():
     prefix = next((p for p in NAME_PREFIXES if key.startswith(p)), None)
     if prefix is None:
         process_lines.append(f"export {key}={shlex.quote(value)}\n")
-    elif key[len(prefix):] not in loaded:
-        suffix = key[len(prefix):]
-        loaded.add(suffix)
-        chosen = next(values[name] for name in names(suffix) if name in values)
-        process_lines.append(f"exomem_export_setting {NAME_PREFIXES[0]}{suffix} {shlex.quote(chosen)}\n")
+for suffix, value in chosen.items():
+    process_lines.append(f"exomem_export_setting {NAME_PREFIXES[0]}{suffix} {shlex.quote(value)}\n")
 Path(process_path).write_text("".join(process_lines), encoding="utf-8")
 xml_lines = ["    <key>EnvironmentVariables</key>", "    <dict>"]
-for key, value in values.items():
+for key, value in published.items():
     xml_lines.extend(
         [f"        <key>{escape(key)}</key>", f"        <string>{escape(value)}</string>"]
     )

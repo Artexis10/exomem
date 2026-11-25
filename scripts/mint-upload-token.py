@@ -1,6 +1,6 @@
 """Mint a short-lived /upload token to paste into a claude.ai web chat.
 
-The long-lived EXOMEM_UPLOAD_TOKEN should never land in a chat transcript. This
+The long-lived EVERMATTER_UPLOAD_TOKEN should never land in a chat transcript. This
 derives a token from it that expires in ~15 min, so the claude.ai web sandbox can
 curl on-disk files to /upload without seeing the real secret. The secret is read
 but NEVER printed — only the short-lived token is.
@@ -15,19 +15,20 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
-from exomem import upload_tokens
+from exomem import env_compat, upload_tokens
+from exomem.remote_setup_wizard import parse_env
 
 ENV = Path(__file__).resolve().parents[1] / ".env"
-KEY = "EXOMEM_UPLOAD_TOKEN"
+KEY = "EXOMEM_UPLOAD_TOKEN"  # the internal name; the .env may set it under any of its names
 
 
 def _secret() -> str:
-    for line in ENV.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith(f"{KEY}="):
-            value = line.split("=", 1)[1].strip()
-            if value:
-                return value
-    raise SystemExit(f"{KEY} not set in .env — run scripts/set-upload-token.py first")
+    value = env_compat.rename_settings(parse_env(ENV.read_text(encoding="utf-8")))[0].get(KEY, "")
+    if value.strip():
+        return value.strip()
+    raise SystemExit(
+        f"{env_compat.emitted_name(KEY)} not set in .env — run scripts/set-upload-token.py first"
+    )
 
 
 def main() -> None:

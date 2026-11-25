@@ -998,7 +998,8 @@ class TestStoppedGate:
         assert result.returncode == 0, flat
         assert f"BOUND={expected}" in flat, flat
         dotenv = (app / ".env").read_text(encoding="utf-8")
-        assert f"EXOMEM_STATE_ROOT={expected}" in dotenv
+        assert f"EVERMATTER_STATE_ROOT={expected}" in dotenv
+        assert "EXOMEM_STATE_ROOT" not in dotenv
         assert str(system_local) not in dotenv
 
     def test_explicit_stopped_resume_requires_the_configured_listener_unbound(

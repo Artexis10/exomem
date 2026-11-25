@@ -101,7 +101,7 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
 # what decides how many tenants a node carries, so torch's absence here is the
 # capacity argument, not a packaging preference. It is only possible in this
 # lane — the reranker and CLIP are sentence-transformers models, and the hosted
-# stage withholds both (EXOMEM_DISABLE_RANKING; CLIP belongs to `vision`).
+# stage withholds both (EVERMATTER_DISABLE_RANKING; CLIP belongs to `vision`).
 #
 # Only the bi-encoder is fetched, and only in the form the runtime reads.
 ########################################################################
@@ -121,7 +121,7 @@ RUN uv pip install --python /app/.venv/bin/python ".[embeddings-onnx]" \
 ########################################################################
 FROM builder-hosted AS builder-cloud-model
 ENV HF_HOME=/opt/exomem-cloud-models \
-    EXOMEM_RECALL_MODEL=BAAI/bge-m3
+    EVERMATTER_RECALL_MODEL=BAAI/bge-m3
 # The pinned multilingual export may need int8 quantization. ONNX's graph
 # builder stays in this build stage; the cloud runtime copies only its models.
 RUN uv pip install --python /app/.venv/bin/python "onnx>=1.17" \
@@ -288,10 +288,10 @@ COPY --from=builder-ml /app/.venv /app/.venv
 COPY LICENSE /LICENSE
 
 ENV PATH=/app/.venv/bin:$PATH \
-    EXOMEM_HOST=0.0.0.0 \
-    EXOMEM_LOG_DIR=/data/logs \
+    EVERMATTER_HOST=0.0.0.0 \
+    EVERMATTER_LOG_DIR=/data/logs \
     HF_HOME=/data/hf \
-    EXOMEM_CONTAINER_VARIANT=ml
+    EVERMATTER_CONTAINER_VARIANT=ml
 
 LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="FSL-1.1-ALv2 AND Apache-2.0" \
@@ -318,10 +318,10 @@ COPY --from=builder-cuda /app/.venv /app/.venv
 COPY LICENSE /LICENSE
 
 ENV PATH=/app/.venv/bin:$PATH \
-    EXOMEM_HOST=0.0.0.0 \
-    EXOMEM_LOG_DIR=/data/logs \
+    EVERMATTER_HOST=0.0.0.0 \
+    EVERMATTER_LOG_DIR=/data/logs \
     HF_HOME=/data/hf \
-    EXOMEM_CONTAINER_VARIANT=cuda \
+    EVERMATTER_CONTAINER_VARIANT=cuda \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -366,13 +366,13 @@ RUN test -n "$EXOMEM_RELEASE_BUILD_TIME" \
  && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin exomem
 
 ENV PATH=/app/.venv/bin:$PATH \
-    EXOMEM_HOST=0.0.0.0 \
-    EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
+    EVERMATTER_HOST=0.0.0.0 \
+    EVERMATTER_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
     HF_HOME=/opt/exomem-models \
     HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1 \
-    EXOMEM_DISABLE_RANKING=1 \
-    EXOMEM_EMBED_BACKEND=onnx \
+    EVERMATTER_DISABLE_RANKING=1 \
+    EVERMATTER_EMBED_BACKEND=onnx \
     MALLOC_ARENA_MAX=2 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
@@ -386,10 +386,10 @@ CMD ["--transport", "http", "--port", "8765"]
 # Final: cloud (target `cloud`). Evermatter Cloud cell runtime (design D1/D2/D8).
 #
 # Derived from `cell-runtime`: the offline ONNX model environment,
-# `EXOMEM_DISABLE_RANKING` and read-only-root compatibility, with bge-m3 as its
+# `EVERMATTER_DISABLE_RANKING` and read-only-root compatibility, with bge-m3 as its
 # only pre-baked model (see `recall_space.configured_recall_model`). It adds the
 # media engines below; each stays off until cellctl switches it on in a cell
-# (EXOMEM_MEDIA_ENGINES). Cloud mode (`EXOMEM_CLOUD_CELL=1`) is a
+# (EVERMATTER_MEDIA_ENGINES). Cloud mode (`EVERMATTER_CLOUD_CELL=1`) is a
 # thin seam over the standalone runtime (D1), so this stage exists to add the
 # identity, backup tooling and command the cell pod needs — not a different
 # Python environment.
@@ -435,7 +435,7 @@ RUN usermod --home /data/host exomem \
 # replaces the PyPI one, so no GPL encoder library reaches the image. That stage's
 # FFmpeg libraries and notice come in as an overlay, and `ldconfig` indexes them.
 #
-# EXOMEM_OCR_INVENTORY: reading each OCR model's script reads every traineddata
+# EVERMATTER_OCR_INVENTORY: reading each OCR model's script reads every traineddata
 # file (about 350 MB), and every media child is fresh. The gate's first OCR run
 # writes that inventory here, read-only at run time, so a child reads one small file.
 #
@@ -462,11 +462,11 @@ RUN --mount=type=bind,from=uv,source=/uv,target=/usr/local/bin/uv \
  && uv pip install --python /app/.venv/bin/python --no-cache --no-deps /wheels/av-*.whl \
  && uv pip check --python /app/.venv/bin/python \
  && rm /tmp/media-cpu.txt
-ENV EXOMEM_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
-    EXOMEM_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
+ENV EVERMATTER_OCR_DEFAULT_LANGS=${EXOMEM_OCR_LANGS} \
+    EVERMATTER_OCR_INVENTORY=/opt/exomem-ocr/inventory.json \
     OMP_THREAD_LIMIT=1 \
-    EXOMEM_ASR_BACKEND=onnx \
-    EXOMEM_MEDIA_BUDGETS='{"speech":{"anon_mib":1024,"vmdata_mib":4096},"clip":{"anon_mib":256,"vmdata_mib":1792}}'
+    EVERMATTER_ASR_BACKEND=onnx \
+    EVERMATTER_MEDIA_BUDGETS='{"speech":{"anon_mib":1024,"vmdata_mib":4096},"clip":{"anon_mib":256,"vmdata_mib":1792}}'
 # New media artifacts only fetch their pinned publication; a cell never builds them.
 RUN HF_HUB_OFFLINE=0 python -c "\
 from exomem.media_models import ensure_media_model; \
@@ -491,10 +491,10 @@ RUN --network=none \
     --mount=type=bind,source=scripts/check-media-samples.py,target=/media-gate.py \
     mkdir -p /opt/exomem-ocr \
  && HOME=/tmp python /media-gate.py /samples "${EXOMEM_MEDIA_SHIPPED_ENGINES}" \
- && test -s "${EXOMEM_OCR_INVENTORY}" \
+ && test -s "${EVERMATTER_OCR_INVENTORY}" \
  && find /tmp -mindepth 1 -delete
 
-# EXOMEM_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
+# EVERMATTER_LOG_DIR: no runtime log ever lands on the tenant volume D8 backs up,
 # even without the manifest setting it (design D1.2 "Log directory"). D2's
 # writable `/tmp` emptyDir is where this actually lands at runtime.
 #
@@ -504,20 +504,20 @@ RUN --network=none \
 # `/health` up after 24s against 4s with it off). Both names are read by the
 # installed `fastmcp.settings.Settings` (`env_prefix="FASTMCP_"`).
 #
-# EXOMEM_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
+# EVERMATTER_RECALL_MODEL: a cloud cell encodes recall with the multilingual model
 # a personal server runs.
 # ORT_DISABLE_TELEMETRY: ORT reads this before import, preventing its device-ID
 # database from entering the tenant volume without changing the custody home.
 #
-# EXOMEM_DISABLE_CLIP: the image carries the ONNX image tower and the multilingual
+# EVERMATTER_DISABLE_CLIP: the image carries the ONNX image tower and the multilingual
 # query tower. Image search stays off by default; a cell turns it on after the image
 # engine's own acceptance passes.
-ENV EXOMEM_CONTAINER_VARIANT=cloud \
-    EXOMEM_CLOUD_RESOURCE_POLICY=service-v1 \
-    EXOMEM_RECALL_MODEL=BAAI/bge-m3 \
-    EXOMEM_DISABLE_CLIP=1 \
+ENV EVERMATTER_CONTAINER_VARIANT=cloud \
+    EVERMATTER_CLOUD_RESOURCE_POLICY=service-v1 \
+    EVERMATTER_RECALL_MODEL=BAAI/bge-m3 \
+    EVERMATTER_DISABLE_CLIP=1 \
     ORT_DISABLE_TELEMETRY=1 \
-    EXOMEM_LOG_DIR=/tmp/exomem-logs \
+    EVERMATTER_LOG_DIR=/tmp/exomem-logs \
     FASTMCP_CHECK_FOR_UPDATES=off \
     FASTMCP_SHOW_SERVER_BANNER=false
 
@@ -548,7 +548,7 @@ CMD ["--transport", "http", "--host", "0.0.0.0", "--port", "8765"]
 ########################################################################
 # Final: lean (target `lean`) — the DEFAULT stage (last in this file; see
 # the top-of-file note). Base dependencies only: no torch, no
-# sentence-transformers, no model download. EXOMEM_DISABLE_EMBEDDINGS=1
+# sentence-transformers, no model download. EVERMATTER_DISABLE_EMBEDDINGS=1
 # keeps search in keyword/BM25 mode. Opt into `ml` explicitly for hybrid
 # search (`--target ml` at build time, or the published `:ml` tag).
 ########################################################################
@@ -557,10 +557,10 @@ COPY --from=builder-lean /app/.venv /app/.venv
 COPY LICENSE /LICENSE
 
 ENV PATH=/app/.venv/bin:$PATH \
-    EXOMEM_HOST=0.0.0.0 \
-    EXOMEM_LOG_DIR=/data/logs \
-    EXOMEM_DISABLE_EMBEDDINGS=1 \
-    EXOMEM_CONTAINER_VARIANT=lean
+    EVERMATTER_HOST=0.0.0.0 \
+    EVERMATTER_LOG_DIR=/data/logs \
+    EVERMATTER_DISABLE_EMBEDDINGS=1 \
+    EVERMATTER_CONTAINER_VARIANT=lean
 
 LABEL org.opencontainers.image.source="https://github.com/substrate-systems/evermatter" \
       org.opencontainers.image.licenses="FSL-1.1-ALv2 AND Apache-2.0" \

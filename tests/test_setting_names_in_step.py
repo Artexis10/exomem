@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,22 @@ def test_the_hooks_skip_on_the_package_placement_settings_and_the_hook_home() ->
 
     for hook in (exomem_capture_nudge, exomem_retrieve_nudge, exomem_continuation_checkpoint):
         assert hook._PLACEMENT_SETTINGS == env_compat.PLACEMENT_SETTINGS | {"HOOK_HOME"}, hook.__name__
+
+
+def test_a_hook_home_conflict_skips_a_turn_only_when_no_flag_decides_the_home() -> None:
+    """The failure: a hook told its home by a flag still skipped every turn over an unused HOOK_HOME conflict."""
+    from exomem._hooks import (
+        exomem_capture_nudge,
+        exomem_continuation_checkpoint,
+        exomem_retrieve_nudge,
+    )
+
+    for hook in (exomem_capture_nudge, exomem_retrieve_nudge, exomem_continuation_checkpoint):
+        assert hook._skips_turn(["EVERMATTER_HOOK_HOME"], home_decided=False), hook.__name__
+        assert not hook._skips_turn(["EVERMATTER_HOOK_HOME"], home_decided=True), hook.__name__
+        # A flag decides the hook's home only; a conflict in the vault still skips the turn.
+        assert hook._skips_turn(["EVERMATTER_HOOK_HOME", "EVERMATTER_VAULT_PATH"], home_decided=True), hook.__name__
+        assert not hook._skips_turn(["EVERMATTER_PORT"], home_decided=False), hook.__name__
 
 
 def test_the_cellctl_and_scheduler_readers_choose_like_env_compat(capsys, caplog) -> None:
@@ -414,3 +431,152 @@ Set-ExomemProcessEnvFromMap -Map ([ordered]@{{ EVERMATTER_VAULT_PATH = '{tmp_pat
     assert forced.startswith(f"root={tmp_path / 'forced'} ")  # the forced value is the one in force
     assert CHILD_RAN in forced and "not run" not in forced
     assert loaded.strip() == f"{tmp_path / 'dotenv-vault'} kept True"
+
+
+# The writers publish EVERMATTER_X and never two names for one setting. Each test below fails on the
+# writer that still emitted EXOMEM_X, or kept the file's other spellings beside the one it wrote.
+
+
+def _renderer_source() -> str:
+    script = (ROOT / "scripts" / "install-service.sh").read_text(encoding="utf-8")
+    # The regex cuts the installer's fixed <<'PY' heredocs out of the script; it reads no shell syntax.
+    (renderer,) = [
+        block for block in re.findall(r"<<'PY'\n(.*?)\nPY\n", script, re.S) if "dotenv_values(env_path)" in block
+    ]
+    return renderer
+
+
+@needs_bash
+def test_the_installer_publishes_each_setting_once_as_evermatter_and_keeps_the_process_file_internal(tmp_path) -> None:
+    """The failure: a legacy-named dotenv was published under its legacy names, in service.env and the launchd plist."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(
+        f"EXOMEM_VAULT_PATH={tmp_path / 'vault'}\nKB_MCP_PORT=2\nEVERMATTER_PORT=3\nEXOMEM_LOG_DIR={tmp_path / 'logs'}\n",
+        encoding="utf-8",
+    )
+    staged, process_file, plist = tmp_path / "service.env", tmp_path / "process.sh", tmp_path / "launchd.xml"
+    rendered = subprocess.run(
+        [sys.executable, "-", dotenv, staged, process_file, plist, tmp_path / "default-logs"],
+        input=_renderer_source(), capture_output=True, text=True, timeout=60, check=False,
+        env=_child_env(EXOMEM_MANAGED_STATE_ROOT_DEFAULT=str(tmp_path / "state"), PATH=os.environ["PATH"]),
+    )
+
+    assert rendered.returncode == 0, rendered.stderr
+    for published in (staged.read_text(encoding="utf-8"), plist.read_text(encoding="utf-8")):
+        assert str(tmp_path / "vault") in published and str(tmp_path / "state") in published
+        assert published.count("EVERMATTER_PORT") == 1 and "3" in published  # EVERMATTER_PORT outranks KB_MCP_PORT
+        assert "EXOMEM_" not in published and "KB_MCP_" not in published
+    assert "EVERMATTER_VAULT_PATH=" in staged.read_text(encoding="utf-8")
+    # The process file is deleted by the installer after its own shell sources it, so it keeps the internal name.
+    assert f"exomem_export_setting EXOMEM_VAULT_PATH {shlex.quote(str(tmp_path / 'vault'))}\n" in process_file.read_text(
+        encoding="utf-8"
+    )
+
+
+@needs_systemd_layout
+def test_binding_a_fresh_state_root_writes_the_public_name_and_leaves_no_other_spelling(tmp_path) -> None:
+    """The failure: the binder appended EXOMEM_STATE_ROOT, or filled an empty legacy line in place under its legacy name."""
+    preferred = tmp_path / "preferred"
+
+    appended = _bind(tmp_path, ["OTHER=kept"], preferred)
+    assert appended.returncode == 0, appended.stderr
+    assert (tmp_path / "service.env").read_text() == f'OTHER=kept\nEVERMATTER_STATE_ROOT="{preferred}"\n'
+
+    filled = _bind(tmp_path, ["EXOMEM_STATE_ROOT=", "OTHER=kept", "KB_MCP_STATE_ROOT="], preferred)
+    assert filled.returncode == 0, filled.stderr
+    assert (tmp_path / "service.env").read_text() == f'EVERMATTER_STATE_ROOT="{preferred}"\nOTHER=kept\n'
+
+
+@needs_bash
+def test_a_hosted_state_root_conflict_is_refused_before_anything_stops(tmp_path) -> None:
+    """The failure: only the first process that read the hosted state root refused, after the service was down."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("EVERMATTER_HOSTED_STATE_ROOT=/one\nEXOMEM_HOSTED_STATE_ROOT=/two\n", encoding="utf-8")
+    agreeing = tmp_path / "agreeing.env"
+    agreeing.write_text("EVERMATTER_HOSTED_STATE_ROOT=/one\nEXOMEM_HOSTED_STATE_ROOT=/one\n", encoding="utf-8")
+
+    refused = _bash(tmp_path, f'exomem_refuse_hosted_state_root_conflicts "{dotenv}"')
+    accepted = _bash(tmp_path, f'exomem_refuse_hosted_state_root_conflicts "{agreeing}" "{tmp_path / "absent.env"}"')
+
+    assert refused.returncode != 0
+    assert "EVERMATTER_HOSTED_STATE_ROOT and EXOMEM_HOSTED_STATE_ROOT" in refused.stderr
+    assert "/one" not in refused.stderr and "/two" not in refused.stderr
+    assert accepted.returncode == 0, accepted.stderr
+
+
+@needs_bash
+def test_the_shell_dotenv_reader_takes_the_last_duplicate_like_python_dotenv(tmp_path) -> None:
+    from dotenv import dotenv_values
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("EXOMEM_PORT=1\nEVERMATTER_PORT=7\nEXOMEM_PORT=2\n", encoding="utf-8")
+
+    read = _bash(tmp_path, f'exomem_dotenv_file_lookup EXOMEM_PORT "{dotenv}"')
+
+    assert read.stdout.strip() == dotenv_values(dotenv)["EXOMEM_PORT"] == "2"
+
+
+@needs_pwsh
+def test_the_powershell_writers_publish_evermatter_names_and_read_the_last_duplicate(tmp_path) -> None:
+    """One pwsh run: the binder, the published-settings map, the duplicate reader and the hosted-state-root refusal."""
+    bind_dir, dup_dir, host_dir = (tmp_path / name for name in ("bind", "dup", "host"))
+    for directory in (bind_dir, dup_dir, host_dir):
+        directory.mkdir()
+    preferred = tmp_path / "preferred"
+    (bind_dir / ".env").write_text("EXOMEM_STATE_ROOT=\nKB_MCP_STATE_ROOT=\nOTHER=kept\n", encoding="utf-8")
+    (dup_dir / ".env").write_text("EXOMEM_PORT=1\nEXOMEM_PORT=2\n", encoding="utf-8")
+    (host_dir / ".env").write_text(
+        "EVERMATTER_HOSTED_STATE_ROOT=/one\nEXOMEM_HOSTED_STATE_ROOT=/two\n", encoding="utf-8"
+    )
+    script = f"""
+. '{COMMON_PS1}'
+Ensure-ExomemDotenvStateRootBinding -AppDirectory '{bind_dir}' -ExpectedStateRoot '{preferred}' | Out-Null
+'bound: ' + ((Get-Content -Raw -LiteralPath '{bind_dir / ".env"}') -replace "`r?`n", '|')
+'dup: ' + (Get-ExomemDotenvValue -RepoRoot '{dup_dir}' -Name 'EXOMEM_PORT')
+$map = [ordered]@{{ EXOMEM_VAULT_PATH = '/v'; KB_MCP_PORT = '2'; EVERMATTER_PORT = '3'; OTHER = 'kept' }}
+$published = ConvertTo-ExomemPublishedSettings -Map $map
+'published: ' + (($published.Keys | ForEach-Object {{ "$_=$($published[$_])" }}) -join ',')
+try {{ Assert-ExomemHostedStateRootUnambiguous -AppDirectory '{host_dir}'; 'hosted: accepted' }}
+catch {{ 'hosted: ' + $_.Exception.Message }}
+"""
+    out = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=120, check=False, env=_child_env(),
+    )
+
+    lines = {line.split(": ", 1)[0]: line.split(": ", 1)[1] for line in out.stdout.splitlines() if ": " in line}
+    assert lines["bound"] == f"EVERMATTER_STATE_ROOT={preferred}|OTHER=kept|", out.stdout + out.stderr
+    assert lines["dup"] == "2"
+    assert lines["published"] == "EVERMATTER_VAULT_PATH=/v,EVERMATTER_PORT=3,OTHER=kept"
+    assert "EVERMATTER_HOSTED_STATE_ROOT and EXOMEM_HOSTED_STATE_ROOT" in lines["hosted"]
+    assert "/one" not in lines["hosted"] and "/two" not in lines["hosted"]
+
+
+@needs_pwsh
+def test_the_nssm_environment_merge_replaces_an_entry_stored_under_another_spelling(tmp_path) -> None:
+    """The failure: an upgrade kept the old install's EXOMEM_X entry beside the new EVERMATTER_X one, so the service held two."""
+    installer = ROOT / "scripts" / "install-service.ps1"
+    script = f"""
+. '{COMMON_PS1}'
+$ast = [System.Management.Automation.Language.Parser]::ParseFile('{installer}', [ref]$null, [ref]$null)
+$function = $ast.FindAll({{ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Set-NssmEnvironment' }}, $true) | Select-Object -First 1
+. ([scriptblock]::Create($function.Extent.Text))
+function Get-ItemProperty {{
+    param($Path, $ErrorAction)
+    [pscustomobject]@{{ AppEnvironmentExtra = @('EXOMEM_PORT=1', 'KB_MCP_BIND_HOST=old', 'OPAQUE=kept', 'EXOMEM_LOG_DIR=x') }}
+}}
+function Invoke-FakeNssm {{ $global:LASTEXITCODE = 0; $global:Captured = $args }}
+$NssmPath = 'Invoke-FakeNssm'
+$ServiceName = 'exomem'
+Set-NssmEnvironment -Map ([ordered]@{{ EVERMATTER_PORT = '2'; EVERMATTER_BIND_HOST = '127.0.0.1' }})
+'args: ' + ($global:Captured -join '|')
+"""
+    out = subprocess.run(
+        [PWSH, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=120, check=False, env=_child_env(),
+    )
+
+    stored = next(line for line in out.stdout.splitlines() if line.startswith("args: ")).split("|")[3:]
+    assert sorted(stored) == ["EVERMATTER_BIND_HOST=127.0.0.1", "EVERMATTER_PORT=2", "EXOMEM_LOG_DIR=x", "OPAQUE=kept"], (
+        out.stdout + out.stderr
+    )

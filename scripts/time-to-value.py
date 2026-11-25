@@ -11,7 +11,7 @@ and measures it:
 4. `exomem setup --vault <tmp> --yes --skip-claude-register`
    — proves the wizard completes from a wheel install
 
-Runs with a scrubbed environment (no EXOMEM_*/KB_MCP_* leakage from a dev
+Runs with a scrubbed environment (no EXOMEM_*, EVERMATTER_* or KB_MCP_* leakage from a dev
 shell) and a scratch HOME (the wizard's skill step must never touch the real
 `~/.claude`). Prints a per-step timing breakdown; exits 1 on any failure or
 when the total exceeds `--budget-seconds` (the CI wall-time gate; the human
@@ -32,6 +32,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from exomem.env_compat import SETTING_PREFIXES
+
 REPO = Path(__file__).resolve().parents[1]
 WINDOWS = sys.platform == "win32"
 
@@ -40,7 +42,7 @@ def _scrubbed_env(home: Path) -> dict[str, str]:
     env = {
         k: v
         for k, v in os.environ.items()
-        if not k.startswith(("EXOMEM_", "KB_MCP_"))
+        if not k.startswith(SETTING_PREFIXES)
     }
     env["HOME"] = str(home)
     if WINDOWS:
