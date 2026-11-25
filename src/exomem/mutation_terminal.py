@@ -2863,6 +2863,10 @@ def project_terminal(
             {key: leaf[key] for key in ("duplicate_of", "fields_not_applied", "same_url", "duplicate_check_unavailable")
              if key in leaf}
         )
+    if isinstance(leaf, Mapping) and isinstance(leaf.get("sensitivity"), Mapping):
+        # The classes the page records, from a write or from the earlier copy a repeat found, and what governs who
+        # reads them now; built by `sensitivity_classes.report`.
+        compact["sensitivity"] = leaf["sensitivity"]
     if result.get("state") == "committed":
         compact.update(_commit_metadata_projection(leaf))
     compact.update(media_projection)

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .vault import kb_root
+from .vault import kb_root, parse_frontmatter
 from .vocabulary import registry
 
 PACK = "sensitivity-classes.yaml"
@@ -151,3 +151,26 @@ def disclosure(vault_root: Path, rel_path: str | None) -> dict[str, Any]:
         "statement": "Governance is on. The ceiling is yours alone, from the current policy; "
                      "no rule reads a sensitivity class yet, so the class restricts nothing by itself.",
     }
+
+
+def classes_of(frontmatter: Mapping[str, object]) -> tuple[str, ...]:
+    """The classes a page records, exactly as stored; none for a page that has no `sensitivity` field."""
+    value = frontmatter.get(FIELD)
+    return tuple(str(item) for item in value) if isinstance(value, list) else ()
+
+
+def stored_report(
+    vault_root: Path, rel_path: str, frontmatter: Mapping[str, object] | None = None
+) -> dict[str, Any] | None:
+    """`sensitivity` for a capture that wrote nothing, read from the page it returned.
+
+    The page does not record how its classes were chosen, so a reused capture reports the stored classes as
+    `declared`. An unreadable page reports nothing rather than a guess.
+    """
+    if frontmatter is None:
+        try:
+            frontmatter = parse_frontmatter((vault_root / rel_path).read_text(encoding="utf-8"))[0]
+        except (OSError, UnicodeDecodeError):
+            return None
+    classes = classes_of(frontmatter)
+    return report(vault_root, Classification(classes, BASIS_DECLARED if classes else BASIS_NONE), rel_path=rel_path)

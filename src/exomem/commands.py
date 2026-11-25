@@ -28,7 +28,7 @@ import os
 import re
 import shlex
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack, nullcontext, suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -155,6 +155,7 @@ from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import semantic_units as semantic_units_module
 from . import semantic_writes as semantic_writes_module
+from . import sensitivity_classes as sensitivity_classes_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import source_coverage as source_coverage_module
@@ -4032,6 +4033,14 @@ def op_suggest_relations(
     )
 
 
+def _checked_sensitivity(vault_root: Path, supplied: Sequence[str] | None) -> list[str] | None:
+    """The canonical classes of a capture's `sensitivity` argument, refused before anything is staged or written.
+
+    `None` stays `None`: the capture then takes its Source kind's default.
+    """
+    return None if supplied is None else list(sensitivity_classes_module.validated(vault_root, supplied))
+
+
 def _resolve_source_kind_argument(
     vault_root: Path, source_type: str | None, source_kind: str | None
 ) -> str:
@@ -4093,6 +4102,7 @@ def _add_source(
     passages: list[source_capture.DeclaredPassage] | None = None,
     document_form: str | None = None,
     custody_only: bool | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Capture text as a source under an already-resolved kind.
 
@@ -4128,6 +4138,7 @@ def _add_source(
                 passages=passages,
                 document_form=document_form,
                 custody_only=custody_only,
+                sensitivity=sensitivity,
             )
     except add_module.AddError as e:
         # FastMCP serializes raised exceptions; we want a structured shape.
@@ -5646,6 +5657,7 @@ def op_preserve(
     content: str,
     description: str | None = None,
     raw_protection: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Capture a TEXT artifact to Evidence/<scope>/<category>/.
 
@@ -5670,6 +5682,7 @@ def op_preserve(
         description: Optional. If supplied, a sidecar `<filename>.md`
             is written alongside the artifact with frontmatter and the
             description under `## Description`.
+        sensitivity: Optional sensitivity classes the page records; the text is kept in full either way.
 
     Returns:
         {path, sidecar_path, warnings}.
@@ -5681,6 +5694,7 @@ def op_preserve(
     preserve_module = _preserve_module()
     from .cli_ops import OpError
 
+    sensitivity = _checked_sensitivity(vault_root, sensitivity)
     # Before the duplicate lookup hashes it: the kept text never holds a card number or a labelled credential.
     kept_content, description, _text, redaction_warnings = preserve_module.redact_capture_text(
         content=content, description=description,
@@ -5716,7 +5730,7 @@ def op_preserve(
     digest = hashlib.sha256(content.encode("utf-8")).hexdigest() if isinstance(content, str) else ""
     held = evidence_reuse.reuse(
         vault_root, scope=scope, category=category, sha256=digest, protected=raw_protection,
-        filename=filename, description=description,
+        filename=filename, description=description, sensitivity=sensitivity,
     )
     duplicate = held.duplicate
     if duplicate is not None:
@@ -5733,6 +5747,9 @@ def op_preserve(
             content_type=mimetypes.guess_type(preserve_module._sanitize_filename(filename))[0],
         )
         receipt["warnings"] = [*redaction_warnings, *receipt.get("warnings", ())]
+        # The kept page's own classes, not the declaration this call made: `fields_not_applied` names a difference.
+        if (kept := sensitivity_classes_module.stored_report(vault_root, duplicate.sidecar_path)) is not None:
+            receipt["sensitivity"] = kept
         if duplicate.family_added:
             # The page gained a family: that edit is a committed write.
             mark_active_mutation_committed()
@@ -5748,6 +5765,7 @@ def op_preserve(
             content=content,
             description=description,
             raw_protection=raw_protection,
+            sensitivity=sensitivity,
         )
     except preserve_module.PreserveError as e:
         raise ValueError(_leaf_error_message(e)) from e
@@ -9573,6 +9591,7 @@ def op_capture_source(
     document_form: str | None = None,
     custody_only: bool | None = None,
     import_identity: str | None = None,
+    sensitivity: list[str] | None = None,
 ) -> dict:
     """Save Source text or original files.
 
@@ -9603,9 +9622,12 @@ def op_capture_source(
         capture_reservation: Unchanged reservation for exact identity-bearing text or passages.
         document_form: What the document is as a record of a work; a new key registers.
         custody_only: Keep the Source for safekeeping with no note expected; a correction carries it.
+        sensitivity: Sensitivity classes you judge the material to carry, such as identity, health or financial.
+            Keep it in full and classify it. Omit it to take the kind's default. A correction keeps its predecessor's.
     """
     from . import source_imports
 
+    sensitivity = _checked_sensitivity(vault_root, sensitivity)
     import_key = None
     if import_identity is not None:
         if not files or len(files) != 1 or adoption is not None or correction is not None:
@@ -9700,7 +9722,7 @@ def op_capture_source(
             "slug": slug, "source_type": kind, "url": url, "tags": tags, "why_captured": why_captured,
             "domain": domain, "projects": projects, "raw_protection": raw_protection,
             "expected_sha256": expected_sha256, "document_form": document_form,
-            "custody_only": custody_only,
+            "custody_only": custody_only, "sensitivity": sensitivity,
         }
         if metadata_only:
             captured = client_artifacts.capture_source_correction(
@@ -9743,6 +9765,7 @@ def op_capture_source(
             passages=passages,
             document_form=document_form,
             custody_only=custody_only,
+            sensitivity=sensitivity,
         )
         if source_redaction_warnings:
             source["warnings"] = [*source_redaction_warnings, *(source.get("warnings") or [])]
@@ -9756,7 +9779,7 @@ def op_capture_source(
             out["capture_outcome"] = "reused"
             out["mutated"] = False
         # The terminal reads these from the leaf's top level.
-        for key in ("vocabulary_resolution", "vocabulary_receipt"):
+        for key in ("vocabulary_resolution", "vocabulary_receipt", "sensitivity"):
             if key in source:
                 out[key] = source[key]
                 source_result_attribution.carry(source, out, moves={(key,): (key,)})
@@ -10118,6 +10141,7 @@ def op_preserve_evidence(
     content: str,
     description: str | None = None,
     raw_protection: bool = False,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Preserve text as append-only proof.
 
@@ -10132,6 +10156,7 @@ def op_preserve_evidence(
         content: Exact UTF-8 text.
         description: Sidecar description.
         raw_protection: Keep the original owner-only until a whole-artifact release.
+        sensitivity: Sensitivity classes you judge it to carry, such as identity, health or financial. Keep it in full.
     """
     return op_preserve(
         vault_root,
@@ -10141,6 +10166,7 @@ def op_preserve_evidence(
         content=content,
         description=description,
         raw_protection=raw_protection,
+        sensitivity=sensitivity,
     )
 
 
@@ -10154,6 +10180,7 @@ def op_preserve_artifacts(
     raw_protection: bool = False,
     archive: Literal["members"] | None = None,
     description: str | None = None,
+    sensitivity: Sequence[str] | None = None,
 ) -> dict:
     """Preserve client file handles as append-only Evidence.
 
@@ -10169,6 +10196,7 @@ def op_preserve_artifacts(
         raw_protection: Keep originals owner-only until whole-artifact release.
         archive: Keep a held zip as members; path is an import source_ref.
         description: One caption for every file, kept on each new original's page.
+        sensitivity: Sensitivity classes for every file, kept on each new original's page; the bytes stay whole.
     """
     from . import client_artifacts
     from . import due_state as due_state_module
@@ -10186,6 +10214,7 @@ def op_preserve_artifacts(
             raw_protection=raw_protection,
             archive=archive,
             description=description,
+            sensitivity=sensitivity,
         )
     _note_committed_artifact_targets(result)
     # No batch deltas: Evidence blobs author no predictions, questions,

@@ -29,7 +29,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from . import media_engines, media_types, memory_refs, preserve, runtime_resources, temporal
+from . import (
+    media_engines,
+    media_types,
+    memory_refs,
+    preserve,
+    runtime_resources,
+    sensitivity_classes,
+    temporal,
+)
 from .governance import raw_protection
 from .kbdir import managed_root
 from .vault import (
@@ -46,6 +54,7 @@ from .vault import (
     read_guarded_text,
     read_guarded_text_for_cache,
     with_newline,
+    yaml_flow_list,
     yaml_scalar,
 )
 
@@ -156,11 +165,14 @@ def render_part(
     ]
     listed_tags = inherited.get("tags")
     tags = [tag for tag in listed_tags if isinstance(tag, str)] if isinstance(listed_tags, list) else []
+    classes = sensitivity_classes.classes_of(inherited)
     lines += [
         f"exomem_id: {exomem_id}",
         f"title: {yaml_scalar(title)}",
         f"captured: {date_iso}",
         f"updated: {date_iso}",
+        # A part holds the page's own extracted text, so it carries the page's classes.
+        *([f"{sensitivity_classes.FIELD}: {yaml_flow_list(classes)}"] if classes else []),
         f"part_of: {yaml_scalar(f'../{source_name}')}",
         f"part: {number}",
         f"parts: {total}",

@@ -208,6 +208,10 @@ _UNLINKED = Field(default=None, description="Why your review found no useful lin
 _PREVIEW = Field(default=None)
 _DETAIL = Field(default=None)
 _REVIEW = Field(default=None, description="This call's preview `review_token`; a profile page's write needs it.")
+_SENSITIVITY = Field(
+    default=None,
+    description="Sensitivity classes you judge this to carry, such as identity, health or financial. Keep it in full and classify it.",
+)
 _DRAFT_FIELDS = ("draft_id", "draft_hash", "draft_token")
 
 
@@ -723,6 +727,7 @@ class SaveSource(Wire):
     tags: list[str] | None = None
     why: str | None = None
     document_form: str | None = Field(default=None, description="The form of this record of the work, as an open slug such as abstract.")
+    sensitivity: list[str] | None = _SENSITIVITY
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, source_identity, expected_sha256, correction, custody_only, import_identity.")
     detail: Detail | None = _DETAIL
 
@@ -733,6 +738,7 @@ def _save_source(wire: dict[str, Any], ctx: Context) -> Translated:
         "tags": wire.get("tags"), "why_captured": wire.get("why"), "source_kind": wire.get("source_kind"),
         "domain": wire.get("domain"), "files": wire.get("files"), "response_detail": wire.get("detail"),
         "projects": wire.get("projects"), "document_form": wire.get("document_form"),
+        "sensitivity": wire.get("sensitivity"),
     }
     return "capture_source", _leaf_call(wire, "options", ctx, "capture_source", "save_source", leaf)
 
@@ -744,6 +750,7 @@ class SaveEvidence(Wire):
     text: str | None = Field(default=None, description="Exact UTF-8 text to keep.")
     files: list[FileHandle] | None = Field(default=None, description="Attached files, up to eight.")
     description: str | None = None
+    sensitivity: list[str] | None = _SENSITIVITY
     options: dict[str, Any] | None = Field(default=None, description="Rare knobs: raw_protection, transcriptions, archive.")
     detail: Detail | None = _DETAIL
 
@@ -754,10 +761,12 @@ def _save_evidence(wire: dict[str, Any], ctx: Context) -> Translated:
         raise Refusal("INVALID_ARGUMENT", "save_evidence takes `text` with `name`, or `files`, and not both.")
     if files:
         leaf = {"scope": wire["scope"], "category": wire["category"], "files": wire["files"],
-                "description": wire.get("description"), "response_detail": wire.get("detail")}
+                "description": wire.get("description"), "sensitivity": wire.get("sensitivity"),
+                "response_detail": wire.get("detail")}
         return "preserve_artifacts", _leaf_call(wire, "options", ctx, "preserve_artifacts", "save_evidence", leaf)
     leaf = {"scope": wire["scope"], "category": wire["category"], "filename": wire["name"],
-            "content": wire["text"], "description": wire.get("description"), "response_detail": wire.get("detail")}
+            "content": wire["text"], "description": wire.get("description"), "sensitivity": wire.get("sensitivity"),
+            "response_detail": wire.get("detail")}
     return "preserve_evidence", _leaf_call(wire, "options", ctx, "preserve_evidence", "save_evidence", leaf)
 
 
