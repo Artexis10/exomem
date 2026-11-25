@@ -16,6 +16,7 @@ import pytest
 from exomem import client_config, doctor, install_hook, rename_migration
 from exomem.__main__ import main
 from exomem._hooks import exomem_retrieve_nudge as retrieve
+from exomem.cloud_import_client import PRODUCTION_MCP_URL
 
 LEGACY_BLOCK = (
     f"{client_config.LEGACY_LEARNING_BEGIN}\nold wording\n{client_config.LEGACY_LEARNING_END}\n"
@@ -71,9 +72,10 @@ class FakeClaude:
 STDIO = {"type": "stdio", "command": "exomem", "args": [], "env": {"A": "1"}}
 HTTP = {"type": "http", "url": "https://memory.example/mcp"}
 CODEX_HTTP_CONFIG = '[mcp_servers.exomem]\nurl = "https://memory.example/mcp"\n'
-KEPT = (
-    "kept `exomem` for https://memory.example/mcp: renaming it would sign you out; "
-    "a later release moves it with a sign-in notice"
+CLOUD_HTTP = {"type": "http", "url": PRODUCTION_MCP_URL}
+CLOUD_KEPT = (
+    f"kept `exomem` for {PRODUCTION_MCP_URL}: it moves with the Cloud plugin's address change, "
+    "so you sign in once"
 )
 
 
@@ -159,37 +161,59 @@ def test_migrate_twice_changes_nothing_the_second_time(tmp_path: Path) -> None:
     )
 
 
-def test_migrate_keeps_a_claude_url_server_under_its_key_and_renames_the_stdio_codex_one(
-    tmp_path: Path,
-) -> None:
+def test_migrate_renames_a_claude_url_server_and_prints_the_sign_in_step(tmp_path: Path) -> None:
     install = Install(tmp_path, claude=HTTP)
     claude = FakeClaude(install.config, install.project)
-    claude_before = install.config.read_bytes()
 
     code, out = install.migrate(claude)
 
     assert code == 0
-    assert claude.calls == []
-    assert install.config.read_bytes() == claude_before
-    assert KEPT in out
-    codex = tomllib.loads((install.codex_home / "config.toml").read_text(encoding="utf-8"))
-    assert set(codex["mcp_servers"]) == {"evermatter", "keeper"}
+    assert "sign in again: run /mcp in Claude Code and choose evermatter" in out
+    assert "codex mcp login" not in out  # the Codex entry here is stdio: no sign-in to renew
+    servers = json.loads(install.config.read_text(encoding="utf-8"))["mcpServers"]
+    assert servers["evermatter"] == HTTP
+    assert "exomem" not in servers
 
 
-def test_migrate_keeps_a_codex_url_server_under_its_key_and_renames_the_stdio_claude_one(
-    tmp_path: Path,
-) -> None:
+def test_migrate_renames_a_codex_url_server_and_prints_the_sign_in_step(tmp_path: Path) -> None:
     install = Install(tmp_path, codex=CODEX_HTTP_CONFIG)
-    codex_before = (install.codex_home / "config.toml").read_bytes()
 
     code, out = install.migrate()
 
     assert code == 0
-    assert (install.codex_home / "config.toml").read_bytes() == codex_before
-    assert not (install.codex_home / "config.toml.exomem-bak").exists()
-    assert KEPT in out
-    servers = json.loads(install.config.read_text(encoding="utf-8"))["mcpServers"]
-    assert set(servers) == {"evermatter", "other"}
+    assert "sign in again: codex mcp login evermatter" in out
+    assert "run /mcp" not in out  # the Claude entry here is stdio: no sign-in to renew
+    config = tomllib.loads((install.codex_home / "config.toml").read_text(encoding="utf-8"))
+    assert config["mcp_servers"] == {"evermatter": {"url": "https://memory.example/mcp"}}
+    backup = install.codex_home / "config.toml.exomem-bak"
+    assert backup.read_text(encoding="utf-8") == CODEX_HTTP_CONFIG
+
+
+def test_migrate_keeps_a_claude_cloud_url_and_renames_a_url_that_is_not_the_cloud(
+    tmp_path: Path,
+) -> None:
+    install = Install(tmp_path, claude=CLOUD_HTTP, local=HTTP)
+
+    code, out = install.migrate()
+
+    assert code == 0
+    assert CLOUD_KEPT in out
+    assert out.count("sign in again: run /mcp in Claude Code") == 1  # the local scope only
+    config = json.loads(install.config.read_text(encoding="utf-8"))
+    assert config["mcpServers"]["exomem"] == CLOUD_HTTP
+    assert config["projects"][str(install.project)]["mcpServers"] == {"evermatter": HTTP}
+
+
+def test_migrate_keeps_a_codex_cloud_url_where_it_is(tmp_path: Path) -> None:
+    cloud_config = f'[mcp_servers.exomem]\nurl = "{PRODUCTION_MCP_URL}"\n'
+    install = Install(tmp_path, codex=cloud_config)
+
+    code, out = install.migrate()
+
+    assert code == 0
+    assert CLOUD_KEPT in out
+    assert "codex mcp login" not in out
+    assert (install.codex_home / "config.toml").read_text(encoding="utf-8") == cloud_config
 
 
 def test_migrating_two_scopes_leaves_the_backup_holding_the_original_file(tmp_path: Path) -> None:
@@ -335,7 +359,7 @@ def test_doctor_passes_a_rule_that_names_the_old_prefix_while_an_exomem_server_a
     check = doctor._check_legacy_tool_references()  # noqa: SLF001
 
     assert check.status == "pass"
-    assert "still names it matches" in check.message
+    assert "still names one matches" in check.message
 
 
 def test_doctor_warns_about_a_rule_that_names_the_old_prefix_once_only_an_evermatter_server_remains(
@@ -349,3 +373,47 @@ def test_doctor_warns_about_a_rule_that_names_the_old_prefix_once_only_an_everma
     assert check.status == "warn"
     assert "mcp__exomem__save_episode" in check.message and str(rule) in check.message
     assert "`mcp__evermatter__`" in (check.remediation or "")
+
+
+def _use_plugin_rule_for_doctor(
+    install: Install, monkeypatch: pytest.MonkeyPatch, *, enabled_plugins: dict[str, bool]
+) -> None:
+    """Point doctor at ``install`` with a user rule that names the old plugin's tool prefix."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(install.claude_home))
+    monkeypatch.setenv("CODEX_HOME", str(install.codex_home))
+    monkeypatch.chdir(install.project)
+    (install.claude_home / "settings.json").write_text(
+        json.dumps(
+            {
+                "enabledPlugins": enabled_plugins,
+                "permissions": {"allow": ["mcp__plugin_exomem_exomem__save_episode"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_doctor_warns_about_a_plugin_rule_once_only_the_evermatter_plugin_is_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = Install(tmp_path)
+    _use_plugin_rule_for_doctor(
+        install, monkeypatch, enabled_plugins={"evermatter@exomem": True, "exomem@exomem": False}
+    )
+
+    check = doctor._check_legacy_tool_references()  # noqa: SLF001
+
+    assert check.status == "warn"
+    assert "mcp__plugin_exomem_exomem__save_episode" in check.message
+    assert "`mcp__plugin_evermatter_evermatter__`" in (check.remediation or "")
+
+
+def test_doctor_passes_a_plugin_rule_while_the_exomem_plugin_is_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    install = Install(tmp_path)
+    _use_plugin_rule_for_doctor(install, monkeypatch, enabled_plugins={"exomem@exomem": True})
+
+    check = doctor._check_legacy_tool_references()  # noqa: SLF001
+
+    assert check.status == "pass"

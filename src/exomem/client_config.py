@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -32,12 +33,40 @@ LEGACY_SERVER_NAME = "exomem"
 # install keeps `exomem` while a new one holds `evermatter`. Writers emit SERVER_NAME only.
 SERVER_NAMES = (SERVER_NAME, LEGACY_SERVER_NAME)
 #: The tool-name prefix that each server key gives. A client builds a user-scope server's tools as
-#: `mcp__<server>__<tool>`, and users' rules and hooks match those names. A plugin's tools keep
-#: their own prefix (`mcp__plugin_exomem_exomem__`) because the plugin keeps its name for now.
+#: `mcp__<server>__<tool>`, and a plugin's as `mcp__plugin_<plugin>_<server>__<tool>`; users' rules
+#: and hooks match those names. The plugin and its server shared the key `exomem` and now share
+#: `evermatter`, so one name fills both slots.
 LEGACY_TOOL_PREFIX = f"mcp__{LEGACY_SERVER_NAME}__"
 TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
+LEGACY_PLUGIN_TOOL_PREFIX = f"mcp__plugin_{LEGACY_SERVER_NAME}_{LEGACY_SERVER_NAME}__"
+PLUGIN_TOOL_PREFIX = f"mcp__plugin_{SERVER_NAME}_{SERVER_NAME}__"
+#: What a user does after a client renames a URL server, which signs the user out once: Claude
+#: Code and Codex both store the sign-in under the server key. `evermatter setup --migrate` prints
+#: the step for each URL registration it renames. The plugin's notice hook holds the Claude Code
+#: step too; it cannot import this module, and a test fails when the two differ.
+SIGN_IN_STEPS = {
+    "claude": f"run /mcp in Claude Code and choose {SERVER_NAME}",
+    "codex": f"codex mcp login {SERVER_NAME}",
+}
 #: The suffix that `_write_user_file` and `evermatter setup --migrate` give a file's backup copy.
 BACKUP_SUFFIX = ".exomem-bak"
+
+
+def is_cloud_url(url: str) -> bool:
+    """Whether ``url`` points at the Evermatter Cloud host, which the Cloud definition fixes once.
+
+    `evermatter setup --migrate` keeps a registration that points there under its old key: the
+    Cloud plugin's address changes in a later release, and renaming now would sign that user in
+    twice. The host comes from `cloud_import_client.PRODUCTION_MCP_URL`; the import is lazy
+    because that module loads the MCP client stack, which no other setup path needs.
+    """
+    from .cloud_import_client import PRODUCTION_MCP_URL
+
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    return host is not None and host == urlsplit(PRODUCTION_MCP_URL).hostname
 
 
 def normalize_mcp_url(raw: str) -> str:
@@ -239,20 +268,52 @@ def claude_registrations(*, config_path: Path, project_dir: Path) -> dict[str, t
     return found
 
 
+def claude_settings_files(*, claude_home: Path, project_dir: Path) -> tuple[Path, ...]:
+    """The settings files Claude Code documents, from the user's down to the project's local one."""
+    return (
+        claude_home / "settings.json",
+        claude_home / "settings.local.json",
+        project_dir / ".claude" / "settings.json",
+        project_dir / ".claude" / "settings.local.json",
+    )
+
+
+def legacy_plugin_enabled(*, claude_home: Path, project_dir: Path) -> bool:
+    """Whether a settings file enables an `exomem` plugin, the one serving `mcp__plugin_exomem_*`.
+
+    Reads `enabledPlugins`, not the install record: a marketplace rename moves the enabled entry
+    to the new name while the old install can linger, and a plugin that is not enabled has no
+    tools. A file it cannot read or parse is skipped, as `user_references` skips it.
+    """
+    for path in claude_settings_files(claude_home=claude_home, project_dir=project_dir):
+        try:
+            enabled = json.loads(path.read_text(encoding="utf-8")).get("enabledPlugins")
+        except (OSError, UnicodeError, ValueError, AttributeError):
+            continue
+        if isinstance(enabled, dict) and any(
+            value is True and str(plugin_id).partition("@")[0] == LEGACY_SERVER_NAME
+            for plugin_id, value in enabled.items()
+        ):
+            return True
+    return False
+
+
 def dead_references(
     *, claude_home: Path, codex_home: Path, claude_config_path: Path, project_dir: Path
 ) -> tuple[list[UserReference], list[Path]]:
-    """The user's rules and hooks that name `mcp__exomem__` in a client with no `exomem` server.
+    """The user's rules and hooks that name an old prefix in a client with nothing behind it.
 
-    Such a rule matches no tool. A rule with an `exomem` server behind it still works, so it is
-    not listed. Returns the dead rules and every file read. Raises ``ValueError`` when a
-    client's registrations cannot be read, because then no rule can be judged. A Claude Code
-    scope that holds both keys reports only `evermatter`, so a rule there counts as dead.
+    `mcp__exomem__` is dead in a client with no `exomem` server, and
+    `mcp__plugin_exomem_exomem__` in a Claude Code with no `exomem` plugin enabled. A rule with
+    its server behind it still works, so it is not listed. Returns the dead rules and every file
+    read. Raises ``ValueError`` when a client's registrations cannot be read, because then no
+    rule can be judged. A Claude Code scope that holds both keys reports only `evermatter`, so a
+    rule there counts as dead.
     """
     references, read = user_references(
         claude_home=claude_home, codex_home=codex_home, project_dir=project_dir
     )
-    holds_legacy = {
+    server_alive = {
         "claude": any(
             key == LEGACY_SERVER_NAME
             for key, _ in claude_registrations(
@@ -261,7 +322,11 @@ def dead_references(
         ),
         "codex": codex_mcp_name(codex_home / "config.toml") == LEGACY_SERVER_NAME,
     }
-    return [ref for ref in references if not holds_legacy[ref.client]], read
+    plugin_alive = legacy_plugin_enabled(claude_home=claude_home, project_dir=project_dir)
+    def answered(ref: UserReference) -> bool:
+        return plugin_alive if ref.prefix == LEGACY_PLUGIN_TOOL_PREFIX else server_alive[ref.client]
+
+    return [ref for ref in references if not answered(ref)], read
 
 
 def _toml_string(value: str) -> str:
@@ -369,16 +434,19 @@ def merge_codex_mcp(block: str, *, path: Path | None = None, replace: bool = Fal
     return {"action": action, "path": str(path), "diff": diff, "backup": backup}
 
 
-def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
+def rename_codex_mcp_server(
+    *, path: Path | None = None, keep_url: Callable[[str], bool] = lambda url: False
+) -> dict:
     """Rename Codex's legacy `exomem` server section, sub-tables included, to ``SERVER_NAME``.
 
     Only the section headers change, so the server's settings and the tool approvals
     under its sub-tables move with it. Returns {"action", "path", "diff", "backup"} where
     ``action`` is "renamed", "current" (no legacy key, nothing written), "conflict" (both keys
-    hold a section, nothing written), "http" (the legacy server is a URL: Codex stores its sign-in
-    under the server key, so a rename would sign the user out; nothing written, ``url`` holds
-    it) or "manual" (the legacy key is not a plain section the rename can move, such as an
-    inline table, nothing written).
+    hold a section, nothing written), "kept" (the legacy server is a URL that ``keep_url``
+    accepts; nothing written, ``url`` holds it) or "manual" (the legacy key is not a plain
+    section the rename can move, such as an inline table, nothing written). A renamed URL
+    server carries its ``url`` in the outcome: Codex stores the sign-in under the server key,
+    so the user signs in again.
 
     Raises:
         ValueError: the config is not valid TOML, or the rename would make it invalid
@@ -398,8 +466,9 @@ def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
     if SERVER_NAME in servers:
         return {"action": "conflict", **outcome}
     registered = servers[LEGACY_SERVER_NAME]
-    if isinstance(registered, dict) and "url" in registered:
-        return {"action": "http", "url": str(registered["url"]), **outcome}
+    url = str(registered["url"]) if isinstance(registered, dict) and "url" in registered else None
+    if url is not None and keep_url(url):
+        return {"action": "kept", "url": url, **outcome}
     legacy = _section_bounds(original, f"[mcp_servers.{LEGACY_SERVER_NAME}]")
     if legacy is None:
         return {"action": "manual", **outcome}
@@ -420,7 +489,7 @@ def rename_codex_mcp_server(*, path: Path | None = None) -> dict:
     if SERVER_NAME not in renamed or LEGACY_SERVER_NAME in renamed:
         return {"action": "manual", **outcome}  # a header the line scan misread
     diff, backup = _write_user_file(path, original, updated)
-    return {"action": "renamed", "path": str(path), "diff": diff, "backup": backup}
+    return {"action": "renamed", "path": str(path), "diff": diff, "backup": backup, "url": url}
 
 
 def _write_user_file(path: Path, original: str, updated: str) -> tuple[str, str | None]:
@@ -613,12 +682,18 @@ def remove_learning_instruction(path: Path) -> dict:
 
 @dataclass(frozen=True)
 class UserReference:
-    """A rule or hook the user wrote that still names the old `mcp__exomem__` prefix."""
+    """A rule or hook the user wrote that still names an old tool prefix."""
 
     client: Literal["claude", "codex"]
     path: Path
     kind: Literal["permission rule", "hook", "setting"]
     name: str
+    prefix: str  # the old prefix it names: LEGACY_TOOL_PREFIX or LEGACY_PLUGIN_TOOL_PREFIX
+
+    @property
+    def replacement(self) -> str:
+        """The prefix the rule should name now."""
+        return PLUGIN_TOOL_PREFIX if self.prefix == LEGACY_PLUGIN_TOOL_PREFIX else TOOL_PREFIX
 
 
 def _strings(node: object, trail: tuple[str, ...] = ()):
@@ -636,18 +711,19 @@ def _strings(node: object, trail: tuple[str, ...] = ()):
 def user_references(
     *, claude_home: Path, codex_home: Path, project_dir: Path
 ) -> tuple[list[UserReference], list[Path]]:
-    """List the user's permission rules and hooks that still name the old `mcp__exomem__` prefix.
+    """List the user's permission rules and hooks that still name an old tool prefix.
 
-    Setup writes no rule or hook that names a tool, so every hit is the user's own. It
-    reads the settings files each client documents, and a file it cannot read or parse
-    is skipped: the client reports that file itself. Nothing is written. Returns the
-    references and the files it read, so a caller can say what it checked.
+    The old prefixes are `mcp__exomem__` and, in Claude Code only, the plugin's
+    `mcp__plugin_exomem_exomem__`. Setup writes no rule or hook that names a tool, so every
+    hit is the user's own. It reads the settings files each client documents, and a file it
+    cannot read or parse is skipped: the client reports that file itself. Nothing is written.
+    Returns the references and the files it read, so a caller can say what it checked.
     """
     files = (
-        ("claude", claude_home / "settings.json"),
-        ("claude", claude_home / "settings.local.json"),
-        ("claude", project_dir / ".claude" / "settings.json"),
-        ("claude", project_dir / ".claude" / "settings.local.json"),
+        *(
+            ("claude", path)
+            for path in claude_settings_files(claude_home=claude_home, project_dir=project_dir)
+        ),
         ("codex", codex_home / "config.toml"),
         ("codex", codex_home / "hooks.json"),
     )
@@ -660,15 +736,29 @@ def user_references(
         except (OSError, UnicodeError, ValueError):  # tomllib and json errors are ValueErrors
             continue
         read.append(path)
+        # The tokens are the client-defined tool-name prefixes, a closed set (protocol tokens,
+        # not a reading of what the rule meant). Codex has no plugin prefix of this shape.
+        prefixes = (LEGACY_TOOL_PREFIX,)
+        if client == "claude":
+            prefixes += (LEGACY_PLUGIN_TOOL_PREFIX,)
         for trail, text in _strings(document):
-            # The token is the client-defined tool-name prefix, a closed set (a protocol token,
-            # not a reading of what the rule meant).
-            bare = LEGACY_TOOL_PREFIX.removesuffix("__")
-            if LEGACY_TOOL_PREFIX not in text and text.strip() != bare:
+            named = next(
+                (
+                    prefix
+                    for prefix in prefixes
+                    if prefix in text or text.strip() == prefix.removesuffix("__")
+                ),
+                None,
+            )
+            if named is None:
                 continue
             root = trail[0] if trail else ""
             kind = (
                 "permission rule" if root == "permissions" else "hook" if root == "hooks" else "setting"
             )
-            found.append(UserReference(client=client, path=path, kind=kind, name=text.strip()[:200]))
+            found.append(
+                UserReference(
+                    client=client, path=path, kind=kind, name=text.strip()[:200], prefix=named
+                )
+            )
     return found, read

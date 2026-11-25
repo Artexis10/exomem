@@ -2,10 +2,12 @@
 
 Every reader accepts both names, so an install made before the rename keeps working and
 nothing here runs unasked. The user runs it to adopt the new names. It changes only what
-setup wrote: the stdio server key in Claude Code and Codex, the managed instruction block and
-the explicit checkpoint bindings. A URL (HTTP) server keeps its key, because both clients store
-its sign-in under that key and a rename signs the user out. A rule or hook the user wrote stays
-as it is and is listed.
+setup wrote: the server key in Claude Code and Codex, the managed instruction block and the
+explicit checkpoint bindings. Both clients store a URL (HTTP) server's sign-in under its key, so
+renaming one signs the user out once; the command prints the sign-in step for each. A URL that
+points at Evermatter Cloud keeps its key, because the Cloud plugin's address changes in a later
+release and one rename now would sign that user in twice. A rule or hook the user wrote stays as
+it is and is listed.
 """
 
 from __future__ import annotations
@@ -20,10 +22,10 @@ from . import client_config, prominence, setup_wizard
 from . import install_hook as hook_module
 from . import install_skill as install_module
 
-#: Said for each URL server that this command leaves under its old key.
-_HTTP_KEPT = (
-    "kept `{old}` for {url}: renaming it would sign you out; "
-    "a later release moves it with a sign-in notice"
+#: Said for each Cloud URL registration that this command leaves under its old key.
+_CLOUD_KEPT = (
+    "kept `{old}` for {url}: it moves with the Cloud plugin's address change, "
+    "so you sign in once"
 )
 
 
@@ -53,8 +55,8 @@ def _migrate_claude_servers(
                 f"claude-{scope}",
                 f"[skipped: holds both `{old_key}` and `{new_key}`; remove the one you do not use]",
             )
-        elif "url" in old:
-            report(f"claude-{scope}", f"[skipped: {_HTTP_KEPT.format(old=old_key, url=old['url'])}]")
+        elif "url" in old and client_config.is_cloud_url(str(old["url"])):
+            report(f"claude-{scope}", f"[skipped: {_CLOUD_KEPT.format(old=old_key, url=old['url'])}]")
         else:
             to_rename[scope] = old
     others = _other_project_registrations(user_config, project_dir)
@@ -109,6 +111,8 @@ def _migrate_claude_servers(
                 report(f"claude-{scope}", f"[failed: {failure}; restored the previous registration]")
             continue
         report(f"claude-{scope}", f"[done] renamed to `{new_key}` in {file.name}")
+        if "url" in entry:
+            print_fn(f"  sign in again: {client_config.SIGN_IN_STEPS['claude']}")
         if scope == "project":
             print_fn("  Claude Code asks you to approve the renamed project server again.")
 
@@ -141,12 +145,14 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         return
     path = setup_wizard._resolve_codex_home(codex_home) / "config.toml"
     try:
-        outcome = client_config.rename_codex_mcp_server(path=path)
+        outcome = client_config.rename_codex_mcp_server(
+            path=path, keep_url=client_config.is_cloud_url
+        )
     except (ValueError, OSError) as exc:
         report("codex", f"[failed: {exc}]")
         return
     skipped = {
-        "http": _HTTP_KEPT.format(old=client_config.LEGACY_SERVER_NAME, url=outcome.get("url")),
+        "kept": _CLOUD_KEPT.format(old=client_config.LEGACY_SERVER_NAME, url=outcome.get("url")),
         "current": f"no `{client_config.LEGACY_SERVER_NAME}` server in {path.name}",
         "conflict": f"{path.name} holds both `{client_config.LEGACY_SERVER_NAME}` and "
         f"`{client_config.SERVER_NAME}`; remove one by hand",
@@ -157,6 +163,8 @@ def _migrate_codex_server(*, codex_home: Path, which_fn, print_fn, report) -> No
         report("codex", f"[skipped: {skipped[outcome['action']]}]")
         return
     setup_wizard._report_file_outcome("codex", outcome, path=path, print_fn=print_fn, report=report)
+    if outcome.get("url"):
+        print_fn(f"  sign in again: {client_config.SIGN_IN_STEPS['codex']}")
 
 
 def _migrate_instruction_blocks(*, claude_home: Path, codex_home: Path, print_fn, report) -> None:
@@ -287,12 +295,14 @@ def migrate(
     if references:
         print_fn("")
         print_fn(
-            "These permission rules and hooks are yours, so setup left them as they are. They name "
-            f"`{client_config.LEGACY_TOOL_PREFIX}`, and no `{client_config.LEGACY_SERVER_NAME}` "
-            f"server answers them now. Change each to the `{client_config.TOOL_PREFIX}` prefix:"
+            "These permission rules and hooks are yours, so setup left them as they are. Each "
+            "names an old tool prefix that no server answers now. Change it to the prefix shown:"
         )
         for reference in references:
-            print_fn(f"  {reference.path}: {reference.kind} {reference.name}")
+            print_fn(
+                f"  {reference.path}: {reference.kind} {reference.name} "
+                f"(change `{reference.prefix}` to `{reference.replacement}`)"
+            )
     print_fn("")
     print_fn(
         "To move the skills too, run `evermatter install-skill`; it moves the old `exomem` "

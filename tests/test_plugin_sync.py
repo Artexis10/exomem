@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import client_config
 from exomem import package_skills as package_module
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -73,7 +74,7 @@ def test_manifest_matches_apart_from_the_version(regenerated: dict[str, bytes]) 
 def test_plugin_never_auto_starts_a_full_stdio_core() -> None:
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
 
-    server = manifest["mcpServers"]["exomem"]
+    server = manifest["mcpServers"]["evermatter"]
     assert server == {"type": "http", "url": "${user_config.mcp_url}"}
     option = manifest["userConfig"]["mcp_url"]
     assert option["type"] == "string"
@@ -88,17 +89,19 @@ def test_plugin_http_placeholder_passes_claude_validation() -> None:
     if claude is None:
         pytest.skip("claude CLI is unavailable")
 
-    result = subprocess.run(
-        [claude, "plugin", "validate", str(PLUGIN_ROOT)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=30,
-        check=False,
-    )
+    # The repository root holds the marketplace and its `renames` map; the other path is the plugin.
+    for target in (REPO_ROOT, PLUGIN_ROOT):
+        result = subprocess.run(
+            [claude, "plugin", "validate", str(target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
+        )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+        assert result.returncode == 0, f"{target}: {result.stdout}{result.stderr}"
 
 
 def test_plugin_ships_every_skill() -> None:
@@ -189,24 +192,78 @@ def test_plugin_checkpoint_survives_a_compaction(tmp_path: Path) -> None:
 def test_marketplace_points_at_the_plugin_directory() -> None:
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    entry = next(p for p in marketplace["plugins"] if p["name"] == "exomem")
+    entry = next(p for p in marketplace["plugins"] if p["name"] == "evermatter")
     # `source` is relative to the REPO ROOT, not to .claude-plugin/.
     source = (REPO_ROOT / entry["source"]).resolve()
     assert source == PLUGIN_ROOT.resolve()
 
 
-def test_plugin_keeps_its_name_so_no_http_sign_in_is_lost() -> None:
+def test_marketplace_moves_an_installed_exomem_plugin_to_the_evermatter_name() -> None:
     """Claude Code stores the plugin server's sign-in under the plugin and server names.
 
-    A rename signs every user out, so it waits for a release that says so. The skills inside the
-    plugin are renamed already, which signs nobody out.
+    The rename signs each user of the plugin's URL out once; the `renames` map carries the
+    install and settings across, and the notice hook names the sign-in step.
     """
     manifest = json.loads((PLUGIN_ROOT / _MANIFEST).read_text(encoding="utf-8"))
     marketplace = json.loads(MARKETPLACE.read_text(encoding="utf-8"))
 
-    assert manifest["name"] == "exomem"
-    assert "renames" not in marketplace
-    assert (PLUGIN_ROOT / "skills" / "evermatter" / "SKILL.md").is_file()
+    assert marketplace["renames"] == {"exomem": "evermatter"}
+    assert marketplace["name"] == "exomem"  # the marketplace id stays: users added it by this name
+    assert manifest["name"] == "evermatter"
+    assert set(manifest["mcpServers"]) == {"evermatter"}
+
+
+def _run_sign_in_notice(tmp_path: Path, **plugin_env: str) -> str:
+    """Run the plugin's `startup` SessionStart command verbatim, as Claude Code does."""
+    document = json.loads((PLUGIN_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    command = next(
+        entry["hooks"][0]["command"]
+        for entry in document["hooks"]["SessionStart"]
+        if entry.get("matcher") == "startup"
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_PLUGIN_")}
+    env.update({"CLAUDE_PLUGIN_ROOT": str(PLUGIN_ROOT), **plugin_env})
+    done = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, env=env, cwd=tmp_path, timeout=30
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+needs_python = pytest.mark.skipif(
+    shutil.which("python3") is None and shutil.which("python") is None,
+    reason="the notice wrapper needs python3 or python on PATH",
+)
+
+
+@needs_python
+def test_sign_in_notice_names_the_step_once_and_not_a_second_time(tmp_path: Path) -> None:
+    plugin_env = {
+        "CLAUDE_PLUGIN_OPTION_MCP_URL": "https://memory.example/mcp",
+        "CLAUDE_PLUGIN_DATA": str(tmp_path / "data"),
+    }
+
+    first = _run_sign_in_notice(tmp_path, **plugin_env)
+    second = _run_sign_in_notice(tmp_path, **plugin_env)
+
+    # The hook cannot import the package, so it holds its own copy of the step.
+    assert client_config.SIGN_IN_STEPS["claude"] in json.loads(first)["systemMessage"]
+    assert second == ""
+
+
+@needs_python
+def test_sign_in_notice_stays_silent_while_the_plugin_has_no_url_to_sign_in_to(
+    tmp_path: Path,
+) -> None:
+    silent = _run_sign_in_notice(tmp_path, CLAUDE_PLUGIN_DATA=str(tmp_path / "data"))
+    later = _run_sign_in_notice(
+        tmp_path,
+        CLAUDE_PLUGIN_DATA=str(tmp_path / "data"),
+        CLAUDE_PLUGIN_OPTION_MCP_URL="https://memory.example/mcp",
+    )
+
+    assert silent == ""
+    assert "systemMessage" in later  # the silent run left no marker behind
 
 
 def test_manifest_carries_listing_metadata() -> None:
