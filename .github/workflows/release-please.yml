@@ -667,6 +667,7 @@ jobs:
         with:
           context: infra/cellctl
           file: infra/cellctl/Dockerfile
+          build-contexts: repository=.
           platforms: linux/${{ matrix.arch }}
           provenance: mode=min,version=v0.2
           sbom: true

@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import os
 import shutil
+from collections.abc import Callable
 from pathlib import Path
+
+import yaml
 
 from . import package_skills, workflow_skills
 
@@ -32,11 +35,11 @@ from . import package_skills, workflow_skills
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 
 # Claude Code loads `~/.claude/skills/<name>/SKILL.md`; the folder name must match
-# the skill's `name:` frontmatter (`exomem`).
+# the skill's `name:` frontmatter (`workflow_skills.CORE_SKILL_NAME`).
 # Resolved on attribute access, not at import: see `_DEFAULT_PATHS` in
 # install_hook.py for why an import must not need a home directory.
 _DEFAULT_PATHS = {
-    "DEFAULT_TARGET": (".claude", "skills", "exomem"),
+    "DEFAULT_TARGET": (".claude", "skills", workflow_skills.CORE_SKILL_NAME),
     "_LEGACY_TARGET": (".claude", "skills", "knowledge-base"),
 }
 
@@ -72,8 +75,8 @@ def client_home(client: str) -> Path:
 
 
 def client_skill_target(client: str) -> Path:
-    """Where the core `exomem` skill lands for a client."""
-    return client_home(client) / "skills" / "exomem"
+    """Where the core skill lands for a client."""
+    return client_home(client) / "skills" / workflow_skills.CORE_SKILL_NAME
 
 
 def detect_clients() -> tuple[str, ...]:
@@ -105,15 +108,19 @@ def install_skills(
     client: str | None = "auto",
     force: bool = False,
     link: bool = False,
+    on_moved: Callable[[dict], None] | None = None,
 ) -> dict:
     """Install the skill set into one or more clients.
+
+    ``on_moved`` hears each old skill folder at the moment it moves, so a later client that
+    raises still leaves the caller with every move already reported.
 
     Returns {"clients": {name: <install_skill result>}, "installed": [names]}.
     """
     results: dict[str, dict] = {}
     for name in resolve_clients(client):
         results[name] = install_skill(
-            client_skill_target(name), force=force, link=link
+            client_skill_target(name), force=force, link=link, on_moved=on_moved
         )
     return {"clients": results, "installed": sorted(results)}
 
@@ -122,6 +129,10 @@ def install_skills(
 # only when it is unmistakably ours (see that function).
 _LEGACY_MARKER = "name: knowledge-base"
 _LEGACY_FINGERPRINT = "Exomem"
+# Where `retire_renamed_skill` moves an old skill folder. It sits beside `skills/`, not inside it,
+# so the client does not load the backup as a second copy of the skill.
+RETIRED_SKILLS_DIR = "exomem-retired-skills"
+_FRONTMATTER_READ_LIMIT = 65536
 
 
 def install_skill(
@@ -129,14 +140,17 @@ def install_skill(
     *,
     force: bool = False,
     link: bool = False,
+    on_moved: Callable[[dict], None] | None = None,
 ) -> dict:
     """Install the bundled Evermatter skill into a Claude Code skills folder.
 
     Copies (or, with ``link=True``, symlinks) the canonical `_Schema/` — SKILL.md,
     references/, project-keys.yaml, and the workflow-skill definitions — to
-    ``target`` (default ``~/.claude/skills/exomem``). The named workflow skills
-    are also installed as sibling Claude Code skills beside the core `exomem`
-    skill so clients can discover them directly.
+    ``target`` (default ``~/.claude/skills/evermatter``). The named workflow skills
+    are also installed as sibling Claude Code skills beside the core `evermatter`
+    skill so clients can discover them directly. A copy of one of our skills that the
+    rename left under its old `exomem` name is moved to a backup folder once the new ones are
+    in place (see ``retire_renamed_skill``); nothing is deleted.
 
     Args:
         target: Destination skill folder. Defaults to DEFAULT_TARGET.
@@ -145,10 +159,11 @@ def install_skill(
         link: Best-effort symlink instead of copy (keeps the install in sync as
             the skill evolves). Falls back to a copy if the OS refuses the
             symlink — e.g. Windows without Developer Mode.
+        on_moved: Called with each move record as it happens.
 
     Returns:
         {"target": str, "mode": "copy"|"symlink"|"mixed", "files": int,
-        "workflow_skills": [...]}.
+        "workflow_skills": [...], "retired": [{"skill", "from", "backup"}, ...]}.
 
     Raises:
         FileNotFoundError: the bundled skill is missing (broken install).
@@ -196,12 +211,20 @@ def install_skill(
             }
         )
 
+    retired = []
+    for item in targets:
+        moved = retire_renamed_skill(item["target"].parent, item["name"])
+        if moved is not None:
+            retired.append(moved)
+            if on_moved is not None:
+                on_moved(moved)
     modes = {r["mode"] for r in records}
     return {
         "target": str(target),
         "mode": records[0]["mode"] if len(modes) == 1 else "mixed",
         "files": sum(r["files"] for r in records),
         "workflow_skills": [r for r in records if r["kind"] == "workflow"],
+        "retired": retired,
     }
 
 
@@ -209,7 +232,7 @@ def _install_targets(target: Path) -> list[dict]:
     targets = [
         {
             "kind": "core",
-            "name": "exomem",
+            "name": workflow_skills.CORE_SKILL_NAME,
             "source": _SKILL_SRC,
             "target": target,
         }
@@ -296,3 +319,57 @@ def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
     else:
         shutil.rmtree(legacy)
     return legacy
+
+
+def skill_name(skill_md: Path) -> str | None:
+    """The ``name`` in the frontmatter of ``skill_md``, or ``None`` when it has none.
+
+    Parses the frontmatter as YAML, so a CRLF file reads like an LF one and a ``name`` that only
+    appears in the body does not count.
+    """
+    try:
+        with Path(skill_md).open(encoding="utf-8-sig", errors="replace", newline=None) as handle:
+            lines = handle.read(_FRONTMATTER_READ_LIMIT).splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    end = next((i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if end is None:
+        return None
+    try:
+        data = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return None
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else None
+
+
+def retire_renamed_skill(skills_dir: Path, name: str) -> dict | None:
+    """Move the copy of our skill ``name`` that the rename left under its old name to a backup.
+
+    The core skill and the workflow skills moved from ``exomem`` and ``exomem-<x>`` to
+    ``evermatter`` and ``evermatter-<x>``; left in ``skills_dir`` after an upgrade the old copy
+    loads as a stale duplicate. It moves only when the ``name`` in its SKILL.md frontmatter is
+    that old name, so a user's own folder that merely shares the folder name stays. The move goes
+    to ``RETIRED_SKILLS_DIR`` beside ``skills_dir``, never into a deletion, so a user's edits to
+    the old copy are kept. A ``--link`` symlink to the renamed scaffold names the new skill, so
+    it is left for the user to clear.
+
+    Returns ``{"skill", "from", "backup"}`` for the move, or ``None`` if there was nothing of
+    ours to move.
+    """
+    skills_dir = Path(skills_dir)
+    old = workflow_skills.legacy_skill_name(name)
+    path = skills_dir / old
+    if skill_name(path / "SKILL.md") != old:
+        return None
+    backups = skills_dir.parent / RETIRED_SKILLS_DIR
+    backups.mkdir(parents=True, exist_ok=True)
+    backup = backups / old
+    count = 1
+    while backup.exists() or backup.is_symlink():
+        count += 1
+        backup = backups / f"{old}-{count}"
+    shutil.move(str(path), str(backup))
+    return {"skill": old, "from": str(path), "backup": str(backup)}

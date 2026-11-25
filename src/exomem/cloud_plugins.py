@@ -198,7 +198,10 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             shutil.rmtree(target)
         target.mkdir()
         skills = target / "skills"
-        for name in ("exomem", *(str(item["name"]) for item in workflow_skills.list_skills())):
+        for name in (
+            workflow_skills.CORE_SKILL_NAME,
+            *(str(item["name"]) for item in workflow_skills.list_skills()),
+        ):
             for relative, content in package_skills.skill_payload(name).items():
                 path = skills / name / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,6 +296,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path = target / ".claude-plugin/plugin.json"
             path.parent.mkdir()
             path.write_bytes(_json_bytes(manifest))
+            # The Cloud plugin keeps the server key `exomem` for now: renaming it signs every
+            # Claude Code install out once, and that move is the operator's decision (tasks 3.1, 3.4).
             (target / ".mcp.json").write_bytes(
                 _json_bytes(
                     {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
@@ -348,6 +353,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 },
             }
             (target / "plugin.json").write_bytes(_json_bytes(manifest))
+            # Same as the Claude edition above: the server key stays `exomem` until the operator
+            # decides how the Cloud plugin's sign-in moves.
             (target / "mcp.json").write_bytes(
                 _json_bytes(
                     {

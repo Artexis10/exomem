@@ -10,15 +10,15 @@ import yaml
 from exomem import semantic_authoring, workflow_skills
 
 EXPECTED_WORKFLOW_SKILLS = [
-    "exomem-continue",
-    "exomem-capture",
-    "exomem-ingest",
-    "exomem-research",
-    "exomem-reflect",
-    "exomem-curate",
-    "exomem-defrag",
-    "exomem-review",
-    "exomem-media",
+    "evermatter-continue",
+    "evermatter-capture",
+    "evermatter-ingest",
+    "evermatter-research",
+    "evermatter-reflect",
+    "evermatter-curate",
+    "evermatter-defrag",
+    "evermatter-review",
+    "evermatter-media",
 ]
 
 REQUIRED_SECTIONS = [
@@ -137,7 +137,7 @@ def test_core_and_standalone_authoring_skills_embed_the_canonical_contract() -> 
         core.parent / "references" / "semantic-authoring.md"
     ).read_text(encoding="utf-8")
     assert core_text.count(concise) == 1
-    workflow_skills.validate_contract_projection("exomem", core.parent, core=True)
+    workflow_skills.validate_contract_projection("evermatter", core.parent, core=True)
     core_text = core.read_text(encoding="utf-8")
     operating_rules = core_text.split("## Portable operating rules\n", 1)[1].split(
         "\n## ", 1
@@ -231,7 +231,7 @@ def test_skill_contract_stamps_cover_the_canonical_skill_sources(tmp_path: Path)
         (schema / "SKILL.md", "Never recommend", "Always recommend"),
         (schema / "references" / "engagement.md", "reports the effective level", "reports a changed effective level"),
         (
-            schema / "workflow-skills" / "exomem-capture" / "SKILL.md",
+            schema / "workflow-skills" / "evermatter-capture" / "SKILL.md",
             "Save durable conclusions",
             "Preserve durable conclusions",
         ),
@@ -314,7 +314,7 @@ def test_workflow_skill_docs_route_through_product_commands() -> None:
 
 
 def test_curate_skill_routes_reviewed_plans_through_the_delegation_envelope() -> None:
-    text = (workflow_skills.source_dir("exomem-curate") / "SKILL.md").read_text(encoding="utf-8")
+    text = (workflow_skills.source_dir("evermatter-curate") / "SKILL.md").read_text(encoding="utf-8")
 
     for action in ("work_item", "preview"):
         assert f'inspect_memory(operation="curation.{action}"' in text
@@ -389,7 +389,7 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
     repo_root = Path(__file__).resolve().parents[1]
     skill_copies = (
         workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "planning-records.md",
-        repo_root / "plugins" / "claude-code" / "skills" / "exomem" / "references" / "planning-records.md",
+        repo_root / "plugins" / "claude-code" / "skills" / "evermatter" / "references" / "planning-records.md",
     )
     operation_copies = (
         workflow_skills.WORKFLOW_SKILLS_DIR.parent / "references" / "operations.md",
@@ -397,7 +397,7 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
         / "plugins"
         / "claude-code"
         / "skills"
-        / "exomem"
+        / "evermatter"
         / "references"
         / "operations.md",
     )
@@ -408,7 +408,7 @@ def test_shipped_records_guidance_routes_observed_state_without_magic_verbs() ->
         / "plugins"
         / "claude-code"
         / "skills"
-        / "exomem"
+        / "evermatter"
         / "references"
         / "mutation-results.md",
     )

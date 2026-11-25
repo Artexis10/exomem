@@ -87,7 +87,7 @@ def test_a_release_please_pr_passes(
         },
         {"filename": "plugins/cloud/generated/release.json", "patch": "@@\n-a\n+b\n"},
         {"filename": "plugins/cloud/generated/claude.zip"},
-        {"filename": "plugins/claude-code/skills/exomem/references/importing.md"},
+        {"filename": "plugins/claude-code/skills/evermatter/references/importing.md"},
     ]
 
     status, errors = _check(tmp_path, files, capsys)

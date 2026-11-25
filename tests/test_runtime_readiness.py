@@ -35,7 +35,7 @@ def test_standalone_runtime_is_ready_without_multi_host_coordination() -> None:
 
     assert snapshot == {
         "status": "ready",
-        "service": "exomem",
+        "service": "evermatter",
         "release": "1.2.3",
         "runtime_contract": RUNTIME_CONTRACT,
         "transport": HTTP_TRANSPORT,

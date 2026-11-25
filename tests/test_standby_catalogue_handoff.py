@@ -1242,6 +1242,92 @@ def test_a_lag_repair_that_reaches_the_adopted_catalogue_first_heals_it_without_
     assert not lexstore.search_bm25(root, f"{MARKER}3", k=3, scope="kb")
 
 
+def test_a_lag_repair_before_the_seed_finishes_leaves_the_lag_to_the_owed_heal(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lag repair can reach the adopted catalogue while one recall scope is still seeding.
+
+    The catch-up declined the standby build's lineage for its instance and the
+    worker rebuilt the whole catalogue; the warm's heal ran seconds later.
+    """
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    freshness.clear()  # the promoted worker's watcher seeds its own scopes, kb first
+    kb = root / "Knowledge Base"
+    freshness.seed(
+        root,
+        "kb",
+        ((str(path), freshness.stat_signature(path)) for path in find_module._walk_md(kb)),
+    )
+    rebuilds = _rebuild_spy(monkeypatch)
+
+    lexstore.request_lag_repair(root)
+    assert lexstore.await_repairs_idle(root)
+    assert rebuilds == [], rebuilds
+    # Nothing was repaired yet, and the readiness surface must not say otherwise.
+    assert (lexstore.repair_progress(root) or {}).get("last_result") == "deferred"
+
+    _seed_live_scopes(root)
+    readiness.manage_runtime()
+    readiness.begin_warm()
+    try:
+        assert warmup.warm_retrieval_catalog(root) is True
+    finally:
+        readiness.finish_warm()
+
+    assert rebuilds == [], rebuilds
+    assert readiness.retrieval_admission(root)["admitted"] is True
+    assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
+
+
+def test_a_whole_catalogue_publication_ends_the_owed_heal(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full pass that replaced the adopted catalogue leaves no heal for a later lag repair to wait on.
+
+    The warm skips its heal while a full pass runs, so the adopted rows outlived
+    it; after a later registry loss a lag repair deferred to a heal nobody ran.
+    """
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    _seed_live_scopes(root)
+    lexstore.request_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    freshness.clear()  # a later registry loss; the kb scope reseeds first
+    kb = root / "Knowledge Base"
+    freshness.seed(
+        root,
+        "kb",
+        ((str(path), freshness.stat_signature(path)) for path in find_module._walk_md(kb)),
+    )
+    lexstore.request_lag_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert (lexstore.repair_progress(root) or {}).get("last_result") != "deferred"
+
+
+def test_a_downgraded_promoted_worker_does_not_wait_for_a_heal_it_cannot_run(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed seed retires the registry, so the adopted catalogue's heal can never run.
+
+    A lag repair that kept waiting for it would leave retrieval unrepaired for the
+    life of the process.
+    """
+    from exomem import server_runtime
+
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    rebuilds = _rebuild_spy(monkeypatch)
+    server_runtime.LocalRuntimeActivation(root)._downgrade_recall_runtime()
+
+    lexstore.request_lag_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert rebuilds == ["atomic"], rebuilds
+
+
 def test_a_slow_seed_after_promotion_admits_retrieval_through_a_save_without_a_rebuild(
     older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

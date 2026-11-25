@@ -26,7 +26,7 @@ import pytest
 from budget_gate import check_budget
 
 import exomem
-from exomem import commands, prominence
+from exomem import commands, prominence, workflow_skills
 
 #: The ceiling the change's spec sets for the line, in served-JSON bytes.
 CARRIER_MAX_BYTES = 220
@@ -49,7 +49,7 @@ PLUGIN_SKILL = (
     / "plugins"
     / "claude-code"
     / "skills"
-    / "exomem"
+    / workflow_skills.CORE_SKILL_NAME
     / "SKILL.md"
 )
 

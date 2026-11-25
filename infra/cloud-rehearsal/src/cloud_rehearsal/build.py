@@ -263,7 +263,7 @@ def build_cellctl_image(run_id: str, workdir: Path, *, mode: str) -> str:
     site = "/opt/cellctl/lib/python3.12/site-packages"
     if mode == "dockerfile":
         base = f"{CELLCTL_REPOSITORY}:{run_id}-base"
-        run(["docker", "build", *docker_labels(run_id, image=True), "--tag", base, str(CELLCTL_ROOT)], timeout=1800)
+        run(["docker", "build", *docker_labels(run_id, image=True), "--build-context", f"repository={images.REPO_ROOT}", "--tag", base, str(CELLCTL_ROOT)], timeout=1800)
         # Only packages the base venv lacks, so nothing cellctl locks is replaced.
         present = set(
             run(["docker", "run", "--rm", *docker_labels(run_id), "--entrypoint", "ls", base, site]).stdout.split()

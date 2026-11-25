@@ -1,8 +1,8 @@
-"""install-skill — copy the bundled exomem skill into Claude Code.
+"""install-skill — copy the bundled Evermatter skill into Claude Code.
 
 The MCP server is only the hands (find/add/note); the skill is the brain that
 tells Claude when to capture and how to file. Until it's installed at
-`~/.claude/skills/exomem/SKILL.md`, the tools sit unused — so installing
+`~/.claude/skills/evermatter/SKILL.md`, the tools sit unused — so installing
 it straight from the package (no vault round-trip) is a first-class operation.
 """
 
@@ -17,20 +17,20 @@ from exomem import package_skills, semantic_authoring
 from exomem.public_artifact_privacy import assert_public_artifacts_clean
 
 EXPECTED_WORKFLOW_SKILLS = [
-    "exomem-continue",
-    "exomem-capture",
-    "exomem-ingest",
-    "exomem-research",
-    "exomem-reflect",
-    "exomem-curate",
-    "exomem-defrag",
-    "exomem-review",
-    "exomem-media",
+    "evermatter-continue",
+    "evermatter-capture",
+    "evermatter-ingest",
+    "evermatter-research",
+    "evermatter-reflect",
+    "evermatter-curate",
+    "evermatter-defrag",
+    "evermatter-review",
+    "evermatter-media",
 ]
 
 
 def test_install_skill_copies_into_target(tmp_path: Path) -> None:
-    target = tmp_path / "exomem"
+    target = tmp_path / "evermatter"
     report = install_module.install_skill(target)
 
     # SKILL.md + references/ land at the target root — Claude Code discovers a
@@ -53,14 +53,14 @@ def test_install_skill_copies_into_target(tmp_path: Path) -> None:
 def test_install_skill_populates_empty_dir(tmp_path: Path) -> None:
     """An empty target dir (common — a parent mkdir often leaves one) is safe to
     fill without --force."""
-    target = tmp_path / "exomem"
+    target = tmp_path / "evermatter"
     target.mkdir()
     install_module.install_skill(target)
     assert (target / "SKILL.md").exists()
 
 
 def test_install_skill_refuses_existing_without_force(tmp_path: Path) -> None:
-    target = tmp_path / "exomem"
+    target = tmp_path / "evermatter"
     target.mkdir()
     (target / "SKILL.md").write_text("stale", encoding="utf-8")  # non-empty
     with pytest.raises(FileExistsError):
@@ -68,7 +68,7 @@ def test_install_skill_refuses_existing_without_force(tmp_path: Path) -> None:
 
 
 def test_install_skill_force_overwrites_cleanly(tmp_path: Path) -> None:
-    target = tmp_path / "exomem"
+    target = tmp_path / "evermatter"
     target.mkdir()
     (target / "stale.md").write_text("old", encoding="utf-8")
 
@@ -77,7 +77,7 @@ def test_install_skill_force_overwrites_cleanly(tmp_path: Path) -> None:
     # A faithful mirror: canonical SKILL.md present, stale leftovers gone.
     assert (target / "SKILL.md").exists()
     assert not (target / "stale.md").exists()
-    assert (tmp_path / "exomem-review" / "SKILL.md").exists()
+    assert (tmp_path / "evermatter-review" / "SKILL.md").exists()
 
 
 def test_install_skill_via_cli(tmp_path: Path) -> None:
@@ -85,7 +85,7 @@ def test_install_skill_via_cli(tmp_path: Path) -> None:
     a second run refuses (1) without --force, then succeeds (0) with it."""
     from exomem.__main__ import main
 
-    target = tmp_path / "exomem"
+    target = tmp_path / "evermatter"
     assert main(["install-skill", "--target", str(target)]) == 0
     assert (target / "SKILL.md").exists()
     assert main(["install-skill", "--target", str(target)]) == 1
@@ -134,7 +134,7 @@ def test_client_home_honours_the_same_env_overrides_as_hooks(
 
     assert install_module.client_home("claude") == tmp_path / "claude"
     assert install_module.client_home("codex") == tmp_path / "codex"
-    assert install_module.client_skill_target("codex") == tmp_path / "codex" / "skills" / "exomem"
+    assert install_module.client_skill_target("codex") == tmp_path / "codex" / "skills" / "evermatter"
 
 
 def test_unsupported_client_is_rejected() -> None:
@@ -175,11 +175,11 @@ def test_install_skills_lands_the_full_set_in_both_clients(
     assert report["installed"] == ["claude", "codex"]
     for client in ("claude", "codex"):
         skills = tmp_path / client / "skills"
-        assert (skills / "exomem" / "SKILL.md").is_file()
+        assert (skills / "evermatter" / "SKILL.md").is_file()
         # A router without its references installs successfully but cannot work.
         # Installed copies differ from the scaffold only in the release pin.
         for source in (install_module._SKILL_SRC / "references").glob("*.md"):
-            installed = skills / "exomem" / "references" / source.name
+            installed = skills / "evermatter" / "references" / source.name
             expected = package_skills.render_shipped_markdown(source.read_text(encoding="utf-8"))
             assert installed.read_bytes() == expected.encode("utf-8")
         for name in EXPECTED_WORKFLOW_SKILLS:
@@ -189,7 +189,7 @@ def test_install_skills_lands_the_full_set_in_both_clients(
 def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
     tmp_path: Path,
 ) -> None:
-    target = tmp_path / "empty-client" / "skills" / "exomem"
+    target = tmp_path / "empty-client" / "skills" / "evermatter"
     install_module.install_skill(target)
     concise = semantic_authoring.render_concise()
 
@@ -210,3 +210,53 @@ def test_clean_filesystem_install_is_self_sufficient_without_personal_skills(
             for path in installed_files
         },
     )
+
+
+# ---- the rename: our old `exomem` skill folders move to a backup, a user's own stay ----
+
+
+def _old_skill(skills: Path, name: str, text: str) -> Path:
+    folder = skills / name
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_bytes(text.encode("utf-8"))
+    return folder
+
+
+def test_install_moves_an_edited_old_skill_to_a_backup_with_its_content_intact(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    old_core = _old_skill(
+        skills, "exomem", "---\nname: exomem\ndescription: My edited recall rule.\n---\n"
+    )
+    (old_core / "notes.md").write_text("my own notes\n", encoding="utf-8")
+    crlf_text = "---\r\nname: exomem-capture\r\n---\r\n\r\nMy capture habits.\r\n"
+    old_capture = _old_skill(skills, "exomem-capture", crlf_text)
+    heard: list[dict] = []
+
+    report = install_module.install_skill(skills / "evermatter", on_moved=heard.append)
+
+    assert (skills / "evermatter" / "SKILL.md").is_file()
+    assert not old_core.exists() and not old_capture.exists()
+    backups = tmp_path / install_module.RETIRED_SKILLS_DIR
+    assert (backups / "exomem" / "notes.md").read_text(encoding="utf-8") == "my own notes\n"
+    assert "My edited recall rule." in (backups / "exomem" / "SKILL.md").read_text(encoding="utf-8")
+    assert (backups / "exomem-capture" / "SKILL.md").read_bytes() == crlf_text.encode("utf-8")
+    assert not (skills / install_module.RETIRED_SKILLS_DIR).exists()
+    assert report["retired"] == heard
+    assert {move["skill"]: move["backup"] for move in heard} == {
+        "exomem": str(backups / "exomem"),
+        "exomem-capture": str(backups / "exomem-capture"),
+    }
+
+
+def test_install_keeps_a_folder_whose_frontmatter_name_is_not_ours(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    other = _old_skill(skills, "exomem-capture", "---\nname: my-capture\n---\n\nExomem helper.\n")
+    in_body = _old_skill(skills, "exomem-review", "---\nname: my-review\n---\n\nname: exomem-review\n")
+
+    report = install_module.install_skill(skills / "evermatter")
+
+    assert other.is_dir() and in_body.is_dir()
+    assert report["retired"] == []
+    assert not (tmp_path / install_module.RETIRED_SKILLS_DIR).exists()

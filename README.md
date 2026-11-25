@@ -93,7 +93,43 @@ For local-only use, run `exomem setup --vault "/path/to/vault" --stdio`.
 Stdio is intentionally explicit because each client session owns its process
 and can load its own embedding runtime. When updating from an older plugin,
 run `/plugin update exomem@exomem`, then `/reload-plugins` or restart Claude
-Code before rerunning setup.
+Code before rerunning setup. The plugin keeps the name `exomem` for now. Its URL
+server stores a sign-in under that name, so a rename signs every user out. A later
+release renames it and says so first. The skills inside it are `evermatter-*`.
+
+### Move an existing install to the Evermatter names
+
+After you update, an install made before the rename keeps working until you run
+`evermatter setup` or `evermatter install-skill`. Its `exomem` server key, tool names,
+hooks, permission rules and managed instruction block still match. Those two commands
+install the `evermatter` skills. They move each old `exomem` skill folder, with your
+edits, to `exomem-retired-skills` beside the client's `skills` folder, where the client
+does not load it.
+
+To rename the server key and the instruction block too, run:
+
+```bash
+evermatter setup --migrate
+```
+
+1. Setup renames the `exomem` server key to `evermatter` in Claude Code and Codex, for each stdio server.
+2. It keeps the `exomem` key of each server that has a URL, and prints that URL. Claude Code and Codex store a sign-in under the server name, so a rename signs you out. A later release moves those servers and says so first.
+3. It rewrites the managed instruction block in `CLAUDE.md` and `AGENTS.md`.
+4. It adds the `mcp__evermatter__` prefix beside the old one in explicit checkpoint bindings.
+5. It backs up each file it changes beside the original, once per run, as `<file>.exomem-bak`.
+6. Restart Claude Code and Codex.
+
+Claude Code keeps a project's local registration per directory. The command renames
+the one for the current directory and lists the others. Run it in each of those
+directories. A new install registers the `evermatter` key from the start, because
+a new registration has no stored sign-in.
+
+Setup never edits a permission rule or hook that you wrote. A rule that names
+`mcp__exomem__*` stops matching for a server that the command renamed. Change it to
+the `mcp__evermatter__*` prefix. A rule still matches while a client holds an
+`exomem` server, such as a URL server that the command kept. `evermatter setup --migrate`
+and `evermatter doctor` list each rule that no `exomem` server answers any more, with
+the file that holds it. Settings keep their `EXOMEM_*` names.
 
 ### claude.ai and ChatGPT
 
@@ -254,7 +290,7 @@ policy, see [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 Or add it directly to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.exomem]
+[mcp_servers.evermatter]
 command = "exomem"
 args = ["--transport", "stdio"]
 env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
@@ -266,7 +302,7 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 <summary>Any MCP client (generic stdio)</summary>
 
 ```json
-{"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
+{"mcpServers": {"evermatter": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
 
 After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
@@ -287,7 +323,7 @@ standing instruction.
 > lines and compose files to keep upgrading.
 
 ```bash
-claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
+claude mcp add evermatter -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/substrate-systems/evermatter:latest --transport stdio
 ```
 
 Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or

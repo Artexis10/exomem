@@ -85,9 +85,9 @@ def test_harness_adds_and_logs_in_once_then_runs_fresh_ephemeral_processes(
     commands = [call[0] for call in runner.calls]
     assert commands[0] == ["codex", "login", "status"]
     assert commands[1] == [
-        "codex", "mcp", "add", "exomem", "--url", "https://kb.example.com/mcp"
+        "codex", "mcp", "add", "evermatter", "--url", "https://kb.example.com/mcp"
     ]
-    assert commands.count(["codex", "mcp", "login", "exomem"]) == 1
+    assert commands.count(["codex", "mcp", "login", "evermatter"]) == 1
     assert runner.browser_launches == 1
     exec_commands = [command for command in commands if command[:2] == ["codex", "exec"]]
     assert len(exec_commands) == 3
@@ -184,6 +184,11 @@ def test_exec_classification_accepts_only_completed_exomem_mcp_call() -> None:
     assert harness.classify_exec_output(_mcp_success(), "diagnostic noise") is None
 
 
+def test_exec_classification_accepts_a_call_under_the_new_server_name() -> None:
+    # A fresh registration is `evermatter`, so the gate's own call arrives under that key.
+    assert harness.classify_exec_output(_mcp_event(server="evermatter"), "") is None
+
+
 def test_exec_classification_rejects_error_like_stderr() -> None:
     with pytest.raises(harness.HarnessFailure, match="stderr"):
         harness.classify_exec_output(_mcp_success(), "ERROR connector crashed")
@@ -239,7 +244,7 @@ def test_harness_stops_if_registration_fails(tmp_path: Path) -> None:
 
     assert calls == [
         ["codex", "login", "status"],
-        ["codex", "mcp", "add", "exomem", "--url", "https://kb.example.com/mcp"],
+        ["codex", "mcp", "add", "evermatter", "--url", "https://kb.example.com/mcp"],
     ]
 
 

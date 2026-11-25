@@ -17,10 +17,11 @@ from .install_info import installed_version
 
 RUNTIME_CONTRACT = 1
 HTTP_TRANSPORT = "streamable-http-stateless"
-SERVICE_NAME = "exomem"
+SERVICE_NAME = "evermatter"
+LEGACY_SERVICE_NAME = "exomem"
 # Every service name a reader of the readiness payload accepts: a doctor must read replicas on
 # either side of the name switch. Writers emit SERVICE_NAME only.
-SERVICE_NAMES = ("exomem", "evermatter")
+SERVICE_NAMES = (SERVICE_NAME, LEGACY_SERVICE_NAME)
 #: The `retrieval.state` of a proven process whose catalogue trails a live
 #: projection that recall still serves. It exists only in this payload, never in
 #: `readiness.retrieval_admission`, whose states `find` routes on.
@@ -389,6 +390,7 @@ _LEXICAL_REPAIR_RESULTS = frozenset(
         "published",
         "targeted",
         "advanced",
+        "deferred",
         "delta_unavailable",
         "identity_changed",
         "source_changed",

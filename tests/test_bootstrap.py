@@ -70,7 +70,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
 
     assert out["contract_version"]
     assert out["profile"] == "compact"
-    assert out["server"]["name"] == "exomem"
+    assert out["server"]["name"] == "evermatter"
     assert out["server"]["content_included"] is False
     assert out["server"]["pure_substrate"] is True
     assert re.fullmatch(
@@ -99,15 +99,15 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "neither reads nor configures" in built_in_memory
     assert not built_in_memory.startswith("Use ")
     assert [s["name"] for s in out["workflow_skills"]] == [
-        "exomem-continue",
-        "exomem-capture",
-        "exomem-ingest",
-        "exomem-research",
-        "exomem-reflect",
-        "exomem-curate",
-        "exomem-defrag",
-        "exomem-review",
-        "exomem-media",
+        "evermatter-continue",
+        "evermatter-capture",
+        "evermatter-ingest",
+        "evermatter-research",
+        "evermatter-reflect",
+        "evermatter-curate",
+        "evermatter-defrag",
+        "evermatter-review",
+        "evermatter-media",
     ]
     # The shipped skills moved out of the note namespace (#488). Still pinned,
     # because this path is the address the agent is told to read a skill from.
