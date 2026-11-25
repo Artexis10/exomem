@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, NamedTuple
 
 from . import vault
@@ -87,6 +87,24 @@ def item_line(item: Mapping[str, Any]) -> str:
     kind = KIND_COLLECTION if item.get("kind") == KIND_COLLECTION else KIND_SKILL
     text = f"- {kind} {item['name']}: {item['summary']}" if item.get("summary") else f"- {kind} {item['name']}"
     return f"{text} [{item['ref']}]"
+
+
+#: How the names line labels each kind, once per group; a closed pair matching KIND_SKILL and KIND_COLLECTION.
+_NAMES_GROUPS = ((KIND_SKILL, "skills"), (KIND_COLLECTION, "collections"))
+
+
+def names_text(names: Sequence[Mapping[str, Any]]) -> str:
+    """The named items as the start-of-turn hook writes them, which is also how `skills_names_max_chars` counts them.
+
+    Each kind is written once before its names (`skills: a; b. collections: X; Y.`), so a long catalogue does not
+    pay for the kind on every name. A standalone hook cannot import this, so a parity test keeps the two in step.
+    """
+    groups = []
+    for kind, label in _NAMES_GROUPS:
+        members = [" ".join(str(item["name"]).split()) for item in names if (item.get("kind") or KIND_SKILL) == kind]
+        if members:
+            groups.append(f"{label}: " + "; ".join(members) + ".")
+    return " ".join(groups)
 
 
 def chars(block: Mapping[str, Any]) -> int:

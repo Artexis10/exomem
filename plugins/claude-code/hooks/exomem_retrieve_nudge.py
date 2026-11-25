@@ -2613,21 +2613,36 @@ def _skill_lines(items: object) -> list[str]:
     return lines
 
 
-def _skill_names_line(block: dict) -> str:
-    """The items the service names without a line, on one line after its own advice; empty when there are none.
+#: The service bounds the names to the vault's `budgets.skills_names_max_chars`; this is the most a vault may set
+#: (`activation_conventions.BUDGET_BOUNDS`, which a standalone hook cannot import; a test pins the two together), so
+#: the hook never drops a well-formed names line and still caps a malformed one. The advice sits outside the cap.
+_SKILLS_NAMES_MAX_CHARS = 8000
+#: How the names line labels each kind, once per group, written exactly as the service's `vault_skills.names_text`.
+_SKILLS_NAMES_GROUPS = (("skill", "skills"), ("collection", "collections"))
 
-    The service bounds the names to the vault's `budgets.skills_names_max_chars`; `_SKILLS_MAX_CHARS` only caps a
-    malformed block, so a well-formed one is never cut.
+
+def _skill_names_text(names: object) -> str:
+    """The named items grouped by kind, exactly as the service's `vault_skills.names_text` counts them."""
+    named = [item for item in names or () if isinstance(item, dict) and item.get("name")]
+    groups = []
+    for kind, label in _SKILLS_NAMES_GROUPS:
+        members = [" ".join(str(item["name"]).split()) for item in named if (item.get("kind") or "skill") == kind]
+        if members:
+            groups.append(f"{label}: " + "; ".join(members) + ".")
+    return " ".join(groups)
+
+
+def _skill_names_line(block: dict) -> str:
+    """The items the service names without a line, after its own advice; empty when there are none or they are malformed.
+
+    A held catalogue is recorded only in the continuity token, so names cut here would never be offered again: the
+    cap applies to the names alone and must never bite a block within the service's bound.
     """
-    names = [
-        f"{'collection' if item.get('kind') == 'collection' else 'skill'} {' '.join(str(item.get('name')).split())}"
-        for item in block.get("names") or () if isinstance(item, dict) and item.get("name")
-    ]
-    if not names:
+    text = _skill_names_text(block.get("names"))
+    if not text or len(text) > _SKILLS_NAMES_MAX_CHARS:
         return ""
     advice = " ".join(str(block.get("names_advice") or "").split()) or "More of the owner's skills and collections, by name only."
-    line = f"- {advice} " + "; ".join(names) + "."
-    return line if len(line) <= _SKILLS_MAX_CHARS else ""
+    return f"- {advice} {text}"
 
 
 def _format_skills_block(block: object) -> str:

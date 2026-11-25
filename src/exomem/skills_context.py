@@ -58,9 +58,6 @@ def _names_advice() -> str:
     )
 
 
-def _name_cost(item: Mapping[str, Any]) -> int:
-    """What one named item spends of `skills_names_max_chars`: its kind, its name and a separator."""
-    return len(f"{item['kind']} {item['name']}") + 2
 
 
 def _unit(item: Mapping[str, Any], path: str) -> dict[str, Any]:
@@ -143,7 +140,7 @@ def compile_block(
     max_chars = conventions.budget("skills_max_chars")
     summary_chars = conventions.budget("skill_summary_max_chars")
     turn_chars = conventions.budget("skills_turn_max_chars")
-    names_chars = conventions.budget("skills_names_max_chars") or 0
+    names_chars = conventions.budget("skills_names_max_chars")
     own_catalogue = catalogue is None
     catalogue = catalogue or context_catalogue.ContextCatalogue(root)
     try:
@@ -186,15 +183,14 @@ def compile_block(
     # Each item left without a line is still named while its name fits, so the agent sees every collection and
     # skill it may choose from and decides itself; `omitted` then counts only the items not even named.
     names: list[dict[str, Any]] = []
-    names_used = 0
-    for candidate in unlisted:
+    for candidate in unlisted if names_chars else ():
         named = {"kind": candidate.item["kind"], "name": candidate.item["name"]}
-        if names_used + _name_cost(named) > names_chars:
+        # The bound counts the names as the hook writes them, so a line within it is never cut there.
+        if len(vault_skills.names_text([*names, named])) > names_chars:
             continue
         names.append(named)
         # Terminal egress decides the whole unit the name comes from, so a name never outlives its page's release.
         served.append(_unit(candidate.item, candidate.path))
-        names_used += _name_cost(named)
     block["omitted"] -= len(names)
     if names:
         block["names"] = names
@@ -205,9 +201,8 @@ def compile_block(
         block.update(state="unchanged", items=[])
         block.pop("names", None)
         served = []
-    else:
-        if block["items"]:
-            block["advice"] = _advice()
+    elif block["state"] == "ready":
+        block["advice"] = _advice()
         if names:
             block["names_advice"] = _names_advice()
     turn_items, turn_used = [], 0

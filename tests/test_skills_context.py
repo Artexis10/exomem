@@ -546,7 +546,7 @@ def _named(block: dict) -> list[tuple[str, str]]:
 
 def test_an_overflowing_catalogue_names_a_collection_that_shares_no_word_or_domain_with_the_turn(skills_vault):
     """The agent sees the collection and decides: no topic, domain or shared word is needed to offer it."""
-    _collection(skills_vault, "Listening", "Listening notes", "User-attributed verdicts on records heard.")
+    _collection(skills_vault, "Pantry", "Pantry counts", "Counts of jars kept on each shelf.")
     _refresh(skills_vault)
     whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
     _one_item_bound(skills_vault, whole["items"], names_chars=2000)
@@ -554,14 +554,14 @@ def test_an_overflowing_catalogue_names_a_collection_that_shares_no_word_or_doma
     block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
 
     assert _names(block) == ["alpha"]
-    assert _named(block) == [("skill", "mid"), ("skill", "zeta"), ("collection", "Listening notes")]
+    assert _named(block) == [("skill", "mid"), ("skill", "zeta"), ("collection", "Pantry counts")]
     assert block["omitted"] == 0
     assert "collection='<name>'" in block["names_advice"]
 
 
 def test_names_past_their_bound_are_counted_as_omitted(skills_vault):
     whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
-    _one_item_bound(skills_vault, whole["items"], names_chars=len("skill mid") + 2)
+    _one_item_bound(skills_vault, whole["items"], names_chars=len(vault_skills.names_text([{"kind": "skill", "name": "mid"}])))
 
     block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
 
@@ -588,3 +588,14 @@ def test_a_collection_the_caller_cannot_see_is_never_named(skills_vault):
     block = _activate(skills_vault, turn=NO_SKILL_NAMED, caller=_external())["skills"]
 
     assert "Depot stock" not in [name for _, name in _named(block)] + _names(block)
+
+
+def test_names_are_counted_as_the_hook_writes_them_with_each_kind_once(skills_vault):
+    _collection(skills_vault, "Pantry", "Pantry counts", "Counts of jars kept on each shelf.")
+    _refresh(skills_vault)
+    whole = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+    _one_item_bound(skills_vault, whole["items"], names_chars=2000)
+
+    block = _activate(skills_vault, turn=NO_SKILL_NAMED)["skills"]
+
+    assert vault_skills.names_text(block["names"]) == "skills: mid; zeta. collections: Pantry counts."
