@@ -17,7 +17,7 @@ The exercise did not invoke the current top-level `drill` wrapper.
 The reviewed helper, its tests and the deployed-image recovery support repeatable comparison of both roots.
 This proof does not close in-place failure recovery, historical rollback or acceptance of a new runtime image.
 
-This runbook covers two operator tools for cells on Hetzner network volumes (storage class `exomem-cloud-encrypted`). One script, `infra/scripts/cloud_restore.sh`, runs both:
+This runbook covers two operator tools for cells on Hetzner network volumes: the shared `exomem-cloud-encrypted` class and the per-cell key class that the live cellctl configures. One script, `infra/scripts/cloud_restore.sh`, runs both:
 
 - **Restore drill.** It restores a cell's restic snapshot from object storage into a scratch namespace.
   It hashes each backup root and compares the hashes with an independently captured reference.
@@ -96,7 +96,8 @@ Both tools refuse to start in these cases:
 - the script does not run on the K3s server;
 - the time is inside the nightly backup window that the live cellctl Deployment is configured with (`cells.backupWindow`, 02:00-05:00 UTC by default);
 - the node has less than 2 GiB of memory available;
-- the cell's volume is not in the `exomem-cloud-encrypted` class.
+- the cell's volume is not in a Hetzner class that the live cellctl configures, or it is in the local class;
+- the cell has no stored object-store key and no `cell-object-store-key` Secret.
 
 The backup window check runs at the start and again just before the stop. It does not stop a run that goes on into the window. A restore that runs into the window keeps cellctl paused, so no cell backs up until cellctl resumes. Start a restore early enough to finish before the window opens.
 
@@ -257,7 +258,7 @@ The cell keeps serving throughout.
 3. Set `CELL_ID`, `SNAPSHOT`, `ORIGINAL` (the vault-relative path), `KIND` and `EXPECTED` (the SHA-256).
 4. Set `CELLCTL_PYTHON` as the export runbook does, and run every block from the reviewed release's checkout root.
 5. Restore the snapshot into scratch, as the export runbook's "Render and apply only scratch resources" does. Expect the Job to complete.
-   If the command prints `scratch: 'b2-key-id'; stop` or `scratch: the cell's volume is not in the exomem-cloud-encrypted class; stop`, stop. The command does not yet support that cell (issue #2670).
+   The scratch volume takes the cell volume's storage class and passphrase. For a cell that the key custodian provisioned, the command copies the cell's `cell-object-store-key` Secret into the scratch namespace.
    The Job runs `restic restore <snapshot> --target / --delete --include /data/vault --include /data/host` on the scratch volume.
 6. Set `SCRATCH` to that scratch namespace, then run the first block. Expect `hash matches the binding`.
 7. Run the second block. It writes the original outside the vault, checks its hash, then moves it into place. Expect `original restored`.

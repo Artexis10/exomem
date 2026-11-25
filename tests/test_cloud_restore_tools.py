@@ -269,6 +269,15 @@ def _manifests():
     return module
 
 
+def _settings(manifests, job_egress_except: tuple[str, ...]):
+    """Two distinct stores, so a test sees which one a restore Job reaches."""
+    return manifests.PlatformSettings(
+        object_storage_bucket="founder-backups", object_storage_endpoint="https://s3.founder.example",
+        cell_data_backup_bucket="cell-data-backups", cell_data_endpoint="https://s3.cell-data.example",
+        job_egress_except=job_egress_except,
+    )
+
+
 def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> None:
     manifests = _manifests()
     scratch = f"exo-scratch-{CELL_ID}-0123abcd"
@@ -276,8 +285,8 @@ def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> 
     documents = manifests.scratch_documents(
         cell_id=CELL_ID, scratch=scratch, snapshot=SNAPSHOT, image=IMAGE, storage_gib=10,
         credential={"backup-password": "p", "b2-key-id": "i", "b2-key-secret": "s"},
-        settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ("10.0.0.0/8",)),
-        started_at="2026-10-09T10:00:00+00:00",
+        settings=_settings(manifests, ("10.0.0.0/8",)),
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-encrypted",
     )
 
     assert sorted(d["kind"] for d in documents) == [
@@ -291,6 +300,75 @@ def test_a_scratch_restore_never_creates_a_runtime_or_a_cell(tmp_path: Path) -> 
     assert all(d["metadata"]["namespace"] == scratch for d in documents[1:])
     secret = next(d for d in documents if d["kind"] == "Secret")
     assert "cell-token" not in secret["data"]
+
+
+def test_a_scratch_restore_of_a_custodian_cell_reads_the_copied_custodian_key() -> None:
+    # A cell the key custodian provisioned has no key in cell-credentials; its restore Job must
+    # read a copy of the custodian's Secret in the scratch namespace, or restic cannot reach B2.
+    manifests = _manifests()
+    scratch = f"exo-scratch-{CELL_ID}-0123abcd"
+    custodian_key = {"type": "Opaque", "metadata": {"name": "cell-object-store-key", "uid": "u-1"},
+                     "data": {"keyId": "a2V5", "applicationKey": "c2VjcmV0"}}
+
+    documents = manifests.scratch_documents(
+        cell_id=CELL_ID, scratch=scratch, snapshot=SNAPSHOT, image=IMAGE, storage_gib=10,
+        credential={"backup-password": "p"},
+        settings=_settings(manifests, ("10.0.0.0/8",)),
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-encrypted",
+        object_store_key=custodian_key,
+    )
+
+    copied = next(d for d in documents if d["kind"] == "Secret" and d["metadata"]["name"] == "cell-object-store-key")
+    assert copied["metadata"]["namespace"] == scratch
+    assert copied["data"] == custodian_key["data"]
+    assert "uid" not in copied["metadata"]
+    job = documents[-1]
+    assert job["kind"] == "Job"
+    env = {e["name"]: e for c in job["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])}
+    assert env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"] == {"name": "cell-object-store-key", "key": "keyId"}
+    assert env["AWS_SECRET_ACCESS_KEY"]["valueFrom"]["secretKeyRef"]["name"] == "cell-object-store-key"
+    # The custodian's key opens only the locked cell-data bucket, where the cell's snapshots live.
+    assert env["RESTIC_REPOSITORY"]["value"] == f"s3:https://s3.cell-data.example/cell-data-backups/cells/{CELL_ID}"
+
+
+def test_a_scratch_volume_keeps_the_source_class_and_its_passphrase() -> None:
+    # A per-cell encrypted class formats a blank volume as plain ext4 without a passphrase,
+    # so the scratch copy of a customer's vault must carry the source's passphrase.
+    manifests = _manifests()
+
+    documents = manifests.scratch_documents(
+        cell_id=CELL_ID, scratch=f"exo-scratch-{CELL_ID}-0123abcd", snapshot=SNAPSHOT, image=IMAGE,
+        storage_gib=10, credential={"backup-password": "p", "encryption-passphrase": "vp",
+                                    "b2-key-id": "i", "b2-key-secret": "s"},
+        settings=_settings(manifests, ("10.0.0.0/8",)),
+        started_at="2026-10-09T10:00:00+00:00", storage_class="exomem-cloud-per-cell",
+    )
+
+    claim = next(d for d in documents if d["kind"] == "PersistentVolumeClaim")
+    assert claim["spec"]["storageClassName"] == "exomem-cloud-per-cell"
+    secret = next(d for d in documents if d["kind"] == "Secret")
+    assert secret["data"]["encryption-passphrase"] == "dnA="
+
+
+
+@pytest.mark.parametrize(("stored_key_id", "key_secret", "repository"), [
+    ("stored-id", "cell-credentials", "s3:https://s3.founder.example/founder-backups/cells/"),
+    ("", "cell-object-store-key", "s3:https://s3.cell-data.example/cell-data-backups/cells/"),
+])
+def test_an_in_place_restore_reaches_the_store_its_cell_backs_up_to(stored_key_id, key_secret, repository) -> None:
+    # An old cell's stored key opens the founder bucket; a custodian cell's key opens only the
+    # locked cell-data bucket. A restore Job with the wrong pair cannot read the cell's snapshots.
+    manifests = _manifests()
+    statefulset = {"spec": {"replicas": 0, "template": {"spec": {"containers": [{"name": "exomem", "image": IMAGE}]}}}}
+
+    job = manifests.in_place_job(
+        cell_id=CELL_ID, statefulset=statefulset, snapshot=SNAPSHOT, settings=_settings(manifests, ()),
+        started_at="2026-10-09T10:00:00+00:00", stored_key_id=stored_key_id,
+    )
+
+    env = {e["name"]: e for c in job["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])}
+    assert env["RESTIC_REPOSITORY"]["value"] == repository + CELL_ID
+    assert env["AWS_ACCESS_KEY_ID"]["valueFrom"]["secretKeyRef"]["name"] == key_secret
 
 
 def test_the_in_place_restore_and_its_helper_run_where_the_cell_runs() -> None:
@@ -307,7 +385,7 @@ def test_the_in_place_restore_and_its_helper_run_where_the_cell_runs() -> None:
 
     job = manifests.in_place_job(
         cell_id=CELL_ID, statefulset=statefulset, snapshot=SNAPSHOT,
-        settings=manifests.PlatformSettings("bucket", "https://s3.example.test", ()),
+        settings=_settings(manifests, ()),
         started_at="2026-10-09T10:00:00+00:00",
     )
 
@@ -359,11 +437,9 @@ def test_in_place_restore_guards_distinguish_the_read_only_verifier(monkeypatch,
     workloads = {"jobs": [job], "pods": [pod]}
     monkeypatch.setattr(manifests, "_kubectl", lambda _context, *args, **_kw: json.dumps({"items": workloads[args[3]]}))
     monkeypatch.setattr(manifests, "_check_cell_namespace", lambda _context, cell: manifests.namespace_name(cell))
-    monkeypatch.setattr(manifests, "_get", lambda *_args: statefulset)
+    monkeypatch.setattr(manifests, "_get", lambda _context, kind, *_rest: {"data": {}} if kind == "secret" else statefulset)
     monkeypatch.setattr(manifests, "_cellctl", lambda _context: {"spec": {"replicas": 0}})
-    monkeypatch.setattr(manifests, "platform_settings", lambda _deployment: manifests.PlatformSettings(
-        "bucket", "https://s3.example.test", (),
-    ))
+    monkeypatch.setattr(manifests, "platform_settings", lambda _deployment: _settings(manifests, ()))
     applied = []
     monkeypatch.setattr(manifests, "_apply", lambda _context, document, _manager: applied.append(document))
 
