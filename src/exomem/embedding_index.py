@@ -221,6 +221,13 @@ class StoreRecord:
 CHUNK_PATH_LOG = sidecar_store.PathChangeLog(
     "chunk_path_log", "chunk_path_log_from", "chunk_path_log_upto"
 )
+# The same log for the semantic-unit matrix, keyed on the unit generation: it
+# names the parents whose unit rows each unit write changed. Every bump of
+# SEMANTIC_UNIT_GENERATION goes through its helpers, so a bump that logs no
+# parent (an older binary, a manual repair) forces the full reload.
+UNIT_PATH_LOG = sidecar_store.PathChangeLog(
+    "unit_path_log", "unit_path_log_from", "unit_path_log_upto", SEMANTIC_UNIT_GENERATION
+)
 
 # Catch-up bounds. PATHS is the real cost knob, not generations: one bump can
 # retire a whole batch of paths (a purge) and many bumps can rewrite one path
@@ -576,6 +583,31 @@ def _unit_block(rows: Iterable[tuple], count: int, width: int) -> _UnitBlock:
     return _UnitBlock(kept, parents, parent_of, matrix)
 
 
+def _splice_unit_block(block: _UnitBlock, replaced: frozenset[str], fresh: _UnitBlock) -> _UnitBlock:
+    """`block` without the `replaced` parents' rows, then `fresh`'s rows: a full load's block.
+
+    A full load reads by rowid, and an insert takes a rowid above every row present,
+    so a rewritten parent's rows come after every untouched parent's, in the order
+    `fresh` holds them (rowid order). Untouched rows keep their order, hence their
+    parents keep theirs. Copy-on-write: a reader may still hold `block`.
+    """
+    dropped = np.fromiter(
+        (path in replaced for path in block.parents), dtype=bool, count=len(block.parents)
+    )
+    kept = np.flatnonzero(~dropped[block.parent_of])
+    kept_parents = [path for path, drop in zip(block.parents, dropped, strict=True) if not drop]
+    new_slot = np.cumsum(~dropped, dtype=np.int32) - 1
+    matrix = np.empty((len(kept) + len(fresh.rows), block.matrix.shape[1]), dtype=np.float32)
+    np.take(block.matrix, kept, axis=0, out=matrix[: len(kept)], mode="clip")
+    matrix[len(kept):] = fresh.matrix
+    return _UnitBlock(
+        [block.rows[row] for row in kept.tolist()] + fresh.rows,
+        kept_parents + fresh.parents,
+        np.concatenate((new_slot[block.parent_of[kept]], fresh.parent_of + len(kept_parents)), dtype=np.int32),
+        matrix,
+    )
+
+
 def _unit_mask(block: _UnitBlock, admitted: Callable[[str], bool]) -> np.ndarray:
     """Admit each parent before any score can spend a transport slot."""
     mask = np.fromiter(
@@ -900,22 +932,30 @@ def _coverage_records(conn: sqlite3.Connection, paths: list[str]) -> dict[str, d
 
 
 def _unit_coverage(
-    conn: sqlite3.Connection, width: int,
+    conn: sqlite3.Connection, width: int, paths: list[str] | None = None,
 ) -> tuple[dict[str, tuple[str, int]], frozenset[str]]:
     """Compact neutral proof of exact occurrence keys, row stamps and usable vectors.
 
     SQLite checks JSON through its parser and compares both key directions. Counts
     alone cannot detect a substituted occurrence. Full summaries stay on disk.
+    `paths` limits the proof to those parents: each parent's verdict reads only its
+    own record and rows, so it equals that parent's verdict in the whole read.
     """
     from .semantic_units import STRUCTURAL_FORMAT
 
     coverage: dict[str, tuple[str, int]] = {}
     unproved: set[str] = set()
+    wanted = None if paths is None else json.dumps(paths, ensure_ascii=False)
+    records, scope = (
+        ("key >= ? AND key < ?", (COVERAGE_PREFIX, _COVERAGE_END))
+        if wanted is None
+        else ("key IN (SELECT ? || value FROM json_each(?))", (COVERAGE_PREFIX, wanted))
+    )
     rows = conn.execute(
         "WITH records AS ("
         "SELECT substr(key, ?) AS path, "
         "CASE WHEN json_valid(value) THEN value ELSE '{}' END AS doc FROM meta "
-        "WHERE key >= ? AND key < ?) "
+        f"WHERE {records}) "
         "SELECT path, json_extract(doc, '$.parent_generation'), "
         "json_array_length(doc, '$.occurrences'), "
         "json_extract(doc, '$.structural_complete') = 1 "
@@ -937,7 +977,7 @@ def _unit_coverage(
         "AND NOT EXISTS (SELECT 1 FROM semantic_unit_vectors v WHERE v.parent_path = records.path "
         "AND v.unit_key NOT IN (SELECT value FROM json_each(doc, '$.occurrences'))) "
         "FROM records",
-        (len(COVERAGE_PREFIX) + 1, COVERAGE_PREFIX, _COVERAGE_END,
+        (len(COVERAGE_PREFIX) + 1, *scope,
          semantic_index.PARSER_VERSION, STRUCTURAL_FORMAT, width * 4),
     )
     for path, generation, count, proved in rows:
@@ -945,9 +985,15 @@ def _unit_coverage(
             coverage[str(path)] = (str(generation), int(count))
         if not proved:
             unproved.add(str(path))
+    held = (
+        "SELECT DISTINCT parent_path FROM semantic_unit_vectors"
+        if wanted is None
+        else "SELECT DISTINCT parent_path FROM semantic_unit_vectors "
+        "WHERE parent_path IN (SELECT value FROM json_each(?))"
+    )
     unproved.update(
         str(path)
-        for (path,) in conn.execute("SELECT DISTINCT parent_path FROM semantic_unit_vectors")
+        for (path,) in conn.execute(held, () if wanted is None else (wanted,))
         if str(path) not in coverage
     )
     return coverage, frozenset(unproved)
@@ -1157,6 +1203,7 @@ class EmbeddingIndex:
         # that a writer which bumps the generation without logging its paths is
         # DETECTED rather than silently caught up (see sidecar_store).
         sidecar_store.ensure_path_change_log(conn, CHUNK_PATH_LOG)
+        sidecar_store.ensure_path_change_log(conn, UNIT_PATH_LOG)
         passage_terms.attach(conn)
         stored_unit_schema = conn.execute(
             "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
@@ -1203,7 +1250,7 @@ class EmbeddingIndex:
                     "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
                     ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
                 )
-                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                sidecar_store.bump_generation_for_reset(conn, UNIT_PATH_LOG)
         if target == self.path:
             conn.execute("BEGIN")
             try:
@@ -1535,7 +1582,9 @@ class EmbeddingIndex:
                         conn, CHUNK_PATH_LOG, [path for path, *_rest in replacements]
                     )
                 if unit_replacements:
-                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                    sidecar_store.bump_generation_for_paths(
+                        conn, UNIT_PATH_LOG, [state.path for state, _vectors, _mtime in unit_replacements]
+                    )
                 _write_store_stamps(conn, store_stamps or {})
                 _remember_transcript_layout(
                     conn, {path for path, chunks, *_ in replacements if chunks and path in transcript_layout},
@@ -1871,7 +1920,7 @@ class EmbeddingIndex:
                     sidecar_store.bump_generation_for_paths(
                         conn, CHUNK_PATH_LOG, removed_paths
                     )
-                    sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                    sidecar_store.bump_generation_for_paths(conn, UNIT_PATH_LOG, removed_paths)
                     own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
@@ -2019,7 +2068,7 @@ class EmbeddingIndex:
                 self._admit(conn, np.asarray(vectors).shape[1])
             with conn:
                 self._replace_occurrences(conn, state, rows)
-                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                sidecar_store.bump_generation_for_paths(conn, UNIT_PATH_LOG, [state.path])
         finally:
             conn.close()
 
@@ -2031,7 +2080,7 @@ class EmbeddingIndex:
                     "DELETE FROM semantic_unit_vectors WHERE parent_path = ?", (parent_path,)
                 )
                 _delete_coverage(conn, [parent_path])
-                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                sidecar_store.bump_generation_for_paths(conn, UNIT_PATH_LOG, [parent_path])
         finally:
             conn.close()
 
@@ -3735,18 +3784,108 @@ class EmbeddingIndex:
             with self._unit_lock:
                 served = self._unit_cache
                 if not current(served):
-                    # Release this lane's stale matrix before allocating its replacement.
-                    served = self._unit_cache = None
-                    with call_spans.span("embeddings.unit_matrix_load"):
-                        served = self._unit_cache = self._load_unit_rows(conn, token, width)
-                    log.info(
-                        "semantic-unit matrix full load: rows=%d gen=%d epoch=%d",
-                        len(served.block.rows),
-                        generation,
-                        epoch,
-                    )
+                    changed = self._unit_delta(conn, served, token, width)
+                    patched = None
+                    if changed is not None:
+                        try:
+                            with call_spans.span("embeddings.unit_matrix_catch_up"):
+                                patched = self._catch_up_unit_rows(
+                                    conn, served, changed, token, width
+                                )
+                        except ValueError as error:
+                            # Not provably the full load's matrix: take the full load.
+                            log.warning("semantic-unit matrix catch-up refused: %s", error)
+                    if patched is not None:
+                        log.info(
+                            "semantic-unit matrix catch-up: paths=%d rows=%d gen=%d epoch=%d "
+                            "cached_gen=%d",
+                            len(changed),
+                            len(patched.block.rows),
+                            generation,
+                            epoch,
+                            served.generation,
+                        )
+                        served = self._unit_cache = patched
+                    else:
+                        # Release this lane's stale matrix before allocating its replacement.
+                        served = self._unit_cache = None
+                        with call_spans.span("embeddings.unit_matrix_load"):
+                            served = self._unit_cache = self._load_unit_rows(conn, token, width)
+                        log.info(
+                            "semantic-unit matrix full load: rows=%d gen=%d epoch=%d",
+                            len(served.block.rows),
+                            generation,
+                            epoch,
+                        )
         self._hits += 1
         return served
+
+    def _unit_delta(
+        self,
+        conn: sqlite3.Connection,
+        cached: _UnitCache | None,
+        token: tuple[int, int, int, int],
+        width: int,
+    ) -> list[str] | None:
+        """The parents changed since `cached`, or None if it cannot be carried forward.
+
+        Reads inside the caller's open read transaction, like `_sidecar_delta`, with
+        the same rule: only a delta that the unit log covers without a gap qualifies,
+        so a unit bump that logged no parent is never read as "nothing changed".
+        """
+        epoch, _chunk_generation, instance, generation = token
+        if cached is None or cached.width != width:
+            return None
+        if not sidecar_store.catchup_is_eligible(
+            cached,
+            epoch,
+            generation,
+            instance,
+            run=sidecar_store.read_logged_run(conn, UNIT_PATH_LOG),
+            max_generations=CATCHUP_MAX_GENERATIONS,
+        ):
+            return None
+        changed = sidecar_store.changed_paths_since(
+            conn, UNIT_PATH_LOG, cached.generation, limit=CATCHUP_MAX_PATHS
+        )
+        return None if len(changed) > CATCHUP_MAX_PATHS else changed
+
+    def _catch_up_unit_rows(
+        self,
+        conn: sqlite3.Connection,
+        cached: _UnitCache,
+        changed: list[str],
+        token: tuple[int, int, int, int],
+        width: int,
+    ) -> _UnitCache:
+        """The matrix and proof at `token`, patched from the changed parents' rows only.
+
+        Equals `_load_unit_rows` at the same token: the matrix by `_splice_unit_block`,
+        the proof because each parent's verdict depends on its own record and rows.
+        Raises ValueError when the rows do not fit the snapshot.
+        """
+        parents = json.dumps(sorted(changed), ensure_ascii=False)
+        scope = "FROM semantic_unit_vectors WHERE parent_path IN (SELECT value FROM json_each(?))"
+        count = conn.execute(f"SELECT COUNT(*) {scope}", (parents,)).fetchone()[0]
+        fresh = _unit_block(
+            conn.execute(f"SELECT {_UNIT_COLUMNS} {scope} ORDER BY rowid", (parents,)),
+            count,
+            width,
+        )
+        replaced = frozenset(changed)
+        fresh_coverage, fresh_unproved = _unit_coverage(conn, width, sorted(changed))
+        coverage = {path: held for path, held in cached.coverage.items() if path not in replaced}
+        coverage.update(fresh_coverage)
+        epoch, _chunk_generation, instance, generation = token
+        return _UnitCache(
+            epoch,
+            generation,
+            instance,
+            width,
+            _splice_unit_block(cached.block, replaced, fresh),
+            coverage,
+            (cached.unproved - replaced) | fresh_unproved,
+        )
 
     def _load_unit_rows(
         self, conn: sqlite3.Connection, token: tuple[int, int, int, int], width: int
@@ -4361,7 +4500,7 @@ class EmbeddingIndex:
                     mirror.repopulate_all(conn)
                 sidecar_store.bump_generation_for_reset(conn, CHUNK_PATH_LOG)
                 sidecar_store.bump_meta(conn, "epoch")
-                sidecar_store.bump_meta(conn, SEMANTIC_UNIT_GENERATION)
+                sidecar_store.bump_generation_for_reset(conn, UNIT_PATH_LOG)
                 if self._projected_source_snapshot() != source_snapshot:
                     conn.rollback()
                     return 0

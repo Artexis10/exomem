@@ -217,11 +217,14 @@ CATCHUP_REASON = "catchup"
 
 
 class PathChangeLog(NamedTuple):
-    """Names of one sidecar's change-log table and its two `meta` run markers."""
+    """Names of one sidecar's change-log table, its two `meta` run markers and the
+    `meta` counter it logs: a sidecar holding a second table with its own counter
+    keeps a second log on that counter."""
 
     table: str
     from_key: str
     upto_key: str
+    generation_key: str = "generation"
 
     def validate(self) -> None:
         """Reject a non-identifier table name (it is interpolated into SQL)."""
@@ -284,7 +287,7 @@ def _extend_logged_run(conn: sqlite3.Connection, log: PathChangeLog, generation:
 
 
 def bump_generation_for_paths(conn: sqlite3.Connection, log: PathChangeLog, paths) -> int:
-    """Bump `generation` AND record the paths it changed, in the caller's txn.
+    """Bump the log's generation AND record the paths it changed, in the caller's txn.
 
     Bumping and recording are ONE call by design. The reader treats an unlogged
     generation as "this write changed no rows", so a bump that forgot to declare
@@ -297,7 +300,7 @@ def bump_generation_for_paths(conn: sqlite3.Connection, log: PathChangeLog, path
     transaction already holds.
     """
     log.validate()
-    generation = bump_meta(conn, "generation")
+    generation = bump_meta(conn, log.generation_key)
     rows = [(path, generation) for path in dict.fromkeys(paths)]
     if rows:
         conn.executemany(
@@ -310,7 +313,7 @@ def bump_generation_for_paths(conn: sqlite3.Connection, log: PathChangeLog, path
 
 
 def bump_generation_for_reset(conn: sqlite3.Connection, log: PathChangeLog) -> int:
-    """Bump `generation` for a whole-table rewrite, in the caller's txn.
+    """Bump the log's generation for a whole-table rewrite, in the caller's txn.
 
     A wipe-and-rebuild changes every path at once; enumerating them would make
     the log as big as the corpus and buy nothing, since such a write also bumps
@@ -319,7 +322,7 @@ def bump_generation_for_reset(conn: sqlite3.Connection, log: PathChangeLog) -> i
     ordinary write.
     """
     log.validate()
-    generation = bump_meta(conn, "generation")
+    generation = bump_meta(conn, log.generation_key)
     conn.execute(f"DELETE FROM {log.table}")
     conn.executemany(
         "INSERT INTO meta (key, value) VALUES (?, ?) "
