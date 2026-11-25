@@ -157,6 +157,42 @@ def accepted_origin(pr: dict | None, source: str, main: str) -> dict | None:
     return record
 
 
+def pick_source() -> dict:
+    """Pick the newest main commit since the last release whose Full evidence a cut can reuse.
+
+    A cut from it skips the Full wait. Without one, main's tip is the source and the cut runs
+    its Full fallback. The cut controller re-checks every source, so this choice grants nothing.
+    """
+    main = trusted_main()
+    previous, _ = predecessor(main, main)
+    boundary = previous["reconciliation_commit"]
+    eligible = git("rev-list", "--topo-order", "--first-parent", f"{boundary}^!", main).splitlines()
+    since = git("show", "-s", "--format=%cI", boundary)
+    workflow_id = evidence.api("actions/workflows/ci.yml")["id"]
+    tested = {
+        run["head_sha"]
+        for event in evidence.FULL_EVENTS
+        for page in evidence.api(
+            f"actions/workflows/ci.yml/runs?event={event}&status=success"
+            f"&created=%3E%3D{quote(since, safe='')}&per_page=100",
+            pages=True,
+        )
+        for run in page["workflow_runs"]
+        if evidence.trusted_full(run, os.environ["GH_REPO"], workflow_id)
+    }
+    for candidate in eligible:
+        if candidate not in tested:
+            continue
+        try:
+            predecessor(candidate, main)
+        except (ValueError, subprocess.CalledProcessError):
+            continue
+        selected = evidence.select_evidence(candidate, os.environ["GH_REPO"])
+        if selected:
+            return {"source": candidate, "main": main, "evidence_run": selected["run_id"]}
+    return {"source": main, "main": main, "evidence_run": None}
+
+
 def prepare(source: str) -> dict:
     branch = evidence.cut_branch(source)
     main = trusted_main()
@@ -866,6 +902,7 @@ def main() -> None:
     parser.add_argument(
         "operation",
         choices=(
+            "pick-source",
             "prepare",
             "check-head",
             "push-generated",
@@ -885,7 +922,9 @@ def main() -> None:
     parser.add_argument("--head")
     args = parser.parse_args()
     os.environ["GH_REPO"] = os.environ.get("GH_REPO") or os.environ["GITHUB_REPOSITORY"]
-    if args.operation == "prepare":
+    if args.operation == "pick-source":
+        print(json.dumps(pick_source()))
+    elif args.operation == "prepare":
         if not args.source:
             parser.error("prepare requires --source")
         state = prepare(args.source)

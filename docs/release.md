@@ -296,11 +296,17 @@ at that commit and runs the pinned Release Please action against that branch.
 Later main commits do not change the selected source. Main remains available
 for normal merges and PR pushes.
 
-1. Resolve the merged source; expect one full immutable commit identity.
+1. In a checkout of this repository, pick the source; expect one full commit identity.
 
 ```bash
-source_commit=$(gh api "repos/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/commits/main" --jq .sha)
+source_commit=$(GH_REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)" python3 scripts/release_cuts.py pick-source | jq -r .source)
 ```
+
+`pick-source` picks the newest main commit since the last release that has
+successful Full evidence the cut can reuse. Its JSON names that evidence run.
+When no such commit exists, it picks main's tip and prints `"evidence_run": null`,
+and the cut runs its own Full fallback. Later main commits wait for the next
+release. To release main's tip regardless, set `source_commit` to main's head.
 
 2. Start or resume the cut; expect one controller run on main for that source.
 

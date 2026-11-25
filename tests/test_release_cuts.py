@@ -1235,3 +1235,53 @@ def test_reconcile_reads_the_pushed_head_and_repushes_only_a_stale_projection(mo
     assert merged and merged[0][:3] == ("gh", "pr", "merge")
     assert merged[0][-1] == heads["pushes"][-1]
     assert len(heads["pushes"]) == (2 if case == "red-on-old-projection" else 1)
+
+
+@pytest.mark.parametrize("tested_after_release", [True, False])
+def test_pick_source_prefers_the_newest_fully_tested_commit_since_the_last_release(
+    tmp_path, monkeypatch, tested_after_release
+):
+    """A cut skips the Full wait only from a commit that has Full evidence and the last release."""
+    repository(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    shas = {}
+    for name in ("before-release", "reconciliation", "tested", "tip"):
+        (tmp_path / f"{name}.txt").write_text(name)
+        shas[name] = commit(tmp_path, name)
+    after = {shas["reconciliation"], shas["tested"]} if tested_after_release else set()
+    green = {shas["before-release"]} | after
+
+    def api(path, pages=False):
+        if path == "actions/workflows/ci.yml":
+            return {"id": 7}
+        event = path.split("event=", 1)[1].split("&", 1)[0]
+        runs = [
+            {"head_sha": sha, "event": event, "head_branch": "main"}
+            for sha in sorted(green)
+            if event == "schedule"
+        ]
+        return [{"workflow_runs": runs}]
+
+    def predecessor(source, main):
+        # The controller refuses a source that lacks the preceding reconciliation.
+        git(tmp_path, "merge-base", "--is-ancestor", shas["reconciliation"], source)
+        return {"reconciliation_commit": shas["reconciliation"]}, None
+
+    monkeypatch.setenv("GH_REPO", "example/project")
+    monkeypatch.setattr(cuts, "trusted_main", lambda: shas["tip"])
+    monkeypatch.setattr(cuts, "predecessor", predecessor)
+    monkeypatch.setattr(cuts.evidence, "api", api)
+    monkeypatch.setattr(cuts.evidence, "trusted_full", lambda run, repository, workflow: True)
+    monkeypatch.setattr(
+        cuts.evidence,
+        "select_evidence",
+        lambda source, repository: {"run_id": "11"} if source in green else None,
+    )
+
+    picked = cuts.pick_source()
+
+    if tested_after_release:
+        assert picked == {"source": shas["tested"], "main": shas["tip"], "evidence_run": "11"}
+    else:
+        # Evidence from before the last release cannot serve; the tip runs its own Full.
+        assert picked == {"source": shas["tip"], "main": shas["tip"], "evidence_run": None}
