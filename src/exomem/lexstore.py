@@ -4028,6 +4028,19 @@ def _changed_paths(
     return [path for (path,) in found]
 
 
+def _restart_change_journal(conn: sqlite3.Connection) -> None:
+    """Drop every row of the change journal but one new row that names no page. It owns no transaction.
+
+    Every position read before the restart loses its row, so `_changed_paths` vouches for no gap across it and
+    a kept state there reads whole. Deleting only some paths' rows would let a kept state patch across a gap
+    that no longer names them. The new row gives readers a position to patch forward from, and the sequence
+    never repeats; its path is empty because no page path is.
+    """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (CHANGE_JOURNAL,)).fetchone():
+        conn.execute(f"INSERT INTO {CHANGE_JOURNAL}(path, stamp) VALUES ('', randomblob(8))")
+        conn.execute(f"DELETE FROM {CHANGE_JOURNAL} WHERE seq < (SELECT max(seq) FROM {CHANGE_JOURNAL})")
+
+
 class _PageRow(NamedTuple):
     """The columns of one page row that recall reads; see `_CatalogueRows`."""
 
@@ -5656,6 +5669,20 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> bool:
         return get_store(vault_root).delete_rel_paths(removed_rel_paths) is not False
     except Exception as e:  # noqa: BLE001
         log.warning("lexical sidecar delete skipped (%s)", e)
+        return False
+
+
+def restart_change_journal(vault_root: Path) -> bool:
+    """Forget every path that the catalogue's change journal names; False when the catalogue refused it.
+
+    The journal still names a page after its rows are dropped, so an erasure restarts it.
+    """
+    if not _catalog_usable() or not lexical_path(vault_root).exists():
+        return True
+    try:
+        return get_store(vault_root).restart_change_journal()
+    except Exception as e:  # noqa: BLE001
+        log.warning("lexical change journal restart skipped (%s)", e)
         return False
 
 
@@ -9173,6 +9200,31 @@ class LexicalStore:
                 _admit_after_bounded_runtime_repair(self.vault_root, applied)
             self._note_pending_publication([], list(rel_paths))
         return applied
+
+    def restart_change_journal(self) -> bool:
+        """Restart the live catalogue's change journal (`_restart_change_journal`) under the barrier.
+
+        The kept catalogue states can no longer patch, so they are dropped with it rather than held until
+        evicted. False when the barrier or the catalogue refused the write.
+        """
+        if self._failed:
+            return False
+        from .vault import VaultLockError
+
+        try:
+            with self._publication_lock(timeout=_PUBLICATION_TIMEOUT_FOREGROUND):
+                conn = self._connect()
+                try:
+                    with conn:
+                        _restart_change_journal(conn)
+                finally:
+                    conn.close()
+        except (VaultLockError, sqlite3.Error) as e:
+            log.info("lexical change journal restart deferred (%s)", e)
+            return False
+        with self._term_frequency_cache_lock:
+            self._catalogue_row_states.clear()
+        return True
 
     def purge_exact_persisted_rows(
         self, values: list[str], *, connection_path: Path | None = None

@@ -41,7 +41,7 @@ _READ_FAILURES = frozenset({"canonical_page_unavailable", "inbound_references_un
 # component reason (an index switched off, logs that are not content-private, custody that cannot be
 # proved) needs a change outside this call, so the answer settles on it. A closed set the eraser emits.
 _TRANSIENT = frozenset({"native_ledger_unreadable", "copy_unreadable", "page_unreadable", "heat_unreadable",
-                        "generation_unwritable"})
+                        "generation_unwritable", "journal_unwritable"})
 
 
 def _identity_sha256(identity: dict) -> str:
@@ -363,6 +363,12 @@ class _Eraser:
                 return {"state": "unknown", "reason": derived.get("reason")}
             return {"state": "pending"}
         if not progress.get("caches_fenced"):
+            from . import lexstore
+
+            # The catalogue's change journal still names the dropped page; it is the history kept catalogue
+            # states patch from, so it restarts here too.
+            if not lexstore.restart_change_journal(self.root):
+                return {"state": "unknown", "reason": "journal_unwritable"}
             if not source_custody.advance_retirement_generation(self.root):
                 return {"state": "unknown", "reason": "generation_unwritable"}
             progress["caches_fenced"] = True

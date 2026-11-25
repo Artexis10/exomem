@@ -105,6 +105,23 @@ def test_a_position_that_the_journal_bound_dropped_cannot_vouch(
     assert lexstore._changed_paths(conn, since, lexstore._journal_position(conn)) is None
 
 
+def test_a_restart_names_no_page_and_vouches_for_no_position_before_it(tmp_path: Path) -> None:
+    """An erasure restarts the journal. A state kept before it reads whole, so it cannot keep the erased page."""
+    conn = _catalogue(tmp_path / "catalogue.sqlite")
+    _write(conn, "erased.md", "a.md")
+    since = lexstore._journal_position(conn)
+    conn.execute("DELETE FROM pages WHERE path = 'erased.md'")
+
+    lexstore._restart_change_journal(conn)
+
+    assert conn.execute(f"SELECT path FROM {lexstore.CHANGE_JOURNAL}").fetchall() == [("",)]
+    restarted = lexstore._journal_position(conn)
+    assert lexstore._changed_paths(conn, since, restarted) is None
+    # A reader positioned at the restart patches forward from it.
+    _write(conn, "b.md")
+    assert lexstore._changed_paths(conn, restarted, lexstore._journal_position(conn)) == ["b.md"]
+
+
 def test_rows_patched_after_seeded_writes_equal_a_whole_read(tmp_path: Path) -> None:
     """Edits, renames, deletions and moves in and out of the knowledge base and its raw material.
 
