@@ -43,6 +43,13 @@ invoke the canonical Python scripts directly and require a real `python3`
 executable on a supported, normally trusted execution surface. They do not
 run in Claude Chat. Skills remain the same portable operating contract.
 
+The connector edition, `generated/claude-connector-hooks`, is listed in the
+repository marketplace as `evermatter-hooks`. It carries the same hooks and
+skills as the hooked edition and bundles no MCP server. Install it on an
+account that already connects Evermatter, for example a self-hosted server
+added as a connector. Its hooks then activate that existing connection. The
+hooked edition would add a second server that points at Evermatter Cloud.
+
 Hook installation health does not prove that the client loaded or executed the
 registration. Native acceptance must observe a normally trusted fresh session,
 its compiler call, and governed capture/readback. Explicit MCP mode instructs

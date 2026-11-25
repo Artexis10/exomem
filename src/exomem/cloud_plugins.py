@@ -17,13 +17,18 @@ from . import package_skills, workflow_skills
 
 _SCHEMA_BASE = "https://agent-plugins.org/schemas/1.0.0/"
 
-# Each generated edition maps to its provider and whether it carries command hooks.
-# The Claude directory admits command hooks only from Verified organizations, so its
-# edition omits them; the hooked edition ships through the repository marketplace.
+# Each generated edition maps to its provider, whether it carries command hooks and
+# whether it bundles the Cloud MCP server. The Claude directory admits command hooks
+# only from Verified organizations, so its edition omits them; the hooked edition ships
+# through the repository marketplace. The connector edition carries the same hooks and
+# skills without a server, for an account that already connects Evermatter itself
+# (a self-hosted server or a separately added connector); a bundled server would add a
+# second, unauthenticated connection to the wrong account there.
 _EDITIONS = {
-    "claude": ("claude", False),
-    "claude-hooks": ("claude", True),
-    "openai": ("openai", False),
+    "claude": ("claude", False, True),
+    "claude-hooks": ("claude", True, True),
+    "claude-connector-hooks": ("claude", True, False),
+    "openai": ("openai", False, True),
 }
 # Claude's directory policy fixes this closed set of admitted file types; a licence,
 # readme and .gitignore are admitted by name. ICO is omitted: the published checklist
@@ -192,7 +197,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
     # The repository's own marketplace lists the hooked Claude edition under this name.
     repository = definition["repository"].removeprefix("https://github.com/")
     full_install = f"/plugin install {definition['name']} --marketplace {repository}"
-    for edition, (provider, hooked) in _EDITIONS.items():
+    for edition, (provider, hooked, bundles_server) in _EDITIONS.items():
+        # The connector edition is its own marketplace plugin, so it takes its own name.
+        identity_override = definition["connector_edition"] if not bundles_server else {}
         target = destination / edition
         if target.exists():
             shutil.rmtree(target)
@@ -207,12 +214,22 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
         assets.mkdir()
         shutil.copyfile(root / "plugins/cloud/assets/icon.png", assets / "icon.png")
         shutil.copyfile(package_skills.APACHE_LICENSE, target / "LICENSE")
+        display_name = identity_override.get("display_name", definition["display_name"])
         readme = (
-            f"# {definition['display_name']}\n\n"
+            f"# {display_name}\n\n"
             f"{definition['description']}\n\n"
             "## Getting started\n\n"
-            "Install the plugin and connect your Evermatter account. Check the account "
-            "shown on the sign-in page before approving access. Then chat normally. "
+            + (
+                "Install the plugin and connect your Evermatter account. Check the account "
+                "shown on the sign-in page before approving access. "
+                if bundles_server
+                else "Connect Evermatter to your assistant first, as a connector or a custom "
+                "MCP server for your Evermatter Cloud account or your own Evermatter server. "
+                "This edition adds lifecycle hooks and skills and bundles no MCP server, so "
+                "it uses the Evermatter connection your account already has. Install the "
+                "full Evermatter plugin instead if you have not connected Evermatter. "
+            )
+            + "Then chat normally. "
             "When something is worth keeping, ask Evermatter to remember it; in a new chat, "
             "ask about what you saved or where you left off.\n\n"
             "For example:\n\n"
@@ -259,7 +276,9 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             with (target / "README.md").open("a", encoding="utf-8", newline="\n") as stream:
                 stream.write(
                     "\n## Claude lifecycle hooks\n\n"
-                    f"To install this plugin in Claude Code, run `{full_install}`. "
+                    "To install this plugin in Claude Code, run "
+                    f"`/plugin install {identity_override.get('name', definition['name'])} "
+                    f"--marketplace {repository}`. "
                     "On supported Cowork/Claude Code surfaces, trust the plugin's command "
                     "hooks through the normal client approval flow. They invoke canonical "
                     "Python scripts directly and require a real `python3` executable on "
@@ -275,8 +294,8 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
                 )
         if provider == "claude":
             manifest = {
-                "name": definition["name"],
-                "displayName": definition["display_name"],
+                "name": identity_override.get("name", definition["name"]),
+                "displayName": display_name,
                 "description": definition["description"],
                 "version": identity["version"],
                 "author": definition["author"],
@@ -293,11 +312,12 @@ def build_packages(root: Path, output: Path | None = None) -> dict:
             path = target / ".claude-plugin/plugin.json"
             path.parent.mkdir()
             path.write_bytes(_json_bytes(manifest))
-            (target / ".mcp.json").write_bytes(
-                _json_bytes(
-                    {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
+            if bundles_server:
+                (target / ".mcp.json").write_bytes(
+                    _json_bytes(
+                        {"mcpServers": {"exomem": {"type": "http", "url": definition["resource"]}}}
+                    )
                 )
-            )
             if not hooked:
                 _validate_claude_directory(target)
         else:

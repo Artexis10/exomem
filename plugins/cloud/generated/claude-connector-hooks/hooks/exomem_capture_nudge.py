@@ -1,0 +1,1397 @@
+#!/usr/bin/env python3
+"""Stop hook: nudge a Knowledge Base capture when a turn looks like a landing.
+
+The KB skill already says to auto-capture at stepping-stones, but skill prose is
+*passive* — over a long thread the model forgets to check, so "auto-save" quietly
+never fires. This hook re-arms the check: when a turn lands durable work and
+hasn't already written to the KB, it blocks the stop with a one-line reminder
+so the agent evaluates whether a capture is warranted before ending. A landing
+alone does not require a write.
+
+LANGUAGE-AGNOSTIC by design. It does NOT gate on English keywords — that would
+miss Japanese and every other language. The gate is structural, and every
+extra fire costs a full-context model turn, so below the most aggressive
+prominence ("maximal") a turn is a candidate only if it contains a LANDING: a
+shell command that commits, pushes, merges, tags or opens/merges a pull request
+or release (`_LANDING_COMMANDS`; Claude `Bash` and Codex shell/exec calls) and
+did not fail. A command counts unless its output reports an explicit non-zero
+exit code (Claude: `is_error`); a Codex cell that returned while the command was
+still running carries no exit code and counts. A turn is also a candidate when it creates a file with Claude's `Write`
+tool and its reply names that file (`_handed_over_file`). Q&A, reading and CI-watching turns stay silent however long the reply.
+Measured over 14 days a length gate fired on ~76% of prompts and only 20% of
+those turns wrote anything. At "maximal" the older gate stays: the reply is
+substantial (>= a char threshold). Either way the KB must not already have been
+written this turn, and a per-session cooldown bounds how often it can fire, while
+the agent — which judges "is this really a stepping-stone?" well in any language —
+makes the actual call (the reminder tells it to do nothing if it isn't one).
+Conversation-level decisions with no landing are covered by the episode ask below.
+
+Cheap and safe: the script itself is free (stdlib only), but reminder context also
+consumes tokens. Self-disarms via `stop_hook_active` (no loops); the
+cooldown caps frequency; every trigger is logged under the active client home for
+tuning.
+
+Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_CHARS
+(default 300 — the "maximal" length gate and the episode ask's "substantive turn"; lower
+it for a dense script like Japanese, which packs more meaning per char),
+EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
+names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
+
+Delivery. By default the per-turn capture reminder blocks the Stop, which forces one
+extra model turn. With `EXOMEM_CAPTURE_NUDGE_DELIVERY=next-turn` (or the config key
+`capture_nudge_delivery`; anything else means `stop`) the same reminder, after the same
+gates and cooldown, is left as a pending marker for the session instead, the Stop is not
+blocked, and the UserPromptSubmit hook (`exomem_retrieve_nudge.py`) adds the reminder to
+that session's next prompt, once, if it is under 6 hours old. The episode ask below
+blocks in both modes.
+
+Episode ask. Every K substantive turns (K and a cooldown by prominence,
+`_EPISODE_ASK_PRESETS`; EXOMEM_EPISODE_ASK_TURNS / EXOMEM_EPISODE_ASK_COOLDOWN_SEC
+override), and only once work has LANDED since the last ask or record
+(`landed_since_ask`, set by the same `_successful_landing` the capture reminder
+uses), the hook asks for one `episode_memory` record under a key derived from
+the client and session id alone (`episode_key`), so the key survives compaction
+without the hook reading a transcript record. A session that never lands work is
+never asked, and an ask answered without a record is not repeated until the next
+landing: an autonomous run with no record would otherwise be blocked at every
+cooldown for as long as it ran. Only a SUCCESSFUL record resets the turn count:
+an unrelated write, a `Saved ->` marker or a failed record leaves the episode
+pending. When the ask is due it takes that Stop; on every other Stop the
+per-turn capture reminder behaves exactly as before. The hook never records
+anything itself — hooks trigger, agents author.
+
+Before an ask actually fires, the hook makes one read-only, bounded REST call —
+`episode_memory(action="inspect", episode=<the derived key>)` against the local
+door, using the same host/port/key resolution and bounded-timeout pattern the
+retrieve hook's REST rung uses — and compares the revision count it reports
+against the count last seen (`last_seen_revisions` in the per-session state
+file). A higher count means a recap was recorded through some other door (a
+client whose tool list predates `episode_memory`, the REST facade directly, a
+door this hook doesn't otherwise watch), which the transcript-only
+`_successful_episode_record` check can never see; the substantive-turn count
+resets and the ask is skipped. A record this hook saw itself leaves the
+baseline unknown, so the next read re-bases on it instead of counting it as
+another door's. `inspect` is scoped to one audience, so "any door" means any
+door acting as the same audience as the REST key; a recap recorded under a
+different principal is invisible here and the ask simply fires. Any failure
+of that call — the door unconfigured, a timeout, any error, or the episode
+simply not found yet — falls straight through to the transcript-only
+behaviour above.
+
+Candidate coverage (close-memory-loop 4.1). A successful write or a `Saved ->`
+marker is an attempted capture: it answers that turn's capture reminder and
+never the episode's coverage. Once a session prepares, dispositions or resumes
+an episode candidate, the hook mirrors that episode's ledger state -- attempted
+leaves, pending items, the input revision it is covered through and its next
+step -- from one bounded `episode_memory(action="candidates")` call on the same
+door, at most once per episode-ask cooldown. While the ledger's next step is
+something the agent can do (`decide`, or `resume`/`attest` when the service
+executes candidates) the Stop gets the coverage ask, whatever was written that
+turn. A covered ledger is not read again until the session moves its workflow.
+A session that never prepared a candidate never reads it, and an unreachable
+door leaves the turn as it was.
+
+Native-MCP activation mode (`EXOMEM_RETRIEVE_INJECT=mcp`, or the explicit
+`--activation-mode mcp`) disables both external inspection paths, including
+credential resolution. Transcript-based record detection and local episode
+bookkeeping stay active. `--client` and `--hook-home` bind them to the installed
+profile rather than the shared script directory.
+
+Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
+`{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
+reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
+hook crash must not break the session.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import shlex
+import sys
+import threading
+import time
+from functools import lru_cache
+from pathlib import Path, PureWindowsPath
+
+# The server-name token that marks an Evermatter tool; a host fixes it, a vault does not. A host
+# builds tool names from the server key or the connector name, and a connector carries the product's
+# name: Evermatter now, Exomem or Knowledge Base from before the renames.
+_KB_SERVER = r"(?:evermatter|exomem|knowledge[_-]?base)"
+# Every Evermatter call that lands durable work: a typed write tool by its name, a door write as
+# `manage_memory:<area>.<action>`. Stamped from `exomem.public_surface.write_selectors()`; the hook
+# cannot import the package, and `tests/test_single_purpose_guidance.py` fails when the two drift.
+# A read tool and a read door operation are absent, so discovery leaves the check armed.
+_KB_WRITES = (
+    "add_observation",
+    "add_plan_item",
+    "add_record",
+    "create_note",
+    "decide_review_item",
+    "edit_note",
+    "edit_plan_item",
+    "edit_record",
+    "manage_memory:connections.create_entity",
+    "manage_memory:episodes.disposition",
+    "manage_memory:episodes.input",
+    "manage_memory:episodes.prepare",
+    "manage_memory:episodes.resume",
+    "manage_memory:files.append",
+    "manage_memory:files.create",
+    "manage_memory:files.delete",
+    "manage_memory:files.move",
+    "manage_memory:files.reclassify",
+    "manage_memory:files.recover",
+    "manage_memory:files.revert_reclassification",
+    "manage_memory:plans.create",
+    "manage_memory:plans.rebaseline",
+    "manage_memory:plans.revise",
+    "manage_memory:records.bulk_upsert",
+    "manage_memory:records.create",
+    "manage_memory:records.discard",
+    "manage_memory:records.import",
+    "manage_memory:records.rebaseline",
+    "manage_memory:records.retract",
+    "manage_memory:records.revise",
+    "save_episode",
+    "save_evidence",
+    "save_source",
+    "supersede_note",
+    "upload_files",
+)
+#: The capture check, one short line on every fire. It names the rules that prevent known
+#: incidents and points at the installed skill or portable operating contract.
+#: A connected vault need not contain a readable copy of the shipped references.
+#: The hook is structural; it does not carry the doctrine.
+REMINDER_SHORT = (
+    "[Evermatter capture check] Per live policy: no chat transcripts; supersede_note supersedes a "
+    "contradicted conclusion, and now advice the user says failed; intent->Planning, outcome->Records; "
+    "no transient code/test/CI; nothing durable: stop. "
+    'Rules: Evermatter skill or read_instructions.'
+)
+
+#: The episode ask. `{key}` is the session's episode key.
+EPISODE_ASK = (
+    "[Evermatter episode check] If live policy permits capture at a durable stop, "
+    'save_episode once: episode="{key}", subject, summary, '
+    "decided. Compile or dismiss every Decided item before citing it from updated "
+    "compiled notes. Otherwise do nothing."
+)
+#: The candidate-coverage ask (task 4.1), with its own prefix. `{key}` is the
+#: episode whose candidates the session prepared, `{next}` its ledger's next step.
+COVERAGE_ASK = (
+    "[Evermatter episode coverage] Episode {key} is not covered through its current "
+    "input; its ledger's next step is {next}. A committed note or a Saved marker "
+    'does not cover it. Read inspect_memory operation="episodes.candidates" and continue: '
+    'decide each candidate, resume the routed ones, or make the final pass '
+    '(inspect_memory operation="episodes.coverage", then manage_memory operation="episodes.resume" with postcommit=true). Deferred work may '
+    "stay deferred."
+)
+_WORKFLOW_ACTIONS = frozenset({"prepare", "disposition", "resume"})
+_EPISODE_KEY_RE = re.compile(r"^ep-[0-9a-f]{32}$")
+_COVERAGE_STEPS = frozenset({"decide", "resume", "attest", "none"})
+#: The label the server derives the same key from (`episode_capture.hook_key`).
+_EPISODE_CLIENT_LABELS = {"claude": "claude-code", "codex": "codex"}
+_EPISODE_KEY_LABEL = "exomem-episode-key-v1"
+
+
+# Back-compat: the tunables were renamed KB_CAPTURE_NUDGE_* -> EXOMEM_CAPTURE_NUDGE_*
+# with the knowledge-base -> exomem rename. The OLD names still work — normalized to
+# the new names at startup so the rest of the hook reads only EXOMEM_* everywhere.
+_ENV_ALIASES = (
+    ("EXOMEM_CAPTURE_NUDGE_DISABLE", "KB_CAPTURE_NUDGE_DISABLE"),
+    ("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", "KB_CAPTURE_NUDGE_MIN_CHARS"),
+    ("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", "KB_CAPTURE_NUDGE_COOLDOWN_SEC"),
+)
+
+
+def _normalize_env_aliases() -> None:
+    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+    for new, old in _ENV_ALIASES:
+        if new not in os.environ and old in os.environ:
+            os.environ[new] = os.environ[old]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name) or default)
+    except (ValueError, TypeError):
+        return default
+
+
+# Prominence presets. This hook is deployed as a STANDALONE copy into the client's
+# hook directory, so it cannot import `exomem.prominence` — the table is duplicated
+# here deliberately, and `tests/test_prominence.py` asserts the two stay identical.
+# Keys are the level; values are (min_chars, cooldown_sec) or None to disable.
+_PROMINENCE_PRESETS = {
+    "off": None,
+    "light": (800, 900),
+    "balanced": (300, 300),
+    "maximal": (120, 60),
+}
+# Episode-ask cadence per level: (substantive turns since the last record,
+# seconds between asks) or None. Duplicated from `exomem.prominence` for the
+# same standalone reason; `tests/test_capture_nudge_episode.py` pins the two.
+_EPISODE_ASK_PRESETS = {
+    "off": None,
+    "light": (12, 3600),
+    "balanced": (6, 1200),
+    "maximal": (3, 600),
+}
+_PROMINENCE_ALIASES = {
+    "none": "off",
+    "silent": "off",
+    "disabled": "off",
+    "minimal": "light",
+    "low": "light",
+    "quiet": "light",
+    "default": "balanced",
+    "medium": "balanced",
+    "normal": "balanced",
+    "high": "maximal",
+    "max": "maximal",
+    "full": "maximal",
+    "aggressive": "maximal",
+}
+
+
+def _config_path() -> Path:
+    """Mirror of `exomem.mode.config_path` — same file the CLI writes."""
+    override = os.environ.get("EXOMEM_CONFIG_PATH")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        base = (
+            os.environ.get("PROGRAMDATA")
+            or os.environ.get("ALLUSERSPROFILE")
+            or "C:" + r"\ProgramData"
+        )
+        return Path(base) / "exomem" / "config.json"
+    return Path.home() / ".exomem" / "config.json"
+
+
+def _prominence() -> str:
+    """Active level: `EXOMEM_PROMINENCE` env -> config file -> balanced.
+
+    Defaults to `balanced` rather than auto-detecting a surface: if this hook is
+    running at all, the client supports hooks, which is exactly the case that wants
+    the hook-backed default.
+    """
+
+    def _canon(value):
+        if not value or not isinstance(value, str):
+            return None
+        v = value.strip().lower()
+        if v in _PROMINENCE_PRESETS:
+            return v
+        return _PROMINENCE_ALIASES.get(v)
+
+    from_env = _canon(os.environ.get("EXOMEM_PROMINENCE"))
+    if from_env:
+        return from_env
+    try:
+        data = json.loads(_config_path().read_text("utf-8"))
+        from_config = _canon(data.get("prominence")) if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
+        from_config = None
+    return from_config or "balanced"
+
+
+#: The reminder's delivery modes. A closed pair this hook implements, so the setting is not a vocabulary.
+_DELIVERY_NEXT_TURN = "next-turn"
+
+
+def _delivery() -> str:
+    """How the per-turn capture reminder is delivered: `stop` (block the Stop) or `next-turn`.
+
+    `EXOMEM_CAPTURE_NUDGE_DELIVERY` env -> `capture_nudge_delivery` in the config file -> `stop`.
+    The first layer that sets a value decides, and any value but `next-turn` means `stop`, so a
+    typo keeps today's behaviour instead of silently changing it.
+    """
+    value = os.environ.get("EXOMEM_CAPTURE_NUDGE_DELIVERY")
+    if not value or not value.strip():
+        try:
+            data = json.loads(_config_path().read_text("utf-8"))
+            value = data.get("capture_nudge_delivery") if isinstance(data, dict) else None
+        except Exception:  # noqa: BLE001 — missing/corrupt config must degrade to default
+            value = None
+    if isinstance(value, str) and value.strip().lower() == _DELIVERY_NEXT_TURN:
+        return _DELIVERY_NEXT_TURN
+    return "stop"
+
+
+def _hook_client() -> str:
+    explicit = os.environ.get("EXOMEM_HOOK_CLIENT", "").strip().lower()
+    if explicit in {"claude", "codex"}:
+        return explicit
+    try:
+        parts = {p.lower() for p in Path(__file__).resolve().parts}
+    except Exception:  # noqa: BLE001 — path resolution must not break the hook
+        parts = set()
+    if ".codex" in parts:
+        return "codex"
+    return "claude"
+
+
+def _hook_home() -> Path:
+    """The client's state home. Mirrors `resolve_home` in
+    `exomem_continuation_checkpoint.py` exactly (a standalone script cannot import
+    its sibling): the checkpoint hook clears this hook's stamps under that home on a
+    compaction, so the two MUST resolve alike or the re-arm misses. Pinned by
+    `tests/test_nudge_diet.py::test_every_hook_resolves_its_home_the_way_the_checkpoint_does`.
+    """
+    env = os.environ
+    shared = env.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if _hook_client() == "codex":
+        return Path(env.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(env.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+
+
+def _content_blocks(msg: dict) -> list[dict]:
+    if not isinstance(msg, dict):
+        return []
+    c = msg.get("content")
+    if isinstance(c, str):
+        return [{"type": "text", "text": c}]
+    if isinstance(c, list):
+        out: list[dict] = []
+        for b in c:
+            if isinstance(b, dict):
+                if b.get("type") in {"input_text", "output_text"}:
+                    out.append({**b, "type": "text"})
+                else:
+                    out.append(b)
+            elif isinstance(b, str):
+                out.append({"type": "text", "text": b})
+        return out
+    return []
+
+
+def _codex_call_output_succeeded(output: object) -> bool:
+    """Confirm a Codex function call completed without an MCP error.
+
+    Codex 0.144.x stores connector output as a timing prelude followed by an
+    ``Output:`` JSON object. There is no positive status field, so malformed or
+    missing output stays unconfirmed and must not suppress the capture check.
+    """
+    if not isinstance(output, str):
+        return False
+    match = re.search(r"(?:^|\n)Output:\s*", output)
+    if not match:
+        return False
+    try:
+        result = json.loads(output[match.end() :].strip())
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(result, dict):
+        return False
+    if result.get("error") or result.get("error_code"):
+        return False
+    error_data = result.get("error_data")
+    if isinstance(error_data, dict):
+        if error_data.get("type") == "mcp_tool_execution_error":
+            return False
+        nested = error_data.get("result")
+        if isinstance(nested, dict) and nested.get("isError") is True:
+            return False
+    return True
+
+
+def _refusal_payload(payload: object) -> bool:
+    """Whether a parsed tool result is a refusal.
+
+    The server answers a refusal with `{"error": {...}}` and no `success`; the old envelope that
+    `response_detail="full"` carries beside it, and REST, say `{"success": false}`.
+    """
+    return isinstance(payload, dict) and (
+        payload.get("success") is False or isinstance(payload.get("error"), dict)
+    )
+
+
+def _refused_with_envelope(content: object) -> bool:
+    """Whether a Claude tool result holds the server's refusal.
+
+    MCP answers a coded refusal as normal tool content, so the result carries no
+    `is_error`. Only the parsed payload shows that the call was refused.
+    """
+    if isinstance(content, dict):
+        return _refusal_payload(content)
+    if isinstance(content, str):
+        texts = [content]
+    elif isinstance(content, list):
+        texts = [b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+    else:
+        return False
+    for text in texts:
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            continue
+        if _refusal_payload(payload):
+            return True
+    return False
+
+
+def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[dict]]:
+    """Return (assistant_text, tool calls) for the latest turn from the JSONL
+    transcript. Walks backward, stopping at the human message that began the turn
+    (a user message with real text and no tool_result block)."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()  # drop a partial first line
+            raw = f.read().decode("utf-8", "replace")
+    except OSError:
+        return "", []
+    chunks: list[str] = []
+    tools: list[dict] = []
+    failed_tool_ids: set[str] = set()
+    completed_codex_tool_ids: set[str] = set()
+    shell_failed_ids: set[str] = set()
+    for line in reversed([ln for ln in raw.splitlines() if ln.strip()]):
+        try:
+            obj = json.loads(line)
+        except Exception:  # noqa: BLE001 — malformed transcript rows are ignored
+            continue
+        payload = obj.get("payload")
+        record = (
+            payload
+            if obj.get("type") == "response_item" and isinstance(payload, dict)
+            else obj
+        )
+        msg = (
+            record.get("message")
+            if isinstance(record.get("message"), dict)
+            else record
+        )
+        role = msg.get("role") if isinstance(msg, dict) else None
+        typ = record.get("type") if isinstance(record, dict) else None
+        if typ == "custom_tool_call":
+            # Current Codex runs shell commands as `exec` cells of JavaScript.
+            tools.append(
+                {
+                    "id": str(record.get("call_id") or ""),
+                    "name": str(record.get("name") or ""),
+                    "operation": "",
+                    "input": {"source": record.get("input")},
+                    "requires_confirmed_output": True,
+                }
+            )
+        elif typ in {"function_call_output", "custom_tool_call_output"}:
+            call_id = str(record.get("call_id") or "")
+            if call_id and _exit_code_failed(record.get("output")):
+                shell_failed_ids.add(call_id)
+            if call_id and _codex_call_output_succeeded(record.get("output")):
+                completed_codex_tool_ids.add(call_id)
+            elif call_id:
+                failed_tool_ids.add(call_id)
+        elif typ == "function_call":
+            arguments = record.get("arguments")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (json.JSONDecodeError, TypeError):
+                    arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            namespace = str(record.get("namespace") or "")
+            name = str(record.get("name") or "")
+            operation = _operation_of(arguments)
+            tools.append(
+                {
+                    "id": str(record.get("call_id") or ""),
+                    "name": f"{namespace}{name}",
+                    "operation": operation,
+                    "input": arguments,
+                    "requires_confirmed_output": True,
+                }
+            )
+        elif role == "assistant" or typ in {"assistant", "agent_message"}:
+            for b in _content_blocks(msg):
+                if b.get("type") == "text":
+                    chunks.append(b.get("text", ""))
+                elif b.get("type") == "tool_use":
+                    name = str(b.get("name", ""))
+                    tool_input = b.get("input")
+                    operation = _operation_of(tool_input) if isinstance(tool_input, dict) else ""
+                    tools.append(
+                        {
+                            "id": str(b.get("id") or ""),
+                            "name": name,
+                            "operation": operation,
+                            "input": tool_input if isinstance(tool_input, dict) else {},
+                        }
+                    )
+        elif role == "user" or typ == "user":
+            blocks = _content_blocks(msg)
+            for b in blocks:
+                if b.get("type") == "tool_result" and (
+                    b.get("is_error") is True or _refused_with_envelope(b.get("content"))
+                ):
+                    failed_tool_ids.add(str(b.get("tool_use_id") or ""))
+            if any(b.get("type") == "text" for b in blocks) and not any(
+                b.get("type") == "tool_result" for b in blocks
+            ):
+                break  # reached the human prompt that began this turn
+    for tool in tools:
+        tool_id = tool["id"]
+        if tool.get("requires_confirmed_output") and _tool_commands(tool):
+            # Shell output carries exit codes, not the connector `Output:` JSON,
+            # and no code means the command was still running: not a failure.
+            tool["failed"] = tool_id in shell_failed_ids
+            continue
+        tool["failed"] = bool(
+            tool_id
+            and (
+                tool_id in failed_tool_ids
+                or (
+                    tool.get("requires_confirmed_output")
+                    and tool_id not in completed_codex_tool_ids
+                )
+            )
+        )
+    return "".join(reversed(chunks)), tools
+
+
+def _operation_of(arguments: dict) -> str:
+    """The operation a door call selects: its `operation` string, such as `episodes.prepare`.
+
+    A typed tool has none; `edit_note` takes an `action`, which names a change and never a door.
+    """
+    return str(arguments.get("operation") or arguments.get("action") or "")
+
+
+def _successful_kb_write(tool: dict) -> bool:
+    """Whether one observed tool call completed a real KB mutation."""
+    if tool.get("failed"):
+        return False
+    name = str(tool.get("name") or "").lower()
+    if not re.search(_KB_SERVER, name, re.I):
+        return False
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    operation = str(tool.get("operation") or "") or _operation_of(tool_input)
+    # A closed set of tool names that the server fixes; the host adds its own prefix, so match the tail.
+    if not any(name.endswith(write) for write in _KB_WRITES if ":" not in write) and not any(
+        f"{name}:{operation}".lower().endswith(write) for write in _KB_WRITES if ":" in write
+    ):
+        return False
+    # A preview validates the call and writes nothing. A dismissal, snooze or stance records a
+    # decision on a review item; only `accept` saves a relation.
+    if name.endswith("decide_review_item") and tool_input.get("decision") != "accept":
+        return False
+    return tool_input.get("preview") is not True
+
+
+#: Command words whose success lands durable work. Matched structurally on the
+#: parsed command (see `_landing_command`), never as a substring of prose.
+_LANDING_COMMANDS = (
+    ("git", "commit"),
+    ("git", "push"),
+    ("git", "merge"),
+    ("git", "tag"),
+    ("yadm", "commit"),
+    ("yadm", "push"),
+    ("gh", "pr", "create"),
+    ("gh", "pr", "merge"),
+    ("gh", "release", "create"),
+)
+_SHELL_TOOLS = frozenset(
+    {"bash", "exec", "exec_command", "shell", "shell_command", "local_shell"}
+)
+_SHELL_WRAPPERS = frozenset({"sudo", "command", "time", "nohup", "exec"})
+#: Shell keywords that may precede a command in a segment (`if git push; then`).
+_SHELL_KEYWORDS = frozenset({"if", "then", "elif", "else", "do", "while", "until", "!"})
+#: Options of `env` / `timeout` that take a value.
+_ENV_VALUE_OPTIONS = frozenset({"-u", "--unset", "-C", "--chdir", "-S", "--split-string"})
+_TIMEOUT_VALUE_OPTIONS = frozenset({"-k", "--kill-after", "-s", "--signal"})
+#: Arguments that make an otherwise-landing command a non-landing: a dry run, an
+#: abandoned merge, a deleted remote ref. `git commit -n` is `--no-verify`, which
+#: still commits, so only `--dry-run` rules a commit out.
+_NON_LANDING_ARGS = {
+    ("git", "commit"): frozenset({"--dry-run"}),
+    ("git", "push"): frozenset({"--dry-run", "-n", "--delete", "-d"}),
+    ("git", "merge"): frozenset({"--abort", "--quit"}),
+}
+#: `git tag` lands only when it creates a tag; these list, verify or delete.
+_TAG_READ_LONG = frozenset(
+    {"list", "contains", "delete", "verify", "points-at", "merged", "no-merged"}
+)
+_TAG_READ_SHORT = frozenset("lndv")
+_TAG_CREATE_LONG = frozenset({"annotate", "sign", "message", "force", "local-user"})
+_TAG_CREATE_SHORT = frozenset("asmfu")
+_SHELLS = frozenset({"bash", "sh", "zsh", "dash"})
+#: Global options that take a value, which must not be read as the subcommand.
+_VALUE_OPTIONS = {
+    "git": frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}),
+    "yadm": frozenset({"-Y", "--yadm-dir", "--yadm-data", "-C", "-c"}),
+    "gh": frozenset({"-R", "--repo", "--hostname"}),
+}
+_SEPARATORS = frozenset({"&&", "||", ";", "&", "|", "(", ")", "\n", ";;", "|&"})
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_EXIT_CODE = re.compile(
+    r"(?:exit_code\W+|exited with code\s+|exit code:?\s+)(-?\d+)", re.I
+)
+#: `cmd: "..."` literals in the source a Codex `exec` cell runs.
+_EXEC_CMD_LITERAL = re.compile(
+    r"""\bcmd\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`[^`]*`)"""
+)
+
+
+def _command_tokens(command: str) -> list[str] | None:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # unbalanced quotes: not a command we can read
+        return None
+
+
+def _landing_command(command: str, depth: int = 0) -> bool:
+    """Whether a shell command line runs one of `_LANDING_COMMANDS`.
+
+    The command words are matched at the start of each `&&`/`;`/`|`/newline
+    segment, after env assignments and a few wrappers, so `git commit -m "git
+    push later"` and `echo git push` do not count while `CI=1 git -C repo push`
+    and `bash -lc "make && git push"` do.
+    """
+    tokens = _command_tokens(command) if depth < 3 else None
+    if not tokens:
+        return False
+    segment: list[str] = []
+    for token in [*tokens, ";"]:
+        if token not in _SEPARATORS:
+            segment.append(token)
+            continue
+        words, segment = segment, []
+        words = _strip_prefixes(words)
+        if not words:
+            continue
+        program = Path(words[0]).name
+        if program in _SHELLS:
+            script = next(
+                (words[i + 1] for i, w in enumerate(words[:-1]) if re.fullmatch(r"-[a-z]*c[a-z]*", w)),
+                None,
+            )
+            if script and _landing_command(script, depth + 1):
+                return True
+            continue
+        if program not in _VALUE_OPTIONS:
+            continue
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            skip = 2 if rest[0] in _VALUE_OPTIONS[program] else 1
+            rest = rest[skip:]
+        for spec in _LANDING_COMMANDS:
+            if spec[0] == program and rest[: len(spec) - 1] == list(spec[1:]):
+                if _lands(spec, rest[len(spec) - 1 :]):
+                    return True
+    return False
+
+
+def _strip_prefixes(words: list[str]) -> list[str]:
+    """Drop env assignments, wrappers (`env -u X`, `timeout 5m`) and shell keywords."""
+    while words:
+        word = words[0]
+        if _ENV_ASSIGNMENT.match(word) or word in _SHELL_WRAPPERS or word in _SHELL_KEYWORDS:
+            words = words[1:]
+        elif word == "env":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _ENV_VALUE_OPTIONS else 1 :]
+        elif word == "timeout":
+            words = words[1:]
+            while words and words[0].startswith("-"):
+                words = words[2 if words[0] in _TIMEOUT_VALUE_OPTIONS else 1 :]
+            if words and words[0][:1].isdigit():
+                words = words[1:]
+        else:
+            break
+    return words
+
+
+def _lands(spec: tuple[str, ...], args: list[str]) -> bool:
+    """Whether the arguments after a landing command's words keep it a landing."""
+    if spec == ("git", "tag"):
+        created = False
+        for arg in args:
+            if arg.startswith("--"):
+                name = arg[2:].split("=", 1)[0]
+                if name in _TAG_READ_LONG:
+                    return False
+                created = created or name in _TAG_CREATE_LONG
+            elif arg.startswith("-") and len(arg) > 1:
+                if _TAG_READ_SHORT & set(arg[1:]):
+                    return False
+                created = created or bool(_TAG_CREATE_SHORT & set(arg[1:]))
+            else:
+                created = True  # a positional tag name
+        return created
+    return not (_NON_LANDING_ARGS.get(spec, frozenset()) & set(args))
+
+
+def _tool_commands(tool: dict) -> list[str]:
+    """The shell command lines a Claude `Bash` or Codex shell/exec call ran."""
+    if str(tool.get("name") or "").lower() not in _SHELL_TOOLS:
+        return []
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    if tool.get("name") == "exec" and isinstance(tool_input.get("source"), str):
+        found = []
+        for literal in _EXEC_CMD_LITERAL.findall(tool_input["source"]):
+            try:
+                found.append(json.loads(literal) if literal[0] == '"' else literal[1:-1])
+            except ValueError:
+                continue
+        return found
+    command = tool_input.get("command") or tool_input.get("cmd")
+    if isinstance(command, list):
+        command = shlex.join(str(part) for part in command)
+    return [command] if isinstance(command, str) else []
+
+
+def _exit_code_failed(output: object) -> bool:
+    """Whether a shell call's output reports an explicit non-zero exit code.
+
+    No code at all is not a failure: a Codex cell can return while the command
+    is still running, and a slow commit or push is still a landing.
+    """
+    if isinstance(output, list):
+        output = "\n".join(str(b.get("text", "")) for b in output if isinstance(b, dict))
+    if not isinstance(output, str):
+        return False
+    return any(int(code) != 0 for code in _EXIT_CODE.findall(output))
+
+
+def _successful_landing(tool: dict) -> bool:
+    """Whether one observed tool call completed a landing command."""
+    if tool.get("failed"):
+        return False
+    return any(_landing_command(command) for command in _tool_commands(tool))
+
+
+#: The file-creating tool of Claude, matched on the lowercased name. An edit of an existing file is not a
+#: hand-over: a reply that says "let me update app.py" names a file that holds working state.
+_FILE_WRITE_TOOLS = frozenset({"write"})
+
+
+def _handed_over_file(tools: list[dict], reply: str) -> bool:
+    """Whether the turn created a file that its reply names: a hand-over that no commit or push marks.
+
+    A reply that names the file it just wrote has delivered work to the user, as a landing does. The name
+    must stand as a whole token in the reply, so `a.md` does not match `data.md`.
+    """
+    for tool in tools:
+        if tool.get("failed") or str(tool.get("name") or "").lower() not in _FILE_WRITE_TOOLS:
+            continue
+        tool_input = tool.get("input")
+        path = tool_input.get("file_path") if isinstance(tool_input, dict) else None
+        name = PureWindowsPath(path).name if isinstance(path, str) else ""
+        if name and re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-])", reply):
+            return True
+    return False
+
+
+#: Written by `install-hook`, cleared once an exomem MCP tool is observed. The
+#: hooks take effect for the CURRENT session, but the MCP server they reference
+#: is not loaded until the client restarts — so on a fresh install the very
+#: first thing the product does is ask for `create_note` / `edit_note` /
+#: `save_episode`, none of which exist yet, and there is no CLI fallback for
+#: the write side. The nudge's own escape hatch ("no Knowledge Base configured,
+#: do nothing") cannot detect this case.
+PENDING_RESTART_MARKER = "pending-restart"
+
+#: Upper bound on the silence. The marker normally clears the moment an exomem
+#: tool appears, but a user who installs and never calls one would otherwise be
+#: muted forever — and the nudge is what prompts the first capture. After this,
+#: assume the restart happened.
+_PENDING_RESTART_MAX_AGE_SEC = 24 * 3600
+
+
+def episode_key(client: str, session_id: str) -> str:
+    """The session's episode key: a pure function of client and session id.
+
+    Mirror of `exomem.episode_capture.hook_key`, which this standalone script
+    cannot import.
+    """
+    material = f"{_EPISODE_KEY_LABEL}\0{client}\0{session_id}".encode("utf-8", "surrogatepass")
+    return "ep-" + hashlib.sha256(material).hexdigest()[:32]
+
+
+def _episode_call(tool: dict) -> tuple[str, dict]:
+    """The episode action a tool call performs and its arguments, or an empty pair.
+
+    `save_episode` records; `manage_memory` moves a candidate's workflow as `episodes.<action>`.
+    """
+    name = str(tool.get("name") or "").lower()
+    tool_input = tool.get("input") if isinstance(tool.get("input"), dict) else {}
+    if not re.search(_KB_SERVER, name, re.I):
+        return "", {}
+    if name.endswith("save_episode"):
+        return "record", tool_input
+    area, _, action = _operation_of(tool_input).partition(".")
+    arguments = tool_input.get("arguments")
+    if name.endswith("manage_memory") and area == "episodes" and isinstance(arguments, dict):
+        return action, arguments
+    return "", {}
+
+
+def _successful_episode_record(tool: dict) -> bool:
+    """A completed episode record — the only thing that covers an episode."""
+    return not tool.get("failed") and _episode_call(tool)[0] == "record"
+
+
+def _workflow_episode(tools: list[dict]) -> str | None:
+    """The episode a completed candidate action (prepare/disposition/resume)
+    named this turn, the latest first, or None."""
+    for tool in tools:
+        if tool.get("failed"):
+            continue
+        action, arguments = _episode_call(tool)
+        episode = arguments.get("episode")
+        if action in _WORKFLOW_ACTIONS and isinstance(episode, str) and _EPISODE_KEY_RE.fullmatch(episode):
+            return episode
+    return None
+
+
+def _episode_state_path(session_id: str) -> Path:
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:120]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"episode_{key}"
+
+
+_EPISODE_STATE_DEFAULT = {
+    "substantive_since_record": 0,
+    "last_ask_ts": 0.0,
+    "last_seen_revisions": 0,
+    # A landing since the last episode ask or record. The ask needs one.
+    "landed_since_ask": False,
+    # The candidate ledger, mirrored from the door (task 4.1): which episode
+    # this session prepared candidates for, its next step (`unknown` until
+    # read, and again once the session moves its workflow), what it attempted,
+    # what is pending and the input revision it is covered through (0: none).
+    "workflow_episode": "",
+    "coverage_next": "unknown",
+    "attempted": 0,
+    "pending": 0,
+    "covered_through": 0,
+    "last_coverage_check_ts": 0.0,
+}
+#: `last_seen_revisions` after a record this hook saw itself: the door's count
+#: now includes that record, so the next read re-bases instead of comparing.
+_REVISIONS_UNKNOWN = -1
+
+
+def _read_episode_state(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — missing/corrupt state starts the count over
+        return dict(_EPISODE_STATE_DEFAULT)
+    if not isinstance(data, dict):
+        return dict(_EPISODE_STATE_DEFAULT)
+    try:
+        workflow = data.get("workflow_episode")
+        step = data.get("coverage_next")
+        return {
+            "substantive_since_record": max(0, int(data.get("substantive_since_record") or 0)),
+            "last_ask_ts": float(data.get("last_ask_ts") or 0.0),
+            "last_seen_revisions": max(-1, int(data.get("last_seen_revisions") or 0)),
+            "landed_since_ask": data.get("landed_since_ask") is True,
+            "workflow_episode": (
+                workflow
+                if isinstance(workflow, str) and _EPISODE_KEY_RE.fullmatch(workflow)
+                else ""
+            ),
+            "coverage_next": step if step in _COVERAGE_STEPS else "unknown",
+            "attempted": max(0, int(data.get("attempted") or 0)),
+            "pending": max(0, int(data.get("pending") or 0)),
+            "covered_through": max(0, int(data.get("covered_through") or 0)),
+            "last_coverage_check_ts": float(data.get("last_coverage_check_ts") or 0.0),
+        }
+    except (TypeError, ValueError):
+        return dict(_EPISODE_STATE_DEFAULT)
+
+
+def _write_episode_state(path: Path, state: dict) -> None:
+    try:
+        _state_core().write_nudge_file(path, json.dumps(state).encode("utf-8"))
+    except Exception:  # noqa: BLE001 — the counter is strictly best-effort
+        pass
+
+
+# --- episode door check: a revision recorded through any door still counts ---
+
+#: One bounded call, only on a Stop where the ask is otherwise about to fire —
+#: this is the Stop hook's own time budget, spent alongside the transcript
+#: work above it.
+_EPISODE_DOOR_TIMEOUT_SECONDS = 2.0
+
+
+def _rest_host() -> str:
+    """Mirror of the retrieve hook's `_rest_host` — this standalone script
+    cannot import it."""
+    return (os.environ.get("EXOMEM_HOST") or "").strip() or "127.0.0.1"
+
+
+def _rest_port() -> int | None:
+    """Mirror of the retrieve hook's `_rest_port`."""
+    value = os.environ.get("EXOMEM_REST_PORT", "").strip()
+    if not value:
+        return 8765
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
+def _rest_lane():
+    """The credentialed REST lane, or `None`: no credential, one the host binding
+    refuses, or no credential module deployed (the Cloud archive omits it)."""
+    credentials = _state_core().optional_sibling_module("exomem_local_credentials.py")
+    return credentials.rest_lane(_rest_host()) if credentials is not None else None
+
+
+def _bounded(call, budget: float):
+    """Mirror of the retrieve hook's `_bounded`: run `call()` on a daemon
+    thread and wait at most `budget` seconds for it. Returns its result, or
+    `None` when it has not finished in time (the thread is left to end with
+    the process; the hook exits right after)."""
+    box: list = []
+
+    def _run() -> None:
+        try:
+            box.append(call())
+        except Exception:  # noqa: BLE001 — hook must never break a stop hook
+            box.append(None)
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(max(0.0, budget))
+    return box[0] if box else None
+
+
+def _episode_revision_count(key: str) -> int | None:
+    """This episode's revision count, via one bounded, read-only REST call —
+    `episode_memory(action="inspect", episode=key)` against the local door.
+    `_episode_door` has the bounds and failure handling.
+    """
+    data = _episode_door("inspect", key)
+    revisions = data.get("revisions") if data is not None else None
+    return len(revisions) if isinstance(revisions, list) else None
+
+
+def _episode_coverage(key: str) -> dict | None:
+    """This episode's ledger coverage, via `episode_memory(action="candidates")`
+    on the same door: `{next, attempted, pending, covered_through, execution}`,
+    or `None` on any failure or an unexpected shape."""
+    data = _episode_door("candidates", key)
+    coverage = data.get("coverage") if data is not None else None
+    if not isinstance(coverage, dict) or coverage.get("next") not in _COVERAGE_STEPS:
+        return None
+    try:
+        return {
+            "next": coverage["next"],
+            "attempted": max(0, int(coverage.get("attempted") or 0)),
+            "pending": max(0, int(coverage.get("pending") or 0)),
+            "covered_through": max(0, int(coverage.get("covered_through_input_revision") or 0)),
+            "execution": str(data.get("execution") or ""),
+        }
+    except (TypeError, ValueError):
+        return None
+
+
+def _episode_door(action: str, key: str) -> dict | None:
+    """One bounded, read-only `episode_memory(action=..., episode=key)` REST
+    call against the local door; its `data` object, or `None`.
+
+    `None` on ANY failure: the door unconfigured (no key resolves), a bad or
+    unresolved port, a timeout, a non-200, a malformed body, or the episode
+    simply not found yet (a session's first ask, before anything was ever
+    recorded). Every caller treats `None` as knowing nothing new: the record
+    ask keeps today's cadence and the coverage ask stays silent. Never raises.
+
+    Reads `_EPISODE_DOOR_TIMEOUT_SECONDS` fresh on every call rather than
+    binding it as a default parameter, so a test (or a future tuning knob)
+    that reassigns the module constant actually changes the bound used here.
+    """
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return None
+    timeout = _EPISODE_DOOR_TIMEOUT_SECONDS
+
+    def _call() -> dict | None:
+        # Credential resolution can block (a FIFO, a stalled mount), so it runs
+        # inside the bound with the request.
+        lane = _rest_lane()
+        if lane is None:
+            return None
+        port = _rest_port()
+        if port is None:
+            return None
+        body = json.dumps({"action": action, "episode": key}).encode("utf-8")
+        try:
+            status, raw = lane.post(f"http://{_rest_host()}:{port}/api/episode_memory", body, timeout)
+            if status != 200:
+                return None
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:  # noqa: BLE001 — hook must never break a stop hook
+            return None
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            return None
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
+
+    return _bounded(_call, timeout)
+
+
+def _episode_ask(
+    session_id: str, tools: list[dict], substantive: bool, level: str
+) -> str | None:
+    """Update this session's episode coverage and return the ask when it is due.
+
+    Coverage is hook-local: covered through the last successful record,
+    pending while substantive turns accrue after it. Asking never resets the
+    count — only a record does — but it does spend the landing the ask needs
+    (`landed_since_ask`), so an ignored ask is not repeated until work lands again.
+
+    Before an ask that is otherwise due actually fires, one bounded REST
+    `inspect` call (`_episode_revision_count`) checks whether some other door
+    recorded a revision this hook hasn't seen. If so, the count resets there
+    too and the ask is skipped — module docstring has the full rationale.
+    """
+    preset = _EPISODE_ASK_PRESETS.get(level)
+    if preset is None or not session_id:
+        return None
+    turns = _env_int("EXOMEM_EPISODE_ASK_TURNS", preset[0])
+    cooldown = _env_int("EXOMEM_EPISODE_ASK_COOLDOWN_SEC", preset[1])
+    path = _episode_state_path(session_id)
+    state = _read_episode_state(path)
+    recorded = any(_successful_episode_record(tool) for tool in tools)
+    if recorded:
+        state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
+        state["last_seen_revisions"] = _REVISIONS_UNKNOWN
+    else:
+        if substantive:
+            state["substantive_since_record"] += 1
+        if any(_successful_landing(tool) for tool in tools):
+            state["landed_since_ask"] = True
+    _note_workflow(state, tools, recorded)
+    now = time.time()
+    client = _EPISODE_CLIENT_LABELS.get(_hook_client(), _hook_client())
+    key = episode_key(client, session_id)
+    about_due = (
+        turns > 0
+        and state["landed_since_ask"]
+        and state["substantive_since_record"] >= turns
+        and now - state["last_ask_ts"] >= cooldown
+    )
+    if about_due:
+        revisions = _episode_revision_count(key)
+        if revisions is not None:
+            # Only a count above a known baseline is another door's record.
+            # An unknown baseline follows a record seen here, which the door
+            # now reports too; re-base on it rather than suppress. A second-door
+            # record before this next due check can cause one redundant ask;
+            # checking only when due avoids a REST call on every record.
+            baseline = state["last_seen_revisions"]
+            if baseline != _REVISIONS_UNKNOWN and revisions > baseline:
+                state["substantive_since_record"] = 0
+                state["landed_since_ask"] = False
+                about_due = False
+            state["last_seen_revisions"] = revisions
+    due = about_due
+    if due:
+        state["last_ask_ts"] = now
+        state["landed_since_ask"] = False
+    coverage_ask = None if due else _coverage_ask(state, now, cooldown)
+    _write_episode_state(path, state)
+    if due:
+        return EPISODE_ASK.replace("{key}", key)
+    return coverage_ask
+
+
+def _note_workflow(state: dict, tools: list[dict], recorded: bool) -> None:
+    """A candidate action or a new record moves the ledger: read it again."""
+    workflow = _workflow_episode(tools)
+    if workflow is not None:
+        state["workflow_episode"] = workflow
+    if workflow is not None or recorded:
+        state["coverage_next"] = "unknown"
+
+
+def _coverage_ask(state: dict, now: float, cooldown: int) -> str | None:
+    """The candidate-coverage ask when the mirrored ledger has work the agent
+    can do. Reads the ledger at most once per cooldown, never for a session
+    without candidates or a ledger last seen covered, and asks nothing when
+    the door cannot say."""
+    key = state["workflow_episode"]
+    if (
+        not key
+        or state["coverage_next"] == "none"
+        or now - state["last_coverage_check_ts"] < cooldown
+    ):
+        return None
+    state["last_coverage_check_ts"] = now
+    seen = _episode_coverage(key)
+    if seen is None:
+        return None
+    state.update(
+        coverage_next=seen["next"],
+        attempted=seen["attempted"],
+        pending=seen["pending"],
+        covered_through=seen["covered_through"],
+    )
+    actionable = seen["next"] == "decide" or (
+        seen["execution"] == "enabled" and seen["next"] in {"resume", "attest"}
+    )
+    if not actionable:
+        return None
+    return COVERAGE_ASK.replace("{key}", key).replace("{next}", seen["next"])
+
+
+def _note_continuation_record(session_id: str, tools: list[dict]) -> None:
+    """Count a record made in a `stop_hook_active` continuation. Never asks.
+
+    The ask blocks a Stop, and the agent answers it in the continuation that
+    follows, which Stops again with `stop_hook_active`. That record is the
+    coverage the ask asked for; dropping it would repeat the ask every cooldown.
+    A landing is not counted here: the continuation re-reads the whole turn, so
+    it would see the landing the ask already spent.
+    """
+    recorded = any(_successful_episode_record(tool) for tool in tools)
+    if not session_id or not (recorded or _workflow_episode(tools)):
+        return
+    path = _episode_state_path(session_id)
+    state = _read_episode_state(path)
+    if recorded:
+        state["substantive_since_record"] = 0
+        state["landed_since_ask"] = False
+        state["last_seen_revisions"] = _REVISIONS_UNKNOWN
+    _note_workflow(state, tools, recorded)
+    _write_episode_state(path, state)
+
+
+def _pending_restart_marker() -> Path:
+    return _hook_home() / ".cache" / "exomem-nudge" / PENDING_RESTART_MARKER
+
+
+def _exomem_tool_seen(tools: list[dict]) -> bool:
+    """Whether any exomem MCP tool appears this turn — read-only counts.
+
+    A read proves the server is loaded just as well as a write does, and this is
+    only ever used to answer "did the client restart yet".
+    """
+    return any(
+        re.search(_KB_SERVER, str(tool.get("name") or ""), re.I)
+        for tool in tools
+    )
+
+
+def _restart_pending(tools: list[dict]) -> bool:
+    """True while the MCP write tools the reminder asks for cannot exist yet."""
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return False
+    marker = _pending_restart_marker()
+    try:
+        if not marker.exists():
+            return False
+        if _exomem_tool_seen(tools) or (
+            time.time() - marker.stat().st_mtime > _PENDING_RESTART_MAX_AGE_SEC
+        ):
+            marker.unlink(missing_ok=True)
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
+    """Per-session timestamp file (mtime-based, so we never parse content)."""
+    state_dir = _hook_home() / ".cache" / "exomem-nudge"
+    key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128]
+    stamp = state_dir / key
+    try:
+        if stamp.exists() and (time.time() - stamp.stat().st_mtime) < cooldown:
+            return False, stamp
+    except OSError:
+        pass
+    return True, stamp
+
+
+@lru_cache(maxsize=1)
+def _state_core():
+    path = Path(__file__).with_name("exomem_continuation_checkpoint.py")
+    spec = importlib.util.spec_from_file_location("_exomem_nudge_state", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _touch(stamp: Path) -> None:
+    try:
+        _state_core().write_nudge_file(stamp, str(time.time()).encode("utf-8"))
+    except Exception:  # noqa: BLE001 — the advisory marker is strictly best-effort
+        pass
+
+
+def _pending_reminder_path(session_id: str) -> Path:
+    """Where next-turn delivery leaves the session's reminder, beside its cooldown stamps.
+
+    The name is a digest of the full `client\0session_id`, as the continuation token's is: a
+    sanitised or truncated id maps distinct sessions onto one file, and one session would then
+    take another's reminder. `exomem_retrieve_nudge.py` derives the same name itself, so a
+    prompt with nothing waiting loads no sibling script; `tests/test_capture_nudge_next_turn.py`
+    runs both hooks against one state home and checks that colliding ids stay apart.
+    """
+    digest = hashlib.sha256(
+        f"{_hook_client()}\0{session_id}".encode("utf-8", "surrogatepass")
+    ).hexdigest()[:32]
+    return _hook_home() / ".cache" / "exomem-nudge" / f"pending_{digest}"
+
+
+def _defer_reminder(session_id: str) -> bool:
+    """Leave the reminder for the session's next prompt; False if the marker cannot be written."""
+    try:
+        _state_core().write_nudge_file(
+            _pending_reminder_path(session_id), str(time.time()).encode("utf-8")
+        )
+    except Exception:  # noqa: BLE001 — the caller blocks the stop instead
+        return False
+    return True
+
+
+def _log(text: str, outcome: str = "fired") -> None:
+    """One metadata row per nudge: `fired` (the Stop blocked), `deferred` or `delivered` (next-turn mode)."""
+    try:
+        logp = _hook_home() / "exomem-capture-nudge.log"
+        row = f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge {outcome}\n"
+        _state_core().write_nudge_file(logp, row.encode("utf-8"), append=True)
+    except Exception:  # noqa: BLE001 — logging must never break a stop hook
+        pass
+
+
+def _capture_reason(reason: str) -> str:
+    if os.environ.get("EXOMEM_RETRIEVE_INJECT", "").strip().lower() == "mcp":
+        return "If Evermatter is not connected or cannot capture, tell the user nothing is saved and to reconnect it in the app's MCP/connector settings. Run read_instructions first if no contract.\n" + reason
+    return reason
+
+
+def deferred_reminder() -> str:
+    """The reminder text the prompt hook adds for a deferred reminder, logged as delivered.
+
+    Public because `exomem_retrieve_nudge.py` loads this module for it: the wording and
+    its log row live here, once.
+    """
+    _log("", "delivered")
+    return _capture_reason(REMINDER_SHORT)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--client", choices=("claude", "codex"))
+    home = parser.add_mutually_exclusive_group()
+    home.add_argument("--hook-home")
+    home.add_argument("--hook-home-env")
+    parser.add_argument("--activation-mode", choices=("mcp", "working-set"))
+    try:
+        args = parser.parse_args(argv or [])
+    except SystemExit:
+        return 0
+    if args.hook_home_env is not None:
+        args.hook_home = os.environ.get(args.hook_home_env)
+        if not args.hook_home or not args.hook_home.strip():
+            return 0  # An unavailable platform home must not fall back to a local profile.
+    for name, value in (
+        ("EXOMEM_HOOK_CLIENT", args.client),
+        ("EXOMEM_HOOK_HOME", args.hook_home),
+        ("EXOMEM_RETRIEVE_INJECT", args.activation_mode),
+    ):
+        if value is not None:
+            os.environ[name] = value
+    _normalize_env_aliases()
+    if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
+        return 0
+    level = _prominence()
+    preset = _PROMINENCE_PRESETS[level]
+    if preset is None:  # prominence=off — the user asked for explicit invocation only
+        return 0
+    try:
+        raw = sys.stdin.read()
+        data = json.loads(raw) if raw.strip() else {}
+    except Exception:  # noqa: BLE001 — malformed hook input must fail soft
+        return 0
+
+    if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once
+        tpath = data.get("transcript_path") or data.get("transcriptPath")
+        if tpath and _EPISODE_ASK_PRESETS.get(level) is not None:
+            _note_continuation_record(
+                str(data.get("session_id") or data.get("sessionId") or ""),
+                _latest_turn(tpath)[1],
+            )
+        return 0
+    tpath = data.get("transcript_path") or data.get("transcriptPath")
+    event_assistant_text = data.get("last_assistant_message") or data.get(
+        "lastAssistantMessage"
+    )
+    if not isinstance(event_assistant_text, str):
+        event_assistant_text = ""
+    if not tpath and not event_assistant_text:
+        return 0
+
+    # Explicit env still wins; the prominence level only moves the default.
+    min_chars = _env_int("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", preset[0])
+    cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", preset[1])
+
+    # Codex exposes the final text directly because its transcript format is not
+    # a stable hook API. Keep transcript parsing as the Claude/older-client
+    # fallback and to retain best-effort successful-write detection.
+    transcript_text, tools = _latest_turn(tpath) if tpath else ("", [])
+    assistant_text = event_assistant_text or transcript_text
+    session_id = str(data.get("session_id") or data.get("sessionId") or "")
+    if _restart_pending(tools):  # hooks are live but the MCP server is not loaded yet
+        return 0
+    # Before the attempted-capture checks below: a write or a Saved marker
+    # answers this turn's reminder, never the episode's coverage, which only
+    # a record or the candidate ledger establishes (task 4.1).
+    ask = _episode_ask(
+        session_id, tools, len(assistant_text.strip()) >= min_chars, level
+    )
+    if ask is not None:
+        _log(assistant_text)
+        print(json.dumps({"decision": "block", "reason": _capture_reason(ask)}))
+        return 0
+    attempted = any(_successful_kb_write(tool) for tool in tools) or bool(
+        re.search(r"Saved\s*(?:->|→|:)", assistant_text)
+    )
+    if attempted:  # capture was attempted this turn; coverage is the checks above
+        return 0
+    if level == "maximal":  # the most aggressive level keeps the length gate
+        if len(assistant_text.strip()) < min_chars:
+            return 0
+    elif not any(_successful_landing(tool) for tool in tools) and not _handed_over_file(tools, assistant_text):
+        return 0  # nothing landed or was handed over: Q&A, reading and watching turns stay silent
+
+    ok, stamp = _cooldown_ok(session_id, cooldown)
+    if not ok:  # fired recently this session — keep cost bounded
+        return 0
+
+    _touch(stamp)
+    # Next-turn delivery: the prompt hook adds the reminder to this session's next prompt. If the
+    # marker cannot be left, the reminder blocks the Stop as usual rather than vanish.
+    if _delivery() == _DELIVERY_NEXT_TURN and _defer_reminder(session_id):
+        _log(assistant_text, "deferred")
+        return 0
+    _log(assistant_text)
+    print(json.dumps({"decision": "block", "reason": _capture_reason(REMINDER_SHORT)}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

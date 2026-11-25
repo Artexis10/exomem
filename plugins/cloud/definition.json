@@ -5,7 +5,8 @@
   "release_notes": {
     "openai": "Updates the Dot E branding and memory workflow guidance. Connect an existing Evermatter account through OAuth. Includes skills and the remote MCP connection, without lifecycle hooks or local service credentials.",
     "claude": "Ships skills and the remote MCP connection for Claude Chat, Cowork and Claude Code, without command hooks or local scripts. Connect an existing Evermatter account through OAuth. The full Evermatter plugin adds lifecycle hooks.",
-    "claude-hooks": "Updates the Dot E branding and memory workflow guidance. Trusted lifecycle hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations. Claude Chat uses the MCP connection and skills without command hooks."
+    "claude-hooks": "Updates the Dot E branding and memory workflow guidance. Trusted lifecycle hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations. Claude Chat uses the MCP connection and skills without command hooks.",
+    "claude-connector-hooks": "Adds Evermatter's lifecycle hooks and skills to an Evermatter connection your account already has, such as a self-hosted server or a separately added connector, without bundling a second MCP server. Hooks support activation, governed capture and local continuation on supported Claude Code and Cowork installations."
   },
   "default_prompts": [
     "Where did we leave off on this project, and what changed?",
@@ -14,6 +15,10 @@
   ],
   "resource": "https://exomem.substratesystems.io/mcp",
   "profile": "product-cloud",
+  "connector_edition": {
+    "name": "evermatter-hooks",
+    "display_name": "Evermatter hooks"
+  },
   "author": {
     "name": "Substrate Systems OÜ",
     "url": "https://substratesystems.io"

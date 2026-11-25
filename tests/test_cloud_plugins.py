@@ -145,6 +145,31 @@ def test_claude_cloud_hooks_use_canonical_bytes_and_native_mcp_binding(tmp_path:
             assert not any(name.startswith("hooks/") for name in archive.namelist())
 
 
+def test_connector_edition_adds_hooks_to_an_existing_connection_without_a_server(
+    tmp_path: Path,
+) -> None:
+    # An account that already connects Evermatter (a self-hosted server, a separate
+    # connector) must get the hooks without a second server bound to Evermatter Cloud.
+    cloud_plugins.build_packages(ROOT, tmp_path)
+    with zipfile.ZipFile(tmp_path / "claude-connector-hooks.zip") as connector:
+        names = set(connector.namelist())
+        assert ".mcp.json" not in names
+        assert "mcpServers" not in json.loads(connector.read(".claude-plugin/plugin.json"))
+        with zipfile.ZipFile(tmp_path / "claude-hooks.zip") as hooked:
+            hook_files = {name for name in hooked.namelist() if name.startswith("hooks/")}
+            assert hook_files and hook_files <= names
+            for name in hook_files:
+                assert connector.read(name) == hooked.read(name)
+        assert any(name.startswith("skills/exomem/") for name in names)
+        manifest = json.loads(connector.read(".claude-plugin/plugin.json"))
+    marketplace = json.loads((ROOT / ".claude-plugin/marketplace.json").read_text())
+    listed = {entry["name"]: entry["source"] for entry in marketplace["plugins"]}
+    assert listed[manifest["name"]] == "./plugins/cloud/generated/claude-connector-hooks"
+    assert manifest["name"] != json.loads(
+        (ROOT / "plugins/cloud/generated/claude-hooks/.claude-plugin/plugin.json").read_text()
+    )["name"]
+
+
 def test_claude_directory_edition_ships_only_admitted_files(tmp_path: Path) -> None:
     # Catch the directory edition regaining command hooks or a script, which the
     # directory refuses from an unverified publisher.
@@ -487,7 +512,12 @@ def test_cloud_openai_schema_and_public_archives(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "openai/mcp.json").read_text())["mcpServers"] == {
         "exomem": {"type": "streamable-http", "url": "https://exomem.substratesystems.io/mcp"}
     }
-    archives = [tmp_path / "claude.zip", tmp_path / "claude-hooks.zip", tmp_path / "openai.zip"]
+    archives = [
+        tmp_path / "claude.zip",
+        tmp_path / "claude-hooks.zip",
+        tmp_path / "claude-connector-hooks.zip",
+        tmp_path / "openai.zip",
+    ]
     assert_public_artifacts_clean(
         archives,
         labels={path: f"plugins/cloud/generated/{path.name}" for path in archives},
