@@ -354,6 +354,10 @@ def _remove_emptied(
             parent, _, name = folder.rpartition("/")
             reason = access.writable_reason(root, folder)
             tree = None if reason else _empty_tree(root, view, folder)
+            if tree is None and reason is None and not _files_under(root, view, folder):
+                # The export drops these files (an editor's or a system's), so the split no longer
+                # blocks it; the merge never deletes a file, so the owner removes the folder.
+                reason = "only files an export drops are under it; remove the folder by hand"
             if tree is None:
                 kept.append({"path": folder, "reason": reason or "files are still under it"})
             elif not held_fs.name_variants(vault._listed(root / parent if parent else root), name):  # noqa: SLF001
