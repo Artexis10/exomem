@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.206.0](https://github.com/substrate-systems/evermatter/compare/v0.205.0...v0.206.0) (2026-11-25)
+
+
+### Features
+
+* **imports:** file staged imports on the cell and record their origin ([#3245](https://github.com/substrate-systems/evermatter/issues/3245)) ([3c63861](https://github.com/substrate-systems/evermatter/commit/3c638617773a7c5cc57e06a76e9aa67c8210b703))
+* **settings:** accept EVERMATTER_ setting names in every reader (settings release S1) ([#3236](https://github.com/substrate-systems/evermatter/issues/3236)) ([866bc5b](https://github.com/substrate-systems/evermatter/commit/866bc5b5d021cbcf3bac1d8e3c42c8869f7f7506))
+
+
+### Bug Fixes
+
+* **activation:** stop the final guard at the call's deadline ([#3259](https://github.com/substrate-systems/evermatter/issues/3259)) ([4493575](https://github.com/substrate-systems/evermatter/commit/44935752618fb7d9416910f3b22b271988ade2e9))
+* **egress:** withhold a page the store refuses as not found, not the whole response ([#3247](https://github.com/substrate-systems/evermatter/issues/3247)) ([4067257](https://github.com/substrate-systems/evermatter/commit/4067257ac895cd36dc7ff5be4a6765a2ceb4fb58))
+* **imports:** bind and dispatch the filer's calls in one place ([#3263](https://github.com/substrate-systems/evermatter/issues/3263)) ([0d4dfd0](https://github.com/substrate-systems/evermatter/commit/0d4dfd0efd7312131ef61da8ac31aa92052328ba))
+* **records:** stop Records queries walking the vault for links while a corpus is coming ([#3230](https://github.com/substrate-systems/evermatter/issues/3230)) ([d44fa57](https://github.com/substrate-systems/evermatter/commit/d44fa57f8e56401d2bd1c77d552079a19c869eac))
+* **vault:** stop folder splits growing and merge them on request ([#3235](https://github.com/substrate-systems/evermatter/issues/3235)) ([38506c0](https://github.com/substrate-systems/evermatter/commit/38506c008b965f20d244d88cec59e02008191cf8))
+* **writes:** refuse argument-decided writes before vault-sized work and resolve refs from the identity projection ([#3267](https://github.com/substrate-systems/evermatter/issues/3267)) ([2859c1e](https://github.com/substrate-systems/evermatter/commit/2859c1e49ba259cf6c2e06414e4d6f18751cb8ec))
+
+
+### Performance
+
+* **lexstore:** reread only the catalogue rows that a write changed ([#3229](https://github.com/substrate-systems/evermatter/issues/3229)) ([db7cb81](https://github.com/substrate-systems/evermatter/commit/db7cb81e75906bd8c189e31185b0ab2943f249ea))
+* **recall:** patch the resident unit matrix from the changed parents instead of reloading it ([#3260](https://github.com/substrate-systems/evermatter/issues/3260)) ([6edb5f9](https://github.com/substrate-systems/evermatter/commit/6edb5f926060e9929f345e6c7f7f10340ec0cefb))
+* **review-pass:** wait for requests in flight at the units of the audit and the scan ([#3266](https://github.com/substrate-systems/evermatter/issues/3266)) ([5bf7918](https://github.com/substrate-systems/evermatter/commit/5bf791897cd55cc5d44a6384d0c47c4e8c9dbda6))
+
 ## [0.205.0](https://github.com/substrate-systems/evermatter/compare/v0.204.0...v0.205.0) (2026-11-25)
 
 
