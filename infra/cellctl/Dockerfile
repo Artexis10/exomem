@@ -1,6 +1,7 @@
 # cellctl, the Evermatter Cloud cell controller (design D4).
 #
-# Built from infra/cellctl as the context. The runtime runs as UID 1000 with
+# Built from infra/cellctl as the context, with the repository root as the named
+# `repository` context for the licence terms. The runtime runs as UID 1000 with
 # a read-only root filesystem (templates/cellctl.yaml): nothing is written at
 # runtime except the heartbeat under the /tmp emptyDir, and bytecode is
 # compiled at build time. The chart's exec probes call `python3`, which the
