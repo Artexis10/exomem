@@ -23,8 +23,8 @@
 
 ## 3. Delivery
 
-- [ ] 3.1 Run the scoped tests, ruff, mypy, the OpenSpec strict gate and the privacy gate.
-- [ ] 3.2 One independent review of the finished batch on Opus with the Risk lens for stored data; merge through the queue.
+- [x] 3.1 Run the scoped tests, ruff, mypy, the OpenSpec strict gate and the privacy gate.
+- [x] 3.2 One independent review of the finished batch on Opus with the Risk lens for stored data; merge through the queue.
 - [ ] 3.3 Release through the release owner and install on the desktop personal service.
 - [ ] 3.4 Acceptance on the owner's installed service: redo the dogfood correction that motivated this change (see proposal, Why) with `supersede_observation` on the real entity page, confirm that a search for superseded claims on that page returns the old claim, and remove the interim correction prose.
 - [ ] 3.5 Sync the deltas into the canonical specs and archive this change.
