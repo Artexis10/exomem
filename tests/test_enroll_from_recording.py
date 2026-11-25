@@ -8,13 +8,14 @@ are real.
 from __future__ import annotations
 
 import hashlib
+import shutil
 from pathlib import Path
 
 import httpx2
 import numpy as np
 import pytest
 
-from exomem import commands, enroll_speaker, operation_entries, speech_attach, voice_embed, voice_profiles
+from exomem import commands, enroll_speaker, extraction_parts, operation_entries, preserve, speaker_names, speech_attach, voice_embed, voice_profiles
 from exomem.cloud_import_client import CloudImportClientConfig
 from exomem.speaker_attribution import attribute_clusters
 
@@ -49,6 +50,10 @@ def _stub_model(monkeypatch: pytest.MonkeyPatch) -> list[list[tuple[float, float
 
 def _recording(vault: Path, *, turns=TURNS) -> tuple[str, str, str]:
     """An attached, labelled recording; returns its vault path, its page text and its original's SHA-256."""
+    return _recording_with(vault, SEGMENTS, turns)
+
+
+def _recording_with(vault: Path, segments: list[dict], turns: list[dict]) -> tuple[str, str, str]:
     binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "talk.m4a"
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_bytes(AUDIO)
@@ -57,7 +62,7 @@ def _recording(vault: Path, *, turns=TURNS) -> tuple[str, str, str]:
     commands.op_process_media(vault, path=relative, operation="process")
     commands.op_process_media(
         vault, path=relative, operation="attach-speech", binary_sha256=digest, binary_size=len(AUDIO),
-        segments=SEGMENTS, turns=turns, engine="whisper + pyannote",
+        segments=segments, turns=turns, engine="whisper + pyannote",
     )
     text, recorded = enroll_speaker.local_page(vault, relative)
     assert recorded == digest
@@ -156,6 +161,29 @@ def test_a_cloud_original_is_downloaded_verified_embedded_and_deleted(vault: Pat
 
     assert record["samples"] == 1 and len(copies) == 1
     assert not copies[0].exists() and not copies[0].parent.exists(), "the downloaded copy is deleted after use"
+
+
+def test_a_page_saved_from_the_cloud_reads_its_part_pages_and_refuses_when_one_is_missing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(preserve, "_MAX_EXTRACT_BYTES", 600)
+    segments = [{"start": float(n * 3), "end": float(n * 3 + 2), "text": f"Line {n} of a long talk."} for n in range(40)]
+    turns = [{"start": float(n * 3), "end": float(n * 3 + 2), "label": f"V{n % 2}"} for n in range(40)]
+    segments[39]["text"] = "The last line, on the last part."
+    turns[39]["label"] = "V2"
+    relative, text, _digest = _recording_with(vault, segments, turns)
+    sidecar = vault / f"{relative}.md"
+    saved = tmp_path / "saved" / sidecar.name
+    shutil.copytree(sidecar.parent, saved.parent, ignore=shutil.ignore_patterns("*.m4a"))
+
+    whole, recorded = enroll_speaker.saved_page(saved)
+
+    assert whole == text and "Speaker C" in speaker_names.labels_in(whole) and recorded
+    for part in extraction_parts.folder_for(saved).glob("part-*.md"):
+        part.unlink()
+    with pytest.raises(enroll_speaker.EnrollmentError) as refused:
+        enroll_speaker.saved_page(saved)
+    assert refused.value.code == "MEDIA_PARTS_UNREADABLE"
 
 
 def test_no_connector_operation_enrols_a_voice_and_the_cell_stores_no_embedding(vault: Path) -> None:

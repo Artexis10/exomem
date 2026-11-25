@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
 from .semantic_segments import TIMED_LINE_RE, ts_from_match
@@ -22,7 +22,6 @@ from .semantic_segments import TIMED_LINE_RE, ts_from_match
 #: Who gave a name: a person (told the agent, or named it) or a voice profile that matched.
 BASIS_PERSON = "person"
 BASIS_PROFILE = "profile"
-BASES = (BASIS_PERSON, BASIS_PROFILE)
 
 #: A name is one short line: a long one would swamp every line that carries it.
 MAX_NAME_CHARS = 80
@@ -32,16 +31,19 @@ MAX_NAME_CHARS = 80
 _MERGED_TURN_RE = re.compile(r"^\[([^\]\n]+)\]:")
 
 
-def name_problem(name: object) -> str | None:
-    """Why `name` cannot stand for a speaker, or None. The rule is the label syntax's own."""
+def name_problem(name: object, noun: str = "a name") -> str | None:
+    """Why `name` cannot stand in a label span, or None. The rule is the label syntax's own.
+
+    A speaker's name and a track both go into the span, so both take this check; `noun` words the reason.
+    """
     if not isinstance(name, str) or not name.strip() or name != name.strip():
-        return "a name must be text with no space at its start or end"
-    if "\n" in name or "\r" in name:
-        return "a name must be one line"
+        return f"{noun} must be text with no space at its start or end"
+    if len(name.splitlines()) != 1:
+        return f"{noun} must be one line"
     if any(character in name for character in "[]:"):
-        return "a name must not hold [, ] or :, which the label syntax uses"
+        return f"{noun} must not hold [, ] or :, which the label syntax uses"
     if len(name) > MAX_NAME_CHARS:
-        return f"a name is at most {MAX_NAME_CHARS} characters"
+        return f"{noun} is at most {MAX_NAME_CHARS} characters"
     return None
 
 
@@ -110,15 +112,17 @@ class Carried:
 
 
 def timed_spans(text: str) -> list[tuple[float, float, str]]:
-    """`(start, end, label)` of each timed labelled line; a line runs to the next timed line's start.
+    """`(start, end, label)` of each timed labelled line, in start order; a line runs to the next later start.
 
-    The last line has no next start, so it has no span. A merged turn has no start at all.
+    The spans never overlap, so a caller can sweep them in one pass. The last line has no next
+    start, so it has no span. A merged turn has no start at all.
     """
     starts: list[tuple[float, str | None]] = []
     for content, _ending in _lines(text):
         timed = TIMED_LINE_RE.match(content)
         if timed is not None:
             starts.append((ts_from_match(timed), timed.group(4)))
+    starts.sort(key=lambda item: item[0])  # a no-op for the renderers' own order, and Timsort is linear on it
     return [
         (start, following, label)
         for (start, label), (following, _next_label) in zip(starts, starts[1:], strict=False)
@@ -126,36 +130,60 @@ def timed_spans(text: str) -> list[tuple[float, float, str]]:
     ]
 
 
-def carry(old_text: str, old_names: Iterable[Mapping[str, str]], new_text: str) -> Carried:
+def _shared_time(
+    spans: list[tuple[float, float, str]], named: list[tuple[float, float, str]]
+) -> dict[str, float]:
+    """For each label of `spans`, its seconds inside `named`: one sweep over both start-ordered, disjoint lists."""
+    shared: dict[str, float] = defaultdict(float)
+    i = j = 0
+    while i < len(spans) and j < len(named):
+        start, end, label = spans[i]
+        named_start, named_end, _name = named[j]
+        overlap = min(end, named_end) - max(start, named_start)
+        if overlap > 0:
+            shared[label] += overlap
+        if end <= named_end:
+            i += 1
+        else:
+            j += 1
+    return shared
+
+
+def carry(
+    old_text: str,
+    old_names: Iterable[Mapping[str, str]],
+    new_text: str,
+    *,
+    keep_labels: Collection[str] = (),
+) -> Carried:
     """Carry each recorded name of `old_text` to the label of `new_text` whose lines overlap its lines most.
 
     A name carries only where the overlap covers more than half of that label's speech time, so a
     majority needs no tuning. A name never reaches two labels, and a label never takes two names.
+    A label in `keep_labels` already has the name that its caller gave, which no carried name
+    replaces: the old name it would have taken is listed as not carried.
+
+    The cost is one sweep of the new lines for each recorded name, so it grows with the length of
+    the recording and the few names it has.
     """
     named = [(entry["name"], entry) for entry in old_names]
-    old_by_name = defaultdict(list)
-    current_names = {name for name, _entry in named}
-    for start, end, label in timed_spans(old_text):
-        if label in current_names:
-            old_by_name[label].append((start, end))
-    new_by_label: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    for start, end, label in timed_spans(new_text):
-        new_by_label[label].append((start, end))
+    names = {name for name, _entry in named}
+    old_by_name: dict[str, list[tuple[float, float, str]]] = defaultdict(list)
+    for span in timed_spans(old_text):
+        if span[2] in names:
+            old_by_name[span[2]].append(span)
+    new_spans = [span for span in timed_spans(new_text) if span[2] not in keep_labels]
+    speech: dict[str, float] = defaultdict(float)
+    for start, end, label in new_spans:
+        speech[label] += end - start
 
     overlaps: list[tuple[float, str, str]] = []
-    for label, spans in new_by_label.items():
-        speech = sum(end - start for start, end in spans)
-        for name, old_spans in old_by_name.items():
-            shared = sum(
-                max(0.0, min(end, old_end) - max(start, old_start))
-                for start, end in spans
-                for old_start, old_end in old_spans
-            )
-            if shared * 2 > speech:
-                overlaps.append((shared, label, name))
+    for name, old_spans in old_by_name.items():
+        shared = _shared_time(new_spans, old_spans)
+        overlaps += [(seconds, label, name) for label, seconds in shared.items() if seconds * 2 > speech[label]]
     labels: dict[str, str] = {}
     taken: set[str] = set()
-    for _shared, label, name in sorted(overlaps, key=lambda item: -item[0]):
+    for _shared, label, name in sorted(overlaps, key=lambda item: (-item[0], item[1], item[2])):
         if label not in labels and name not in taken:
             labels[label] = name
             taken.add(name)

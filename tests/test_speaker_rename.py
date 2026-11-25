@@ -7,12 +7,14 @@ labelled lines are the stored turns, so the tests read the lines and the front m
 from __future__ import annotations
 
 import hashlib
+import time
 from pathlib import Path
 
 import pytest
 
 from exomem import commands, extraction_parts, preserve, speech_attach, speaker_names
 from exomem.cli_ops import OpError
+from exomem.semantic_segments import format_ts
 from exomem.vault import parse_frontmatter
 
 PAYLOAD = b"fake audio bytes, no container"
@@ -162,6 +164,17 @@ def test_a_rename_that_breaks_a_rule_is_refused_and_changes_nothing(vault: Path,
     assert refused.value.code == code and page.read_bytes() == written
 
 
+def test_a_rename_of_a_label_that_the_page_lists_and_no_line_carries_is_refused_and_changes_nothing(vault: Path) -> None:
+    relative, page = _attached(vault)
+    page.write_text(page.read_text(encoding="utf-8").replace("speakers: [Speaker A, Speaker B]", "speakers: [Speaker A, Speaker B, Ghost]"), encoding="utf-8")
+    written = page.read_bytes()
+
+    with pytest.raises(OpError) as refused:
+        _rename(vault, relative, {"Ghost": "Hugo"})
+
+    assert refused.value.code == "SPEAKER_LABEL_UNKNOWN" and page.read_bytes() == written
+
+
 def test_a_rename_enrols_no_voice_and_points_the_owner_to_enroll_speaker(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from exomem import voice_profiles
 
@@ -213,6 +226,22 @@ def test_names_on_merged_turns_are_not_carried_because_no_line_has_a_time() -> N
     carried = speaker_names.carry(old, [{"name": "Hugo", "label": "Speaker A", "basis": "person"}], new)
 
     assert carried.labels == {} and carried.not_carried == ("Hugo",)
+
+
+def test_a_reprocess_of_a_fifty_thousand_line_recording_carries_names_in_one_sweep() -> None:
+    # Two voices, three seconds a line. Comparing every new span with every old span took five seconds at
+    # six thousand lines, so fifty thousand would take minutes; one sweep takes a fraction of a second.
+    voices = ("Hugo", "Sam")
+    old = "".join(f"[{format_ts(n * 3)}] [{voices[n % 2]}]: line {n}\n" for n in range(50_000))
+    new = old.replace("[Hugo]", "[Speaker B]").replace("[Sam]", "[Speaker A]")
+    names = [{"name": name, "label": f"Speaker {'AB'[index]}", "basis": "person"} for index, name in enumerate(voices)]
+
+    started = time.perf_counter()
+    carried = speaker_names.carry(old, names, new)
+    elapsed = time.perf_counter() - started
+
+    assert carried.labels == {"Speaker B": "Hugo", "Speaker A": "Sam"}
+    assert elapsed < 10, f"carrying names over 50,000 lines took {elapsed:.1f} s"
 
 
 def test_a_rewrite_of_a_page_with_windows_line_endings_changes_only_the_label_bytes(vault: Path) -> None:

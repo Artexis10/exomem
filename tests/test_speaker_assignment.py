@@ -57,3 +57,14 @@ def test_each_track_takes_its_own_turns_and_letters_and_names_its_lines_by_track
 
     assert text.splitlines() == ["[0:00] [mic1: Speaker A]: hello", "[0:00] [mic2: Speaker A]: hi", "[0:03] [mic1: Speaker A]: again"]
     assert [item["speaker"] for item in merged] == ["mic1: Speaker A", "mic2: Speaker A", "mic1: Speaker A"]
+
+
+def test_voices_past_the_twenty_sixth_continue_the_letters_in_one_closed_shape():
+    segments = [_segment(f"line {n}", float(n), n + 1.0) for n in range(28)]
+    turns = [Turn(float(n), n + 1.0, f"SPEAKER_{n:02d}") for n in range(28)]
+
+    _text, merged = label_transcript(segments, turns, timed=True)
+
+    labels = [item["speaker"] for item in merged]
+    assert labels[24:] == ["Speaker Y", "Speaker Z", "Speaker AA", "Speaker AB"]
+    assert len(set(labels)) == 28

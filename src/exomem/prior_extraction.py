@@ -33,6 +33,7 @@ def whole_extraction_digest(vault_root: Path, page: Path, content: str) -> str:
 
     `extraction_digest` reads the first part alone, which names what a result replaces on one page.
     This one lets a caller ask whether a stored page and an incoming one hold the same result.
+    Task 1.3 of `keep-speech-results-in-cloud` (the adoption of a Source) is its first caller.
     """
     engine = parse_frontmatter(content)[0].get("extracted_by")
     whole = extraction_parts.whole_text(vault_root, page, content)
@@ -242,9 +243,9 @@ def extraction_writes(
         text=old_pieces[0],
         parts=extraction_parts.layout(page, old_pieces),
     )
-    keep = {entry["name"] for entry in entries}
+    given = {entry["name"] for entry in entries}  # the call's names already stand on the labels of `text`
     carried = speaker_names.carry(
-        old_text, [entry for entry in names_of(before) if entry["name"] not in keep], text
+        old_text, [entry for entry in names_of(before) if entry["name"] not in given], text, keep_labels=given
     )
     if carried.labels:
         text = speaker_names.rename_labels(text, carried.labels)

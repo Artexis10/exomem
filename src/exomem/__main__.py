@@ -2236,12 +2236,8 @@ def _enroll_from_recording(args, enroll_module, threshold: float):
     root = _speaker_vault(args)
     if args.cloud:
         from .cloud_import_client import CloudImportClientConfig
-        from .preserve import extracted_text
-        from .vault import parse_frontmatter
 
-        page = args.page_file.read_text(encoding="utf-8")
-        recorded = parse_frontmatter(page)[0].get("binary_sha256")
-        text = extracted_text(page)
+        text, recorded = enroll_module.saved_page(args.page_file)
         config = CloudImportClientConfig(args.mcp_url, args.api_base_url, args.oauth_client_id)
         original = enroll_module.cloud_original(config, args.recording)
     else:
@@ -2255,12 +2251,13 @@ def _enroll_from_recording(args, enroll_module, threshold: float):
         if args.yes:
             return True
         try:
+            # nosemgrep: ep-word-set -- the answers of the prompt's own [y/N]: a closed set the prompt states, not a reading of free text.
             return input(f"Keep this voice as {args.name!r}? [y/N] ").strip().lower() in {"y", "yes"}
         except EOFError:
             return False
 
     return enroll_module.enroll_from_recording(
-        text, recorded if isinstance(recorded, str) else None, args.label, args.name,
+        text, recorded, args.label, args.name,
         original=original, confirm=confirm, is_self=args.is_self, threshold=threshold, vault_root=root,
     )
 

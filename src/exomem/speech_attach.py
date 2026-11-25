@@ -36,9 +36,6 @@ from .vault import PlannedWrite, batch_atomic_write, parse_frontmatter, post_com
 log = logging.getLogger(__name__)
 
 
-#: Engine values that the page schema reads as "no result yet", which would hide the result they came with.
-_ENGINE_STATES = frozenset({"none", "pending"})  # nosemgrep: ep-word-set -- the page schema's own closed processing states.
-
 _Committed = TypeVar("_Committed")
 
 
@@ -69,18 +66,26 @@ def parse(
 ) -> Result:
     """The call's fields as a `Result`, or a refusal that names the rule the fields break."""
     lowered = engine.strip().lower()
-    if lowered in _ENGINE_STATES or lowered.startswith("failed") or "\n" in engine or "\r" in engine:
+    # The page schema reads these engine values as "no result yet", which would hide the result they came with.
+    if lowered in media_processing._INCOMPLETE_ENGINES or lowered.startswith("failed") or len(engine.splitlines()) > 1:  # noqa: SLF001 - the page schema's own closed states
         raise refuse("ATTACH_PAYLOAD_INVALID", "engine must name, on one line, the engine that produced the result")
     for index, item in enumerate(segments):
-        if not item["text"].strip():
+        text = item["text"].strip()
+        if not text:
             raise refuse("ATTACH_PAYLOAD_INVALID", f"segment {index} has no text")
+        if len(text.splitlines()) > 1:
+            # The page stores one line for each segment, and a break would start a line that reads as a label.
+            raise refuse("ATTACH_PAYLOAD_INVALID", f"segment {index} text must be one line")
         if item.get("end") is not None and item["end"] < item["start"]:
             raise refuse("ATTACH_PAYLOAD_INVALID", f"segment {index} ends before it starts")
+        _check_track("segment", index, item.get("track"))
     for index, item in enumerate(turns or ()):
         if item["end"] < item["start"]:
             raise refuse("ATTACH_PAYLOAD_INVALID", f"turn {index} ends before it starts")
-        if item["label"] != item["label"].strip() or "\n" in item["label"] or "\r" in item["label"]:
+        if item["label"] != item["label"].strip() or len(item["label"].splitlines()) != 1:
             raise refuse("ATTACH_PAYLOAD_INVALID", f"turn {index} label must be one line with no outer space")
+        _check_track("turn", index, item.get("track"))
+    _check_tracks_meet(segments, turns or ())
     _check_names(names or (), labels={item["label"] for item in turns or ()})
     try:
         AsrFacts.from_payload(dict(asr or {}))
@@ -88,6 +93,25 @@ def parse(
         raise refuse("ATTACH_PAYLOAD_INVALID", f"asr: {error}") from error
     ordered = sorted(segments, key=lambda item: item["start"])
     return Result(engine.strip(), tuple(ordered), tuple(turns or ()), tuple(names or ()), dict(asr or {}), replace_labelled)
+
+
+def _check_track(kind: str, index: int, track: str | None) -> None:
+    """Refuse a track that the label syntax cannot hold: it stands in the label span of every line it labels."""
+    problem = None if track is None else speaker_names.name_problem(track, "a track")
+    if problem is not None:
+        raise refuse("ATTACH_PAYLOAD_INVALID", f"{kind} {index}: {problem}")
+
+
+def _check_tracks_meet(segments: Sequence[Mapping[str, Any]], turns: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse turns on a track that no segment carries: a turn labels only the segments of its own track."""
+    carried = {item.get("track") for item in segments}
+    for index, item in enumerate(turns):
+        if item.get("track") not in carried:
+            raise refuse(
+                "ATTACH_PAYLOAD_INVALID",
+                f"turn {index} is on track {item.get('track')!r}, which no segment carries; "
+                "give the turns and the segments they label the same track",
+            )
 
 
 def _check_names(names: Sequence[Mapping[str, str]], *, labels: set[str]) -> None:
@@ -206,7 +230,11 @@ def render(result: Result, duration: float) -> tuple[str, list[dict]]:
     )
     if rendered is None:
         raise refuse("ATTACH_PAYLOAD_INVALID", "the segments carry no text")
-    return rendered
+    text, merged = rendered
+    # The page's lines are its turns: a segment whose own words start like a label line would add a speaker the call never named.
+    if set(speaker_names.labels_in(text)) != {turn["speaker"] for turn in merged}:
+        raise refuse("ATTACH_PAYLOAD_INVALID", "a segment's text reads as a speaker label on its line; reword it")
+    return text, merged
 
 
 def verification(result: Result) -> str:

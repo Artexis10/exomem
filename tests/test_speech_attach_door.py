@@ -2,7 +2,7 @@
 
 The server is the local one, with the real door, argument validation, writer lease and job
 ledger. The recording's bytes are fake, so only the container's duration is stated by the test;
-`test_the_duration_probe_reads_a_real_container` reads a real file where PyAV is installed.
+`test_the_duration_probe_reads_a_real_container` reads a real file in the frame-codecs CI job.
 """
 
 from __future__ import annotations
@@ -110,8 +110,8 @@ def test_an_agent_attaches_a_result_names_its_speakers_and_finds_the_recording_b
     assert [hit["path"] for hit in found] == [f"{relative}.md"], found
 
 
+@pytest.mark.frame_codecs
 def test_the_duration_probe_reads_a_real_container(vault, tmp_path: Path) -> None:
-    pytest.importorskip("av")
     clip = tmp_path / "tone.wav"
     with wave.open(str(clip), "wb") as out:
         out.setnchannels(1)

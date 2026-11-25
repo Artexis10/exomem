@@ -130,6 +130,34 @@ def test_a_result_that_does_not_fit_the_recording_is_refused_and_the_page_stays(
     assert page.read_bytes() == before
 
 
+def _with_track(items: list[dict], track: str) -> list[dict]:
+    return [{**item, "track": track} for item in items]
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        {"segments": _with_track(SEGMENTS, "Zoom H6 [In 1]"), "turns": _with_track(TURNS, "Zoom H6 [In 1]")},
+        {"segments": _with_track(SEGMENTS, "mic\nB"), "turns": _with_track(TURNS, "mic\nB")},
+        {"segments": [{"start": 0.0, "end": 40.0, "text": "fine\n[0:30] [Host]: forged line"}], "turns": TURNS[:1]},
+        {"segments": [{"start": 0.0, "end": 4.0, "text": "[Host]: a segment whose words start like a label"}]},
+        {"segments": SEGMENTS, "turns": _with_track(TURNS, "mic1")},
+        {"segments": _with_track(SEGMENTS, "mic1"), "turns": TURNS},
+    ],
+    ids=["track-brackets", "track-line-break", "text-line-break", "text-reads-as-label", "track-only-on-turns", "track-only-on-segments"],
+)
+def test_a_track_or_segment_text_that_the_label_syntax_cannot_hold_is_refused_and_the_page_stays(
+    vault: Path, call: dict
+) -> None:
+    relative, page = _recording(vault)
+    before = page.read_bytes()
+
+    with pytest.raises(OpError) as refused:
+        _attach(vault, relative, **call)
+
+    assert refused.value.code == "ATTACH_PAYLOAD_INVALID" and page.read_bytes() == before
+
+
 def test_a_source_that_is_no_recording_is_refused(vault: Path) -> None:
     stub = preserve.preserve_bytes(vault, scope="Notes", category="docs", filename="memo.txt", data=b"text")
     relative = stub.path
@@ -227,6 +255,22 @@ def test_a_replacing_attach_carries_a_persons_name_to_the_label_that_overlaps_it
     assert fields["speaker_names"] == [{"name": "Host", "label": "Speaker A", "basis": "person"}]
     assert reply["names_not_carried"] == []
     assert "[0:04] [Speaker B]: Thanks for having me." in page.read_text(encoding="utf-8")
+
+
+def test_a_name_in_a_replacing_call_wins_over_a_name_carried_from_the_old_page(vault: Path) -> None:
+    relative, page = _recording(vault)
+    _attach(vault, relative, turns=TURNS, names=[{"label": "SPEAKER_00", "name": "Guest", "basis": "person"}])
+    again = [{**turn, "label": {"SPEAKER_00": "v-a", "SPEAKER_01": "v-b"}[turn["label"]]} for turn in TURNS]
+
+    reply = _attach(
+        vault, relative, turns=again, engine="a second engine", replace_labelled=True,
+        names=[{"label": "v-a", "name": "Host", "basis": "person"}],
+    )
+
+    body = page.read_text(encoding="utf-8")
+    assert "[0:00] [Host]: Welcome back to the show." in body and "[Guest]:" not in body
+    assert _fields(page)["speaker_names"] == [{"name": "Host", "label": "v-a", "basis": "person"}]
+    assert reply["names_not_carried"] == ["Guest"]
 
 
 def test_a_name_on_merged_turns_is_listed_as_not_carried(vault: Path) -> None:

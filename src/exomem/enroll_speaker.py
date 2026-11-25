@@ -117,15 +117,39 @@ def sample_of(page_text: str, label: str) -> Sample:
     return Sample(label, spans, tuple(speaker_names.lines_of(page_text, label)[:SAMPLE_LINES]))
 
 
+def _page_text(root: Path, page: Path) -> tuple[str, str | None]:
+    """The whole extraction text of the Source page `page`, parts included, and the original's SHA-256 it records.
+
+    The part pages sit where `extraction_parts.part_path` puts them, inside `root`. A missing part
+    is refused: the label's lines would be partial, and an enrolment reads the audio they cut.
+    """
+    try:
+        content = page.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise EnrollmentError(f"no Source page at {page.name}", "MEDIA_NOT_FOUND") from error
+    frontmatter = parse_frontmatter(content)[0]
+    try:
+        text = extraction_parts.whole_text(root, page, content)
+    except (OSError, UnicodeError) as error:
+        first = extraction_parts.part_path(page, 2)
+        raise EnrollmentError(
+            f"the page lists {extraction_parts.count_of(frontmatter)} parts and one is missing or unreadable; "
+            f"keep each part page where the first one is expected: {first}",
+            "MEDIA_PARTS_UNREADABLE",
+        ) from error
+    recorded = frontmatter.get("binary_sha256")
+    return text, recorded if isinstance(recorded, str) else None
+
+
 def local_page(vault_root: Path, recording: str) -> tuple[str, str | None]:
     """The whole extraction text of a recording's Source in the vault, and the original's SHA-256 it records."""
-    sidecar = Path(vault_root) / f"{recording}.md"
-    try:
-        content = sidecar.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        raise EnrollmentError(f"no Source page for {recording}", "MEDIA_NOT_FOUND") from error
-    recorded = parse_frontmatter(content)[0].get("binary_sha256")
-    return extraction_parts.whole_text(Path(vault_root), sidecar, content), recorded if isinstance(recorded, str) else None
+    return _page_text(Path(vault_root), Path(vault_root) / f"{recording}.md")
+
+
+def saved_page(page_file: Path) -> tuple[str, str | None]:
+    """The same for a Source page saved from the Cloud, with its part pages beside it."""
+    page = Path(page_file).resolve()
+    return _page_text(page.parent, page)
 
 
 #: An original is a context manager that yields its local path and the SHA-256 of the bytes it holds.

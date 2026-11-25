@@ -57,6 +57,15 @@ def assign_spans(
     return [assign_span(s, e, turns) for (s, e) in spans]
 
 
+def _letters(index: int) -> str:
+    """The letters of the `index`-th voice of a track: A to Z, then AA, AB and on, so a label stays one closed shape."""
+    letters, rest = "", index + 1
+    while rest:
+        rest, digit = divmod(rest - 1, 26)
+        letters = chr(ord("A") + digit) + letters
+    return letters
+
+
 def label_transcript(
     segments: Sequence[object],
     turns: Sequence[Turn],
@@ -69,7 +78,7 @@ def label_transcript(
     """Label ASR segments with speakers and render the transcript; None when nothing can be labelled.
 
     Each segment goes to the turn that overlaps it most (`assign_span`), among the turns of its own
-    track. Raw turn labels become `Speaker A`, `Speaker B`, ... in order of first appearance within
+    track. Raw turn labels become `Speaker A`, `Speaker B`, ... `Speaker Z`, `Speaker AA`, ... in order of first appearance within
     the track; a label in `resolved_labels` keeps the name it maps to instead, and takes no letter.
     A segment of a named track reads `<track>: <label>`, or the track alone where the track has no
     turns. Consecutive same-speaker segments merge into one turn. Returns `(text, merged_turns)`:
@@ -95,7 +104,7 @@ def label_transcript(
         if (track, raw) not in label_names:
             index = letters.get(track, 0)
             letters[track] = index + 1
-            label_names[(track, raw)] = f"Speaker {chr(ord('A') + index)}"
+            label_names[(track, raw)] = f"Speaker {_letters(index)}"
         return label_names[(track, raw)]
 
     labelled = bool(turns) or any(getattr(seg, "track", None) for seg in segments)

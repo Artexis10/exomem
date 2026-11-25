@@ -71,8 +71,13 @@ def rename(
         def rewrite(text: str) -> str:
             return speaker_names.rename_labels(text, pending)
 
-        # Every page's lines, as they read after the rename: `speakers` lists the labels they then carry.
         texts = [preserve.extracted_text(before), *(extraction_parts.text_of_part(content) for _, content, _ in parts)]
+        on_lines = {label for text in texts for label in speaker_names.labels_in(text)}
+        # `speakers` can list a label that no line carries; a rename of it would change no line and still say `renamed`.
+        for label in pending:
+            if label not in on_lines:
+                raise refuse("SPEAKER_LABEL_UNKNOWN", f"no line of the extraction carries the label {label!r}")
+        # Every page's lines, as they read after the rename: `speakers` lists the labels they then carry.
         carried = list(dict.fromkeys(label for text in texts for label in speaker_names.labels_in(rewrite(text))))
         entries = speaker_names.rename_entries(
             [item for item in fields.get("speaker_names") or [] if isinstance(item, dict)], pending
