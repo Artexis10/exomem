@@ -2805,8 +2805,10 @@ def _caught_up_without_rebuild(vault_root: Path, store) -> bool:
     catch_up = getattr(store, "catch_up_lagging_delta", None)
     if catch_up is None:
         return False
+    store._last_catch_up_deferred = False
     try:
         if not _heal_adopted_catalog_before_catch_up(vault_root, store):
+            store._last_catch_up_deferred = True
             return True
         if not catch_up():
             # A round that writes outran still advanced the stored checkpoint,
@@ -3066,7 +3068,10 @@ def _schedule_repair(
                         return
                     # "advanced" is not "targeted": the stored checkpoint moved but
                     # the registry is still ahead, so a lag-only catch-up follows.
-                    if caught_up and getattr(store, "_last_catch_up_advanced", False):
+                    if caught_up and getattr(store, "_last_catch_up_deferred", False):
+                        # Nothing was repaired: the lag waits for the owed heal.
+                        catch_up_result = "deferred"
+                    elif caught_up and getattr(store, "_last_catch_up_advanced", False):
                         catch_up_result = "advanced"
                     else:
                         catch_up_result = "targeted" if caught_up else "declined"
@@ -9717,7 +9722,12 @@ class LexicalStore:
                             "lexical atomic publish aborted: live catalog advanced past build"
                         )
                         return self._decline_rebuild("publish_conflict")
-                    return self._replace_live_catalog(temp_path)
+                    published = self._replace_live_catalog(temp_path)
+                    if published:
+                        # The whole catalogue replaced the adopted one, so no heal is owed.
+                        with self._lock:
+                            self._adopted_rows = None
+                    return published
 
             # The capped suffix was complete but too large to replay while
             # blocking writers. Rebase it without the barrier, then repeat the

@@ -436,9 +436,10 @@ class LocalRuntimeActivation:
         watcher = self.file_watcher
         # Invalidation cancels any replacement walk that is still in flight;
         # if it eventually returns it cannot re-publish an unmaintained map.
-        freshness.invalidate(self.vault_root)
-        # Its heal needs both scopes live; a lag repair must not wait for it now.
+        # Its heal needs both scopes live; forget it before they stop being live,
+        # so no lag repair waits for it.
         lexstore.forget_adopted_catalog(self.vault_root)
+        freshness.invalidate(self.vault_root)
         readiness.unmanage_runtime()
         self.file_watcher = None
         stop = getattr(watcher, "stop", None)

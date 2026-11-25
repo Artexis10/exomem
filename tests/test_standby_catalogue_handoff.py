@@ -1264,6 +1264,8 @@ def test_a_lag_repair_before_the_seed_finishes_leaves_the_lag_to_the_owed_heal(
     lexstore.request_lag_repair(root)
     assert lexstore.await_repairs_idle(root)
     assert rebuilds == [], rebuilds
+    # Nothing was repaired yet, and the readiness surface must not say otherwise.
+    assert (lexstore.repair_progress(root) or {}).get("last_result") == "deferred"
 
     _seed_live_scopes(root)
     readiness.manage_runtime()
@@ -1276,6 +1278,33 @@ def test_a_lag_repair_before_the_seed_finishes_leaves_the_lag_to_the_owed_heal(
     assert rebuilds == [], rebuilds
     assert readiness.retrieval_admission(root)["admitted"] is True
     assert lexstore.search_bm25(root, "quokkaafterbuild", k=3, scope="kb")
+
+
+def test_a_whole_catalogue_publication_ends_the_owed_heal(
+    older_catalogue: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full pass that replaced the adopted catalogue leaves no heal for a later lag repair to wait on.
+
+    The warm skips its heal while a full pass runs, so the adopted rows outlived
+    it; after a later registry loss a lag repair deferred to a heal nobody ran.
+    """
+    root = older_catalogue
+    _promote_over_older_catalogue(root, monkeypatch, between=_serving_writes)
+    _seed_live_scopes(root)
+    lexstore.request_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    freshness.clear()  # a later registry loss; the kb scope reseeds first
+    kb = root / "Knowledge Base"
+    freshness.seed(
+        root,
+        "kb",
+        ((str(path), freshness.stat_signature(path)) for path in find_module._walk_md(kb)),
+    )
+    lexstore.request_lag_repair(root)
+    assert lexstore.await_repairs_idle(root)
+
+    assert (lexstore.repair_progress(root) or {}).get("last_result") != "deferred"
 
 
 def test_a_downgraded_promoted_worker_does_not_wait_for_a_heal_it_cannot_run(
