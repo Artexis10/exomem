@@ -188,8 +188,10 @@ class _Derivation:
         # Released owner1 stores stay writable before the owner2 job creates its optional projections.
         self.projections = frozenset(name for (name,) in tx.execute("SELECT name FROM sqlite_master WHERE type = 'table'"))
         self.links = "inbound_links" in self.projections
-        self.body_link_column = any(
-            row[1] == "body_link" for row in tx.execute("PRAGMA table_info(graph_dependencies)")
+        # Both columns arrive together in the owner pass's DDL; a store lacking either writes neither.
+        self.graph_derived_columns = all(
+            any(row[1] == column for row in tx.execute(f"PRAGMA table_info({table})"))
+            for table, column in (("graph_dependencies", "body_link"), ("graph_edges", "raw_target"))
         )
 
         self.admission = tx.execute(
@@ -407,7 +409,7 @@ class _Derivation:
             epistemic_graph.drop_page_graph_rows(self.tx, rel)
         else:
             epistemic_graph.write_page_graph_rows(
-                self.tx, rows, graph.stamps, body_link_column=self.body_link_column,
+                self.tx, rows, graph.stamps, derived_columns=self.graph_derived_columns,
                 # Pages that link to an original re-derive in the same transaction, so their
                 # graph rows draw on the same reservation as the original's own.
                 before_write=self.reserve_graph if charge else None,

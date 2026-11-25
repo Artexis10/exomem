@@ -2748,31 +2748,38 @@ def write_page_graph_rows(
     rows: PageGraphRows,
     registry_stamps: Iterable[tuple[str, str]],
     *,
-    body_link_column: bool = True,
+    derived_columns: bool = True,
     before_write: Callable[[str, tuple[PageGraphRecords, ...]], None] | None = None,
 ) -> None:
     """Replace the page's graph rows with ``rows`` and store ``registry_stamps`` beside them.
 
     ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
-    and the records that replace its rows, before any row changes. The caller owns the transaction.
+    and the records that replace its rows, before any row changes. ``derived_columns`` is False for
+    a store whose tables lack the columns that the owner pass adds (``graph_dependencies.body_link``,
+    ``graph_edges.raw_target``): its rows omit them. The caller owns the transaction.
     """
     rel = rows.rel
     parent = PageGraphRecords(
         "graph_parent_refs", ("path", "parent_ref"),
         ((rel, rows.parent_ref),) if rows.parent_ref is not None else (), replace=True,
     )
-    if body_link_column:
+    if derived_columns:
         dependencies = PageGraphRecords(
             "graph_dependencies", ("source_path", "lookup_key", "raw_target", "body_link"),
             tuple((rel, key, target, body_link) for key, target, body_link in rows.dependencies),
         )
     else:
         # An owner1 store remains writable before the bounded owner2 pass creates
-        # its derived column.
+        # its derived columns.
         dependencies = PageGraphRecords(
             "graph_dependencies", ("source_path", "lookup_key", "raw_target"),
             tuple((rel, key, target) for key, target, _body_link in rows.dependencies),
         )
+    edge_columns = _EDGE_COLUMNS if derived_columns else _OWNER1_EDGE_COLUMNS
+    edges = PageGraphRecords(
+        "graph_edges", edge_columns,
+        tuple(_edge_values(edge)[: len(edge_columns)] for edge in rows.edges), replace=True,
+    )
     coverage = PageGraphRecords(
         "graph_dependency_coverage",
         ("source_path", "source_hash", "dependency_format", "expected_count"),
@@ -2781,10 +2788,6 @@ def write_page_graph_rows(
     if before_write is not None:
         nodes = PageGraphRecords(
             "graph_nodes", _NODE_COLUMNS, tuple(_node_values(node) for node in rows.nodes),
-            replace=True,
-        )
-        edges = PageGraphRecords(
-            "graph_edges", _EDGE_COLUMNS, tuple(_edge_values(edge) for edge in rows.edges),
             replace=True,
         )
         before_write(rel, (nodes, parent, edges, dependencies, coverage))
@@ -2800,8 +2803,7 @@ def write_page_graph_rows(
         for node in rows.nodes:
             _insert_node(conn, node)
         parent.write(conn)
-        for edge in rows.edges:
-            _insert_edge(conn, edge)
+        edges.write(conn)
     else:
         nodes.write(conn)
         parent.write(conn)
@@ -3118,7 +3120,7 @@ class EpistemicGraphIndex:
                 source_anchor TEXT, metadata TEXT NOT NULL,
                 resolver_project TEXT, resolver_page_type TEXT,
                 resolver_source_kind TEXT, resolver_target_kind TEXT,
-                resolver_origin TEXT, review_evidence TEXT NOT NULL
+                resolver_origin TEXT, review_evidence TEXT NOT NULL, raw_target TEXT
             )
         """)
         conn.execute("""
@@ -3151,6 +3153,10 @@ class EpistemicGraphIndex:
             conn.execute(
                 "ALTER TABLE graph_dependencies ADD COLUMN body_link INTEGER NOT NULL DEFAULT 0"
             )
+        # A real column, not an expression index on `metadata`, so the store's room sizer
+        # (`vault_store.write`) can bound its index records.
+        if "raw_target" not in {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)")}:
+            conn.execute("ALTER TABLE graph_edges ADD COLUMN raw_target TEXT")
         conn.execute(
             "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('instance', ?)",
             (secrets.token_hex(16),),
@@ -3194,7 +3200,7 @@ class EpistemicGraphIndex:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_graph_edges_raw_target "
-            "ON graph_edges(source_path, json_extract(metadata, '$.raw_target'))"
+            "ON graph_edges(source_path, raw_target)"
         )
         # Relation-type indexes back the relation-filtered-recall lookups; the two
         # columns are queried by separate UNIONed branches (an OR across them would
@@ -12173,7 +12179,7 @@ def _family_relation_predicate(
     relation = (
         "NOT (e.dst_key = 'file:' || e.source_path "
         "AND json_extract(e.metadata, '$.occurrence_key') IS NOT NULL "
-        "AND json_extract(e.metadata, '$.raw_target') IS NULL) AND "
+        "AND e.raw_target IS NULL) AND "
         "(e.relation_type IN (SELECT value FROM json_each(?)) "
         "OR e.parent_relation IN (SELECT value FROM json_each(?)) "
         "OR (e.registry_status = ? AND e.raw_relation IN (SELECT value FROM json_each(?))))"
@@ -12204,7 +12210,7 @@ def family_proposal(vault_root: Path, families: Collection[str]) -> tuple[str, l
         "(SELECT value FROM json_each(exomem_dependency_keys(u.parent_path, p.title))) "
         f"AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
         "WHERE e.source_path = d.source_path "
-        "AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
+        "AND e.raw_target = d.raw_target "
         f"AND {relation})))"
     )
     if link:
@@ -12262,7 +12268,7 @@ def stored_family_edges(
         "WHERE d.lookup_key IN (SELECT value FROM json_each(?)) "
         "AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
         "WHERE e.source_path = d.source_path "
-        "AND json_extract(e.metadata, '$.raw_target') = d.raw_target "
+        "AND e.raw_target = d.raw_target "
         f"AND {relation}))",
         (json.dumps(dependency_keys), int(plain_links), *bound),
     ).fetchall()
@@ -15521,7 +15527,10 @@ _EDGE_COLUMNS = (
     "parent_relation", "registry_status", "registry_version", "registry_hash", "origin",
     "source_path", "source_anchor", "metadata", "resolver_project", "resolver_page_type",
     "resolver_source_kind", "resolver_target_kind", "resolver_origin", "review_evidence",
+    "raw_target",
 )
+# A store before the owner pass that adds `raw_target` (the last column) writes the others.
+_OWNER1_EDGE_COLUMNS = _EDGE_COLUMNS[:-1]
 _INSERT_NODE = _graph_insert("graph_nodes", _NODE_COLUMNS)
 _INSERT_EDGE = _graph_insert("graph_edges", _EDGE_COLUMNS)
 
@@ -15586,6 +15595,7 @@ def _edge_values(edge: GraphEdge) -> tuple[Any, ...]:
         edge.resolver_target_kind,
         edge.resolver_origin,
         json.dumps(edge.review_evidence or {}, ensure_ascii=False, sort_keys=True),
+        (edge.metadata or {}).get("raw_target"),
     )
 
 

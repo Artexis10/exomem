@@ -695,12 +695,16 @@ def test_an_owner_upgrade_restarts_an_older_pass_and_resumes_its_own_generation(
             tx.execute("DROP TABLE title_fts")
             tx.execute("DROP TABLE wikilink_keys")
             tx.execute("ALTER TABLE graph_dependencies DROP COLUMN body_link")
+            tx.execute("DROP INDEX idx_graph_edges_raw_target")
+            tx.execute("ALTER TABLE graph_edges DROP COLUMN raw_target")
         legacy_write = "Knowledge Base/Notes/Upgrade write.md"
         write.commit(upgrading, write.StoreChange(
             write.Origin.GOVERNED, "note", puts=(write.PagePut(
-                legacy_write, b"# Upgrade write\n\n## Claim\n\nA write during background upgrade.\n",
+                legacy_write, b"# Upgrade write\n\n## Claim\n\nA write during background upgrade. See [[Alpha]].\n",
             ),),
         ))
+        # The store lacks the pass's graph columns, yet the write derives its edges at once.
+        assert rows(stored, "SELECT COUNT(*) FROM graph_edges WHERE source_path = ?", legacy_write)[0][0] > 0
         write.commit(upgrading, write.StoreChange(
             write.Origin.GOVERNED, "note", deletes=(write.PageDelete(legacy_write),),
         ))
