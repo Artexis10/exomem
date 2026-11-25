@@ -473,8 +473,9 @@ Partial release evidence can recover from a complete producer artifact.
 
 Image publishers share one Actions concurrency group across release versions.
 The workflow checks the latest release inside that group before each floating-tag
-update. A running image build delays the next publisher; dry runs use separate
-groups and do not occupy the publication queue.
+update. Images build in separate jobs before the publisher starts, so a queued
+publisher waits only for attestation and tagging. Dry runs use separate groups
+and do not occupy the publication queue.
 
 A legacy image without original evidence remains visibly incomplete. It needs a
 complete successor release.
