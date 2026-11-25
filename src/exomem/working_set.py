@@ -519,18 +519,12 @@ def _without_lede_repeats(
     return tuple(out)
 
 
-def display_chars(display: Mapping[str, Any] | None) -> int:
-    """The compact JSON characters that a unit's optional display metadata adds."""
-    return len(json.dumps(display, separators=(",", ":"), ensure_ascii=False)) if display else 0
-
-
 def served_chars(section: str, entry: Mapping[str, Any]) -> int:
     """What one served `units`, `pointers` or `current_state` entry costs the
-    budget outside conversation inference: its prose and a unit's display
-    marks, nothing else. The egress guard refunds exactly this for an entry it
-    removes."""
+    budget outside conversation inference: its prose, nothing else. The egress
+    guard refunds exactly this for an entry it removes."""
     if section == "units":
-        return len(str(entry.get("text") or "")) + display_chars(entry.get("display"))
+        return len(str(entry.get("text") or ""))
     if section == "pointers":
         return len(str(entry.get("title") or "")) + len(str(entry.get("why") or ""))
     if section == "current_state":
