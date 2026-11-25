@@ -985,11 +985,12 @@ def _eligibility_predicate(
     )
 
 
-def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
+def _selected_axis_labels(vault_root: Path, conn: sqlite3.Connection) -> SelectedAxisLabels:
     """Raw labels any admitted instance could interpret to a requested value.
 
     Unit filters compare served values by spelling, so every admitted
     instance's own vocabulary proposes candidates, not only shared core.
+    Edge families propose pages from `conn`'s graph rows.
     """
     from . import semantic_index, semantic_language_registry
 
@@ -1002,7 +1003,7 @@ def _selected_axis_labels(vault_root: Path) -> SelectedAxisLabels:
         if axis == "unit.edge_families":
             from . import epistemic_graph
 
-            return epistemic_graph.family_proposal(vault_root, values)
+            return epistemic_graph.family_proposal(vault_root, conn, values)
         parts = [
             semantic_language_registry.unit_query_plan(
                 adapter,
@@ -4900,11 +4901,13 @@ def search_semantic_units_result(
     registry_scope: str | None = None,
     validated: dict[tuple[str, str, str, int], bool] | None = None,
     filter_plan: Any | None = None,
+    rank_query: bool = False,
 ) -> CatalogQueryResult[list[SemanticUnitLexicalHit]]:
     """Typed exact-category unit query preserving every catalog outcome.
 
-    `validated` keeps each row stamp's currency check for the caller's request,
-    so several queries over the same parents read each one once. A request
+    `rank_query` ranks the eligible rows by the query's BM25 match and keeps the best `k`; an
+    unavailable FTS5 answers `unsupported`. `validated` keeps each row stamp's currency check
+    for the caller's request, so several queries over the same parents read each one once. A request
     shares it across its activation lanes, so a parent whose file changes
     while its catalogue rows do not passes in every later query as it did in
     the first: those lanes serve the parent as the request first read it. A
@@ -4922,12 +4925,20 @@ def search_semantic_units_result(
         return CatalogQueryResult(
             None, CatalogReadiness("unsupported", False, backend())
         )
-    # This is the exact metadata seam. Do not let a non-empty content query
-    # turn catalog availability into an FTS capability probe: literal keyword
+    # This is the exact metadata seam. Unless the caller asks to rank, do not let a non-empty
+    # content query turn catalog availability into an FTS capability probe: literal keyword
     # filtering uses normal-table `instr`, while hybrid/vector callers rank the
     # returned exact candidate set independently.
     tokens: list[str] = []
     literal_tokens = tuple(query.lower().split()) if literal_all else ()
+    if rank_query and query.strip() and not literal_tokens:
+        from . import bm25 as bm25_module
+
+        tokens = bm25_module.tokenize(query, query=True)
+        if not tokens:
+            return CatalogQueryResult([], CatalogReadiness("available", True, backend()))
+        if not fts5_available():
+            return CatalogQueryResult(None, CatalogReadiness("unsupported", False, backend()))
     result = get_store(vault_root).search_semantic_units_result(
         tokens,
         k,
@@ -5008,6 +5019,7 @@ def search_semantic_units_result(
                 registry_scope=registry_scope,
                 validated=validated,
                 filter_plan=filter_plan,
+                rank_query=rank_query,
             )
     _schedule_repair(vault_root)
     return CatalogQueryResult(
@@ -5108,7 +5120,7 @@ class BrowseRow(NamedTuple):
 
 
 def _browse_plan_sql(
-    vault_root: Path, eligibility: Any | None, col: str
+    vault_root: Path, conn: sqlite3.Connection, eligibility: Any | None, col: str
 ) -> tuple[str, str, list[object]]:
     """`own` and `via_parent` as SQL over a `pages r` row, with the plan predicate's parameters.
 
@@ -5120,7 +5132,7 @@ def _browse_plan_sql(
     """
     if eligibility is None:
         return "1", "0", []
-    labels = _selected_axis_labels(vault_root) if eligibility.has_unit_axis else None
+    labels = _selected_axis_labels(vault_root, conn) if eligibility.has_unit_axis else None
     predicate, params = _eligibility_predicate(eligibility, "in_vault", labels)
     own = f"EXISTS (SELECT 1 FROM pages p WHERE p.path = r.path AND ({predicate}))"
     via = (
@@ -5173,7 +5185,7 @@ def browse_window_result(
         # The pragma reads the index's own entry, not a table of the store.
         if not conn.execute("SELECT 1 FROM pragma_index_info(?)", (BROWSE_INDEX,)).fetchone():
             return None
-        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        own, via, plan_params = _browse_plan_sql(vault_root, conn, eligibility, col)
         params: list[object] = [*plan_params, *plan_params]
         keyset = ""
         if after is not None:
@@ -5219,7 +5231,7 @@ def browse_children_result(
     col = _browse_scope_column(scope)
 
     def query(conn: sqlite3.Connection) -> list[BrowseRow]:
-        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        own, via, plan_params = _browse_plan_sql(vault_root, conn, eligibility, col)
         return _browse_rows(
             conn.execute(
                 f"SELECT r.path, r.updated, r.emitted_parent_path, 1, "
@@ -5251,7 +5263,7 @@ def browse_rows_result(
     col = _browse_scope_column(scope)
 
     def query(conn: sqlite3.Connection) -> list[BrowseRow]:
-        own, via, plan_params = _browse_plan_sql(vault_root, eligibility, col)
+        own, via, plan_params = _browse_plan_sql(vault_root, conn, eligibility, col)
         return _browse_rows(
             conn.execute(
                 f"SELECT r.path, r.updated, r.emitted_parent_path, r.{col}, "
@@ -6633,14 +6645,6 @@ class LexicalStore:
             return CatalogQueryResult(None, verdict)
 
     def _require_row_key_projection(self, conn: sqlite3.Connection, eligibility: Any) -> None:
-        if eligibility.requires_edge_families:
-            from . import epistemic_graph
-
-            conn.create_function(
-                "exomem_dependency_keys", 2,
-                lambda path, title: json.dumps(sorted(epistemic_graph.dependency_keys_for_page(path, title))),
-                deterministic=True,
-            )
         if (eligibility.requires_row_keys or eligibility.requires_edge_families) and self._reads_store():
             from .vault_store import read as store_read
             from .vault_store import rederive
@@ -14000,7 +14004,7 @@ class LexicalStore:
             eligibility = structured_filters.plan_index_eligibility(filter_plan)
             self._require_row_key_projection(conn, eligibility)
             proposal, proposed_params = _eligibility_sql(
-                eligibility.expr, unit_missing=False, labels=_selected_axis_labels(self.vault_root),
+                eligibility.expr, unit_missing=False, labels=_selected_axis_labels(self.vault_root, conn),
             )
             clauses.append(f"({proposal}) IS NOT 0")
             params.extend(proposed_params)
@@ -14224,7 +14228,7 @@ class LexicalStore:
             _require_current_parser(conn)
         col = "in_vault" if scope == "vault" else "in_kb"
         predicate, params = _eligibility_predicate(
-            eligibility, col, _selected_axis_labels(self.vault_root)
+            eligibility, col, _selected_axis_labels(self.vault_root, conn)
         )
         rows = conn.execute(
             "WITH matched AS ("
@@ -14285,7 +14289,7 @@ class LexicalStore:
             _require_current_parser(conn)
         col = "in_vault" if scope == "vault" else "in_kb"
         predicate, params = _eligibility_predicate(
-            eligibility, col, _selected_axis_labels(self.vault_root)
+            eligibility, col, _selected_axis_labels(self.vault_root, conn)
         )
         rows = conn.execute(
             "WITH matched AS ("

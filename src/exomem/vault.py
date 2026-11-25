@@ -10036,17 +10036,25 @@ class WikilinkResolution:
         return {"status": self.status, count: len(witnesses), "witnesses": [item.path for item in witnesses]}
 
 
+def wikilink_lookup_stages(target: str) -> list[tuple[str, str]]:
+    """The `(axis, key)` lookups that resolve `target`, in precedence order; none for a blank one."""
+    cleaned = wikilink_page_key(split_wikilink_target(target)[0])
+    if not cleaned:
+        return []
+    stages = [("path", cleaned), ("path", managed_join(cleaned))]
+    if "/" not in cleaned:
+        stages.extend((("stem", cleaned), ("title", title_key(cleaned))))
+    return stages
+
+
 def select_wikilink(
     target: str, lookup: Callable[[str, str], WikilinkMatches | None],
 ) -> WikilinkResolution:
     """Apply normalizer precedence to prepared proofs without I/O or legacy fallbacks."""
-    cleaned, anchor = split_wikilink_target(target)
-    cleaned = wikilink_page_key(cleaned)
-    if not cleaned:
+    anchor = split_wikilink_target(target)[1]
+    stages = wikilink_lookup_stages(target)
+    if not stages:
         return WikilinkResolution("missing")
-    stages = [("path", cleaned), ("path", managed_join(cleaned))]
-    if "/" not in cleaned:
-        stages.extend((("stem", cleaned), ("title", title_key(cleaned))))
     for axis, key in stages:
         matches = lookup(axis, key)
         if matches is None:

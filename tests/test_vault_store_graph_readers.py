@@ -975,6 +975,93 @@ def test_stored_family_dimensions_fill_the_limit_before_ranking(stored, writer, 
                 request_budget.reset_current(token)
 
 
+def test_a_family_dimension_ranks_its_first_hits_the_same_at_any_limit(stored, writer, encoder):  # noqa: F811
+    """A small limit must not rank members by the eligible set's own term statistics.
+
+    Corpus statistics favour the rare `alpha`; among the members `beta` is the rare term. Noise
+    outranks every member in both lanes, so only the small limit's windows miss the members.
+    """
+    def claim(name, text, relation=""):
+        return f"## Claim\n- id: {name}\n{relation}\n{text}\n"
+
+    derived = "- relations: derived_from: [[Family target]]\n"
+    members = [claim(f"a-{index}", f"Beta material for case {index}.", derived) for index in range(3)]
+    members += [claim(
+        f"b-{index}", f"Alpha material for case {index}, with many further words about other matters "
+        "that make this claim much longer than the rest.", derived,
+    ) for index in range(10)]
+    noise = [claim(f"noise-{index}", "Beta gamma delta beta gamma delta beta gamma delta.") for index in range(40)]
+    filler = [
+        write.PagePut(f"Knowledge Base/Notes/Filler {page}.md", (f"# Filler {page}\n\n" + "\n".join(
+            claim(f"filler-{index}", f"Unrelated filler number {index}.") for index in range(10)
+        )).encode())
+        for page in range(8)
+    ]
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut("Knowledge Base/Notes/Family source.md",
+                      ("# Family source\n\n" + "\n".join(members)).encode()),
+        write.PagePut("Knowledge Base/Notes/Noise.md", ("# Noise\n\n" + "\n".join(noise)).encode()),
+        write.PagePut("Knowledge Base/Notes/Family target.md", b"# Family target\n\nSurvey material.\n"),
+        *filler,
+    )))
+    catch_up(stored)
+
+    def first_hits(limit):
+        result = commands.op_ask_memory(
+            stored, query="alpha beta gamma delta", scope="kb-only", mode="hybrid", result_level="unit",
+            filters={"unit.dimension": {"$eq": "provenance"}}, limit=limit, graph=False,
+        )
+        return [hit["excerpt"] for hit in result["hits"]]
+
+    assert first_hits(3) == first_hits(60)[:3]
+
+
+def test_a_family_dimension_does_no_graph_work_for_unrelated_pages(stored, writer, monkeypatch):  # noqa: F811
+    """Pages that no family edge touches add no per-unit membership work to a filtered search."""
+    source = "Knowledge Base/Notes/Family source.md"
+    target = "Knowledge Base/Notes/Family target.md"
+    body = "# Family source\n\n" + "\n".join(
+        f"## Claim\n- id: member-{index}\n- relations: derived_from: [[Family target]]\n\n"
+        f"The signal has qualifying source material for outcome {index}.\n"
+        for index in range(3)
+    )
+
+    def unrelated(first, count):
+        return tuple(
+            write.PagePut(f"Knowledge Base/Notes/Unrelated {index}.md", (f"# Unrelated {index}\n\n" + "\n".join(
+                f"## Claim\n- id: noise-{unit}\n\nSignal signal signal from page {index}.\n" for unit in range(5)
+            )).encode())
+            for index in range(first, first + count)
+        )
+
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=(
+        write.PagePut(source, body.encode()), write.PagePut(target, b"# Family target\n\nSurvey material.\n"),
+        *unrelated(0, 10),
+    )))
+    calls = []
+    counted = epistemic_graph.dependency_keys_for_page
+
+    def counting(path, title):
+        calls.append(path)
+        return counted(path, title)
+
+    monkeypatch.setattr(epistemic_graph, "dependency_keys_for_page", counting)
+
+    def membership_reads():
+        calls.clear()
+        for ranking in ("keyword", "hybrid"):
+            result = commands.op_ask_memory(
+                stored, query="signal", scope="kb-only", mode=ranking, result_level="unit",
+                filters={"unit.dimension": {"$eq": "provenance"}}, limit=2, graph=False,
+            )
+            assert len(result["hits"]) == 2
+        return len(calls)
+
+    small = membership_reads()
+    write.commit(writer, write.StoreChange(write.Origin.GOVERNED, "test", puts=unrelated(10, 40)))
+    assert membership_reads() == small
+
+
 def test_stored_family_dimensions_keep_the_authors_private_meaning(vault, private_instances):  # noqa: F811
     """The query's same-named extension cannot replace a private author's family."""
     from exomem import relation_registry, semantic_language_registry

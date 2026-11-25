@@ -4041,13 +4041,26 @@ def _find_semantic_units(
     parent_reads: UnitParentReads | None = None,
     _defer_hydration: bool = False,
     _candidate_window: _UnitCandidateWindow | None = None,
-    _exact_dimensions: bool = False,
+    _dimension_window: int | None = None,
+    _dimension_parents: set[str] | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     from . import lexstore
 
-    def fill_exactly():
-        # The candidate windows underfilled the limit: exact eligibility reads every proposed unit.
+    def proposed_parents() -> set[str]:
+        # One catalogue read of the parents whose units the plan can propose.
+        if _dimension_parents is not None:
+            return _dimension_parents
+        eligibility = structured_filters.plan_index_eligibility(plan)
+        if not eligibility.resolvable:
+            return set(snapshot.recall_paths(scope))
+        return _eligibility_candidate_paths(
+            vault_root, scope=scope, eligibility=eligibility, freshness=snapshot.for_scope(scope),
+        )
+
+    def widen():
+        # The windows underfilled the limit while a lane held more rows: read both twice as deep.
+        parents = proposed_parents()
         return _find_semantic_units(
             vault_root, query=query, limit=limit, scope=scope, plan=plan, snapshot=snapshot,
             prefer_active=prefer_active, config=config, mode=mode, degraded_out=degraded_out,
@@ -4056,7 +4069,8 @@ def _find_semantic_units(
             prepared_queries=prepared_queries, recall_checkpoint=recall_checkpoint, repair=repair,
             max_catalog_candidates=max_catalog_candidates, truncated_out=truncated_out,
             status_basis=status_basis, parent_reads=parent_reads, _defer_hydration=_defer_hydration,
-            _candidate_window=_candidate_window, _exact_dimensions=True,
+            _candidate_window=_candidate_window, _dimension_window=window * 2,
+            _dimension_parents=parents,
         )
 
     def finish(hits):
@@ -4108,13 +4122,17 @@ def _find_semantic_units(
     dnf_clauses = algebra.clauses if algebra.status == "complete" else None
     requested_limit = 20 if limit is None else max(1, limit)
     candidate_limit = max(20, min(200, requested_limit * 8))
-    # A dimension can propose most of the corpus, and exact eligibility hydrates every proposed
-    # unit. A ranked, limited query checks dimensions on its usual candidate windows first.
-    windowed_dimensions = (
-        indexed_dimensions and dnf_clauses is None and not _exact_dimensions
-        and limit is not None and mode in {"hybrid", "vector"}
+    # A dimension can propose most of the corpus. A query with content pushes the dimension into
+    # its ranked lexical window instead of hydrating every proposed unit; `widen` deepens it.
+    pushed_dimensions = (
+        indexed_dimensions and dnf_clauses is None and bool(query.strip())
+        and (mode == "keyword" or lexstore.fts5_available())
     )
-    exact_eligibility = dnf_clauses is not None or (indexed_dimensions and not windowed_dimensions)
+    # Keyword order is the store's own recency order, so its prefix starts at the limit.
+    window = _dimension_window or (
+        max(8, requested_limit) if mode == "keyword" and limit is not None else candidate_limit
+    )
+    exact_eligibility = dnf_clauses is not None or (indexed_dimensions and not pushed_dimensions)
     if exact_eligibility:
         # Exact eligibility is normal-table metadata only. Hybrid/vector
         # content ranking consumes this finite candidate set independently,
@@ -4218,6 +4236,31 @@ def _find_semantic_units(
                     if mode == "vector"
                     else select(indexed)
                 )
+    elif pushed_dimensions:
+        # The store checks each proposed row's dimensions exactly and stops after `window + 1`.
+        pushed = lexstore.search_semantic_units_result(
+            vault_root,
+            query,
+            k=window + 1,
+            filter_plan=plan,
+            rank_query=mode != "keyword",
+            literal_all=mode == "keyword",
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
+            recall_checkpoint=recall_checkpoint,
+            allowed_parent_paths=allowed_parent_paths,
+            admitted_parent_paths=allowed_parent_paths,
+            released_parent_paths=released_parent_paths,
+            _repair_stale=True,
+            repair=_bounded_lexical_repair_allowed(snapshot.for_scope(scope)) if repair is None else repair,
+            allow_delta=True if repair is None else repair,
+            validated=parent_reads.validated if parent_reads else None,
+            _validate_current=False,
+        )
+        _set_catalog_timing_profile(timings, pushed.readiness)
+        if not pushed.readiness.complete:
+            _raise_catalog_outcome(pushed.readiness)
+        indexed = list(pushed.value or [])
     else:
         indexed = lexstore.search_semantic_units(
             vault_root,
@@ -4257,9 +4300,9 @@ def _find_semantic_units(
         else:
             records = _eligible_unit_records(vault_root, scope=scope, plan=plan, allowed_parent_paths=allowed_parent_paths)
     elif not exact_eligibility:
-        if len(indexed) > candidate_limit:
+        if len(indexed) > window:
             candidate_window_exhausted = True
-            indexed = indexed[:candidate_limit]
+            indexed = indexed[:window]
         records = (
             {}
             if mode == "vector"
@@ -4289,7 +4332,7 @@ def _find_semantic_units(
 
     if mode == "keyword":
         if not records:
-            return finish([])
+            return widen() if candidate_window_exhausted and pushed_dimensions and limit is not None else finish([])
         tokens = query.lower().split()
         ordered = sorted(
             (
@@ -4304,17 +4347,22 @@ def _find_semantic_units(
             ),
             reverse=True,
         )
+        superseded = {
+            id(record): prefer_active and status_basis.classify(
+                record[0].frontmatter.get("status"),
+                path=record[0].rel_path,
+                frontmatter=record[0].frontmatter,
+            ).require() == "superseded"
+            for record in ordered
+        }
         if prefer_active:
-            ordered.sort(
-                key=lambda record: (
-                    status_basis.classify(
-                        record[0].frontmatter.get("status"),
-                        path=record[0].rel_path,
-                        frontmatter=record[0].frontmatter,
-                    ).require()
-                    == "superseded"
-                )
-            )
+            ordered.sort(key=lambda record: superseded[id(record)])
+        if (
+            candidate_window_exhausted and pushed_dimensions and limit is not None
+            and sum(not superseded[id(record)] for record in ordered[:limit]) < limit
+        ):
+            # Recency is the final order, so only a short or superseded prefix needs more rows.
+            return widen()
         selected = ordered if limit is None else ordered[:limit]
         hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
@@ -4327,6 +4375,10 @@ def _find_semantic_units(
         return finish(hits)
 
     vector_hits: list[Any] = []
+    # Vector hits already selected while a dimension deepened the vector window.
+    vector_records: dict[str, tuple[Any, Any, int]] = {}
+    vector_selected: set[str] = set()
+    vector_stale: list[str] = []
     vector_profile: dict[str, Any] = {
         "status": "non_applicable",
         "reason": "requested_mode_keyword",
@@ -4340,27 +4392,43 @@ def _find_semantic_units(
             # flattened cross-product filter.
             vector_allowed_refs = {row.unit_ref for row in indexed or ()}
         vector_candidate_limit = (
-            len(vector_allowed_refs) if vector_allowed_refs is not None else candidate_limit + 1
+            len(vector_allowed_refs) if vector_allowed_refs is not None else window + 1
         )
         vector_parent_paths = snapshot.recall_paths(scope)
         if allowed_parent_paths is not None:
             vector_parent_paths = vector_parent_paths & allowed_parent_paths
+        if pushed_dimensions:
+            # The vector lane ranks only the units of parents the plan can propose.
+            _dimension_parents = proposed_parents()
+            vector_parent_paths = vector_parent_paths & _dimension_parents
         if vector_allowed_refs is not None:
             # Public refs are per-reader meanings; their parents bound the rows read.
             vector_parent_paths = vector_parent_paths & {row.parent_path for row in indexed or ()}
-        vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
-            vault_root,
-            query=query,
-            candidate_limit=vector_candidate_limit,
-            allowed_unit_refs=vector_allowed_refs,
-            allowed_parent_paths=vector_parent_paths,
-            released_parent_paths=released_parent_paths,
-            degraded_out=degraded_out,
-            failed_out=failed_out,
-            timings=timings,
-            query_vector_provider=query_vector_provider,
-            prepared_queries=prepared_queries,
-        )
+        vector_window = window
+        while True:
+            vector_hits, vector_profile, _indexed_scope = _vector_unit_candidates(
+                vault_root,
+                query=query,
+                candidate_limit=vector_candidate_limit,
+                allowed_unit_refs=vector_allowed_refs,
+                allowed_parent_paths=vector_parent_paths,
+                released_parent_paths=released_parent_paths,
+                degraded_out=degraded_out,
+                failed_out=failed_out,
+                timings=timings,
+                query_vector_provider=query_vector_provider,
+                prepared_queries=prepared_queries,
+            )
+            if not (pushed_dimensions and len(vector_hits) > vector_window):
+                break
+            fresh = [hit for hit in vector_hits[:vector_window] if hit.unit_ref not in vector_selected]
+            vector_records.update(select(fresh, stale_out=vector_stale))
+            vector_selected.update(hit.unit_ref for hit in fresh)
+            if len(vector_records) >= requested_limit or vector_stale:
+                break
+            # Fewer members than the limit among the proposed parents' units: read twice as deep.
+            vector_window *= 2
+            vector_candidate_limit = vector_window + 1
         if (
             vector_allowed_refs is not None
             and {hit.unit_ref for hit in vector_hits} != vector_allowed_refs
@@ -4377,14 +4445,15 @@ def _find_semantic_units(
             _record_degradation("vector")
             if failed_out is not None and "vector" not in failed_out:
                 failed_out.append("vector")
-        elif vector_allowed_refs is None and len(vector_hits) > candidate_limit:
+        elif vector_allowed_refs is None and len(vector_hits) > vector_window:
             candidate_window_exhausted = True
-            vector_hits = vector_hits[:candidate_limit]
+            vector_hits = vector_hits[:vector_window]
     if vector_hits:
-        stale_vector_refs: list[str] = []
-        records.update(
-            select(vector_hits, stale_out=stale_vector_refs)
-        )
+        stale_vector_refs = list(vector_stale)
+        vector_records.update(select(
+            [hit for hit in vector_hits if hit.unit_ref not in vector_selected], stale_out=stale_vector_refs,
+        ))
+        records.update(vector_records)
         if stale_vector_refs:
             vector_hits = []
             vector_profile = {
@@ -4405,8 +4474,8 @@ def _find_semantic_units(
         )
 
     if not records:
-        if candidate_window_exhausted and windowed_dimensions:
-            return fill_exactly()
+        if candidate_window_exhausted and pushed_dimensions and limit is not None:
+            return widen()
         if candidate_window_exhausted and _candidate_window is None and failed_out is not None:
             failed_out.append("semantic_units_candidate_window")
             _record_degradation("semantic_units_candidate_window")
@@ -4535,8 +4604,8 @@ def _find_semantic_units(
 
     if limit is not None:
         final_ranking = final_ranking[:limit]
-    if candidate_window_exhausted and windowed_dimensions and len(final_ranking) < limit:
-        return fill_exactly()
+    if candidate_window_exhausted and pushed_dimensions and limit is not None and len(final_ranking) < limit:
+        return widen()
     if (candidate_window_exhausted and _candidate_window is None
             and (limit is None or len(final_ranking) < limit)):
         if failed_out is not None:

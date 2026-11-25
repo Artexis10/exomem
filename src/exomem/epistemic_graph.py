@@ -2755,8 +2755,9 @@ def write_page_graph_rows(
 
     ``registry_stamps`` is `graph_registry_stamps` of the pass. ``before_write`` receives the page
     and the records that replace its rows, before any row changes. ``derived_columns`` is False for
-    a store whose tables lack the columns that the owner pass adds (``graph_dependencies.body_link``,
-    ``graph_edges.raw_target``): its rows omit them. The caller owns the transaction.
+    a store whose tables lack the columns that the owner pass adds
+    (``graph_dependencies.body_link``, ``graph_edges.raw_target``): its rows omit them. The caller
+    owns the transaction.
     """
     rel = rows.rel
     parent = PageGraphRecords(
@@ -4295,7 +4296,10 @@ class EpistemicGraphIndex:
             if current and (not exact_live_checkpoint or startup_negative is not None):
                 # The first SELECT pins the snapshot; a preceding write cannot
                 # borrow an older proof.
-                if not exact_live_checkpoint and _sidecar_file_identity(self.path) != sidecar_identity:
+                if (
+                    not exact_live_checkpoint
+                    and _sidecar_file_identity(self.path) != sidecar_identity
+                ):
                     if outcome_out is not None:
                         outcome_out.append("unproven")
                     conn.close()
@@ -12192,33 +12196,44 @@ def _family_relation_predicate(
     ]
 
 
-def family_proposal(vault_root: Path, families: Collection[str]) -> tuple[str, list[Any]]:
-    """Indexed neutral edge/dependency presence over `u` and `p`, before selected interpretation."""
+def family_proposal(
+    vault_root: Path, conn: sqlite3.Connection, families: Collection[str]
+) -> tuple[str, list[Any]]:
+    """The pages an edge of `families` may touch, as SQL over `u`, read once from indexed rows.
+
+    A page qualifies when it authors or receives such an edge, or when a raw target of one could
+    resolve to it at any wikilink lookup stage. Selected interpretation then decides each unit.
+    """
     registry = relation_registry.load_registry(vault_root)
     relation, bound = _family_relation_predicate(
         registry, families, semantic_index.Interpretations(vault_root)
     )
-    nearby = (
-        "EXISTS(SELECT 1 FROM graph_nodes n JOIN graph_edges e ON e.src_key = n.node_key "
-        f"WHERE n.path = u.parent_path AND {relation}) OR "
-        "EXISTS(SELECT 1 FROM graph_edges e WHERE e.dst_page_key = 'file:' || u.parent_path "
-        f"AND {relation})"
-    )
     link = registry.family_of(registry.link_key) in families
-    dependencies = (
-        "EXISTS(SELECT 1 FROM graph_dependencies d WHERE d.lookup_key IN "
-        "(SELECT value FROM json_each(exomem_dependency_keys(u.parent_path, p.title))) "
-        f"AND ((d.body_link = 1 AND ?) OR EXISTS(SELECT 1 FROM graph_edges e "
-        "WHERE e.source_path = d.source_path "
-        "AND e.raw_target = d.raw_target "
-        f"AND {relation})))"
-    )
-    if link:
-        dependencies += (
-            " OR EXISTS(SELECT 1 FROM graph_dependencies d WHERE d.source_path = u.parent_path "
-            "AND d.body_link = 1)"
-        )
-    return f"({nearby} OR {dependencies})", [*bound, *bound, int(link), *bound]
+    plain = " UNION SELECT {} FROM graph_dependencies WHERE body_link = 1" if link else ""
+    pages = {str(path) for (path,) in conn.execute(
+        "SELECT n.path FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
+        f"WHERE {relation} UNION SELECT substr(e.dst_page_key, 6) FROM graph_edges e "
+        f"WHERE substr(e.dst_page_key, 1, 5) = 'file:' AND {relation}"
+        + plain.format("source_path"),
+        [*bound, *bound],
+    ) if path is not None}
+    stages: dict[str, set[str]] = {}
+    for (raw,) in conn.execute(
+        f"SELECT e.raw_target FROM graph_edges e WHERE e.raw_target IS NOT NULL AND {relation}"
+        + plain.format("raw_target"),
+        bound,
+    ):
+        for axis, key in vault_module.wikilink_lookup_stages(_split_target_fragment(str(raw))[0]):
+            stages.setdefault(axis, set()).add(key)
+    for axis, keys in sorted(stages.items()):
+        # Lookup axes are the normalizer's closed protocol, never authored SQL identifiers.
+        pages.update(str(path) for (path,) in conn.execute(
+            f"SELECT path FROM wikilink_keys WHERE {axis}_key IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(keys), ensure_ascii=False),),
+        ))
+    return "u.parent_path IN (SELECT value FROM json_each(?))", [
+        json.dumps(sorted(pages), ensure_ascii=False)
+    ]
 
 
 def stored_family_edges(
