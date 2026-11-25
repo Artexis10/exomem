@@ -11,12 +11,13 @@ Every artifact published from this repository SHALL declare one SPDX licence exp
 
 ### Requirement: The licence follows the release regime
 
-Versions made available after the licence change SHALL license the server, the command-line interface and the images under FSL-1.1-ALv2. The client plugins and the starter skill SHALL stay Apache-2.0. So the wheel and the images, which ship the starter skill, SHALL declare `FSL-1.1-ALv2 AND Apache-2.0`. Versions made available before the change SHALL keep `AGPL-3.0-or-later AND Apache-2.0`.
+Versions made available after the licence change SHALL license the server, the command-line interface and the images under FSL-1.1-ALv2. The client plugins and the starter skill SHALL stay Apache-2.0. An artifact that ships the starter skill SHALL declare `FSL-1.1-ALv2 AND Apache-2.0`; one without it SHALL declare `FSL-1.1-ALv2`. Versions made available before the change SHALL keep `AGPL-3.0-or-later AND Apache-2.0`.
 
 #### Scenario: A version after the cut
 
 - **WHEN** a version is made available after the licence change
-- **THEN** its wheel metadata and image labels declare `FSL-1.1-ALv2 AND Apache-2.0`
+- **THEN** its wheel metadata and the labels of the images that ship the starter skill declare `FSL-1.1-ALv2 AND Apache-2.0`
+- **AND** the label of an image that ships only FSL-1.1-ALv2 code declares `FSL-1.1-ALv2`
 - **AND** the README licence map names FSL-1.1-ALv2 for the server and Apache-2.0 for the plugins and the starter skill
 
 #### Scenario: A version before the cut stays as published
