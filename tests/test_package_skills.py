@@ -289,7 +289,8 @@ def test_builds_and_unpacks_every_public_contract_distribution(
     )
     for path in local_runtime_state:
         path.write_bytes(b"synthetic ignored local runtime state")
-    for name in ("pyproject.toml", "README.md", "LICENSE"):
+    for name in ("pyproject.toml", "README.md", "LICENSE", "plugins/cloud/generated/claude-connector-hooks.zip"):
+        (build_source / name).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(REPO_ROOT / name, build_source / name)
     dist = tmp_path / "dist"
     env = {"UV_CACHE_DIR": str(tmp_path / "uv-cache")}
@@ -318,6 +319,7 @@ def test_builds_and_unpacks_every_public_contract_distribution(
         )
         assert "exomem/_scaffold/_Schema/references/page-types.md" in built.namelist()
         assert "exomem/semantic_authoring.py" in built.namelist()
+        assert "exomem/_plugins/claude-connector-hooks.zip" in built.namelist()
         for name in skills:
             path = f"exomem/_scaffold/_Schema/workflow-skills/{name}/SKILL.md"
             _assert_contract(built.read(path).decode("utf-8"))

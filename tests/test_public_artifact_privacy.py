@@ -87,7 +87,13 @@ def test_sdist_manifest_is_fail_closed_to_package_inputs() -> None:
     project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     includes = project["tool"]["hatch"]["build"]["targets"]["sdist"]["include"]
 
-    assert set(includes) == {"/src", "/LICENSE", "/README.md", "/pyproject.toml"}
+    assert set(includes) == {
+        "/src",
+        "/LICENSE",
+        "/README.md",
+        "/pyproject.toml",
+        "/plugins/cloud/generated/claude-connector-hooks.zip",
+    }
     assert all("*" not in item for item in includes)
 
 

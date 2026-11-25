@@ -276,6 +276,10 @@ exclude = [
 # exomem is the real package; kb_mcp is the permanent import-compat shim.
 packages = ["src/exomem", "src/kb_mcp"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# A self-hosted server builds its one-upload Claude plugin from this generated edition.
+"plugins/cloud/generated/claude-connector-hooks.zip" = "exomem/_plugins/claude-connector-hooks.zip"
+
 [tool.hatch.build.targets.sdist]
 # Fail closed: Hatch's broad default sdist selection can sweep untracked agent
 # scratch, local databases, and maintainer files from a dirty checkout into a
@@ -287,6 +291,7 @@ include = [
     "/LICENSE",
     "/README.md",
     "/pyproject.toml",
+    "/plugins/cloud/generated/claude-connector-hooks.zip",
 ]
 
 [tool.pytest.ini_options]

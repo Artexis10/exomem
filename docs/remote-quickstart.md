@@ -228,6 +228,8 @@ just importable.
 
 ### 6. Add the connector
 
+To install everything in one upload, open `https://<host>/claude-plugin.zip`, upload the file as a plugin in Claude, then connect Evermatter from the plugin's **Connectors** tab. The plugin carries the connection, every skill and the hooks. To add only the connection:
+
 claude.ai → **Settings** → **Connectors** → **Add custom connector** →
 `https://<host>/mcp` → log in with GitHub as the account named in
 `EXOMEM_GITHUB_USERNAME`. A newly upgraded installation asks each existing
