@@ -8,11 +8,11 @@ Transcribing again on the cell is slow, and it cannot bring the labels back. Cel
 
 ## What Changes
 
-- **Adoption keeps an Evermatter speech result.** Adoption pairs an audio or video original with the page beside it, when that page holds a completed extraction for the same bytes. The original's Source keeps the transcript, the timed text, the speaker fields and the part pages. The cell does not transcribe the recording again. A page that arrives in a later window pairs with its stored original. A page that does not match keeps today's behaviour.
+- **Adoption keeps an Evermatter speech result.** Adoption pairs an audio or video original with the page beside it, when that page holds a completed extraction for the same bytes. The original's Source keeps the transcript, the timed text, the speaker fields and the part pages. The cell does not transcribe the recording again. A page that arrives in a later window pairs with its stored original. It replaces that Source's result under the same rule as an attach: a pending, failed or unlabelled result gives way, and a labelled or named one stays, with the page filed beside it and linked. A page that does not match keeps today's behaviour.
 - **Imports carry part folders.** `exomem import` and `exomem cloud import` select the part folder of each selected page. A windowed import keeps each page with its part folder.
 - **New audio is transcribed on the cell's CPU.** This change adds no mechanism for it. The owner's cell gets the speech engine through the existing per-cell engine selection, under an operator-approved live change.
 - **The owner's agent attaches speech results.** A new governed operation, `media.attach-speech`, lets an agent attach a transcript, speaker turns, track names and speaker names to an existing media Source. The owner's agent computes them on the owner's machine with the personal install, over its existing connection. The result binds to the original's SHA-256 and size. The cell renders and publishes it as it does its own results. A platform burst GPU job stays a priced later alternative that would call the same operation.
-- **Multitrack recordings.** Separate audio streams, channels declared as separate microphones, and separate files grouped as one session are transcribed per track. Turns carry their track's name. The fields come from published metadata specifications.
+- **Multitrack recordings.** Audio streams and channels declared as separate microphones, and separate files grouped as one session, are transcribed per track. Without a declaration, speech reads the first audio stream, as today. Turns carry their track's name. The fields come from published metadata specifications.
 - **Naming speakers after the fact.** An agent can rename a recording's speaker labels. The names survive a reprocess and an attach. Keeping a voice for later recordings stays an owner action on a personal install, never an agent tool.
 
 This change replaces an earlier draft that specified a speech worker on the owner's machine. That draft's capability, routes, credential scope, proof purpose, command and change to `cloud-multimodal-processing` are withdrawn. No speech worker, route, credential or service is added. A result computed outside the cell reaches it only through `media.attach-speech`.
@@ -26,7 +26,7 @@ This change replaces an earlier draft that specified a speech worker on the owne
 ### Modified Capabilities
 - `adoption-studio`: adoption keeps a completed Evermatter speech result for its original, also across windows, and import selection carries part folders.
 - `cloud-vault-import`: a windowed Cloud import keeps each page with its part folder.
-- `speaker-diarization`: renaming a recording's speaker labels after the fact, and keeping a voice as an owner action.
+- `speaker-diarization`: renaming a recording's speaker labels in place after the fact, and keeping a voice as an owner action.
 
 ## Impact
 

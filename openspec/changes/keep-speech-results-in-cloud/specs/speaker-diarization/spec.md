@@ -2,13 +2,23 @@
 
 ### Requirement: An agent can rename a recording's speaker labels
 
-A governed operation that agents can call SHALL rename the speaker labels of one recording. It SHALL take the recording's Source and a map from current labels to names. It SHALL read every timed line of the extraction, part pages included, with the transcript's line grammar. It SHALL replace the label of each line that the map names, and render the lines again. It SHALL rewrite `speakers` from those lines and record each name with the label it replaced in `speaker_names`.
+A governed operation that agents can call SHALL rename the speaker labels of one recording. It SHALL take the recording's Source and a map from current labels to names. In each line of the extraction, part pages included, that starts with a label in the timed or the merged-turn grammar, it SHALL rewrite only that label, in place. It SHALL rewrite `speakers` from the labels that the lines then carry, and record each name with the label it replaced in `speaker_names`.
 
 #### Scenario: An agent names one speaker
 
 - **WHEN** the person tells the agent that Speaker B is the host, and the agent renames `Speaker B` to `Host` for that recording
 - **THEN** every line labelled `Speaker B` reads `Host`, in the page and in its part pages
 - **AND** `speakers` lists `Host`, and `speaker_names` records that `Host` replaced `Speaker B`
+
+#### Scenario: A page without timestamps is renamed
+
+- **WHEN** a recording's extraction holds merged turns such as `[Speaker B]: Welcome back.`, and the agent renames `Speaker B` to `Host`
+- **THEN** that line reads `[Host]: Welcome back.`
+
+#### Scenario: A line without a label stays byte for byte
+
+- **WHEN** the extraction starts with a line that carries no label, and a hand-edited line runs on to a second line
+- **THEN** the rename leaves the unlabelled line and the second line unchanged
 
 ### Requirement: A rename changes only labels
 
@@ -31,7 +41,7 @@ A rename SHALL write through the governed writer, guarded by each page's content
 
 ### Requirement: Names given by a person survive a reprocess
 
-A reprocess that produces speaker labels SHALL carry each name of the prior extraction to the new label whose lines overlap that name's lines most. A line's span SHALL run from its start to the next line's start. A name SHALL carry only when the overlap covers more than half of the new label's speech time. The result SHALL list each name that it could not carry. The prior extraction page SHALL keep its names.
+A reprocess that produces speaker labels SHALL carry each name of the prior extraction to the new label whose lines overlap that name's lines most. A line's span SHALL run from its start to the next line's start. A name SHALL carry only when the overlap covers more than half of the new label's speech time. A name on lines without a start time SHALL NOT carry. The result SHALL list each name that it could not carry. The prior extraction page SHALL keep its names.
 
 #### Scenario: A name carries to the new label
 
@@ -43,9 +53,14 @@ A reprocess that produces speaker labels SHALL carry each name of the prior extr
 - **WHEN** the owner reprocesses a named recording without labels
 - **THEN** the result lists every name as not carried, and the prior extraction page keeps the names
 
+#### Scenario: Names on merged turns do not carry
+
+- **WHEN** the owner reprocesses with labels a recording whose named extraction holds merged turns without timestamps
+- **THEN** the result lists every name as not carried, and the prior extraction page keeps the names
+
 ### Requirement: Keeping a voice is an owner action on a personal install
 
-A personal install SHALL let the owner keep a voice from one label of one recording, through `enroll-speaker` and through its terminal Home. Both SHALL show that label's sample lines and wait for the owner to confirm. At confirmation, the install SHALL compute the label's ECAPA centroid from the label's line spans, and store it in the local voice-profile store under the given name. The action SHALL NOT be exposed as an MCP connector tool. A rename's reply SHALL name this action.
+A personal install SHALL let the owner keep a voice from one label of one recording, through `enroll-speaker` and through its terminal Home. Both SHALL show that label's sample lines and wait for the owner to confirm. At confirmation, the install SHALL compute the label's ECAPA centroid from the label's timed line spans, and store it in the local voice-profile store under the given name. The action SHALL NOT be exposed as an MCP connector tool. A rename's reply SHALL name this action.
 
 #### Scenario: The owner keeps the host's voice
 

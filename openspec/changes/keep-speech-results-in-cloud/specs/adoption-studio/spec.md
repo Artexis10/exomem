@@ -7,8 +7,7 @@ Adoption SHALL pair a staged audio or video original with its sidecar-named page
 - `type: source` and the original's `media_type`;
 - a completed extraction with text under `## Extracted text`;
 - `binary_sha256` and `binary_size` equal to the original's;
-- an `evidence_file` that names the original's file name;
-- every part page that it lists.
+- a part folder that holds every part that its `extraction_parts` count names.
 
 #### Scenario: A matching page is paired
 
@@ -66,7 +65,7 @@ The extraction request that follows the commit of a paired original SHALL admit 
 
 ### Requirement: A paired page is not filed on its own
 
-A paired page and its part pages SHALL NOT be filed as Sources of their own. When a stored Source already holds the original's bytes with a completed extraction, apply SHALL NOT file the paired page, and that Source SHALL keep its own extraction. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the item `SOURCE_CHANGED`.
+A paired page and its part pages SHALL NOT be filed as Sources of their own, unless a stored Source keeps its own result as the replacement rule decides. Apply SHALL repeat the pairing checks with the bytes it writes. A page or part that changed after the plan SHALL give the item `SOURCE_CHANGED`.
 
 #### Scenario: No text Source holds a paired page
 
@@ -76,26 +75,46 @@ A paired page and its part pages SHALL NOT be filed as Sources of their own. Whe
 #### Scenario: A second run writes nothing
 
 - **WHEN** the same folder with a paired page is planned and applied again unchanged
-- **THEN** the recording reports `already-applied`, the page is not filed, and no file in the vault changes
+- **THEN** the recording reports `already-applied`, the page is not filed again, and no file in the vault changes
 
 #### Scenario: A page changed after the plan
 
 - **WHEN** a paired page changes between `plan` and `apply`
 - **THEN** the item records `SOURCE_CHANGED`, and nothing is written for it
 
-### Requirement: A page that arrives after its original keeps its result
+### Requirement: A page whose original is already stored pairs with that Source
 
-A sidecar-named page SHALL also pair with a stored Source whose original matches the page's `binary_sha256` and `binary_size`, and whose extraction is pending or failed. Apply SHALL write the kept extraction to that Source as for a staged original, guarded by the Source page's content hash, and SHALL NOT file the page. It SHALL retire a speech job that waits for that Source. A result that a running job produces later SHALL NOT replace the kept one.
+A sidecar-named page SHALL also pair with a stored Source whose original matches the page's `binary_sha256` and `binary_size`. The original MAY be stored in an earlier window or run, or be a staged duplicate of the stored one. When that Source's extraction is the page's own kept result, apply SHALL write nothing. Apply SHALL decide that by the extraction digest, with the page's text taken after the card-number and credential removal.
 
 #### Scenario: A page in a later window keeps its result
 
 - **WHEN** a series of windows files a recording in an artifact window, and its paired page in a later text window
 - **THEN** the recording's Source holds the page's extraction, and no text Source holds the page
 
-#### Scenario: A completed Source keeps its own extraction
+#### Scenario: A Source that already holds the page's result
 
-- **WHEN** a sidecar-named page matches a stored Source whose extraction is complete
-- **THEN** that Source keeps its extraction, the page is not filed, and the counts list the page under its reason
+- **WHEN** a paired page matches a stored Source whose extraction is that page's kept result
+- **THEN** apply writes nothing for the page, and the recording reports `already-applied`
+
+### Requirement: A stored Source takes a paired page's result by the speech replacement rule
+
+When a paired page's stored Source does not hold the page's kept result, apply SHALL offer that result to the Source under the replacement rule of `speech-result-attachment`, without `replace_labelled`. When the rule accepts it, apply SHALL write the kept extraction to it, guarded by the Source page's content hash, and SHALL NOT file the page. When the rule refuses it, apply SHALL file the page as a text Source, as before, and the Source SHALL list that page in `prior_extractions`.
+
+#### Scenario: A pending Source takes the page's result
+
+- **WHEN** a paired page matches a stored Source whose extraction is pending
+- **THEN** the Source holds the page's extraction, no speech job waits for it, and no text Source holds the page
+
+#### Scenario: An unlabelled transcript is replaced by a labelled page
+
+- **WHEN** a paired page with speaker labels matches a stored Source whose completed transcript has no labels and no `speaker_names`
+- **THEN** the Source holds the page's extraction, and the earlier transcript stays on a linked prior extraction page
+
+#### Scenario: A labelled or named Source keeps its result
+
+- **WHEN** a paired page matches a stored Source whose transcript carries speaker labels or `speaker_names`
+- **THEN** the Source keeps its transcript, the page is filed as a text Source, and the Source lists that page in `prior_extractions`
+- **AND** the plan and the apply result count the page under its reason
 
 #### Scenario: A running job does not replace a kept result
 
@@ -104,7 +123,7 @@ A sidecar-named page SHALL also pair with a stored Source whose original matches
 
 ### Requirement: Import selection carries a selected page's part folder
 
-The selection rules that `exomem import` and `exomem cloud import` share SHALL select the part folder of each selected page, as an exception to the hidden-entry rule of local staging. A part folder is the dot folder that holds a page's further extraction parts, such as `.X.parts/` for the page `X.md`. The other selection rules SHALL still apply to its files. The report before staging or archiving SHALL count the part folders that the selection carries.
+The selection rules that `exomem import` and `exomem cloud import` share SHALL select the part folder of each selected page, as an exception to the hidden-entry rule of local staging. A part folder SHALL be the folder that the extraction's part layout names for a page, such as `.X.parts/` for the page `X.md`. The other selection rules SHALL still apply to its files. The report before staging or archiving SHALL count the part folders that the selection carries.
 
 #### Scenario: A long transcript's part pages travel with it
 

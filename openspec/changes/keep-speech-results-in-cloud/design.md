@@ -12,8 +12,8 @@ What the sidecar holds today:
 - A completed audio or video page has `type: source`, the `media_type`, no pending or failed state, an `extracted_by` engine and text under `## Extracted text`.
 - It records the original's provenance: `evidence_file`, `original_filename`, `binary_sha256`, `binary_size` and two timestamps. `evidence_file`, `binary_sha256` and `binary_size` are its identity fields (`media_processing._IDENTITY_FIELDS`). A difference in a timestamp or the file name is repairable.
 - The completed-shape check also needs `evidence_file` to equal the original's vault path.
-- The speech fields are `speakers` (the distinct labels), `speaker_verification`, `diarize_requested` and the `asr_` facts (`preserve._EXTRACTION_FIELDS`). The transcript keeps its turns only as timed lines, `[m:ss] [Speaker A]: text`. `semantic_segments.parse_timed_lines` reads them, and `render_timed_lines` writes them.
-- A long extraction keeps its first part on the page and the rest in a dot folder beside it: `.X.parts/part-02.md` for the page `X.md` (`extraction_parts`). The page lists `extraction_parts` and `next_part`.
+- The speech fields are `speakers` (the distinct labels), `speaker_verification`, `diarize_requested` and the `asr_` facts (`preserve._EXTRACTION_FIELDS`). The transcript keeps its turns only as timed lines, `[m:ss] [Speaker A]: text`. `semantic_segments.parse_timed_lines` reads them, and `render_timed_lines` writes them. When timed rendering fails, the page holds merged turns without times, `[Speaker A]: text` (`extract._diarize`).
+- A long extraction keeps its first part on the page and the rest in a part folder beside it. `extraction_parts.folder_for` names that folder: `.X.parts/` for the page `X.md`, without the dot when the page's name carries the raw-protection mark. The page records the part count in `extraction_parts` (`extraction_parts.count_of`) and the next part in `next_part`.
 
 What the cell can run:
 - 2 CPUs and 3 GiB per cell (`add-cloud-multimodal-processing` design).
@@ -25,7 +25,9 @@ What the cell can run:
 How speech results reach a Source today:
 - Agents call media operations through the write door, such as `manage_memory(operation="media.reprocess", ...)`. The `process_media` group holds them, with the `change_media` write class (`operation_entries`).
 - The speech pipeline assigns each ASR segment to the diarisation turn that overlaps it most (`speaker_assignment.assign_span`), names labels in order of first appearance, and renders timed lines (`extract._diarize`, `semantic_segments.render_timed_lines`).
+- Speech decodes only the first audio stream of a file (`onnx_asr_runtime.audio_chunks`, `decode(audio=0)`).
 - The media worker publishes a result only while the original's identity and the sidecar's content hash still match. It splits a long result into part pages, and keeps a replaced extraction on a linked prior page (`media_worker`, `prior_extraction`).
+- `MediaJobStore.retire_ocr` drops the text-extraction stage of a waiting job, which for audio and video is speech. It keeps the job's frame-vector, re-embed and offload stages (`media_jobs._drop_ocr_stage`).
 - An owner reads a Cloud original on their own machine with `exomem cloud download`.
 
 Measured rates. These were measured outside this repository, and this change does not re-measure them:
@@ -52,9 +54,10 @@ Measured rates. These were measured outside this repository, and this change doe
 - **Sidecar-named page:** a staged page whose name is an original's name plus `.md`, in the same folder.
 - **Kept extraction:** a completed audio or video extraction on a sidecar-named page that matches its original's bytes (D1).
 - **Paired page:** a sidecar-named page that holds a kept extraction for its original.
-- **Part folder:** the dot folder that holds a page's further parts.
+- **Part folder:** the folder that holds a page's further parts, as `extraction_parts.folder_for` names it.
 - **Attached result:** a speech result that an agent sends to the cell with `media.attach-speech` (D6).
-- **Track:** one transcribed audio signal: an audio stream, a declared channel or one member file of a session (D7).
+- **Replacement rule:** the one rule that decides whether a speech result from an attach or from an adopted page replaces a Source's extraction (D6).
+- **Track:** one transcribed audio signal: a declared audio stream, a declared channel or one member file of a session (D7).
 - **Session:** a group of separate recordings of one event, grouped by a governed operation (D11).
 
 ## Decisions
@@ -66,8 +69,9 @@ The plan pairs a sidecar-named page with its original when all these checks pass
 2. The page has `type: source` and the same `media_type`.
 3. The page's extraction is complete: no pending or failed state, an `extracted_by` engine, and text under `## Extracted text`.
 4. Its `binary_sha256` and `binary_size` equal the staged original's SHA-256 and size.
-5. Its `evidence_file` names the original's file name.
-6. Every part that `extraction_parts` lists is in the page's part folder.
+5. The page's part folder holds every part that its `extraction_parts` count names. `extraction_parts.folder_for` names that folder, so pairing keeps no second copy of the naming rule.
+
+Pairing has no `evidence_file` check. The SHA-256 and size bind the page to the bytes. `evidence_file` holds a path in the old vault, and a stored original carries the name that filing gave it (`preserve`, `original_filename`). A name check would add nothing, and could refuse matching bytes.
 
 The plan already hashes each original, so check 4 adds one front matter read per sidecar-named page. Apply repeats the checks under its mutation guard, with the bytes it writes. A page or part that changed after the plan gives the item `SOURCE_CHANGED`, as a changed original does.
 
@@ -75,13 +79,19 @@ A page that fails a check keeps today's behaviour. The plan and the apply result
 
 Pairing reads the product's own sidecar layout and schema fields, and binds by SHA-256. It reads no words of the page to decide what the page means. So it is not a C6 pattern.
 
-A paired page is not filed as a Source of its own, and neither are its parts. The plan shows it with its original. Two identical recordings in one run each keep their own paired page, and the duplicate rules decide which Source stores the bytes.
+A paired page is not filed as a Source of its own, and neither are its parts, except in step 3 below. The plan shows it with its original. Two identical recordings in one run each keep their own paired page, and the duplicate rules decide which Source stores the bytes.
 
-When a stored Source already holds the original's bytes, the original records an import mapping. The paired page is not filed. A completed extraction on that Source stays, and the counts list the page under `KEPT_EXTRACTION_ORIGINAL_STORED`. So a second run of the same tree still writes nothing.
+**A stored original.** A sidecar-named page also pairs with a stored Source whose original has the page's SHA-256 and size. Adoption finds that Source through the duplicate lookup that it already uses (`duplicates.find_duplicate`). The original may have arrived in an earlier window or run, or be a staged duplicate of the stored one. The checks are the same, with the stored original's SHA-256 and size. Apply then decides in three steps, with one replacement rule (D6):
 
-When that Source's extraction is pending or failed, the page pairs with it. The checks are the same, with the stored original's SHA-256 and size in place of a staged original's. The file-name check does not apply, because filing renamed the original (`preserve`, `original_filename`). The SHA-256 and size bind the page to its bytes. Apply writes the kept extraction fields and part pages of D2 to that Source, guarded by the Source page's content hash. The Source keeps its own provenance. This is the case of a windowed import: the original arrives in an artifact window and its page in a later text window. It is also the case of a recording that an earlier import filed with a pending extraction.
+1. When the Source's extraction is the page's own kept result, apply writes nothing. It compares `prior_extraction.extraction_digest` of the Source with that of the page, taken after the card-number and credential removal. That digest covers the engine and the page's own text. A reprocess already uses it to name the extraction that it replaces. A second run of the same tree therefore writes nothing.
+2. Otherwise apply offers the page's kept result to the Source under the replacement rule, without `replace_labelled`. The rule accepts a pending or failed extraction, and a completed one with no labels and no `speaker_names`. That covers a cell that finished an unlabelled transcript between two windows. Apply writes the kept extraction fields and part pages of D2 to the Source, guarded by the Source page's content hash. The replaced transcript stays on a linked prior page, and the Source keeps its own provenance.
+3. When the rule refuses, because the Source carries labels or `speaker_names`, apply files the page as a text Source, as today. The Source lists that page in `prior_extractions`, so the page's labels and hand edits stay one link away. The counts list the page under `KEPT_EXTRACTION_STORED_LABELLED`. A second run finds the text Source as a duplicate and the link in place, so it writes nothing.
 
-Apply retires a speech job that waits for that Source. A job that already runs produces a stale result, and the worker does not publish it, because the sidecar changed (`media_worker`, "newer canonical input preserved").
+`prior_extractions` today lists the `.prior-<n>` pages of a reprocess (`prior_extraction.links_of`). A listed page of another name does not change the numbering of later prior pages (`prior_extraction.next_page`).
+
+Step 2 covers the windowed import: the original arrives in an artifact window, and its page in a later text window. It also covers a recording that an earlier import filed with a pending extraction.
+
+A replacement retires only the speech stage of a waiting job (D6). A job that already runs produces a stale result, and the worker does not publish it, because the sidecar changed (`media_worker`, "newer canonical input preserved").
 
 The scan still records a part folder as a skipped hidden folder, as the scan rule requires. Pairing reads the part pages of a paired page as content of that page. The plan shows the number of parts with each pairing.
 
@@ -96,7 +106,7 @@ It sets:
 - the provenance fields for the new artifact, as reconciliation records them, so that `evidence_file` names the artifact's vault path;
 - the adoption provenance that every applied Source carries (`imported_from`, `import_collection`, `collection_path`, `original_sha256`);
 - the Source's identity, as for any adopted Source;
-- the part folder's new name, and the `part_of` and `next_part` links, because adoption names the artifact anew.
+- the part folder's new name from `extraction_parts.folder_for`, and the `part_of` and `next_part` links, because adoption names the artifact anew.
 
 The kept text passes the card-number and credential removal that applies to every kept text (`client-artifact-preservation`). A removal is reported as a warning, as elsewhere.
 
@@ -110,13 +120,13 @@ A kept video still needs its frame vectors. Today the worker queues those for co
 
 ### D4. Imports carry part folders, and windows keep them with their page
 
-The selection rules leave hidden entries behind by default (`import_selection.select`). A part folder is a dot folder, so a long transcript would arrive without its parts, and D1 would not pair it.
+The selection rules leave hidden entries behind by default (`import_selection.select`). A part folder is usually a dot folder (`extraction_parts.folder_for`), so a long transcript would arrive without its parts, and D1 would not pair it.
 
-`exomem import` and `exomem cloud import` share these rules, and the Cloud CLI must apply "the same rules as `exomem import`" (`cloud-vault-import`). So the exception lives in the shared selection: it selects the part folder of each selected page. The other selection rules still apply to the files in it. The report counts the part folders that the selection carries. An added requirement in `adoption-studio` states the exception. It leaves the text of the local staging requirement unchanged, which the active change `scale-agent-led-imports` also modifies.
+`exomem import` and `exomem cloud import` share these rules, and the Cloud CLI must apply "the same rules as `exomem import`" (`cloud-vault-import`). So the exception lives in the shared selection: it selects the part folder of each selected page. It names that folder with `extraction_parts.folder_for`, not with a second copy of the rule. The other selection rules still apply to the files in it. The report counts the part folders that the selection carries. An added requirement in `adoption-studio` states the exception. It leaves the text of the local staging requirement unchanged, which the active change `scale-agent-led-imports` also modifies.
 
 A part folder of a page that does not pair, such as a long document extraction, also travels. The scan records it as a skipped hidden folder, and filing ignores it. Its bytes are text.
 
-A windowed series sends artifacts first and text last, each in path order (`add-cloud-media-store`). The CLI orders members by class, then by path (`cloud_import_windows._sorted`). A part folder's name starts with a dot, so it usually sorts before its page, with other entries between them. A window boundary could therefore fall between them. The CLI sorts a part folder's members with their page, places no boundary between them, and counts them as one member for window sizing. Text still travels last. The original arrives in an earlier window, so D1 pairs the page with the stored original.
+A windowed series sends artifacts first and text last, each in path order (`add-cloud-media-store`). The CLI orders members by class, then by path (`cloud_import_windows._sorted`). A part folder whose name starts with a dot usually sorts before its page, with other entries between them. A window boundary could therefore fall between them. The CLI sorts a part folder's members with their page, places no boundary between them, and counts them as one member for window sizing. Text still travels last. The original arrives in an earlier window, so D1 pairs the page with the stored original.
 
 The CLI does not judge whether a page holds a completed extraction; the cell does.
 
@@ -138,13 +148,14 @@ A personal install diarises through its diarizer sidecar: slowly on a CPU, fast 
 **The route.**
 1. The agent reads the original with `exomem cloud download`, or uses the owner's local copy.
 2. The agent processes that file on the personal install with labels requested (`media.process` with `diarize`), as for any recording there.
-3. The agent builds the call from the local page's timed lines, labels and `asr_` facts.
+3. The agent builds the call from the local page's timed lines, labels and `asr_` facts. A page that holds merged turns without times cannot give segment starts. For it, the agent processes the file again with labels requested, which renders timed lines.
 4. The agent calls `media.attach-speech` with that result and the original's `binary_sha256` and `binary_size`.
 
 Nothing new runs on the owner's machine: no service, no daemon and no credential. The call uses the agent's existing connection and write access. The same operation serves any customer's agent.
 
 **The operation.** `media.attach-speech` is a new kind in the `process_media` group, with the `change_media` write class, so the existing write authorization applies. The name avoids `exomem attach`, which uploads a file. The call carries:
-- the original's `binary_sha256` and `binary_size`;
+- `path`, the Source's vault path, as every other media operation takes it;
+- the original's `binary_sha256` and `binary_size`, which bind the call to the bytes;
 - segments: `start`, an optional `end`, `text` and an optional `track`;
 - optional speaker turns: `start`, `end`, `label` and an optional `track`;
 - optional names: a name for a label, with its basis, `person` or `profile`;
@@ -153,7 +164,7 @@ Nothing new runs on the owner's machine: no service, no daemon and no credential
 
 A personal install's sidecar holds timed lines, not segment ends. An agent that starts from timed lines sends no `end`, and each segment ends at the next one's start, as in D13. Each line's label becomes a turn over that span.
 
-**Binding.** The operation compares the call's SHA-256 and size with the Source's original, and refuses a mismatch with `ATTACH_BINARY_MISMATCH`. A Source with no audio or video original is refused with `ATTACH_NOT_MEDIA`.
+**Binding.** `path` finds the Source, and the SHA-256 and size bind the call to its bytes. The operation compares the call's SHA-256 and size with the original of the Source at `path`, and refuses a mismatch with `ATTACH_BINARY_MISMATCH`. A Source with no audio or video original is refused with `ATTACH_NOT_MEDIA`.
 
 **One rendering.** The cell feeds the segments and turns to the speech pipeline's code: `speaker_assignment.assign_span`, label naming, the multitrack merge (D7) and `render_timed_lines`. `extract._diarize` today reads its turns from the diarizer. Its assignment and rendering move into one function that takes turns, and both paths call it. The result then goes through the worker's extraction publication. That splits parts, keeps a replaced extraction on a prior page, and checks the original's identity and the page's content hash.
 
@@ -166,15 +177,17 @@ A personal install's sidecar holds timed lines, not segment ends. An agent that 
 
 A container without a duration is refused with `ATTACH_DURATION_UNKNOWN`. The bounds are constants beside the operation's schema. They check a payload's shape, not its meaning, so they are not policy data. A ten-hour transcript is a few megabytes, well under the service's ingress body limit (32 MiB by default, `service_ingress`).
 
-**Replacement.** An attach replaces a pending or failed extraction, and a completed one with no labels and no names, such as a cell's own transcript. A result with labels or `speaker_names` is replaced only when the call sets `replace_labelled: true`; otherwise the call is refused with `ATTACH_REPLACES_LABELS`. A replaced extraction stays on a linked prior page. The attach retires a speech job that waits for the Source. A running job's result is stale and is not published.
+**Replacement.** One replacement rule serves the attach and adoption (D1). It replaces a pending or failed extraction, and a completed one with no labels and no names, such as a cell's own transcript. It replaces a result with labels or `speaker_names` only when an attach sets `replace_labelled: true`. Otherwise an attach is refused with `ATTACH_REPLACES_LABELS`, and adoption files the page beside the Source (D1, step 3). A replaced extraction stays on a linked prior page.
 
-**Names.** When an attach replaces a named result, names carry by the rule of D13. A name in the call wins for its label. `speaker_verification` is `human-verified` only when a person named every label. An attach never enrols a voice; D14 keeps that an owner action.
+A replacement retires only the speech stage of a job that waits for the Source. It drops the text-extraction stage through the helper that `MediaJobStore.retire_ocr` uses (`media_jobs._drop_ocr_stage`). The frame-vector, re-embed and offload stages stay queued, so a video keeps its frame vectors. A running job's result is stale and is not published.
+
+**Names.** When an attach replaces a named result, names carry by the rule of D13. Names on merged turns without times do not carry, and the reply lists them. A name in the call wins for its label. `speaker_verification` is `human-verified` only when a person named every label. An attach never enrols a voice; D14 keeps that an owner action.
 
 **Repeats.** Before the replacement rules, the operation compares the call's original and result digest with the Source's current attached result. When they match, it writes nothing and reports the earlier outcome. A retry after an unknown outcome follows the write door's mutation identity rules.
 
 **Cost.** On a personal GPU, diarising a recording costs a few cents of electricity. This is an estimate from one owner's setup, not a measurement.
 
-**Later alternative: a platform burst GPU job.** The platform could rent a GPU for a batch, read the originals under the platform's custody rules, and call `media.attach-speech` for each. Nothing would be installed on a customer's machine. The price below uses an L4-class GPU at about EUR 0.79 per hour. The provider price is not verified. The example collection holds 81 audio hours.
+**Later alternative: a platform burst GPU job.** The platform could rent a GPU for a batch, read the originals under the platform's custody rules, and call `media.attach-speech` for each. Nothing would be installed on a customer's machine. The price below uses an L4-class GPU at about EUR 0.79 per hour. The provider price is not verified. The table prices a collection of 81 audio hours.
 
 | Job | Rate | GPU-hours | Cost |
 |---|---|---|---|
@@ -186,9 +199,11 @@ Each job also pays its start-up time. The platform job needs a privacy copy chan
 ### D7. Tracks
 
 A recording can carry its voices on separate tracks. Speech takes tracks from three sources:
-1. **Audio streams.** Each audio stream of a container is a track.
-2. **Declared channels.** The channels of one stream are tracks only when they are declared as separate microphones. The upload, the owner, the agent or the device metadata (D8) declares them. Otherwise a multi-channel stream is one mixed track, as today. No measurement of the audio declares channels.
+1. **Declared audio streams.** An audio stream is a track only when the upload, the owner, the agent or published track metadata (D8) declares it a separate microphone. A container can carry a dub, a commentary or a full mix beside the microphones. So an undeclared stream stays out, and speech reads the first audio stream as today (`onnx_asr_runtime.audio_chunks`).
+2. **Declared channels.** The channels of one stream are tracks only when they are declared as separate microphones, by the same declarers. Otherwise a multi-channel stream is one mixed track, as today.
 3. **Session members.** Separate files grouped as one session (D11) are one track each.
+
+No measurement of the audio declares a stream or a channel. The dominance rule of D9 would keep a full mix as a speaker's track, because the mix holds every voice.
 
 Each track is transcribed on its own. The transcript merges the tracks' segments by start time and labels each turn with its track's name.
 
@@ -201,7 +216,7 @@ Speech reads track names and start times from these published fields:
 - BWF `TimeReference`, the start as a sample count since midnight;
 - the container's stream `title` tag and its timecode.
 
-A recorder family that writes these facts in its own fields gets a mapping in shipped data, not in code (C4). Adding a family is a data change. A name that the owner or the agent gives wins over metadata.
+A recorder family that writes these facts in its own fields gets a mapping in shipped data, not in code (C4). Adding a family is a data change. A field declares a stream or a channel a separate microphone only where shipped data maps it so. A stream `title` alone names a declared track, but declares none. A name that the owner or the agent gives wins over metadata.
 
 ### D9. Crosstalk: a track keeps a segment where it is the dominant source
 
@@ -216,6 +231,8 @@ Why this remedy:
 - Real overlap stays: two people who speak at once are both within the margin.
 
 The alternative, where the owner chooses the mixed track for the text, needs a person for each recording, and it loses the track names.
+
+The rule compares the tracks over one span, so it needs one clock. Members aligned by an assumed start (D11) have none, so the rule is off for them, and each member keeps all its segments.
 
 ### D10. Progress, timeouts and cost per track
 
@@ -233,20 +250,24 @@ Alignment:
 
 The session transcript is a page of the note type that the note-type registry marks as the session transcript type, in that type's folder (C4). This change ships that entry in the core pack, marked by an attribute, in the way the pack marks its profile type. Code finds the type by the attribute, never by its key. The page cites its member Sources.
 
-The session page stays current. When a member's extraction or names change, the session page is rendered again from its members. A section that the owner writes on the page is kept, as on a sidecar.
+The session page stays current. When a member's extraction or names change, speech finds that member's session pages through the inbound-link index (`vault.find_inbound_wikilinks`). The session page links each member, so the member's inbound links name its sessions; speech keeps those of the session transcript type. A store-mode vault answers from its link rows. No change reads every session page. The relation lives once, in the session page's links, so no member field can drift from it.
+
+Speech renders each found session page again from its members. A section that the owner writes on the page is kept, as on a sidecar.
 
 ### D12. Renaming speaker labels
 
 An agent-facing governed operation renames the speaker labels of one recording. It takes the recording's Source and a map from current labels to names. The person tells the agent who spoke, and the agent records it.
 
-The sidecar stores no turn list. The timed lines are the stored turns. The operation:
-1. reads every timed line of the extraction, including the part pages, with `parse_timed_lines`;
-2. replaces the label of each line that the map names;
-3. renders the lines again with the transcript renderer;
-4. rewrites `speakers` from the rendered lines;
+The sidecar stores no turn list. The labelled lines are the stored turns. The operation:
+1. reads each line of the extraction, including the part pages;
+2. finds the label span at the start of a line in one of the two grammars that the renderer writes: a timed line, `[m:ss] [Speaker B]: text`, or a merged turn, `[Speaker B]: text`;
+3. rewrites that span in place when the map names its label and `speakers` lists it;
+4. rewrites `speakers` from the labels that the lines then carry, in order of first appearance;
 5. records each name and the label it replaced in `speaker_names`.
 
-Text outside a label never changes, and the operation never replaces text in the body. A line whose words mention "Speaker B" keeps those words.
+Every other byte stays. The operation does not parse and render the lines again: `parse_timed_lines` skips leading lines that carry no time and folds a continuation line into the line before it, so a new rendering would change them. A line whose words mention "Speaker B" keeps those words, because only the span at the line's start changes.
+
+The two grammars are the product's own rendering formats, a closed set that the renderer fixes. Matching them reads the page's layout, not its meaning, so it is not a C6 pattern.
 
 `speaker_verification` becomes `human-verified` only when every label carries a name that a person gave. Otherwise it keeps its value, so a partial naming does not claim more than it is (`automatic-media-processing`).
 
@@ -256,9 +277,9 @@ A name must be one line and must not hold a character of the label syntax (`[`, 
 
 ### D13. Names survive a reprocess
 
-A reprocess that produces labels carries each name of the prior extraction to the new label whose lines overlap the named lines most. A line's span runs from its start to the next line's start. A name carries only when the overlap covers more than half of the new label's speech time. A majority rule needs no tuning, so it is not policy data.
+A reprocess that produces labels carries each name of the prior extraction to the new label whose lines overlap the named lines most. A line's span runs from its start to the next line's start. Merged turns have no times, so a name on them does not carry. A name carries only when the overlap covers more than half of the new label's speech time. A majority rule needs no tuning, so it is not policy data.
 
-The result lists each name that it could not carry. A reprocess without labels carries no names, and the result says so. The prior extraction page keeps its names in any case. An attach that replaces a named result uses the same rule (D6).
+The result lists each name that it could not carry. A reprocess without labels carries no names, and the result says so. A reprocess with labels renders timed lines, so later names carry again. The prior extraction page keeps its names in any case. An attach that replaces a named result uses the same rule (D6).
 
 ### D14. Keeping a voice
 
@@ -266,7 +287,7 @@ Keeping a voice enrols a voice profile, so that later recordings name that speak
 - `exomem enroll-speaker` gains a form that takes a recording's Source and one label.
 - The personal install's terminal Home offers the same action.
 
-Both show the label's sample lines, and the owner confirms. At confirmation, the install computes that label's ECAPA centroid from the label's line spans. It stores the centroid in the local voice-profile store under the given name.
+Both show the label's sample lines, and the owner confirms. At confirmation, the install computes that label's ECAPA centroid from the label's timed line spans. An extraction of merged turns has no spans; the action refuses it with a code that names the cause, and names a reprocess with labels as the remedy. It stores the centroid in the local voice-profile store under the given name.
 
 For a Cloud vault, the install reads the original through the owner's signed-in Cloud download. It checks the original's SHA-256 against the Source, and it deletes its copy after it computes the centroid. Cloud stores no speaker embedding for any recording.
 
@@ -281,7 +302,7 @@ The repository records no load target for Cloud cells. This change reports that 
 - **An attach** validates and renders one recording's result, then writes its page and parts in one batch. Its cost grows with that recording's length only, and its payload stays under the ingress body limit.
 - **Pairing with a stored original** looks up the Source by the page's SHA-256, through the duplicate lookup that adoption already uses (`duplicates.find_duplicate`).
 - **Renaming** reads and writes one recording's page and its parts in one batch. Its cost grows with that recording's length only.
-- **A session render** reads its members. A session holds the tracks of one event, so its member count stays small.
+- **A session render** reads its members. A session holds the tracks of one event, so its member count stays small. A member change finds its sessions through the inbound-link index, not by reading every session page.
 - **Multitrack cost** multiplies the cell's speech time by the track count (D10).
 
 ## Risks / Trade-offs
@@ -290,6 +311,8 @@ The repository records no load target for Cloud cells. This change reports that 
 - **An old engine.** A kept transcript may come from an older engine than the cell runs. `extracted_by` and the `asr_` facts say which engine wrote it, and an explicit reprocess replaces it.
 - **A declared engine.** An attached result names an engine that the cell cannot check. `extraction_origin: attached` says so, and a reprocess or another attach replaces it.
 - **A wrong attach.** An agent can attach a poor result to the right bytes. A labelled result needs the explicit flag to be replaced, and every replaced extraction stays on a prior page.
+- **Two transcripts of one recording.** When a stored Source keeps its labelled result, adoption files the page beside it, as today, and the Source links it in `prior_extractions`. An agent can attach the page's result with `replace_labelled` when the person prefers it.
+- **Undeclared streams.** A container whose microphones sit in undeclared streams gets the first stream's text alone, as today, until a person, an agent or shipped metadata mapping declares them.
 - **Part folders of other pages.** The selection also carries part folders of pages that do not pair. They are small text, and filing ignores them.
 - **Crosstalk margin.** A margin that is too narrow drops a quiet speaker's words, and a margin that is too wide keeps echoes. The margin is data, and the sidecar records its revision.
 
@@ -302,9 +325,8 @@ The repository records no load target for Cloud cells. This change reports that 
 5. Ship `media.attach-speech`. The owner's agent can then attach labels for recordings whose kept page had none, and for new recordings.
 6. Ship multitrack and naming when their tasks are done. They need no migration.
 
-This change only adds requirements. `scale-agent-led-imports` modifies `adoption-studio` requirements that this change does not touch, so the two archive in either order. The window order requirement refines the windows of `add-cloud-media-store`, so this change archives after it.
+This change only adds requirements. `scale-agent-led-imports` modifies `adoption-studio` requirements that this change does not touch, so the two archive in either order. The local staging requirement of `adoption-studio` is too long and baselined. Task 6.2 records the debt to split it and fold in this change's hidden-entry exception. The window order requirement refines the windows of `add-cloud-media-store`, so this change archives after it.
 
 ## Open Questions
 
-1. When adoption meets a stored Source with a completed but unlabelled in-cell transcript, and the paired page carries labels, should adoption replace it, as `media.attach-speech` would? This change keeps the stored transcript, and the owner's agent can attach the labels.
-2. Which values do the attach bounds take? Task 3.3 sets them beside the schema, each with its reason.
+1. Which values do the attach bounds take? Task 3.3 sets them beside the schema, each with its reason.

@@ -2,7 +2,7 @@
 
 ### Requirement: An agent can attach a speech result to a recording's Source
 
-The write door SHALL offer `media.attach-speech`, which attaches a speech result to an existing audio or video Source. The call SHALL carry the original's `binary_sha256` and `binary_size`, timed segments, and the engine identity. It MAY carry speaker turns, a track name for each segment and turn, and speaker names. The call SHALL use the caller's existing connection and write access, with no new credential, scope or service.
+The write door SHALL offer `media.attach-speech`, which attaches a speech result to an audio or video Source. The call SHALL name the Source by `path`, as the other media operations do. It SHALL carry the original's `binary_sha256` and `binary_size`, timed segments, and the engine identity. It MAY carry speaker turns, a track name for each segment and turn, and speaker names. It SHALL use the caller's existing connection and write access, with no new credential, scope or service.
 
 #### Scenario: The owner's agent attaches a labelled transcript
 
@@ -16,7 +16,7 @@ The write door SHALL offer `media.attach-speech`, which attaches a speech result
 
 ### Requirement: An attached result binds to the original's bytes
 
-`media.attach-speech` SHALL refuse with `ATTACH_BINARY_MISMATCH` when the call's `binary_sha256` or `binary_size` differs from the Source's original. It SHALL refuse a Source that has no audio or video original with `ATTACH_NOT_MEDIA`. A refused call SHALL write nothing.
+`media.attach-speech` SHALL refuse with `ATTACH_BINARY_MISMATCH` when the call's `binary_sha256` or `binary_size` differs from the original of the Source at `path`. It SHALL refuse a Source that has no audio or video original with `ATTACH_NOT_MEDIA`. A refused call SHALL write nothing.
 
 #### Scenario: A result for other bytes is refused
 
@@ -55,14 +55,14 @@ The cell SHALL read the recording's duration from its container metadata, withou
 - **WHEN** a call carries more characters than the rate per audio second allows for the recording's duration
 - **THEN** the operation refuses with `ATTACH_PAYLOAD_OUT_OF_BOUNDS` and names the text bound
 
-### Requirement: An attach replaces only an unlabelled or unfinished result
+### Requirement: A speech result replaces only an unlabelled or unfinished result
 
-`media.attach-speech` SHALL replace a pending or failed extraction, and a completed one with no speaker labels and no `speaker_names`. It SHALL refuse with `ATTACH_REPLACES_LABELS` to replace a result with speaker labels or `speaker_names`, unless the call sets `replace_labelled: true`. A replaced completed extraction SHALL stay on a linked prior extraction page. The attach SHALL retire a waiting speech job, and a running job's later result SHALL NOT replace it.
+One replacement rule SHALL decide whether a speech result from `media.attach-speech` or from an adopted page replaces a Source's extraction. It SHALL replace a pending or failed extraction, and a completed one with no speaker labels and no `speaker_names`. It SHALL replace a result with speaker labels or `speaker_names` only when an attach sets `replace_labelled: true`. A replaced completed extraction SHALL stay on a linked prior extraction page.
 
 #### Scenario: A pending recording takes the attached result
 
 - **WHEN** the agent attaches a result to a Source whose extraction is pending
-- **THEN** the Source holds the attached result, and no speech job waits for it
+- **THEN** the Source holds the attached result
 
 #### Scenario: An in-cell transcript is replaced and kept as prior
 
@@ -78,6 +78,25 @@ The cell SHALL read the recording's duration from its container metadata, withou
 
 - **WHEN** the agent repeats that call with `replace_labelled: true`
 - **THEN** the Source holds the attached result, and the labelled transcript stays on a linked prior extraction page
+
+### Requirement: A replacement retires only the speech stage
+
+When a speech result replaces a Source's extraction, the cell SHALL retire the speech stage of a job that waits for that Source, and SHALL keep its other stages. A running job's later result SHALL NOT replace the new result. An attach that the replacement rule refuses SHALL return `ATTACH_REPLACES_LABELS` and write nothing.
+
+#### Scenario: A pending recording's speech job is retired
+
+- **WHEN** the agent attaches a result to an audio Source whose speech job waits
+- **THEN** no speech job waits for the Source
+
+#### Scenario: A video keeps its frame-vector stage
+
+- **WHEN** the agent attaches a result to a video Source whose job waits with a speech stage and a frame-vector stage
+- **THEN** the speech stage is retired, and the frame-vector stage still runs
+
+#### Scenario: A running job's result is not published
+
+- **WHEN** a speech job for the Source is running when the attach publishes its result
+- **THEN** the job's later result is not published, and the Source keeps the attached result
 
 ### Requirement: Names survive an attach, and an attach keeps no voice
 

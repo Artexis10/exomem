@@ -4,16 +4,20 @@
 
 Speech SHALL transcribe each track of a recording on its own. A track SHALL be one of these:
 
-- an audio stream of a container;
-- a channel of one stream, only when the upload, the owner, the agent or the device metadata declares it a separate microphone;
+- an audio stream or a channel that the upload, the owner, the agent or published track metadata declares a separate microphone;
 - a member file of a session.
 
-The audio itself SHALL NOT declare channels. An undeclared multi-channel stream SHALL stay one mixed track. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
+Without a declaration, speech SHALL read the first audio stream as one mixed track, as today. The audio itself SHALL NOT declare tracks. The transcript SHALL merge the tracks' segments by start and label each turn with its track's name.
 
-#### Scenario: A video with two audio streams
+#### Scenario: Two declared audio streams
 
-- **WHEN** a video carries two audio streams named "Host" and "Guest"
+- **WHEN** the owner declares a video's two audio streams as the microphones "Host" and "Guest"
 - **THEN** each stream is transcribed on its own, and the transcript's turns read `Host` and `Guest` in start order
+
+#### Scenario: An undeclared second stream is not transcribed
+
+- **WHEN** a screen recording carries a full mix in its first audio stream and an undeclared commentary stream
+- **THEN** speech transcribes the first stream alone, as before
 
 #### Scenario: An undeclared stereo file stays one mix
 
@@ -41,21 +45,26 @@ Each track SHALL keep its own progress record and its own job timeout. A stop SH
 
 ### Requirement: Track names and start times come from published metadata or from people
 
-Speech SHALL read track names and start times from these published fields where a file carries them: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. A mapping from a recorder family's own fields to a track name or a start time SHALL live in shipped data, not in code. A name that the owner or the agent gives SHALL win over metadata.
+Speech SHALL read track names and start times from these published fields: iXML `TRACK_LIST`, BWF `TimeReference`, and the container's stream title and timecode. A published or recorder-family field SHALL declare a stream or channel a separate microphone only where shipped data maps it so. Those mappings SHALL live in shipped data, not in code. A name that the owner or the agent gives SHALL win over metadata.
 
 #### Scenario: An iXML track list names the tracks
 
-- **WHEN** a multitrack recording's iXML `TRACK_LIST` names its channels "Host" and "Guest"
+- **WHEN** a recording's iXML `TRACK_LIST` names its channels "Host" and "Guest", and the shipped data maps that list as separate microphones
 - **THEN** the turns of each track carry that track's name
+
+#### Scenario: A stream title alone declares no track
+
+- **WHEN** a video's second audio stream has the title "Commentary", and nothing declares it a microphone
+- **THEN** speech reads the first audio stream alone
 
 #### Scenario: A recorder family is added as data
 
-- **WHEN** a mapping for a new recorder family's track-name field is added to the shipped data
-- **THEN** speech reads that family's track names, and no code changes
+- **WHEN** a mapping for a new recorder family's track fields is added to the shipped data
+- **THEN** speech reads that family's tracks and names, and no code changes
 
 ### Requirement: A track keeps a segment only where it is the dominant source
 
-Where a recording has more than one track, speech SHALL keep a track's segment only where that track is the dominant source over the segment's span. A track SHALL be dominant when its speech energy, normalised by that track's own speech level, is the highest of the tracks or within a margin of the highest. The margin SHALL live in the speech decoding policy data, and the sidecar SHALL record the policy revision that applied.
+Where a recording has more than one track, speech SHALL keep a track's segment only where that track is the dominant source over the segment's span. A track SHALL be dominant when its speech energy, normalised by its own speech level, is the highest or within a margin of the highest. The margin SHALL live in the speech decoding policy data, and the sidecar SHALL record its revision. The rule SHALL NOT apply to members aligned by an assumed start.
 
 #### Scenario: Bleed is dropped
 
@@ -66,6 +75,11 @@ Where a recording has more than one track, speech SHALL keep a track's segment o
 
 - **WHEN** the host and the guest speak at once at similar levels
 - **THEN** the transcript keeps both segments, each in its own track
+
+#### Scenario: Assumed alignment keeps every member's words
+
+- **WHEN** two session members are aligned by an assumed start
+- **THEN** speech keeps the segments of each member, and applies no dominance rule between them
 
 ### Requirement: Separate files from one session can be grouped
 
@@ -81,19 +95,23 @@ A governed operation SHALL group separate recordings as one session and name eac
 - **WHEN** an agent groups two files that carry no shared time
 - **THEN** the session page aligns them by their start and records the alignment as assumed
 
-### Requirement: A session transcript takes its type from the registry and stays current
+### Requirement: A session transcript takes its type from the registry
 
-The session transcript SHALL be a page of the note type that the note-type registry marks as the session transcript type, in that type's folder. Code SHALL find that type by its registry attribute, not by an entry key. The page SHALL cite its member Sources. When a member's extraction or speaker names change, the session page SHALL be rendered again from its members. A section that the owner writes on the page SHALL be kept.
+The session transcript SHALL be a page of the note type that the note-type registry marks as the session transcript type, in that type's folder. Code SHALL find that type by its registry attribute, not by an entry key. The page SHALL link each member Source.
 
 #### Scenario: The session page uses the registry's type
 
 - **WHEN** an agent groups two recordings as a session
 - **THEN** the session page has the type that the registry marks as the session transcript type, in that type's folder
 
+### Requirement: A session transcript stays current
+
+When a member's extraction or speaker names change, speech SHALL find that member's session pages through the inbound-link index, and SHALL render each one again from its members. It SHALL NOT read every session page to find them. A section that the owner writes on a session page SHALL be kept.
+
 #### Scenario: A member change updates the session
 
 - **WHEN** a member's speaker labels are renamed, or the member is reprocessed, after grouping
-- **THEN** the session page's transcript shows the member's new text and names
+- **THEN** the session page's transcript shows the member's new text and names, and the owner's section stays
 
 ### Requirement: A track is diarised only when labels are requested and it is not declared single-voice
 
