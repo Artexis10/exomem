@@ -9,6 +9,7 @@ import json
 import os
 import stat
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -158,11 +159,13 @@ def retain_cli_diagnostics(ctx: Context, label: str) -> dict | None:
 
 async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str = "",
                          include_hidden: bool = False, wait_seconds: int = 900,
-                         tenant: Tenant | None = None) -> CliRun:
+                         tenant: Tenant | None = None, cli_args: Sequence[str] = (),
+                         windowed: bool = False) -> CliRun:
     """Run the shipped CLI against `source` as a person would, signing in through the headless browser.
 
     `label` keeps a second import's container and files apart from the first one's. `tenant` is the person
-    whose cell receives it (default: the owner, A).
+    whose cell receives it (default: the owner, A). `cli_args` go to `exomem cloud import` as given.
+    `windowed` is for a folder: the CLI then reports its windows (`import_ids`) in place of one import's state.
     """
     tenant = tenant or ctx.a
     if not tenant.cell_id or not tenant.session:
@@ -181,7 +184,7 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
          "--env", "EXOMEM_CLOUD_RESOURCE_POLICY=legacy",
          "--env", "SSL_CERT_FILE=/ca.pem", "--env", "BROWSER=python3 /fixture/browser.py %s",
          image, "cloud", "import", "/input", "--checkpoint", "/fixture/checkpoint",
-         *(["--include-hidden"] if include_hidden else []),
+         *(["--include-hidden"] if include_hidden else []), *cli_args,
          "--mcp-url", MCP_URL, "--api-base-url", PUBLIC_BASE_URL])
     egress = run(["docker", "exec", name, "python3", "-c", EGRESS_SCRIPT]).stdout.strip()
     if egress != "sealed":
@@ -243,6 +246,11 @@ async def run_cli_import(ctx: Context, image: str, source: Path, *, label: str =
     if exited.stdout.strip() != "0" or len(results) != 1 or not results[0].get("ok"):
         raise StepFailure(f"native CLI did not return success; exit={exited.stdout.strip()}, structured_results={results}")
     result = results[0]
+    if windowed:
+        ids = [str(uuid.UUID(value)) for value in result.get("import_ids") or []]
+        if not ids or result.get("windows") != len(ids):
+            raise StepFailure(f"native CLI did not report its landed windows: {result}")
+        return CliRun(name, fixture, checkpoint, ids[-1], result, egress, log_file)
     import_id = str(uuid.UUID(result["import_id"]))
     if result != {"ok": True, "import_id": import_id, "state": "done"}:
         raise StepFailure("native CLI did not report the completed C5 import")

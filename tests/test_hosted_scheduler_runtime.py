@@ -203,6 +203,46 @@ def test_scheduler_request_adopts_a_changed_cadence_and_keeps_its_counters(
     assert persisted["last_success_unixtime"] > 1_789_077_372
 
 
+def _recorded_bearers(monkeypatch: pytest.MonkeyPatch, module: object) -> list[str]:
+    bearers: list[str] = []
+    monkeypatch.setattr(
+        module, "_read_state", lambda name: ({"metadata": {"name": name}}, module.initial_state("job", 60))
+    )
+    monkeypatch.setattr(module, "_write_state", lambda resource, state: None)
+    monkeypatch.setattr(
+        module, "_exact_https_request", lambda target, bearer, timeout: bearers.append(bearer) or True
+    )
+    return bearers
+
+
+def test_scheduler_request_reads_its_secret_from_the_evermatter_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load()
+    _request_environment(monkeypatch, job="job", cadence=60)
+    monkeypatch.delenv("EXOMEM_HOSTED_SCHEDULER_SECRET")
+    monkeypatch.setenv("EVERMATTER_HOSTED_SCHEDULER_SECRET", "renamed-secret")
+    bearers = _recorded_bearers(monkeypatch, module)
+
+    assert module.request_once() == 0
+
+    assert bearers == ["renamed-secret"]
+
+
+def test_scheduler_request_keeps_its_exomem_secret_when_both_names_differ(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load()
+    _request_environment(monkeypatch, job="job", cadence=60)
+    monkeypatch.setenv("EVERMATTER_HOSTED_SCHEDULER_SECRET", "renamed-secret")
+    bearers = _recorded_bearers(monkeypatch, module)
+
+    assert module.request_once() == 0
+
+    assert bearers == ["test-secret"]
+    assert "renamed-secret" not in capsys.readouterr().err
+
+
 def test_scheduler_request_still_refuses_another_jobs_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

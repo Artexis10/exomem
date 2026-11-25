@@ -18,11 +18,12 @@ import logging
 import os
 from pathlib import Path
 
+from .env_compat import SETTING_PREFIXES
 from .vault import _is_vault
 
 log = logging.getLogger(__name__)
 
-_VAULT_PATH_ENV = ("EXOMEM_VAULT_PATH", "KB_MCP_VAULT_PATH")
+_VAULT_PATH_ENV = tuple(prefix + "VAULT_PATH" for prefix in SETTING_PREFIXES)
 
 
 def dotenv_load_guard(path: Path, *, vault: Path | None = None) -> Path | None:

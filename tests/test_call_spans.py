@@ -484,6 +484,7 @@ _DOCUMENTED_SPAN_NAMES = frozenset(
         "lexical.proof",
         "lexical.query",
         "lexical.resolver_entries",
+        "lexical.catalogue_rows",
         "recall.projection.checkpoint",
         "recall.projection.snapshot",
         "recall.projection.scope_snapshot",

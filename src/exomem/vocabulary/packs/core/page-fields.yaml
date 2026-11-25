@@ -8,8 +8,11 @@ registry: page-fields
 # and `closure` writes the back-reference when a compiled page cites the source. A field
 # that `carries: project-key` holds project keys, so a value it gains registers that key and
 # a relocation rewrites it. A field with `shape: list` holds a list of values; any other
-# field holds one. This pack is the only source of a role: a vault overlay may retire an
-# entry and nothing else.
+# field holds one. A `provenance` field records where an imported file came from: filing
+# writes it onto each Source of a stage that states an origin. Its `source` is `envelope`
+# (the value is the named `envelope` key of the stage's series file) or `member-time` (the
+# staged member's modification time). This pack is the only source of a role: a vault
+# overlay may retire an entry and nothing else.
 entries:
   project:
     label: Project
@@ -35,3 +38,15 @@ entries:
   artifact-path:
     label: Artifact path
     attributes: {field: artifact_path, role: pointer, writer: custody}
+  origin-label:
+    label: Origin label
+    attributes: {field: origin_label, role: provenance, source: envelope, envelope: label}
+  upload-device:
+    label: Upload device
+    attributes: {field: upload_device, role: provenance, source: envelope, envelope: device_family}
+  upload-browser:
+    label: Upload browser
+    attributes: {field: upload_browser, role: provenance, source: envelope, envelope: browser_family}
+  file-modified:
+    label: File modified
+    attributes: {field: file_modified, role: provenance, source: member-time}

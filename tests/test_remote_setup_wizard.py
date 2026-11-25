@@ -339,6 +339,16 @@ def test_existing_signing_key_is_preserved(tmp_path: Path) -> None:
     assert "[skipped: already set" in out
 
 
+def test_an_evermatter_signing_key_is_preserved_not_rotated(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("EVERMATTER_JWT_SIGNING_KEY=keep-this-stable-key\n", encoding="utf-8")
+    code, out, _ = _run(env_path)
+    assert code == 0
+    written = rsw.parse_env(env_path.read_text(encoding="utf-8"))
+    assert written["EXOMEM_JWT_SIGNING_KEY"] == "keep-this-stable-key"
+    assert "[skipped: already set" in out
+
+
 def test_existing_github_user_id_is_preserved_without_network(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("EXOMEM_GITHUB_USER_ID=1234\n", encoding="utf-8")
@@ -665,6 +675,16 @@ def test_patch_env_none_removes_a_key_and_keeps_the_rest() -> None:
     text = "A=1\n# note\nEXOMEM_OWNER_OAUTH_SUBJECT=github:1234\nB=2\n"
     assert rsw.patch_env(text, {OWNER_KEY: None}) == "A=1\n# note\nB=2\n"
     assert rsw.patch_env("A=1\n", {OWNER_KEY: None}) == "A=1\n"
+
+
+def test_patch_env_none_removes_the_owner_binding_under_every_prefix() -> None:
+    """A binding left under an alias prefix would bring the removed owner back."""
+    text = "EVERMATTER_OWNER_OAUTH_SUBJECT=github:1\nKB_MCP_OWNER_OAUTH_SUBJECT=github:2\nB=2\n"
+    assert rsw.patch_env(text, {OWNER_KEY: None}) == "B=2\n"
+
+
+def test_patch_env_none_removes_a_key_that_has_no_exomem_prefix() -> None:
+    assert rsw.patch_env("GITHUB_CLIENT_ID=abc\nB=2\n", {"GITHUB_CLIENT_ID": None}) == "B=2\n"
 
 
 def test_yes_without_a_flag_writes_no_binding(tmp_path: Path) -> None:

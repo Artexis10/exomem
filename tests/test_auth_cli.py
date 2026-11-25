@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,13 @@ def _record(*, generation: str = "current", status: str = "active") -> SessionRe
     )
 
 
+@pytest.fixture(autouse=True)
+def _empty_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The CLI loads the working directory's `.env`; run in an empty one, never a developer's."""
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
 class FakeAuthority:
     def __init__(self, records: list[SessionRecord] | None = None) -> None:
         self.records = [_record()] if records is None else records
@@ -51,15 +59,8 @@ class FakeAuthority:
         return "new-secret-generation"
 
 
-def _install_authority(
-    monkeypatch: pytest.MonkeyPatch, authority: FakeAuthority
-) -> list[str]:
-    dotenv_calls: list[str] = []
+def _install_authority(monkeypatch: pytest.MonkeyPatch, authority: FakeAuthority) -> None:
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com/")
-    monkeypatch.setattr(
-        "dotenv.load_dotenv",
-        lambda **kwargs: dotenv_calls.append(f"override={kwargs['override']}"),
-    )
     monkeypatch.setattr(
         server_auth,
         "build_session_authority",
@@ -70,7 +71,6 @@ def _install_authority(
         ),
         raising=False,
     )
-    return dotenv_calls
 
 
 def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
@@ -81,12 +81,11 @@ def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
         replace(_record(), session_id="qrstuvwxyzABCDEF", generation="old"),
     ]
     authority = FakeAuthority(records)
-    dotenv_calls = _install_authority(monkeypatch, authority)
+    _install_authority(monkeypatch, authority)
 
     assert main(["auth", "sessions", "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert dotenv_calls == ["override=True"]
     assert payload == {
         "sessions": [
             {
@@ -204,7 +203,6 @@ def test_auth_usage_errors_exit_two(argv: list[str]) -> None:
 def test_auth_missing_config_exits_two(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
     monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
 
     assert main(["auth", "sessions"]) == 2
@@ -214,38 +212,29 @@ def test_auth_missing_config_exits_two(
 def test_auth_authority_loads_dotenv_from_service_working_directory(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
-    calls: list[tuple[object, bool]] = []
-
-    def load_env(*, dotenv_path=None, override: bool) -> None:
-        calls.append((dotenv_path, override))
-
-    monkeypatch.setattr("dotenv.load_dotenv", load_env)
+    (tmp_path / ".env").write_text("EXOMEM_BASE_URL=https://dotenv.example.com\n", encoding="utf-8")
+    # The loader writes the process environment: have monkeypatch remove what it writes.
+    monkeypatch.setenv("EXOMEM_BASE_URL", "removed-below")
+    monkeypatch.delenv("EXOMEM_BASE_URL")
+    seen: list[str] = []
     monkeypatch.setattr(
         server_auth,
         "build_session_authority",
-        lambda *, base_url: FakeAuthority([]),
+        lambda *, base_url: seen.append(base_url) or FakeAuthority([]),
     )
 
     assert main(["auth", "sessions", "--json"]) == 0
-    assert calls == [(tmp_path / ".env", True)]
+    assert seen == ["https://dotenv.example.com"]
 
 
 def test_auth_promotes_legacy_env_after_loading_dotenv(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     authority = FakeAuthority([])
     monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
     monkeypatch.delenv("KB_MCP_BASE_URL", raising=False)
-
-    def load_env(*, dotenv_path, override: bool) -> None:
-        assert dotenv_path is not None
-        assert override is True
-        monkeypatch.setenv("KB_MCP_BASE_URL", "https://legacy.example.com")
-
+    (tmp_path / ".env").write_text("KB_MCP_BASE_URL=https://legacy.example.com\n", encoding="utf-8")
     seen: list[str] = []
-    monkeypatch.setattr("dotenv.load_dotenv", load_env)
     monkeypatch.setattr(env_compat, "_advised", False)
     monkeypatch.setattr(
         server_auth,
@@ -264,7 +253,6 @@ def test_auth_factory_storage_failure_exits_one_without_details(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
-    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
 
     def fail_factory(*, base_url: str):
         raise OSError(f"cannot create store for {base_url} with secret-token")
@@ -289,7 +277,6 @@ def test_auth_real_oauth_configuration_error_exits_two(
     monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "octocat")
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "https://coordinator.example")
     monkeypatch.delenv("EXOMEM_JWT_SIGNING_KEY", raising=False)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
 
     def representative_session_helper(*, base_url: str):
         return server_auth.build_oauth(require_auth=True, base_url=base_url)

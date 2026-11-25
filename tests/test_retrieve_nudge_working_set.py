@@ -310,6 +310,13 @@ def test_the_legacy_env_name_still_selects_the_mode(
     assert hook._inject_mode() == hook._WORKING_SET_MODE
 
 
+def test_the_evermatter_prefix_sets_a_hook_tunable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_RETRIEVE_INJECT_MAX_CHARS", raising=False)
+    monkeypatch.setenv("EVERMATTER_RETRIEVE_INJECT_MAX_CHARS", "1234")
+    hook._normalize_env_aliases()
+    assert hook._working_set_max_chars() == 1234
+
+
 # --------------------------------------------------------------------------- #
 # The rendered block
 # --------------------------------------------------------------------------- #
