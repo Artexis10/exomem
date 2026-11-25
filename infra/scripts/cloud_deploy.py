@@ -12,6 +12,11 @@ After a release, set its cell image as Substrate's `cell_image`, but only when:
 
 Then poll Substrate's bounded rollout view until the canary runs the target.
 
+Every run, before any of those stops, also reports two alerts from the rollout view: the
+fleet is behind a release that is more than two days old, and cells are pinned to an image
+other than the fleet's. The workflow runs daily, so a missed dispatch, an unowned platform
+upgrade or a pinned cell is reported every day.
+
 The repository's Actions logs are public, so this prints only codes and counts:
 never a cell ID, a tenant ID, a URL or a secret. It reads only the bounded
 rollout view, and it never sends anything but `cellImage` and `release`, so it
@@ -31,7 +36,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -53,6 +58,10 @@ RELEASE_PATH = "/api/exomem/admin/cloud-release"
 ALERT_JOB = "cloud-deploy"
 PLATFORM_NEEDED_ALERT = "cloud-release-platform-needed"
 BARRIER_ALERT = "cloud-release-barrier"
+RELEASE_BEHIND_ALERT = "cloud-release-behind"
+CELL_PINNED_ALERT = "cloud-cell-pinned"
+# A release gets two days for its rollout and any platform upgrade it needs before the fleet counts as behind.
+RELEASE_BEHIND_AFTER = timedelta(hours=48)
 # Substrate's two answers that say the release is not newer than the fleet: nothing to do.
 NOT_NEWER = ("CELL_IMAGE_SEEN", "CELL_RELEASE_OLDER")
 HTTP_TIMEOUT = 30
@@ -94,6 +103,12 @@ def parse_release(tag: str) -> tuple[int, int, int] | None:
 
 
 @dataclass(frozen=True)
+class Release:
+    tag: str
+    published_at: datetime
+
+
+@dataclass(frozen=True)
 class Settings:
     repository: str
     github_api: str
@@ -131,12 +146,23 @@ class GitHub:
             raise Stop("GITHUB_API_FAILED", ok=False, detail=str(status))
         return json.loads(body)
 
-    def latest_release(self) -> str:
+    def latest_release(self) -> Release:
         release = self._get(f"/repos/{self.settings.repository}/releases/latest")
         tag = release.get("tag_name") if isinstance(release, dict) else None
         if not isinstance(tag, str) or parse_release(tag) is None:
             raise Stop("RELEASE_NOT_FOUND", ok=False)
-        return tag
+        return Release(tag, self._published_at(release.get("published_at")))
+
+    @staticmethod
+    def _published_at(value: object) -> datetime:
+        # A time that is missing, unparseable or without a zone stops the run: it never reads as "not behind".
+        try:
+            published = datetime.fromisoformat(value) if isinstance(value, str) else None
+        except ValueError:
+            published = None
+        if published is None or published.tzinfo is None:
+            raise Stop("RELEASE_TIME_UNREADABLE", ok=False)
+        return published.astimezone(UTC)
 
     def newest_platform_deployment(self) -> dict | None:
         """The newest successful platform Deployment's ref and payload, or None when the
@@ -318,6 +344,33 @@ class Tools:
     now: Callable[[], datetime] = lambda: datetime.now(UTC)
 
 
+def report_release_behind(settings: Settings, tools: Tools, release: Release, view: dict) -> None:
+    """Send `cloud-release-behind`: active when the newest release is older than
+    RELEASE_BEHIND_AFTER and the fleet's release is another. The log shows the hours only."""
+
+    now = tools.now()
+    age = now - release.published_at
+    behind = age > RELEASE_BEHIND_AFTER and view.get("release") != release.tag
+    send_alert(settings, tools.transport, RELEASE_BEHIND_ALERT, behind, now)
+    if behind:
+        print(f"cloud-deploy: RELEASE_BEHIND hours={int(age.total_seconds() // 3600)}")
+
+
+def report_pinned_cells(settings: Settings, tools: Tools, view: dict) -> None:
+    """Send `cloud-cell-pinned`: active when the view counts a cell pinned off the fleet's image.
+    A count that is absent (Substrate predates the field) or not a non-negative integer is
+    unknown: it sends nothing, and never reads as zero."""
+
+    cells = view.get("cells")
+    pinned = cells.get("pinned_off_fleet") if isinstance(cells, dict) else None
+    if not isinstance(pinned, int) or isinstance(pinned, bool) or pinned < 0:
+        print("cloud-deploy: PINNED_UNKNOWN")
+        return
+    send_alert(settings, tools.transport, CELL_PINNED_ALERT, pinned > 0, tools.now())
+    if pinned:
+        print(f"cloud-deploy: CELLS_PINNED {pinned}")
+
+
 def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]], barriers: dict) -> None:
     if not settings.deploy_token or not settings.substrate_url:
         raise Stop("CLOUD_DEPLOY_NOT_CONFIGURED", ok=True)
@@ -326,8 +379,15 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
     github = GitHub(settings, tools.transport)
     substrate = Substrate(settings, tools.transport)
 
+    # The newest release and the rollout view are read first, and both lag alerts are sent
+    # from them, so every run reports them whichever stop below ends it.
+    release = github.latest_release()
+    tag = release.tag
+    view = substrate.rollout()
+    report_release_behind(settings, tools, release, view)
+    report_pinned_cells(settings, tools, view)
+
     # D1 steps 1-2: the newest release's cell image, and its attestation.
-    tag = github.latest_release()
     image = tools.image(tag)
     if not image:
         raise Stop("CELL_IMAGE_NOT_PUBLISHED", ok=False)
@@ -336,7 +396,6 @@ def deploy(settings: Settings, tools: Tools, *, gate: tuple[list[str], list[str]
 
     # D1 step 3: never resume a paused fleet; only a person clears the pause. This comes
     # first, so a re-run for the release the rollout paused on fails instead of passing.
-    view = substrate.rollout()
     refuse_paused(view)
     # D1 step 4: already the fleet's image, by digest or by release tag, before any
     # gate, so a release the fleet runs never raises a platform alert.

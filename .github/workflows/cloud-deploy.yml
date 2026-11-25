@@ -9,6 +9,10 @@ name: cloud-deploy
 #   dispatch, and so does the platform upgrade. A workflow_run trigger never
 #   fired: the tag run starts from a github.token dispatch, and such a run's
 #   completion starts no other workflow (v0.172.0-v0.174.0 started none).
+# - It also runs once a day. A daily run re-reports the active alerts (a release that
+#   waits on a platform upgrade, a fleet behind the newest release for two days, a
+#   pinned cell) and retries a rollout that a missed dispatch left behind. With the
+#   fleet current it resolves the alerts and ends CELL_IMAGE_CURRENT.
 # - The `cloud-deploy` environment holds EXOMEM_DEPLOY_TOKEN and the alert
 #   capability, and admits only main (docs/runbooks/cloud-platform-deploy.md).
 #   Without the token, the run does nothing and succeeds.
@@ -16,6 +20,8 @@ name: cloud-deploy
 #   is public, so the script prints only codes and counts.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '23 6 * * *'
 
 permissions:
   contents: read

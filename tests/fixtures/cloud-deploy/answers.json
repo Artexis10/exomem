@@ -77,7 +77,8 @@
       "cells": {
         "on_target": 41,
         "behind_target": 0,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -93,7 +94,8 @@
       "cells": {
         "on_target": 40,
         "behind_target": 0,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -109,7 +111,8 @@
       "cells": {
         "on_target": 1,
         "behind_target": 40,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -125,7 +128,8 @@
       "cells": {
         "on_target": 2,
         "behind_target": 39,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -173,7 +177,8 @@
       "cells": {
         "on_target": 41,
         "behind_target": 0,
-        "held": 0
+        "held": 0,
+        "pinned_off_fleet": 0
       }
     }
   },
@@ -189,7 +194,25 @@
       "cells": {
         "on_target": 40,
         "behind_target": 0,
-        "held": 1
+        "held": 1,
+        "pinned_off_fleet": 0
+      }
+    }
+  },
+  "substrate_rollout_cell_pinned": {
+    "success": true,
+    "requestId": "req-0010",
+    "view": {
+      "cell_image": "ghcr.io/artexis10/exomem@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "release": "v0.170.0",
+      "paused": false,
+      "error_code": null,
+      "canary_on_target": true,
+      "cells": {
+        "on_target": 41,
+        "behind_target": 0,
+        "held": 0,
+        "pinned_off_fleet": 1
       }
     }
   }
